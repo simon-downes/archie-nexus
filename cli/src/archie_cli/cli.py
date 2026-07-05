@@ -13,6 +13,8 @@ from pathlib import Path
 import click
 from ulid import ULID
 
+from archie_cli.project import detect_project_dir
+
 # Repo root: cli.py is at {repo}/cli/src/archie_cli/cli.py → parents[3] = repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IMAGE_TAG = "archie:latest"
@@ -58,8 +60,9 @@ def generate_session_id() -> str:
 
     Uses the first 10 characters of a ULID (the timestamp component),
     giving millisecond-precision chronological sorting without randomness.
+    Project is detected by walking up from cwd to find the first child of ~/dev.
     """
-    project = Path.cwd().name
+    project = detect_project_dir().name
     ulid_str = str(ULID())[:10].lower()
     return f"{project}-{ulid_str}"
 
@@ -220,7 +223,7 @@ def start():
     session_id = generate_session_id()
     container_name = f"{CONTAINER_PREFIX}{session_id}"
     agent_dir = REPO_ROOT / "agent"
-    cwd = str(Path.cwd())
+    project_dir = str(detect_project_dir())
 
     docker_cmd = [
         "docker",
@@ -234,7 +237,7 @@ def start():
         "-v",
         f"{agent_dir}:/opt/archie/agent:rw",
         "-v",
-        f"{cwd}:/workspace:rw",
+        f"{project_dir}:/workspace:rw",
         "-w",
         "/workspace",
         IMAGE_TAG,
