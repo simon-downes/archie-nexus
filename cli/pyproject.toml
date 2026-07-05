@@ -1,0 +1,18 @@
+[project]
+name = "archie-cli"
+version = "0.1.0"
+description = "Archie CLI client"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "click>=8,<9",
+]
+
+[project.scripts]
+archie = "archie_cli.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archie_cli"]
