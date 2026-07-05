@@ -2,23 +2,28 @@
 
 import json
 import os
-import secrets
+import re
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
 from pathlib import Path
 
 import click
+from ulid import ULID
 
 # Repo root: cli.py is at {repo}/cli/src/archie_cli/cli.py → parents[3] = repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IMAGE_TAG = "archie:latest"
 CONTAINER_PREFIX = "archie-"
-CONTAINER_LABEL = "archie.nexus=true"
 CONTAINER_PORT = "8080"
+
+# Session ID format: {project}-{ulid_timestamp_10chars}
+# Container name: archie-{session_id}
+# Pattern matches: archie-{word_chars}-{10_crockford_base32_chars}
+_CROCKFORD = r"[0-9A-HJKMNP-TV-Z]"
+SESSION_PATTERN = re.compile(rf"^archie-(.+)-({_CROCKFORD}{{10}})$", re.IGNORECASE)
 
 
 def check_docker() -> None:
@@ -49,11 +54,14 @@ def check_image(tag: str) -> None:
 
 
 def generate_session_id() -> str:
-    """Generate a session ID: YYYY-MM-DD-{project}-{random}."""
-    date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+    """Generate a session ID: {project}-{ulid_timestamp}.
+
+    Uses the first 10 characters of a ULID (the timestamp component),
+    giving millisecond-precision chronological sorting without randomness.
+    """
     project = Path.cwd().name
-    suffix = secrets.token_hex(3)[:5]
-    return f"{date_str}-{project}-{suffix}"
+    ulid_str = str(ULID())[:10].lower()
+    return f"{project}-{ulid_str}"
 
 
 def _container_running(name: str) -> bool:
@@ -124,9 +132,12 @@ def wait_for_ready(name: str, docker_run_cmd: list[str], timeout: float = 30.0) 
 
 
 def list_sessions() -> list[dict]:
-    """List running archie containers. Returns list of dicts with name, session_id, port."""
+    """List running archie containers. Returns list of dicts with name, session_id, port.
+
+    Identifies archie-nexus containers by name pattern: archie-{project}-{10_char_ulid}.
+    """
     result = subprocess.run(
-        ["docker", "ps", "--filter", f"label={CONTAINER_LABEL}", "--format", "{{json .}}"],
+        ["docker", "ps", "--filter", f"name={CONTAINER_PREFIX}", "--format", "{{json .}}"],
         capture_output=True,
         text=True,
         check=False,
@@ -138,6 +149,8 @@ def list_sessions() -> list[dict]:
     for line in result.stdout.strip().splitlines():
         data = json.loads(line)
         name = data.get("Names", "")
+        if not SESSION_PATTERN.match(name):
+            continue
         session_id = name.removeprefix(CONTAINER_PREFIX)
         port = _query_port(name)
         sessions.append(
@@ -216,8 +229,6 @@ def start():
         "--rm",
         "--name",
         container_name,
-        "--label",
-        CONTAINER_LABEL,
         "-p",
         f"127.0.0.1:0:{CONTAINER_PORT}",
         "-v",
