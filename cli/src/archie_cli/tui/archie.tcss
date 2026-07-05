@@ -1,0 +1,87 @@
+/*
+ * archie.tcss — Visual theme styling.
+ *
+ * Structural layout (height, margin, padding, overflow) lives in each widget's
+ * DEFAULT_CSS. This file contains only visual properties: colours, backgrounds,
+ * borders, text styles, and :focus states.
+ *
+ * Textual loads this via CSS_PATH on the App class — it takes higher specificity
+ * than DEFAULT_CSS, so visual overrides here always win.
+ */
+
+/* --- Screen --- */
+Screen {
+    background: $surface;
+    overflow: hidden;
+}
+
+/* --- Conversation area --- */
+Conversation {
+    background: black;
+}
+
+/* --- Message borders --- */
+UserMessage {
+    border-left: thick $primary;
+}
+
+AssistantMessage {
+    border-left: thick transparent;
+}
+
+AssistantMessage > .header {
+    color: $success;
+    text-style: bold;
+}
+
+StreamingMessage {
+    border-left: thick transparent;
+}
+
+StreamingMessage > .header {
+    color: $success;
+    text-style: bold;
+}
+
+ErrorMessage {
+    border-left: thick $error-darken-3;
+    background: $error-darken-3;
+    color: white;
+}
+
+/* --- Focus styling: left border accent --- */
+AssistantMessage:focus { border-left: thick $primary; }
+StreamingMessage:focus { border-left: thick $primary; }
+ErrorMessage:focus { border-left: thick $primary; }
+
+/* --- Status bar colours --- */
+StatusBar {
+    color: $muted;
+}
+
+StatusBar #status-left {
+    color: auto;
+}
+
+StatusBar #status-right {
+    color: auto;
+}
+
+/* --- Input styling --- */
+MessageInput {
+    border: round $surface-lighten-2;
+
+    & .text-area--cursor-line {
+        background: $surface;
+    }
+}
+
+MessageInput:focus {
+    border: round $primary;
+}
+
+/* --- Footer --- */
+Footer {
+    height: 2;
+    padding: 1 0 0 0;
+}
