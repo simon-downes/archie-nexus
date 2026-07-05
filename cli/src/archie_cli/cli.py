@@ -225,6 +225,14 @@ def start():
     agent_dir = REPO_ROOT / "agent"
     project_dir = str(detect_project_dir())
 
+    # Ensure config exists
+    from archie_shared.config import ensure_default_config
+
+    config_path = ensure_default_config()
+
+    # Resolve username for .aws mount path inside container
+    username = os.environ.get("USER", "archie")
+
     docker_cmd = [
         "docker",
         "run",
@@ -234,14 +242,28 @@ def start():
         container_name,
         "-p",
         f"127.0.0.1:0:{CONTAINER_PORT}",
+        "-e",
+        "ARCHIE_CONFIG=/archie/config/nexus.yaml",
+        "-e",
+        f"ARCHIE_SESSION_ID={session_id}",
         "-v",
         f"{agent_dir}:/opt/archie/agent:rw",
         "-v",
         f"{project_dir}:/workspace:rw",
+        "-v",
+        f"{config_path}:/archie/config/nexus.yaml:ro",
         "-w",
         "/workspace",
         IMAGE_TAG,
     ]
+
+    # Mount ~/.aws if it exists (needed for Bedrock credentials)
+    aws_dir = Path.home() / ".aws"
+    if aws_dir.exists():
+        docker_cmd.insert(-1, "-v")
+        docker_cmd.insert(-1, f"{aws_dir}:/home/{username}/.aws:ro")
+    else:
+        click.echo("Warning: ~/.aws not found — Bedrock credentials may not be available.")
 
     result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
