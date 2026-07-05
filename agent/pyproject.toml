@@ -5,8 +5,11 @@ description = "Archie agent server"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "archie-shared",
+    "boto3>=1.35",
     "click>=8,<9",
+    "python-ulid>=3.1.0",
     "starlette>=0.40",
+    "typing-extensions>=4.0",
     "uvicorn>=0.30",
 ]
 
