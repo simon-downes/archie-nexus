@@ -141,13 +141,17 @@ RUN groupadd ${USERNAME} \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # --- Pre-install agent dependencies (cached layer) ---
-# Agent source is mounted at runtime; only pyproject.toml is needed for dep resolution.
+# The agent depends on archie-shared (a workspace sibling). To resolve deps correctly,
+# uv needs the workspace root pyproject.toml, the shared package source, and the agent's
+# pyproject.toml. Shared source is baked in (changes infrequently). Agent source is
+# mounted at runtime for fast iteration.
 # .python-version was already copied above. UV_PYTHON_INSTALL_DIR (/opt/python) is
-# inherited from the ENV set earlier, so the venv reuses the shared Python install
-# instead of downloading a copy into root's home (which the runtime user can't read).
+# inherited from the ENV set earlier, so the venv reuses the shared Python install.
+COPY pyproject.toml /opt/archie/
+COPY shared/ /opt/archie/shared/
 COPY agent/pyproject.toml /opt/archie/agent/
 ENV UV_PROJECT_ENVIRONMENT=/opt/archie/venv
-RUN cd /opt/archie/agent && uv sync --no-dev --no-install-project
+RUN cd /opt/archie && uv sync --package archie-agent --no-dev --no-install-project
 ENV PATH="/opt/archie/venv/bin:$PATH"
 
 # --- Entrypoint script ---
