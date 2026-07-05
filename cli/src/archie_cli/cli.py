@@ -345,6 +345,51 @@ def shell(session_id: str | None):
     sys.exit(result.returncode)
 
 
+@main.command()
+@click.argument("session_id", required=False)
+def attach(session_id: str | None):
+    """Attach an interactive TUI to a running session.
+
+    Supports prefix matching on session ID. If no session specified or match
+    is ambiguous, displays a picker.
+    """
+    check_docker()
+
+    sessions = list_sessions()
+    if not sessions:
+        raise click.ClickException("No running sessions. Start one with: archie start")
+
+    # Resolve target session (same logic as shell)
+    if session_id is None:
+        if len(sessions) == 1:
+            target = sessions[0]
+        else:
+            target = _pick_session(sessions)
+    else:
+        matches = [s for s in sessions if s["session_id"].startswith(session_id)]
+        if len(matches) == 0:
+            raise click.ClickException(
+                f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
+            )
+        elif len(matches) == 1:
+            target = matches[0]
+        else:
+            click.echo(f"Multiple sessions match '{session_id}':")
+            target = _pick_session(matches)
+
+    port = target.get("port")
+    if not port:
+        raise click.ClickException(
+            f"Session '{target['session_id']}' has no published port.\n"
+            "It may still be starting. Try again shortly."
+        )
+
+    from archie_cli.tui.app import ArchieApp
+
+    app = ArchieApp(host="127.0.0.1", port=int(port))
+    app.run()
+
+
 def _pick_session(sessions: list[dict]) -> dict:
     """Display a numbered list and prompt the user to choose."""
     click.echo()

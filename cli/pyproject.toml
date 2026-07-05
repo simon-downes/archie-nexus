@@ -6,8 +6,11 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "archie-shared",
     "click>=8,<9",
+    "httpx>=0.27",
     "python-ulid>=3.1.0",
+    "textual>=1.0",
     "typing-extensions>=4.0",
+    "websockets>=13",
 ]
 
 [project.scripts]
