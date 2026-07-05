@@ -5,12 +5,13 @@ description = "Personal AI platform — workspace root"
 requires-python = ">=3.13,<3.14"
 
 [tool.uv.workspace]
-members = ["cli", "agent"]
+members = ["cli", "agent", "shared"]
 
 [dependency-groups]
 dev = [
     "archie-agent",
     "archie-cli",
+    "archie-shared",
     "httpx>=0.27",
     "pytest>=9",
     "ruff>=0.15",
@@ -19,6 +20,7 @@ dev = [
 [tool.uv.sources]
 archie-agent = { workspace = true }
 archie-cli = { workspace = true }
+archie-shared = { workspace = true }
 
 [tool.ruff]
 line-length = 100

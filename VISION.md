@@ -60,9 +60,10 @@ inside them. Each session is a container. Clients attach and detach freely.
 
 ## Principles
 
-1. **Packages share no code.** archie-cli never imports from archie-agent and vice
-   versa. The contract between them is HTTP/WS, mount points, and env vars. If logic
-   is genuinely shared, duplicate it — coupling across the boundary defeats the point.
+1. **Shared protocol, separate concerns.** Common types (wire protocol events,
+   message types, serialization) live in `archie-shared` and are imported by both
+   client and agent packages. Business logic remains separated — clients handle UI
+   and container lifecycle, the agent handles LLM orchestration and tool execution.
 
 2. **Session = container.** Each conversation is a container instance. Named sessions
    are named containers. Concurrent sessions are concurrent containers. Clients are
