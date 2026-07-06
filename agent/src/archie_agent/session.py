@@ -111,17 +111,13 @@ class Session:
     @property
     def context_pct(self) -> float:
         """Estimated context window usage for the NEXT request (0-100)."""
-        estimated = self._last_input_tokens + (
-            self.turns[-1].output_tokens if self.turns else 0
-        )
+        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
         return (estimated / self.model_info.max_context_tokens) * 100
 
     @property
     def context_warning(self) -> bool:
         """True if we're approaching the model's context limit."""
-        estimated = self._last_input_tokens + (
-            self.turns[-1].output_tokens if self.turns else 0
-        )
+        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
         return (
             estimated
             > self.model_info.max_context_tokens * self.model_info.context_warning_threshold
