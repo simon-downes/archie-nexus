@@ -251,9 +251,10 @@ class BedrockClient:
         return "".join(block.get("text", "") for block in output)
 
     def _call_with_retry(self, params: dict, max_retries: int = 3) -> dict:
-        """Call converse_stream with retry on throttling.
+        """Call converse_stream with retry on throttling and credential refresh.
 
         If cachePoint is rejected, retry without it and disable caching.
+        If credentials are expired, re-read from creds file and retry once.
         """
         for attempt in range(max_retries):
             try:
@@ -282,5 +283,38 @@ class BedrockClient:
                             b for b in msg.get("content", []) if "cachePoint" not in b
                         ]
                     return self.client.converse_stream(**params)
+                # Non-cachePoint access denied — likely expired credentials
+                if self._try_refresh_credentials():
+                    log.info("Credentials refreshed, retrying request")
+                    return self.client.converse_stream(**params)
+                raise
+            except Exception as e:
+                # Catch ExpiredTokenException and similar auth errors
+                msg_text = str(type(e).__name__)
+                if "expired" in msg_text.lower() or "ExpiredToken" in msg_text:
+                    if self._try_refresh_credentials():
+                        log.info("Credentials refreshed after %s, retrying", msg_text)
+                        return self.client.converse_stream(**params)
                 raise
         raise RuntimeError("Unreachable")
+
+    def _try_refresh_credentials(self) -> bool:
+        """Re-read credentials from the creds file and recreate the boto3 client.
+
+        Returns True if credentials were successfully refreshed (file had new creds),
+        False if nothing changed or no creds available.
+        """
+        from archie_shared.credentials import SERVICE_BEDROCK, get_service_credentials
+
+        creds = get_service_credentials(SERVICE_BEDROCK)
+        if not creds or "aws_access_key_id" not in creds:
+            log.warning(
+                "Credential refresh failed — no valid credentials in creds file. "
+                "Run 'archie auth bedrock' on the host to update."
+            )
+            return False
+
+        # Recreate the client with fresh credentials
+        log.info("Re-reading credentials from creds file")
+        self.client = self._create_client(self._region)
+        return True

@@ -86,6 +86,7 @@ class AgentLoop:
         """
         # Clear stale interrupt from previous turn
         self._interrupt.clear()
+        self._worker_error: str = ""
 
         if self._turn_active:
             turn_index = self.session.turn_index or 1
@@ -129,9 +130,8 @@ class AgentLoop:
                 if event is _SENTINEL_ERROR:
                     # Unrecoverable exception in the worker thread
                     interrupted = True
-                    await self.broadcast(
-                        TurnError(turn_index=turn_index, message="LLM request failed")
-                    )
+                    error_msg = getattr(self, "_worker_error", "LLM request failed")
+                    await self.broadcast(TurnError(turn_index=turn_index, message=error_msg))
                     break
 
                 # Translate internal events → wire events and broadcast
@@ -240,9 +240,11 @@ class AgentLoop:
                     break
                 loop.call_soon_threadsafe(queue.put_nowait, event)
 
-        except Exception:
+        except Exception as e:
             log.exception("Stream worker error")
             error = True
+            # Store the error message for the drain loop to include in TurnError
+            self._worker_error = f"{type(e).__name__}: {e}"
 
         finally:
             # Push appropriate sentinel to unblock the drain loop
