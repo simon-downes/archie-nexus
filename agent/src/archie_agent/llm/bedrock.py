@@ -289,11 +289,12 @@ class BedrockClient:
                     return self.client.converse_stream(**params)
                 raise
             except Exception as e:
-                # Catch ExpiredTokenException and similar auth errors
-                msg_text = str(type(e).__name__)
-                if "expired" in msg_text.lower() or "ExpiredToken" in msg_text:
+                # Catch ExpiredTokenException and similar auth errors.
+                # These are botocore ClientError with the error code in the message.
+                err_str = str(e)
+                if "ExpiredToken" in err_str or "expired" in err_str.lower():
                     if self._try_refresh_credentials():
-                        log.info("Credentials refreshed after %s, retrying", msg_text)
+                        log.info("Credentials refreshed after token expiry, retrying")
                         return self.client.converse_stream(**params)
                 raise
         raise RuntimeError("Unreachable")
