@@ -160,7 +160,9 @@ class TurnError:
 
 
 # Union of all server→client events
-type ServerEvent = SessionInfo | TextDeltaEvent | UsageUpdated | TurnComplete | TurnInterrupted | TurnError
+type ServerEvent = (
+    SessionInfo | TextDeltaEvent | UsageUpdated | TurnComplete | TurnInterrupted | TurnError
+)
 
 
 # --- Client → Server Commands ---

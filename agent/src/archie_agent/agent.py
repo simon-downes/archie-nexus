@@ -21,6 +21,7 @@ import logging
 import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from archie_shared.events import (
     TextDeltaEvent,
@@ -30,16 +31,20 @@ from archie_shared.events import (
     UsageUpdated,
     serialize_event,
 )
-from archie_shared.models import ModelInfo, calculate_cost
+from archie_shared.models import ModelInfo
 from starlette.websockets import WebSocket
 
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, Usage
 from archie_agent.session import Session, TurnLog
 
+if TYPE_CHECKING:
+    from archie_agent.llm import LLMClient
+
 log = logging.getLogger(__name__)
 
-# Sentinel pushed to the queue when the worker thread exits (normal or interrupt)
-_SENTINEL = None
+# Sentinel values pushed to the queue to signal completion
+_SENTINEL_DONE = object()  # Normal or interrupt completion
+_SENTINEL_ERROR = object()  # Unrecoverable exception in worker
 
 
 class AgentLoop:
@@ -53,7 +58,7 @@ class AgentLoop:
     def __init__(
         self,
         session: Session,
-        llm_client: object,
+        llm_client: "LLMClient",
         model_info: ModelInfo,
         system_prompt: str,
     ) -> None:
@@ -114,11 +119,19 @@ class AgentLoop:
             while True:
                 event = await queue.get()
 
-                if event is _SENTINEL:
-                    # Check if this was an interrupt
+                if event is _SENTINEL_DONE:
+                    # Normal completion or user interrupt
                     if self._interrupt.is_set():
                         interrupted = True
                         await self.broadcast(TurnInterrupted(turn_index=turn_index))
+                    break
+
+                if event is _SENTINEL_ERROR:
+                    # Unrecoverable exception in the worker thread
+                    interrupted = True
+                    await self.broadcast(
+                        TurnError(turn_index=turn_index, message="LLM request failed")
+                    )
                     break
 
                 # Translate internal events → wire events and broadcast
@@ -128,14 +141,8 @@ class AgentLoop:
 
                 elif isinstance(event, Usage):
                     usage_event = event
-                    calculate_cost(
-                        self._model_info,
-                        event.input_tokens,
-                        event.output_tokens,
-                        event.cache_read_input_tokens,
-                        event.cache_write_input_tokens,
-                    )
-                    # Update session totals
+                    # Update session totals directly (not via add_turn — that's for
+                    # the assistant turn at completion). Usage is per-request metadata.
                     self.session.total_input_tokens += event.input_tokens
                     self.session.total_output_tokens += event.output_tokens
                     self.session.total_cache_read_tokens += event.cache_read_input_tokens
@@ -153,13 +160,12 @@ class AgentLoop:
                     )
 
                 elif isinstance(event, Done):
-                    # Add assistant turn to session
+                    # Add assistant turn to session (do NOT pass input/output_tokens
+                    # here — totals were already updated when Usage event arrived)
                     self.session.add_turn(
                         role="assistant",
                         content=assistant_text,
                         turn_index=turn_index,
-                        input_tokens=usage_event.input_tokens if usage_event else 0,
-                        output_tokens=usage_event.output_tokens if usage_event else 0,
                     )
                     await self.broadcast(
                         TurnComplete(turn_index=turn_index, stop_reason=event.stop_reason)
@@ -191,12 +197,8 @@ class AgentLoop:
                     assistant_text=assistant_text,
                     input_tokens=usage_event.input_tokens if usage_event else 0,
                     output_tokens=usage_event.output_tokens if usage_event else 0,
-                    cache_read_tokens=(
-                        usage_event.cache_read_input_tokens if usage_event else 0
-                    ),
-                    cache_write_tokens=(
-                        usage_event.cache_write_input_tokens if usage_event else 0
-                    ),
+                    cache_read_tokens=(usage_event.cache_read_input_tokens if usage_event else 0),
+                    cache_write_tokens=(usage_event.cache_write_input_tokens if usage_event else 0),
                     model=self._llm.model_id,
                     interrupted=interrupted,
                 )
@@ -219,6 +221,7 @@ class AgentLoop:
         Uses loop.call_soon_threadsafe to safely push to the asyncio Queue.
         Checks interrupt flag between generator yields.
         """
+        error = False
         try:
             messages = self.session.turns
             gen: Generator[StreamEvent] = self._llm.stream(
@@ -235,14 +238,12 @@ class AgentLoop:
 
         except Exception:
             log.exception("Stream worker error")
-            # Push error as a TurnError-like signal — the drain loop will handle it
-            # We use the sentinel to signal completion; the drain loop checks interrupt
-            # For unrecoverable errors, we set interrupt so the drain loop emits TurnError
-            self._interrupt.set()
+            error = True
 
         finally:
-            # Always push sentinel to unblock the drain loop
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+            # Push appropriate sentinel to unblock the drain loop
+            sentinel = _SENTINEL_ERROR if error else _SENTINEL_DONE
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
 
     async def broadcast(self, event) -> None:
         """Serialize and send an event to all connected WebSocket clients."""

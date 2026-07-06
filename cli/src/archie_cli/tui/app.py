@@ -99,9 +99,7 @@ class ArchieApp(App):
         conv = self.query_one("#conversation", Conversation)
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"http://{self._host}:{self._port}/history", timeout=5.0
-                )
+                resp = await client.get(f"http://{self._host}:{self._port}/history", timeout=5.0)
                 if resp.status_code != 200:
                     return
                 turns = resp.json()
