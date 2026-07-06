@@ -78,7 +78,11 @@ class ArchieApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        """Connect to agent and start receiving events."""
+        """Connect to agent and start receiving events.
+
+        Ordering per plan: subscribe WS first → start receive loop (buffering) →
+        fetch /history → reconcile by turn_index → replay remainder.
+        """
         self.query_one("#input", MessageInput).focus()
 
         try:
@@ -88,27 +92,43 @@ class ArchieApp(App):
             self._show_error(f"Connection failed: {e}")
             return
 
-        # Fetch and replay history
-        await self._load_history()
-
-        # Start the receive loop
+        # Start receive loop FIRST — events buffer in _event_buffer
+        self._event_buffer: list = []
+        self._buffering = True
         self._receive_task = asyncio.create_task(self._receive_loop())
 
-    async def _load_history(self) -> None:
-        """Fetch conversation history from /history and populate the conversation."""
+        # Fetch history while receive loop buffers incoming events
+        last_turn_index = await self._load_history()
+
+        # Reconcile: discard buffered events with turn_index ≤ last history turn
+        self._buffering = False
+        for event in self._event_buffer:
+            turn_index = getattr(event, "turn_index", 0)
+            if turn_index > last_turn_index:
+                self._handle_event(event)
+        self._event_buffer = []
+
+    async def _load_history(self) -> int:
+        """Fetch conversation history and populate the conversation.
+
+        Returns the highest turn_index in the history (0 if empty).
+        """
         conv = self.query_one("#conversation", Conversation)
+        last_turn_index = 0
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(f"http://{self._host}:{self._port}/history", timeout=5.0)
                 if resp.status_code != 200:
-                    return
+                    return 0
                 turns = resp.json()
         except Exception as e:
             log.warning("Failed to load history: %s", e)
-            return
+            return 0
 
         for turn in turns:
             role = turn.get("role")
+            turn_index = turn.get("turn_index", 0)
+            last_turn_index = max(last_turn_index, turn_index)
             content_blocks = turn.get("content", [])
             # Extract text blocks only for display
             text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
@@ -120,11 +140,24 @@ class ArchieApp(App):
             elif role == "assistant":
                 conv.add_assistant_message(text)
 
+        return last_turn_index
+
     async def _receive_loop(self) -> None:
-        """Consume events from the WebSocket and dispatch to widget updates."""
+        """Consume events from the WebSocket and dispatch to widget updates.
+
+        During the buffering phase (before history is fetched), events are
+        stored in _event_buffer. After reconciliation, events are dispatched
+        directly.
+        """
         try:
             async for event in self._ws.receive():
-                self._handle_event(event)
+                if isinstance(event, SessionInfo):
+                    # SessionInfo is always handled immediately (no turn_index)
+                    self._handle_event(event)
+                elif self._buffering:
+                    self._event_buffer.append(event)
+                else:
+                    self._handle_event(event)
         except Exception as e:
             log.warning("WS receive loop error: %s", e)
             self._show_error(f"Connection lost: {e}")

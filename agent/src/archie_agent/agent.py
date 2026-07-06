@@ -206,6 +206,10 @@ class AgentLoop:
 
             # Wait for thread to finish
             thread.join(timeout=5.0)
+            if thread.is_alive():
+                log.warning(
+                    "Stream worker thread did not exit within 5s (likely blocked on network I/O)"
+                )
 
     def interrupt(self) -> None:
         """Signal the current turn to stop. Called from the WS read task."""
@@ -249,7 +253,8 @@ class AgentLoop:
         """Serialize and send an event to all connected WebSocket clients."""
         data = serialize_event(event)
         disconnected = set()
-        for ws in self.clients:
+        # Snapshot to avoid RuntimeError if clients set is mutated during iteration
+        for ws in list(self.clients):
             try:
                 await ws.send_text(data)
             except Exception:
