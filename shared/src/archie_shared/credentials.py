@@ -27,6 +27,9 @@ CREDENTIALS_PATH = ARCHIE_DIR / "nexus.creds.yaml"
 # Inside the container, credentials are mounted here
 CONTAINER_CREDENTIALS_PATH = Path("/archie/config/nexus.creds.yaml")
 
+# Service keys — shared constants to prevent typo bugs
+SERVICE_BEDROCK = "bedrock"
+
 
 def get_credentials_path() -> Path:
     """Determine credentials file path (container vs host)."""
