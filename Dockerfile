@@ -142,14 +142,30 @@ RUN groupadd ${USERNAME} \
 
 # --- Pre-install agent dependencies (cached layer) ---
 # The agent depends on archie-shared (a workspace sibling). To resolve deps correctly,
-# uv needs the workspace root pyproject.toml, the shared package source, and the agent's
+# uv needs a workspace root pyproject.toml, the shared package source, and the agent's
 # pyproject.toml. Shared source is baked in (changes infrequently). Agent source is
 # mounted at runtime for fast iteration.
+#
+# We create a container-specific workspace manifest that only includes agent and shared
+# (cli is host-only and not present in the container). Without this, uv fails to parse
+# the workspace when the cli/ directory is missing.
 # .python-version was already copied above. UV_PYTHON_INSTALL_DIR (/opt/python) is
 # inherited from the ENV set earlier, so the venv reuses the shared Python install.
-COPY pyproject.toml /opt/archie/
 COPY shared/ /opt/archie/shared/
 COPY agent/pyproject.toml /opt/archie/agent/
+RUN cat > /opt/archie/pyproject.toml <<'EOF'
+[project]
+name = "archie-nexus"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+
+[tool.uv.workspace]
+members = ["agent", "shared"]
+
+[tool.uv.sources]
+archie-agent = { workspace = true }
+archie-shared = { workspace = true }
+EOF
 ENV UV_PROJECT_ENVIRONMENT=/opt/archie/venv
 RUN cd /opt/archie && uv sync --package archie-agent --no-dev --no-install-project
 ENV PATH="/opt/archie/venv/bin:$PATH"
