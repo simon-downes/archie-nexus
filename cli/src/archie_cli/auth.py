@@ -10,7 +10,11 @@ Bedrock account differs from the tooling account.
 """
 
 import click
-from archie_shared.credentials import get_service_credentials, set_service_credentials
+from archie_shared.credentials import (
+    SERVICE_BEDROCK,
+    get_service_credentials,
+    set_service_credentials,
+)
 
 
 @click.group()
@@ -79,7 +83,7 @@ def bedrock():
         else:
             click.echo("  Type: long-lived (no session token)")
 
-        set_service_credentials("bedrock", fields)
+        set_service_credentials(SERVICE_BEDROCK, fields)
         click.echo("\n✓ Bedrock credentials saved to ~/.archie/nexus.creds.yaml")
 
     except botocore.exceptions.NoCredentialsError:
@@ -94,7 +98,7 @@ def bedrock():
 @auth.command()
 def status():
     """Show credential status for all services."""
-    creds_data = get_service_credentials("bedrock")
+    creds_data = get_service_credentials(SERVICE_BEDROCK)
     if creds_data:
         key_id = creds_data.get("aws_access_key_id", "")
         has_session = "aws_session_token" in creds_data
