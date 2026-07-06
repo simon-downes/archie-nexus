@@ -1,6 +1,12 @@
 """archie-shared — shared types, events, and config for archie-nexus."""
 
 from archie_shared.config import Config, load_config
+from archie_shared.credentials import (
+    get_service_credentials,
+    load_credentials,
+    save_credentials,
+    set_service_credentials,
+)
 from archie_shared.events import (
     PROTOCOL_VERSION,
     ClientCommand,
@@ -43,7 +49,11 @@ __all__ = [
     "deserialize_command",
     "deserialize_event",
     "get_model_info",
+    "get_service_credentials",
     "load_config",
+    "load_credentials",
+    "save_credentials",
     "serialize_command",
     "serialize_event",
+    "set_service_credentials",
 ]

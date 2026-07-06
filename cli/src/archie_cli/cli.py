@@ -172,6 +172,12 @@ def main():
     """Archie — personal AI platform."""
 
 
+# Register subcommand groups
+from archie_cli.auth import auth  # noqa: E402
+
+main.add_command(auth)
+
+
 @main.command()
 @click.option("--no-cache", is_flag=True, help="Build without Docker layer cache.")
 def build(no_cache: bool):
@@ -230,9 +236,6 @@ def start():
 
     config_path = ensure_default_config()
 
-    # Resolve username for .aws mount path inside container
-    username = os.environ.get("USER", "archie")
-
     docker_cmd = [
         "docker",
         "run",
@@ -257,13 +260,16 @@ def start():
         IMAGE_TAG,
     ]
 
-    # Mount ~/.aws if it exists (needed for Bedrock credentials)
-    aws_dir = Path.home() / ".aws"
-    if aws_dir.exists():
+    # Mount credentials file if it exists (needed for Bedrock)
+    from archie_shared.credentials import CREDENTIALS_PATH
+
+    if CREDENTIALS_PATH.exists():
         docker_cmd.insert(-1, "-v")
-        docker_cmd.insert(-1, f"{aws_dir}:/home/{username}/.aws:ro")
+        docker_cmd.insert(-1, f"{CREDENTIALS_PATH}:/archie/config/nexus.creds.yaml:ro")
+        docker_cmd.insert(-1, "-e")
+        docker_cmd.insert(-1, "ARCHIE_CREDENTIALS=/archie/config/nexus.creds.yaml")
     else:
-        click.echo("Warning: ~/.aws not found — Bedrock credentials may not be available.")
+        click.echo("Warning: No credentials found. Run 'archie auth bedrock' to configure.")
 
     result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:

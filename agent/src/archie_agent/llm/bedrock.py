@@ -70,12 +70,26 @@ class BedrockClient:
         self.model_id = model_id
         self._region = region
         self.max_output_tokens = max_output_tokens
-        self.client = boto3.client(
-            "bedrock-runtime",
-            region_name=region,
-            config=Config(read_timeout=300, retries={"max_attempts": 0}),
-        )
+        self.client = self._create_client(region)
         self._cache_supported: bool = True
+
+    def _create_client(self, region: str):
+        """Create boto3 bedrock-runtime client, using archie credentials if available."""
+        from archie_shared.credentials import get_service_credentials
+
+        creds = get_service_credentials("bedrock")
+        kwargs: dict[str, Any] = {
+            "region_name": region,
+            "config": Config(read_timeout=300, retries={"max_attempts": 0}),
+        }
+
+        if creds:
+            kwargs["aws_access_key_id"] = creds["aws_access_key_id"]
+            kwargs["aws_secret_access_key"] = creds["aws_secret_access_key"]
+            if "aws_session_token" in creds:
+                kwargs["aws_session_token"] = creds["aws_session_token"]
+
+        return boto3.client("bedrock-runtime", **kwargs)
 
     def stream(
         self,
