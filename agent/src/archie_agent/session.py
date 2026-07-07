@@ -5,7 +5,7 @@ A Session represents one conversation. It tracks:
 - Cumulative token usage and cost
 - Context window utilisation
 
-Persistence: single JSONL file per session at /archie/sessions/{id}.jsonl
+Persistence: single JSONL file per session at <ARCHIE_HOME_DIR>/sessions/{id}.jsonl
 - One line per user exchange (prompt → response)
 - Append-only — each turn is flushed when the agent loop completes it
 
@@ -13,7 +13,6 @@ The turn_index is per-exchange: a user message and its assistant response share
 the same index. It's incremented once per user message.
 """
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -165,13 +164,13 @@ class Session:
         """Write a completed turn to the JSONL log file. Append-only.
 
         Called by the agent loop at the end of each user exchange.
-        Creates the sessions directory and file on first write.
+        Uses the canonical SessionLogEntry schema from archie_shared.session.
         """
         log_path = self.log_path
         if log_path is None:
             return
 
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        from archie_shared.session.log import EntryMetadata, SessionLogEntry, write_entry
 
         cost = calculate_cost(
             self.model.cost,
@@ -181,24 +180,21 @@ class Session:
             turn_log.cache_write_tokens,
         )
 
-        entry = {
-            "id": str(ULID()),
-            "when": turn_log.when,
-            "user": turn_log.user,
-            "assistant": turn_log.assistant_text or None,
-            "metadata": {
-                "model": turn_log.model or self.model_id,
-                "input_tokens": turn_log.input_tokens,
-                "output_tokens": turn_log.output_tokens,
-                "cache_read_tokens": turn_log.cache_read_tokens,
-                "cache_write_tokens": turn_log.cache_write_tokens,
-                "cost": round(cost, 6),
-                "interrupted": turn_log.interrupted,
-            },
-        }
+        entry = SessionLogEntry(
+            id=str(ULID()),
+            when=turn_log.when,
+            user=turn_log.user,
+            assistant=turn_log.assistant_text or None,
+            metadata=EntryMetadata(
+                model=turn_log.model or self.model_id,
+                backend=self.model.provider.name,
+                input_tokens=turn_log.input_tokens,
+                output_tokens=turn_log.output_tokens,
+                cache_read_tokens=turn_log.cache_read_tokens,
+                cache_write_tokens=turn_log.cache_write_tokens,
+                cost=round(cost, 6),
+                interrupted=turn_log.interrupted,
+            ),
+        )
 
-        if entry["assistant"] is None:
-            del entry["assistant"]
-
-        with log_path.open("a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        write_entry(log_path, entry)

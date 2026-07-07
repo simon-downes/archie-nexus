@@ -48,7 +48,7 @@ inside them. Each session is a container. Clients attach and detach freely.
 │  - /workspace          (project dir, rw)                 │
 │  - /opt/archie/agent   (agent source, ro — dev mount)    │
 │  - /archie/brain       (brain, rw)                       │
-│  - /archie/sessions    (session logs, rw)                │
+│  - <ARCHIE_HOME_DIR>/sessions  (session logs, rw)           │
 │  - /archie/skills      (skills, ro)                      │
 │  - /archie/credentials (tokens + keys, ro)               │
 │  - ~/.ssh              (git auth, ro)                     │
@@ -279,7 +279,7 @@ tool-use events in the stream.
 
 ### Session Persistence
 
-Each turn is appended to a JSONL file at `/archie/sessions/{session-id}.jsonl`.
+Each turn is appended to a JSONL file at `<ARCHIE_HOME_DIR>/sessions/{session-id}.jsonl`.
 
 Entry format:
 ```json
@@ -342,7 +342,7 @@ All paths inside the container use `/opt/archie/` or `/archie/`:
 | `/opt/archie/entrypoint.sh` | Startup script | built into image |
 | `/workspace` | Project directory | rw (from host CWD) |
 | `/archie/brain` | Brain git repo | rw |
-| `/archie/sessions` | Session JSONL logs | rw |
+| `<ARCHIE_HOME_DIR>/sessions` | Session JSONL logs | rw |
 | `/archie/skills` | Skills directory | ro |
 | `/archie/credentials` | OAuth tokens + keys | ro |
 

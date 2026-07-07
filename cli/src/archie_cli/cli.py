@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -11,21 +10,19 @@ import urllib.request
 from pathlib import Path
 
 import click
-from ulid import ULID
+from archie_shared.session import (
+    SessionDescriptor,
+    container_name,
+    generate_session_id,
+    parse_container_name,
+)
 
 from archie_cli.project import detect_project_dir
 
 # Repo root: cli.py is at {repo}/cli/src/archie_cli/cli.py → parents[3] = repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IMAGE_TAG = "archie:latest"
-CONTAINER_PREFIX = "archie-"
 CONTAINER_PORT = "8080"
-
-# Session ID format: {project}-{ulid_timestamp_10chars}
-# Container name: archie-{session_id}
-# Pattern matches: archie-{word_chars}-{10_crockford_base32_chars}
-_CROCKFORD = r"[0-9A-HJKMNP-TV-Z]"
-SESSION_PATTERN = re.compile(rf"^archie-(.+)-({_CROCKFORD}{{10}})$", re.IGNORECASE)
 
 
 def check_docker() -> None:
@@ -53,18 +50,6 @@ def check_image(tag: str) -> None:
     )
     if result.returncode != 0:
         raise click.ClickException(f"Image '{tag}' not found.\nBuild it with: archie build")
-
-
-def generate_session_id() -> str:
-    """Generate a session ID: {project}-{ulid_timestamp}.
-
-    Uses the first 10 characters of a ULID (the timestamp component),
-    giving millisecond-precision chronological sorting without randomness.
-    Project is detected by walking up from cwd to find the first child of ~/dev.
-    """
-    project = detect_project_dir().name
-    ulid_str = str(ULID())[:10].lower()
-    return f"{project}-{ulid_str}"
 
 
 def _container_running(name: str) -> bool:
@@ -134,11 +119,13 @@ def wait_for_ready(name: str, docker_run_cmd: list[str], timeout: float = 30.0) 
     )
 
 
-def list_sessions() -> list[dict]:
-    """List running archie containers. Returns list of dicts with name, session_id, port.
+def list_sessions() -> list[SessionDescriptor]:
+    """List running archie containers as typed SessionDescriptors.
 
-    Identifies archie-nexus containers by name pattern: archie-{project}-{10_char_ulid}.
+    Identifies archie-nexus containers by name pattern via parse_container_name.
     """
+    from archie_shared.session import CONTAINER_PREFIX
+
     result = subprocess.run(
         ["docker", "ps", "--filter", f"name={CONTAINER_PREFIX}", "--format", "{{json .}}"],
         capture_output=True,
@@ -152,17 +139,17 @@ def list_sessions() -> list[dict]:
     for line in result.stdout.strip().splitlines():
         data = json.loads(line)
         name = data.get("Names", "")
-        if not SESSION_PATTERN.match(name):
+        session_id = parse_container_name(name)
+        if session_id is None:
             continue
-        session_id = name.removeprefix(CONTAINER_PREFIX)
-        port = _query_port(name)
+        port_str = _query_port(name)
         sessions.append(
-            {
-                "name": name,
-                "session_id": session_id,
-                "status": data.get("Status", ""),
-                "port": port,
-            }
+            SessionDescriptor(
+                session_id=session_id,
+                container_name=name,
+                port=int(port_str) if port_str else None,
+                raw_docker_status=data.get("Status", ""),
+            )
         )
     return sessions
 
@@ -226,8 +213,8 @@ def start():
     check_docker()
     check_image(IMAGE_TAG)
 
-    session_id = generate_session_id()
-    container_name = f"{CONTAINER_PREFIX}{session_id}"
+    session_id = generate_session_id(project=detect_project_dir().name)
+    cname = container_name(session_id)
     agent_dir = REPO_ROOT / "agent"
     project_dir = str(detect_project_dir())
 
@@ -256,7 +243,7 @@ def start():
         "-d",
         "--rm",
         "--name",
-        container_name,
+        cname,
         "-p",
         f"127.0.0.1:0:{CONTAINER_PORT}",
         "-e",
@@ -268,7 +255,7 @@ def start():
         "-v",
         f"{project_dir}:/workspace:rw",
         "-v",
-        f"{nexus_home}:{container_home}:ro",
+        f"{nexus_home}:{container_home}:rw",
         "-w",
         "/workspace",
         IMAGE_TAG,
@@ -279,10 +266,10 @@ def start():
         raise click.ClickException(f"Failed to start container:\n{result.stderr.strip()}")
 
     # Wait for agent to be ready
-    port = wait_for_ready(container_name, docker_cmd)
+    port = wait_for_ready(cname, docker_cmd)
 
     click.echo(f"Session: {session_id}")
-    click.echo(f"Container: {container_name}")
+    click.echo(f"Container: {cname}")
     click.echo(f"Agent: http://127.0.0.1:{port}")
 
 
@@ -301,8 +288,8 @@ def ls_cmd():
     click.echo(f"{'-' * 40} {'-' * 20} {'-' * 6}")
 
     for s in sessions:
-        port_str = s["port"] or "-"
-        click.echo(f"{s['session_id']:<40} {s['status']:<20} {port_str}")
+        port_str = str(s.port) if s.port else "-"
+        click.echo(f"{s.session_id:<40} {s.raw_docker_status:<20} {port_str}")
 
 
 @main.command()
@@ -326,7 +313,7 @@ def shell(session_id: str | None):
         else:
             target = _pick_session(sessions)
     else:
-        matches = [s for s in sessions if s["session_id"].startswith(session_id)]
+        matches = [s for s in sessions if s.session_id.startswith(session_id)]
         if len(matches) == 0:
             raise click.ClickException(
                 f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
@@ -339,16 +326,16 @@ def shell(session_id: str | None):
 
     # Check if /workspace exists in the container before using -w
     check = subprocess.run(
-        ["docker", "exec", target["name"], "test", "-d", "/workspace"],
+        ["docker", "exec", target.container_name, "test", "-d", "/workspace"],
         capture_output=True,
         check=False,
     )
 
     if check.returncode == 0:
-        exec_cmd = ["docker", "exec", "-it", "-w", "/workspace", target["name"], "bash"]
+        exec_cmd = ["docker", "exec", "-it", "-w", "/workspace", target.container_name, "bash"]
     else:
         click.echo("Warning: /workspace not found in container. Rebuild image with: archie build")
-        exec_cmd = ["docker", "exec", "-it", target["name"], "bash"]
+        exec_cmd = ["docker", "exec", "-it", target.container_name, "bash"]
 
     result = subprocess.run(exec_cmd, check=False)
     sys.exit(result.returncode)
@@ -375,7 +362,7 @@ def attach(session_id: str | None):
         else:
             target = _pick_session(sessions)
     else:
-        matches = [s for s in sessions if s["session_id"].startswith(session_id)]
+        matches = [s for s in sessions if s.session_id.startswith(session_id)]
         if len(matches) == 0:
             raise click.ClickException(
                 f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
@@ -386,10 +373,10 @@ def attach(session_id: str | None):
             click.echo(f"Multiple sessions match '{session_id}':")
             target = _pick_session(matches)
 
-    port = target.get("port")
+    port = target.port
     if not port:
         raise click.ClickException(
-            f"Session '{target['session_id']}' has no published port.\n"
+            f"Session '{target.session_id}' has no published port.\n"
             "It may still be starting. Try again shortly."
         )
 
@@ -399,12 +386,59 @@ def attach(session_id: str | None):
     app.run()
 
 
-def _pick_session(sessions: list[dict]) -> dict:
+@main.command()
+@click.argument("session_id", required=False)
+def stop(session_id: str | None):
+    """Stop a running agent session.
+
+    The container is destroyed (--rm) but the session JSONL log is preserved
+    on the host at ~/.nexus/sessions/{session_id}.jsonl.
+
+    Supports prefix matching on session ID.
+    """
+    check_docker()
+
+    sessions = list_sessions()
+    if not sessions:
+        raise click.ClickException("No running sessions.")
+
+    # Resolve target session
+    if session_id is None:
+        if len(sessions) == 1:
+            target = sessions[0]
+        else:
+            target = _pick_session(sessions)
+    else:
+        matches = [s for s in sessions if s.session_id.startswith(session_id)]
+        if len(matches) == 0:
+            raise click.ClickException(
+                f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
+            )
+        elif len(matches) == 1:
+            target = matches[0]
+        else:
+            click.echo(f"Multiple sessions match '{session_id}':")
+            target = _pick_session(matches)
+
+    result = subprocess.run(
+        ["docker", "stop", target.container_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise click.ClickException(f"Failed to stop container:\n{result.stderr.strip()}")
+
+    click.echo(f"✓ Stopped session: {target.session_id}")
+    click.echo(f"  Log retained at: ~/.nexus/sessions/{target.session_id}.jsonl")
+
+
+def _pick_session(sessions: list[SessionDescriptor]) -> SessionDescriptor:
     """Display a numbered list and prompt the user to choose."""
     click.echo()
     for i, s in enumerate(sessions, 1):
-        port_str = f" (port {s['port']})" if s["port"] else ""
-        click.echo(f"  {i}. {s['session_id']}{port_str}")
+        port_str = f" (port {s.port})" if s.port else ""
+        click.echo(f"  {i}. {s.session_id}{port_str}")
     click.echo()
 
     while True:
