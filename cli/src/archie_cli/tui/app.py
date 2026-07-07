@@ -187,6 +187,7 @@ class ArchieApp(App):
             status.cache_read = event.cache_read_tokens
             status.cache_write = event.cache_write_tokens
             status.pricing_label = f"${event.cost:.4f}"
+            status.context_pct = event.context_pct
 
         elif isinstance(event, TurnComplete):
             self._end_turn()

@@ -156,6 +156,7 @@ class AgentLoop:
                             cache_read_tokens=self.session.total_cache_read_tokens,
                             cache_write_tokens=self.session.total_cache_write_tokens,
                             cost=self.session.total_cost,
+                            context_pct=self.session.context_pct,
                         )
                     )
 
