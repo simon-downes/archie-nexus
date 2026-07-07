@@ -55,6 +55,7 @@ version = "0.1.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "archie-shared" },
+    { name = "boto3" },
     { name = "click" },
     { name = "httpx" },
     { name = "python-ulid" },
@@ -66,6 +67,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "archie-shared", editable = "shared" },
+    { name = "boto3", specifier = ">=1.35" },
     { name = "click", specifier = ">=8,<9" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "python-ulid", specifier = ">=3.1.0" },

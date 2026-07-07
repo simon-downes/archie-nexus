@@ -274,17 +274,6 @@ def start():
         IMAGE_TAG,
     ]
 
-    # Mount credentials file if it exists (needed for Bedrock)
-    from archie_shared.credentials import CREDENTIALS_PATH
-
-    if CREDENTIALS_PATH.exists():
-        docker_cmd.insert(-1, "-v")
-        docker_cmd.insert(-1, f"{CREDENTIALS_PATH}:/archie/config/nexus.creds.yaml:ro")
-        docker_cmd.insert(-1, "-e")
-        docker_cmd.insert(-1, "ARCHIE_CREDENTIALS=/archie/config/nexus.creds.yaml")
-    else:
-        click.echo("Warning: No credentials found. Run 'archie auth bedrock' to configure.")
-
     result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise click.ClickException(f"Failed to start container:\n{result.stderr.strip()}")

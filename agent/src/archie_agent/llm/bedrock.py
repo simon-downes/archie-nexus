@@ -78,29 +78,27 @@ class BedrockClient:
     def _create_client(self, region: str):
         """Create boto3 bedrock-runtime client, using archie credentials if available.
 
-        Reads from ~/.archie/nexus.creds.yaml (or container-mounted equivalent).
+        Reads from ~/.nexus/credentials.yaml via the typed credential store.
         Falls back to default boto3 chain if no archie credentials are configured.
         """
-        from archie_shared.credentials import SERVICE_BEDROCK, get_service_credentials
+        from archie_shared.credentials import get_credential
 
-        creds = get_service_credentials(SERVICE_BEDROCK)
+        cred = get_credential("bedrock")
         kwargs: dict[str, Any] = {
             "region_name": region,
             "config": Config(read_timeout=300, retries={"max_attempts": 0}),
         }
 
-        if creds:
-            # Validate required keys are present
-            if "aws_access_key_id" not in creds or "aws_secret_access_key" not in creds:
-                log.warning(
-                    "Bedrock credentials file is missing required keys "
-                    "(aws_access_key_id, aws_secret_access_key) — falling back to default chain"
-                )
-            else:
-                kwargs["aws_access_key_id"] = creds["aws_access_key_id"]
-                kwargs["aws_secret_access_key"] = creds["aws_secret_access_key"]
-                if "aws_session_token" in creds:
-                    kwargs["aws_session_token"] = creds["aws_session_token"]
+        if cred and cred.aws_access_key_id and cred.aws_secret_access_key:
+            kwargs["aws_access_key_id"] = cred.aws_access_key_id
+            kwargs["aws_secret_access_key"] = cred.aws_secret_access_key
+            if cred.aws_session_token:
+                kwargs["aws_session_token"] = cred.aws_session_token
+        elif cred:
+            log.warning(
+                "Bedrock credentials file is missing required keys "
+                "(aws_access_key_id, aws_secret_access_key) — falling back to default chain"
+            )
 
         return boto3.client("bedrock-runtime", **kwargs)
 
@@ -307,10 +305,10 @@ class BedrockClient:
         Returns True if credentials were successfully refreshed (file had new creds),
         False if nothing changed or no creds available.
         """
-        from archie_shared.credentials import SERVICE_BEDROCK, get_service_credentials
+        from archie_shared.credentials import get_credential
 
-        creds = get_service_credentials(SERVICE_BEDROCK)
-        if not creds or "aws_access_key_id" not in creds:
+        cred = get_credential("bedrock")
+        if not cred or not cred.aws_access_key_id:
             log.warning(
                 "Credential refresh failed — no valid credentials in creds file. "
                 "Run 'archie auth bedrock' on the host to update."
