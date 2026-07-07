@@ -10,7 +10,6 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from archie_shared.config import home_dir
 from archie_shared.events import (
@@ -62,8 +61,17 @@ async def lifespan(app):
         can_cache=model.can_cache,
     )
 
-    session_id = os.environ.get("ARCHIE_SESSION_ID", "unknown")
-    sessions_dir = Path(os.environ.get("ARCHIE_SESSIONS_DIR", "/archie/sessions"))
+    session_id = os.environ.get("ARCHIE_SESSION_ID")
+    if not session_id:
+        log.error(
+            "ARCHIE_SESSION_ID is not set. "
+            "This variable is injected by the host CLI at container start."
+        )
+        import sys
+
+        sys.exit(1)
+
+    sessions_dir = home_dir() / "sessions"
 
     session = Session(
         model_id=config.global_.model,
