@@ -45,7 +45,7 @@ def test_stream_text_response():
             "stream": mock_stream,
         }
 
-        client = BedrockClient(model_id="test-model", region="us-east-1")
+        client = BedrockClient(model_id="test-model", region="us-east-1", can_cache=True)
         messages = [Turn(role="user", content=[TextBlock(text="hi")], turn_index=1)]
 
         events = list(client.stream(messages, system="You are helpful."))
@@ -89,7 +89,7 @@ def test_stream_closes_on_early_exit():
             "stream": mock_stream,
         }
 
-        client = BedrockClient(model_id="test-model", region="us-east-1")
+        client = BedrockClient(model_id="test-model", region="us-east-1", can_cache=True)
         messages = [Turn(role="user", content=[TextBlock(text="hi")], turn_index=1)]
 
         # Only consume the first event then break (simulating interrupt)

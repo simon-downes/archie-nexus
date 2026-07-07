@@ -66,12 +66,14 @@ class BedrockClient:
     - Explicit stream close to prevent connection leaks
     """
 
-    def __init__(self, model_id: str, region: str, max_output_tokens: int = 32_768):
+    def __init__(
+        self, model_id: str, region: str, max_output_tokens: int = 32_768, can_cache: bool = False
+    ):
         self.model_id = model_id
         self._region = region
         self.max_output_tokens = max_output_tokens
         self.client = self._create_client(region)
-        self._cache_supported: bool = True
+        self._cache_supported: bool = can_cache
 
     def _create_client(self, region: str):
         """Create boto3 bedrock-runtime client, using archie credentials if available.

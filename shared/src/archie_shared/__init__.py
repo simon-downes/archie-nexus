@@ -1,12 +1,6 @@
 """archie-shared — shared types, events, and config for archie-nexus."""
 
-from archie_shared.config import Config, load_config
-from archie_shared.credentials import (
-    get_service_credentials,
-    load_credentials,
-    save_credentials,
-    set_service_credentials,
-)
+from archie_shared.config import ConfigError, home_dir, load_config
 from archie_shared.events import (
     PROTOCOL_VERSION,
     ClientCommand,
@@ -24,17 +18,39 @@ from archie_shared.events import (
     serialize_command,
     serialize_event,
 )
-from archie_shared.models import ModelInfo, calculate_cost, get_model_info
+from archie_shared.models import (
+    CostConfig,
+    ModelEntry,
+    ProviderConfig,
+    calculate_cost,
+    get_model,
+    load_models,
+)
+from archie_shared.schemas import (
+    AgentConfig,
+    CliConfig,
+    GlobalConfig,
+    NexusConfig,
+    WebConfig,
+    expand_project_root,
+    load_nexus_config,
+)
 from archie_shared.types import ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock
 
 __all__ = [
+    "AgentConfig",
     "ClientCommand",
-    "Config",
+    "CliConfig",
+    "ConfigError",
     "ContentBlock",
+    "CostConfig",
+    "GlobalConfig",
     "InterruptCommand",
     "MessageCommand",
-    "ModelInfo",
+    "ModelEntry",
+    "NexusConfig",
     "PROTOCOL_VERSION",
+    "ProviderConfig",
     "ServerEvent",
     "SessionInfo",
     "TextBlock",
@@ -45,15 +61,16 @@ __all__ = [
     "TurnError",
     "TurnInterrupted",
     "UsageUpdated",
+    "WebConfig",
     "calculate_cost",
     "deserialize_command",
     "deserialize_event",
-    "get_model_info",
-    "get_service_credentials",
+    "expand_project_root",
+    "get_model",
+    "home_dir",
     "load_config",
-    "load_credentials",
-    "save_credentials",
+    "load_models",
+    "load_nexus_config",
     "serialize_command",
     "serialize_event",
-    "set_service_credentials",
 ]

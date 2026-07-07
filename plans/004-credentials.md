@@ -38,10 +38,10 @@ code* from (not a blind lift):
   dicts).
 
 **Dependency (must land first):** plan 003 (amended) delivers the config-dir
-migration this plan builds on — `~/.nexus` directory, single `ARCHIE_CONFIG_DIR`
-env var (host default `~/.nexus`, container `/opt/archie/config`), and
-`config.py:config_dir() -> Path`. This plan resolves the credential store as
-`config_dir() / "credentials.yaml"`.
+migration this plan builds on — `~/.nexus` HOME directory, single `ARCHIE_HOME_DIR`
+env var (host default `~/.nexus`, container `/home/${USERNAME}/.nexus`), and
+`config.py:home_dir() -> Path`. This plan resolves the credential store as
+`home_dir() / "credentials.yaml"`.
 
 **Scope boundary (this iteration):** the in-container agent consumes **only
 bedrock** credentials. Agent-side credential self-refresh + write-back is
@@ -115,9 +115,9 @@ container. OAuth login is **host-only**.
 
 ### Container integration
 
-- MUST mount the credential store as a **directory** (`config_dir()`) read-only
-  at `/opt/archie/config`, alongside config (shared dir mount from plan 003);
-  container reads `credentials.yaml` via `ARCHIE_CONFIG_DIR`
+- MUST mount the credential store as part of the home **directory** (`home_dir()`)
+  read-only at `/home/${USERNAME}/.nexus`, alongside config (shared dir mount from
+  plan 003); container reads `credentials.yaml` via `ARCHIE_HOME_DIR`
 - MUST keep the directory-mount shape so a future plan can flip `:ro` → `:rw`
   without re-plumbing
 - The in-container `BedrockClient` MUST read bedrock credentials via the new
@@ -167,7 +167,7 @@ New package `shared/src/archie_shared/credentials/` (replaces the flat
   - `bedrock`: treated as a static-like provider whose credentials are
     populated by `archie auth bedrock`; `can_refresh_noninteractive=False`
 - `store.py` — store resolution + atomic IO:
-  - `store_path() -> Path` = `config_dir() / "credentials.yaml"`
+  - `store_path() -> Path` = `home_dir() / "credentials.yaml"`
   - `load_store() -> dict[str, dict]` (perm warning; empty → `{}`)
   - `save_store(data: dict) -> None` (temp+rename+chmod0600 in same dir)
   - `get_credential(service) -> struct | None` (`msgspec.convert` of the entry)
@@ -215,8 +215,8 @@ Create new `shared/tests/` (does not exist yet) with a package marker.
 ### 1. Config-dir + credentials path
 
 **Approach:**
-- Depends on plan 003's `config_dir()`. Introduce
-  `store.store_path() = config_dir() / "credentials.yaml"`.
+- Depends on plan 003's `home_dir()`. Introduce
+  `store.store_path() = home_dir() / "credentials.yaml"`.
 - Create the `credentials/` package skeleton (`__init__.py`) alongside the old
   flat module (not yet deleted).
 
@@ -225,7 +225,7 @@ Create new `shared/tests/` (does not exist yet) with a package marker.
 - Add `store_path()` in `store.py`
 - Create `shared/tests/__init__.py`
 
-**Deliverable:** store path resolves relative to `ARCHIE_CONFIG_DIR`.
+**Deliverable:** store path resolves relative to `ARCHIE_HOME_DIR`.
 
 **Verify:** `uv run python -c "from archie_shared.credentials.store import store_path; print(store_path())"`.
 
@@ -358,8 +358,8 @@ Create new `shared/tests/` (does not exist yet) with a package marker.
 - In `cli/cli.py` (docker run, ~246-272): replace the two per-file mounts
   (`ARCHIE_CONFIG=/archie/config/nexus.yaml` + the conditional
   `nexus.creds.yaml` file mount + `ARCHIE_CREDENTIALS`) with a **single
-  directory mount** of `config_dir()` at `/opt/archie/config:ro` plus
-  `ARCHIE_CONFIG_DIR=/opt/archie/config` (config path piece comes from plan 003).
+  directory mount** of `home_dir()` at `/home/${USERNAME}/.nexus:ro` plus
+  `ARCHIE_HOME_DIR=/home/${USERNAME}/.nexus` (config path piece comes from plan 003).
 - Drop the `CREDENTIALS_PATH`-exists conditional file-mount block; the directory
   mount carries `credentials.yaml` if present.
 - Keep the mount as a directory (`:ro` now) so a future plan flips to `:rw`.
@@ -368,7 +368,7 @@ Create new `shared/tests/` (does not exist yet) with a package marker.
 - Directory mount + atomic-rename on the host = container sees new inode on
   reload (this is the intended pattern; single-file bind mount would pin the
   inode and serve stale reads).
-- If the config dir doesn't exist on the host, create it (or warn) before mount.
+- If the home dir doesn't exist on the host, create it (or warn) before mount.
 
 **Tasks:**
 - Rewrite docker-run mount/env block in `cli/cli.py`
@@ -377,7 +377,7 @@ Create new `shared/tests/` (does not exist yet) with a package marker.
   Bedrock
 
 **Deliverable:** container reads config + credentials from one `:ro` dir mount
-via `ARCHIE_CONFIG_DIR`.
+via `ARCHIE_HOME_DIR`.
 
 **Verify:** `archie build && archie start`, attach, send a message, confirm a
 Bedrock response; `uv run ruff check && uv run pytest -v`.

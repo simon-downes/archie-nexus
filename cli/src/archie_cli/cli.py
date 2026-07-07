@@ -231,10 +231,24 @@ def start():
     agent_dir = REPO_ROOT / "agent"
     project_dir = str(detect_project_dir())
 
-    # Ensure config exists
-    from archie_shared.config import ensure_default_config
+    # Ensure home dir exists (config.yaml is optional; dir must exist for mount)
+    from archie_shared.config import home_dir
 
-    config_path = ensure_default_config()
+    nexus_home = home_dir()
+    nexus_home.mkdir(parents=True, exist_ok=True)
+
+    # Write default config if none exists
+    config_file = nexus_home / "config.yaml"
+    if not config_file.exists():
+        config_file.write_text(
+            'global:\n  model: "bedrock-claude-sonnet-4-6"\n'
+            '  region: "eu-west-1"\n'
+            '  project_root: "~/dev"\n'
+        )
+
+    # Determine container home path (symmetric with host)
+    username = os.environ.get("USER", "archie")
+    container_home = f"/home/{username}/.nexus"
 
     docker_cmd = [
         "docker",
@@ -246,7 +260,7 @@ def start():
         "-p",
         f"127.0.0.1:0:{CONTAINER_PORT}",
         "-e",
-        "ARCHIE_CONFIG=/archie/config/nexus.yaml",
+        f"ARCHIE_HOME_DIR={container_home}",
         "-e",
         f"ARCHIE_SESSION_ID={session_id}",
         "-v",
@@ -254,7 +268,7 @@ def start():
         "-v",
         f"{project_dir}:/workspace:rw",
         "-v",
-        f"{config_path}:/archie/config/nexus.yaml:ro",
+        f"{nexus_home}:{container_home}:ro",
         "-w",
         "/workspace",
         IMAGE_TAG,

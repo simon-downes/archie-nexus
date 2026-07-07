@@ -22,16 +22,24 @@ Since we're the only user, existing files can be deleted and recreated.
 the format change, this plan migrates the config *location* so that plan 004
 (credentials) can build on a single, stable convention:
 
-- Config directory: `~/.archie` → `~/.nexus`.
+- Archie home directory: `~/.archie` → `~/.nexus`. This is a HOME dir, not just
+  config — it holds config, the model catalog, credentials (plan 004), and
+  session logs. (Prior art: kiro `~/.kiro`, nextgen `~/.archie/sessions`.)
 - Application config file: `nexus.yaml` → `config.yaml` (under the dir).
 - Model catalog: `models.yaml` (under the dir, unchanged name).
-- **Single env var `ARCHIE_CONFIG_DIR`** replaces the per-file `ARCHIE_CONFIG`.
-  Host default `~/.nexus`; container `/opt/archie/config`. All config files
-  (`config.yaml`, `models.yaml`, and later `credentials.yaml`) resolve
-  *relative* to this directory.
-- Container mount path: `/archie/config` → `/opt/archie/config`; the container
-  gets `ARCHIE_CONFIG_DIR=/opt/archie/config` set as an ENV.
+- **Single env var `ARCHIE_HOME_DIR`** replaces the per-file `ARCHIE_CONFIG`.
+  Host default `~/.nexus`; container `/home/${USERNAME}/.nexus` (symmetric with
+  the host — `/opt/archie` is the archie install tree, code+venv, so the home
+  dir must NOT live there). All files (`config.yaml`, `models.yaml`, later
+  `credentials.yaml`, and `sessions/`) resolve *relative* to this directory.
+- Container mount: bind the host home dir at `/home/${USERNAME}/.nexus`; the
+  container gets `ARCHIE_HOME_DIR=/home/${USERNAME}/.nexus` set as an ENV. Works
+  because host UID == container UID (already guaranteed via `USER_UID` build arg).
 - Clean break, **no migration shim**. Delete old `~/.archie` and recreate.
+- NOTE: this plan does the `ARCHIE_HOME_DIR` rename + mount ONLY. Session-log
+  path work (sessions resolve at `home_dir()/sessions`, drop `ARCHIE_SESSIONS_DIR`,
+  `"unknown"` session_id fallback fix, session.py/app.py docstrings) is a SEPARATE
+  later plan.
 
 ## Requirements
 
@@ -57,7 +65,7 @@ the format change, this plan migrates the config *location* so that plan 004
 ### Model Catalog
 
 - MUST define default models in code as msgspec Structs
-- MUST load user overrides/additions from `<ARCHIE_CONFIG_DIR>/models.yaml`
+- MUST load user overrides/additions from `<ARCHIE_HOME_DIR>/models.yaml`
 - MUST merge by key — user entries fully replace defaults for that key; new keys added
 - MUST use `provider-model` key format (e.g. `bedrock-claude-opus-4-6`)
 - MUST support fields: `name`, `context`, `max_output_tokens`, `context_warning_threshold`,
@@ -125,7 +133,7 @@ class NexusConfig(msgspec.Struct, rename="lower", forbid_unknown_fields=True):
 geo-inference Claude models rely on. Consumers resolve effective region as
 `model.provider.region or config.global_.region`.
 
-`load_nexus_config(path=None)` resolves path relative to `ARCHIE_CONFIG_DIR`
+`load_nexus_config(path=None)` resolves path relative to `ARCHIE_HOME_DIR`
 (default `~/.nexus`) as `<dir>/config.yaml`. Missing file at default path →
 return all defaults. An explicit `path=` that is missing → raise ConfigError.
 
@@ -188,16 +196,16 @@ until a client + model switching land.
 
 **Config-dir resolution in `config.py`:** replace the old
 `ARCHIE_DIR = Path.home() / ".archie"` constant with a resolver
-`config_dir() -> Path` that reads `ARCHIE_CONFIG_DIR` (default `~/.nexus`,
+`home_dir() -> Path` that reads `ARCHIE_HOME_DIR` (default `~/.nexus`,
 expanduser). The old flat `credentials.py` also uses this; plan 004 rebuilds
-credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
+credentials on top of the same `ARCHIE_HOME_DIR` resolution.
 
 ### What Stays Unchanged
 
 - `credentials.py` — separate concern (fully rebuilt in plan 004). During this
   plan, apply only a minimal patch so it keeps importing cleanly after
   `ARCHIE_DIR` is removed: swap `from archie_shared.config import ARCHIE_DIR` /
-  `ARCHIE_DIR / "nexus.creds.yaml"` to use `config_dir()`. No behavioural change.
+  `ARCHIE_DIR / "nexus.creds.yaml"` to use `home_dir()`. No behavioural change.
 - `events.py`, `types.py` — wire protocol (future work)
 - `__init__.py` — updated re-exports only
 
@@ -210,9 +218,9 @@ credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
 **Approach:**
 - Add `msgspec>=0.19` to `shared/pyproject.toml`
 - Rewrite `shared/src/archie_shared/config.py`:
-  - Add `config_dir() -> Path` resolving `ARCHIE_CONFIG_DIR` (default `~/.nexus`,
+  - Add `home_dir() -> Path` resolving `ARCHIE_HOME_DIR` (default `~/.nexus`,
     expanduser). Remove old `ARCHIE_DIR = Path.home() / ".archie"` constant
-    (callers switch to `config_dir()`; credentials rebuilt in plan 004)
+    (callers switch to `home_dir()`; credentials rebuilt in plan 004)
   - New: `ConfigError(Exception)` with path + message
   - New: `load_config(path: str | Path, schema: type[T]) -> T`
   - Implementation: `yaml.safe_load` → handle None as `{}` → `msgspec.convert(data, schema, strict=False)`
@@ -285,7 +293,7 @@ credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
 - Handle `global` keyword: use msgspec field rename (`name="global"`)
 - `load_nexus_config(path: Path | None = None) -> NexusConfig`:
   - If path given → load it (raise on missing)
-  - Otherwise → `config_dir() / "config.yaml"` (dir from `ARCHIE_CONFIG_DIR`,
+  - Otherwise → `home_dir() / "config.yaml"` (dir from `ARCHIE_HOME_DIR`,
     default `~/.nexus`), return `NexusConfig()` if the file doesn't exist
 - Path expansion for `project_root` via property or helper function
 
@@ -313,7 +321,7 @@ credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
   - Replace `from archie_shared.config import load_config` with `from archie_shared.schemas import load_nexus_config`
   - Replace `from archie_shared.models import get_model_info` with `from archie_shared.models import load_models, get_model`
   - `config = load_nexus_config()` → `config.global_.model` for active model key
-  - `catalog = load_models(config_dir() / "models.yaml")` → `model = get_model(catalog, config.global_.model)`
+  - `catalog = load_models(home_dir() / "models.yaml")` → `model = get_model(catalog, config.global_.model)`
     (this lookup is now the sole model-key validation — raises at startup; D3)
   - Pass `model.provider.endpoint` to BedrockClient (the inference profile ID)
   - Resolve region as `model.provider.region or config.global_.region` (D2 —
@@ -337,9 +345,9 @@ credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
   - Replace `ensure_default_config` with path resolution that creates a new-format default
     if no file exists. **The generated default must use the new model key**
     (`bedrock-claude-sonnet-4-6`), not the old dotted inference-profile ID (#5)
-  - Docker mount: bind the whole config **directory** (`config_dir()`) at
-    `/opt/archie/config` (single dir mount, not per-file), and set container
-    ENV `ARCHIE_CONFIG_DIR=/opt/archie/config`. Replace the old
+  - Docker mount: bind the whole home **directory** (`home_dir()`) at
+    `/home/${USERNAME}/.nexus` (single dir mount, not per-file), and set container
+    ENV `ARCHIE_HOME_DIR=/home/${USERNAME}/.nexus`. Replace the old
     `ARCHIE_CONFIG=/archie/config/nexus.yaml` env + file mount. **Leave the
     existing conditional `nexus.creds.yaml` file-mount block (cli.py ~263-272)
     untouched here** — plan 004 removes it and folds credentials into this dir
@@ -352,8 +360,8 @@ credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
   sourced from `model.provider.endpoint`, required for all models
 - `Session.model_info` is renamed to `model` (type `ModelEntry`; D6) — multi-file
   rename touching session.py, agent.py:62,67, app.py:67,80
-- Container config path is now `/opt/archie/config/config.yaml` (dir mount +
-  `ARCHIE_CONFIG_DIR`), replacing the old `/archie/config/nexus.yaml` file mount
+- Container config path is now `/home/${USERNAME}/.nexus/config.yaml` (dir mount +
+  `ARCHIE_HOME_DIR`), replacing the old `/archie/config/nexus.yaml` file mount
 - Old `~/.archie/nexus.yaml` with a dotted model key will `KeyError` at startup —
   expected (breaking change; delete old `~/.archie` & recreate under `~/.nexus`)
 
@@ -362,9 +370,9 @@ credentials on top of the same `ARCHIE_CONFIG_DIR` resolution.
 - Update `BedrockClient.__init__` (add `can_cache` param)
 - Update `session.py` (ModelEntry, `model` attr rename, calculate_cost signature)
 - Update `agent.py` type annotations + `model` rename
-- Update `cli.py` config handling (dir mount at `/opt/archie/config` + set
-  container ENV `ARCHIE_CONFIG_DIR`; see docker-run mount edit at cli.py ~260-270)
-- Patch `credentials.py`: `ARCHIE_DIR` \u2192 `config_dir()` (line 23/25) so it still
+- Update `cli.py` config handling (dir mount at `/home/${USERNAME}/.nexus` + set
+  container ENV `ARCHIE_HOME_DIR`; see docker-run mount edit at cli.py ~260-270)
+- Patch `credentials.py`: `ARCHIE_DIR` \u2192 `home_dir()` (line 23/25) so it still
   imports after the constant is removed (behaviour unchanged; superseded by 004)
 - Update `shared/__init__.py` exports (drop `ModelInfo`/`get_model_info`; add
   `ModelEntry`/`load_models`/`get_model`/`load_nexus_config` etc.)
