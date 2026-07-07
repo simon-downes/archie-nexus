@@ -216,6 +216,7 @@ def start():
     session_id = generate_session_id(project=detect_project_dir().name)
     cname = container_name(session_id)
     agent_dir = REPO_ROOT / "agent"
+    shared_dir = REPO_ROOT / "shared"
     project_dir = str(detect_project_dir())
 
     # Ensure home dir exists (config.yaml is optional; dir must exist for mount)
@@ -252,6 +253,8 @@ def start():
         f"ARCHIE_SESSION_ID={session_id}",
         "-v",
         f"{agent_dir}:/opt/archie/agent:rw",
+        "-v",
+        f"{shared_dir}:/opt/archie/shared:ro",
         "-v",
         f"{project_dir}:/workspace:rw",
         "-v",

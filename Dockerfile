@@ -1,6 +1,6 @@
 # Archie agent container.
-# Contains system tools for development work. The agent source is mounted at runtime
-# for fast iteration — only dependencies are baked into the image.
+# Contains system tools for development work. Agent and shared source are mounted at
+# runtime for fast iteration — only dependencies are baked into the image.
 
 FROM debian:bookworm-slim
 
@@ -143,8 +143,9 @@ RUN groupadd ${USERNAME} \
 # --- Pre-install agent dependencies (cached layer) ---
 # The agent depends on archie-shared (a workspace sibling). To resolve deps correctly,
 # uv needs a workspace root pyproject.toml, the shared package source, and the agent's
-# pyproject.toml. Shared source is baked in (changes infrequently). Agent source is
-# mounted at runtime for fast iteration.
+# pyproject.toml. Shared source is baked in so the editable install resolves at build
+# time, but the host shared/ is mounted over it at runtime (like agent) for fast
+# iteration — no rebuild needed for shared changes.
 #
 # We create a container-specific workspace manifest that only includes agent and shared
 # (cli is host-only and not present in the container). Without this, uv fails to parse
