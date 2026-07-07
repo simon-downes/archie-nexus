@@ -15,7 +15,7 @@ from archie_shared.events import (
     UsageUpdated,
     deserialize_event,
 )
-from archie_shared.models import get_model_info
+from archie_shared.models import DEFAULT_MODELS, get_model
 
 
 def _make_mock_llm(events: list):
@@ -55,21 +55,21 @@ class FakeWebSocket:
 
 
 @pytest.fixture
-def model_info():
-    return get_model_info("eu.anthropic.claude-sonnet-4-6")
+def model_entry():
+    return get_model(DEFAULT_MODELS, "bedrock-claude-sonnet-4-6")
 
 
 @pytest.fixture
-def session(model_info):
+def session(model_entry):
     return Session(
-        model_id="eu.anthropic.claude-sonnet-4-6",
-        model_info=model_info,
+        model_id="bedrock-claude-sonnet-4-6",
+        model=model_entry,
         session_id="test-session",
     )
 
 
 @pytest.mark.asyncio
-async def test_handle_message_emits_correct_events(session, model_info):
+async def test_handle_message_emits_correct_events(session, model_entry):
     """Verify events are emitted in correct order: TextDelta, Usage, TurnComplete."""
     mock_events = [
         TextDelta(text="Hello"),
@@ -82,7 +82,7 @@ async def test_handle_message_emits_correct_events(session, model_info):
     agent = AgentLoop(
         session=session,
         llm_client=mock_llm,
-        model_info=model_info,
+        model=model_entry,
         system_prompt="You are helpful.",
     )
 
@@ -117,7 +117,7 @@ async def test_handle_message_emits_correct_events(session, model_info):
 
 
 @pytest.mark.asyncio
-async def test_interrupt_mid_stream(session, model_info):
+async def test_interrupt_mid_stream(session, model_entry):
     """Verify interrupt stops the stream and emits TurnInterrupted.
 
     Uses a slow-yielding mock so the interrupt lands mid-stream, exercising the
@@ -138,7 +138,7 @@ async def test_interrupt_mid_stream(session, model_info):
     agent = AgentLoop(
         session=session,
         llm_client=mock_llm,
-        model_info=model_info,
+        model=model_entry,
         system_prompt="You are helpful.",
     )
 
@@ -165,7 +165,7 @@ async def test_interrupt_mid_stream(session, model_info):
 
 
 @pytest.mark.asyncio
-async def test_no_stale_interrupt_on_next_turn(session, model_info):
+async def test_no_stale_interrupt_on_next_turn(session, model_entry):
     """Verify interrupt flag from previous turn doesn't leak into next turn."""
     mock_events = [
         TextDelta(text="Hello"),
@@ -177,7 +177,7 @@ async def test_no_stale_interrupt_on_next_turn(session, model_info):
     agent = AgentLoop(
         session=session,
         llm_client=mock_llm,
-        model_info=model_info,
+        model=model_entry,
         system_prompt="You are helpful.",
     )
 

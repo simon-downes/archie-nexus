@@ -31,7 +31,7 @@ from archie_shared.events import (
     UsageUpdated,
     serialize_event,
 )
-from archie_shared.models import ModelInfo
+from archie_shared.models import ModelEntry
 from starlette.websockets import WebSocket
 
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, Usage
@@ -59,12 +59,12 @@ class AgentLoop:
         self,
         session: Session,
         llm_client: "LLMClient",
-        model_info: ModelInfo,
+        model: ModelEntry,
         system_prompt: str,
     ) -> None:
         self.session = session
         self._llm = llm_client
-        self._model_info = model_info
+        self._model = model
         self._system_prompt = system_prompt
 
         # Connected WebSocket clients for broadcast

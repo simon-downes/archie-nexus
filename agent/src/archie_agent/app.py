@@ -12,7 +12,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from archie_shared.config import load_config
+from archie_shared.config import home_dir
 from archie_shared.events import (
     PROTOCOL_VERSION,
     InterruptCommand,
@@ -21,7 +21,8 @@ from archie_shared.events import (
     deserialize_command,
     serialize_event,
 )
-from archie_shared.models import get_model_info
+from archie_shared.models import get_model, load_models
+from archie_shared.schemas import load_nexus_config
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -47,42 +48,45 @@ async def lifespan(app):
     """Initialize the agent loop on startup."""
     global _agent
 
-    config = load_config()
-    model_info = get_model_info(config.model)
+    config = load_nexus_config()
+    catalog = load_models(home_dir() / "models.yaml")
+    model = get_model(catalog, config.global_.model)
 
     # Determine target region (model-specific or session default)
-    region = model_info.region or config.region
+    region = model.provider.region or config.global_.region
 
     llm_client = BedrockClient(
-        model_id=config.model,
+        model_id=model.provider.endpoint,
         region=region,
-        max_output_tokens=model_info.max_output_tokens,
+        max_output_tokens=model.max_output_tokens,
+        can_cache=model.can_cache,
     )
 
     session_id = os.environ.get("ARCHIE_SESSION_ID", "unknown")
     sessions_dir = Path(os.environ.get("ARCHIE_SESSIONS_DIR", "/archie/sessions"))
 
     session = Session(
-        model_id=config.model,
-        model_info=model_info,
+        model_id=config.global_.model,
+        model=model,
         session_id=session_id,
         _log_dir=sessions_dir,
     )
 
     # Minimal system prompt for v1
     system_prompt = (
-        f"You are Archie, a helpful AI assistant.\nModel: {model_info.name}\nBe concise and direct."
+        f"You are Archie, a helpful AI assistant.\nModel: {model.name}\nBe concise and direct."
     )
 
     _agent = AgentLoop(
         session=session,
         llm_client=llm_client,
-        model_info=model_info,
+        model=model,
         system_prompt=system_prompt,
     )
 
     log.info(
-        "Agent started", extra={"model": config.model, "region": region, "session": session_id}
+        "Agent started",
+        extra={"model": config.global_.model, "region": region, "session": session_id},
     )
     yield
     log.info("Agent shutting down")

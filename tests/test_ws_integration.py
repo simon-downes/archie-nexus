@@ -23,10 +23,12 @@ def _make_mock_bedrock_client(events: list):
 
 @pytest.fixture
 def mock_env(tmp_path):
-    """Set up environment with a config file."""
-    config_file = tmp_path / "nexus.yaml"
-    config_file.write_text('model: "eu.anthropic.claude-sonnet-4-6"\nregion: "eu-west-1"\n')
-    return {"ARCHIE_CONFIG": str(config_file), "ARCHIE_SESSION_ID": "test-session"}
+    """Set up environment with a config file in the new format."""
+    home_dir = tmp_path / "nexus_home"
+    home_dir.mkdir()
+    config_file = home_dir / "config.yaml"
+    config_file.write_text('global:\n  model: "bedrock-claude-sonnet-4-6"\n  region: "eu-west-1"\n')
+    return {"ARCHIE_HOME_DIR": str(home_dir), "ARCHIE_SESSION_ID": "test-session"}
 
 
 @pytest.fixture
@@ -57,7 +59,7 @@ def test_status_includes_session_metadata(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["model"] == "eu.anthropic.claude-sonnet-4-6"
+    assert data["model"] == "bedrock-claude-sonnet-4-6"
     assert data["session_id"] == "test-session"
     assert data["turn_count"] == 0
 
@@ -75,7 +77,7 @@ def test_websocket_session_info_on_connect(client):
         data = json.loads(ws.receive_text())
         assert data["type"] == "session_info"
         assert data["data"]["protocol_version"] == 1
-        assert data["data"]["model"] == "eu.anthropic.claude-sonnet-4-6"
+        assert data["data"]["model"] == "bedrock-claude-sonnet-4-6"
         assert data["data"]["session_id"] == "test-session"
 
 

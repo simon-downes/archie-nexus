@@ -20,9 +20,9 @@ from pathlib import Path
 
 import yaml
 
-from archie_shared.config import ARCHIE_DIR
+from archie_shared.config import home_dir
 
-CREDENTIALS_PATH = ARCHIE_DIR / "nexus.creds.yaml"
+CREDENTIALS_PATH = home_dir() / "nexus.creds.yaml"
 
 # Inside the container, credentials are mounted here
 CONTAINER_CREDENTIALS_PATH = Path("/archie/config/nexus.creds.yaml")

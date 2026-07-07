@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from archie_shared.models import ModelInfo, calculate_cost
+from archie_shared.models import ModelEntry, calculate_cost
 from archie_shared.types import ContentBlock, TextBlock
 from ulid import ULID
 
@@ -78,7 +78,7 @@ class Session:
     """
 
     model_id: str
-    model_info: ModelInfo
+    model: ModelEntry
     session_id: str = ""
     turns: list[Turn] = field(default_factory=list)
     turn_index: int = field(default=0)
@@ -101,7 +101,7 @@ class Session:
     def total_cost(self) -> float:
         """Total USD spent in this session across all turns."""
         return calculate_cost(
-            self.model_info,
+            self.model.cost,
             self.total_input_tokens,
             self.total_output_tokens,
             self.total_cache_read_tokens,
@@ -112,16 +112,13 @@ class Session:
     def context_pct(self) -> float:
         """Estimated context window usage for the NEXT request (0-100)."""
         estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
-        return (estimated / self.model_info.max_context_tokens) * 100
+        return (estimated / self.model.context) * 100
 
     @property
     def context_warning(self) -> bool:
         """True if we're approaching the model's context limit."""
         estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
-        return (
-            estimated
-            > self.model_info.max_context_tokens * self.model_info.context_warning_threshold
-        )
+        return estimated > self.model.context * self.model.context_warning_threshold
 
     def next_turn_index(self) -> int:
         """Increment and return the next turn index."""
@@ -177,7 +174,7 @@ class Session:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         cost = calculate_cost(
-            self.model_info,
+            self.model.cost,
             turn_log.input_tokens,
             turn_log.output_tokens,
             turn_log.cache_read_tokens,
