@@ -74,8 +74,11 @@ async def test_handle_message_emits_correct_events(session, model_entry):
     mock_events = [
         TextDelta(text="Hello"),
         TextDelta(text=" world"),
-        Usage(input_tokens=100, output_tokens=10, cache_read_input_tokens=50),
+        # Real Bedrock ordering: messageStop (Done) is emitted BEFORE the
+        # trailing metadata/usage event. The drain loop must not break on Done
+        # or the usage data is lost.
         Done(stop_reason="end_turn"),
+        Usage(input_tokens=100, output_tokens=10, cache_read_input_tokens=50),
     ]
 
     mock_llm = _make_mock_llm(mock_events)
@@ -101,13 +104,15 @@ async def test_handle_message_emits_correct_events(session, model_entry):
     assert isinstance(events[1], TextDeltaEvent)
     assert events[1].text == " world"
 
-    assert isinstance(events[2], UsageUpdated)
-    assert events[2].input_tokens == 100
-    assert events[2].output_tokens == 10
+    # TurnComplete is broadcast when Done arrives; UsageUpdated follows because
+    # Bedrock sends usage after messageStop.
+    assert isinstance(events[2], TurnComplete)
+    assert events[2].stop_reason == "end_turn"
+    assert events[2].turn_index == 1
 
-    assert isinstance(events[3], TurnComplete)
-    assert events[3].stop_reason == "end_turn"
-    assert events[3].turn_index == 1
+    assert isinstance(events[3], UsageUpdated)
+    assert events[3].input_tokens == 100
+    assert events[3].output_tokens == 10
 
     # Session should have 2 turns: user + assistant
     assert len(session.turns) == 2
@@ -130,8 +135,8 @@ async def test_interrupt_mid_stream(session, model_entry):
         TextDelta(text="chunk3"),
         TextDelta(text="chunk4"),
         TextDelta(text="chunk5"),
-        Usage(input_tokens=50, output_tokens=5),
         Done(stop_reason="end_turn"),
+        Usage(input_tokens=50, output_tokens=5),
     ]
 
     mock_llm = _make_mock_llm_slow(mock_events, delay=0.05)
@@ -169,8 +174,8 @@ async def test_no_stale_interrupt_on_next_turn(session, model_entry):
     """Verify interrupt flag from previous turn doesn't leak into next turn."""
     mock_events = [
         TextDelta(text="Hello"),
-        Usage(input_tokens=50, output_tokens=5),
         Done(stop_reason="end_turn"),
+        Usage(input_tokens=50, output_tokens=5),
     ]
 
     mock_llm = _make_mock_llm(mock_events)
@@ -191,5 +196,8 @@ async def test_no_stale_interrupt_on_next_turn(session, model_entry):
     await agent.handle_message("hi")
 
     events = [deserialize_event(m) for m in ws.messages]
-    # Should complete normally, not be interrupted
-    assert isinstance(events[-1], TurnComplete)
+    # Should complete normally, not be interrupted. TurnComplete is followed by
+    # the trailing UsageUpdated (Bedrock sends usage after messageStop).
+    assert any(isinstance(e, TurnComplete) for e in events)
+    assert not any(isinstance(e, TurnInterrupted) for e in events)
+    assert isinstance(events[-1], UsageUpdated)
