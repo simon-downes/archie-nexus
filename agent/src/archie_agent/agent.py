@@ -161,8 +161,12 @@ class AgentLoop:
                     )
 
                 elif isinstance(event, Done):
-                    # Add assistant turn to session (do NOT pass input/output_tokens
-                    # here — totals were already updated when Usage event arrived)
+                    # Record completion. Do NOT break here: Bedrock emits the
+                    # `metadata`/usage event AFTER `messageStop` (Done), so the
+                    # Usage event is still queued behind this one. Breaking now
+                    # would drop token/cost data (both live UsageUpdated and the
+                    # JSONL flush). Add the assistant turn now, then keep draining
+                    # until the worker's sentinel so the trailing Usage arrives.
                     self.session.add_turn(
                         role="assistant",
                         content=assistant_text,
@@ -171,7 +175,6 @@ class AgentLoop:
                     await self.broadcast(
                         TurnComplete(turn_index=turn_index, stop_reason=event.stop_reason)
                     )
-                    break
 
         except Exception as e:
             log.exception("Error in agent loop drain")
