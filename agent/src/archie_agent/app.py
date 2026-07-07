@@ -29,14 +29,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from archie_agent.agent import AgentLoop
+from archie_agent.harness import AgentHarness
 from archie_agent.llm.bedrock import BedrockClient
 from archie_agent.session import Session
 
 log = logging.getLogger(__name__)
 
 # Module-level agent reference, set during lifespan
-_agent: AgentLoop | None = None
+_agent: AgentHarness | None = None
 
 # Strong references to active tasks (prevents GC of fire-and-forget coroutines)
 _active_tasks: set[asyncio.Task] = set()
@@ -77,7 +77,6 @@ async def lifespan(app):
         model_id=config.global_.model,
         model=model,
         session_id=session_id,
-        _log_dir=sessions_dir,
     )
 
     # Minimal system prompt for v1
@@ -85,11 +84,11 @@ async def lifespan(app):
         f"You are Archie, a helpful AI assistant.\nModel: {model.name}\nBe concise and direct."
     )
 
-    _agent = AgentLoop(
+    _agent = AgentHarness(
         session=session,
         llm_client=llm_client,
-        model=model,
         system_prompt=system_prompt,
+        log_dir=sessions_dir,
     )
 
     log.info(

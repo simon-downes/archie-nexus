@@ -12,6 +12,7 @@ from typing import Protocol
 
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.bedrock import BedrockClient
+from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Turn
 
 
@@ -37,6 +38,7 @@ class LLMClient(Protocol):
 __all__ = [
     "BedrockClient",
     "Done",
+    "FakeLLMClient",
     "LLMClient",
     "StreamEvent",
     "TextDelta",

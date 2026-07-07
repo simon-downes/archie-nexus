@@ -1,24 +1,20 @@
-"""Session state and persistence.
+"""Session state — in-memory conversation transcript and accumulators.
 
 A Session represents one conversation. It tracks:
 - The sequence of turns (for building LLM context)
 - Cumulative token usage and cost
 - Context window utilisation
 
-Persistence: single JSONL file per session at <ARCHIE_HOME_DIR>/sessions/{id}.jsonl
-- One line per user exchange (prompt → response)
-- Append-only — each turn is flushed when the agent loop completes it
+Persistence is handled externally by the harness (not this module).
 
 The turn_index is per-exchange: a user message and its assistant response share
 the same index. It's incremented once per user message.
 """
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from archie_shared.models import ModelEntry, calculate_cost
 from archie_shared.types import ContentBlock, TextBlock
-from ulid import ULID
 
 
 @dataclass
@@ -51,29 +47,11 @@ class Turn:
 
 
 @dataclass
-class TurnLog:
-    """Accumulated data for one user exchange, written to the JSONL log.
-
-    Built up by the agent loop during run_turn, then passed to session.flush_turn().
-    """
-
-    when: str
-    user: str
-    assistant_text: str = ""
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    model: str = ""
-    interrupted: bool = False
-
-
-@dataclass
 class Session:
-    """Manages conversation state and persistence.
+    """In-memory conversation state and token accounting.
 
-    In-memory state (turns list) is used for building LLM context.
-    Persistence (flush_turn) writes completed turns to a JSONL file.
+    The harness owns persistence; Session is purely in-memory transcript
+    plus cumulative accumulators for cost and context tracking.
     """
 
     model_id: str
@@ -87,14 +65,6 @@ class Session:
     total_cache_write_tokens: int = 0
 
     _last_input_tokens: int = field(default=0, repr=False)
-    _log_dir: Path | None = field(default=None, repr=False)
-
-    @property
-    def log_path(self) -> Path | None:
-        """Path to the JSONL log file, or None if no log dir configured."""
-        if self._log_dir is None:
-            return None
-        return self._log_dir / f"{self.session_id}.jsonl"
 
     @property
     def total_cost(self) -> float:
@@ -124,15 +94,30 @@ class Session:
         self.turn_index += 1
         return self.turn_index
 
+    def record_usage(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        """Update all token accumulators and context tracking from a TurnUsage event.
+
+        This is the single entry point for recording per-request token usage.
+        Keeps context-window logic encapsulated (where context_pct lives).
+        """
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+        self.total_cache_read_tokens += cache_read_tokens
+        self.total_cache_write_tokens += cache_write_tokens
+        self._last_input_tokens = input_tokens
+
     def add_turn(
         self,
         role: str,
         content: str | list[ContentBlock],
         turn_index: int = 0,
-        input_tokens: int = 0,
         output_tokens: int = 0,
-        cache_read_tokens: int = 0,
-        cache_write_tokens: int = 0,
         interrupted: bool = False,
     ) -> Turn:
         """Record a turn in memory (for LLM context building). Does NOT write to disk."""
@@ -145,56 +130,8 @@ class Session:
             role=role,
             content=blocks,
             turn_index=turn_index,
-            input_tokens=input_tokens,
             output_tokens=output_tokens,
             interrupted=interrupted,
         )
         self.turns.append(turn)
-        self.total_input_tokens += input_tokens
-        self.total_output_tokens += output_tokens
-        self.total_cache_read_tokens += cache_read_tokens
-        self.total_cache_write_tokens += cache_write_tokens
-
-        if input_tokens > 0:
-            self._last_input_tokens = input_tokens
-
         return turn
-
-    def flush_turn(self, turn_log: TurnLog) -> None:
-        """Write a completed turn to the JSONL log file. Append-only.
-
-        Called by the agent loop at the end of each user exchange.
-        Uses the canonical SessionLogEntry schema from archie_shared.session.
-        """
-        log_path = self.log_path
-        if log_path is None:
-            return
-
-        from archie_shared.session.log import EntryMetadata, SessionLogEntry, write_entry
-
-        cost = calculate_cost(
-            self.model.cost,
-            turn_log.input_tokens,
-            turn_log.output_tokens,
-            turn_log.cache_read_tokens,
-            turn_log.cache_write_tokens,
-        )
-
-        entry = SessionLogEntry(
-            id=str(ULID()),
-            when=turn_log.when,
-            user=turn_log.user,
-            assistant=turn_log.assistant_text or None,
-            metadata=EntryMetadata(
-                model=turn_log.model or self.model_id,
-                backend=self.model.provider.name,
-                input_tokens=turn_log.input_tokens,
-                output_tokens=turn_log.output_tokens,
-                cache_read_tokens=turn_log.cache_read_tokens,
-                cache_write_tokens=turn_log.cache_write_tokens,
-                cost=round(cost, 6),
-                interrupted=turn_log.interrupted,
-            ),
-        )
-
-        write_entry(log_path, entry)
