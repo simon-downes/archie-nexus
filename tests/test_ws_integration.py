@@ -77,7 +77,7 @@ def test_websocket_session_info_on_connect(client):
         data = json.loads(ws.receive_text())
         assert data["type"] == "session_info"
         assert data["data"]["protocol_version"] == 1
-        assert data["data"]["model"] == "bedrock-claude-sonnet-4-6"
+        assert data["data"]["model"] == "Claude Sonnet 4.6"
         assert data["data"]["session_id"] == "test-session"
 
 

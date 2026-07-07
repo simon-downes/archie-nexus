@@ -77,6 +77,7 @@ class UsageUpdated:
     cache_read_tokens: int
     cache_write_tokens: int
     cost: float
+    context_pct: float = 0.0
 
     def to_json(self) -> dict:
         return {
@@ -88,6 +89,7 @@ class UsageUpdated:
                 "cache_read_tokens": self.cache_read_tokens,
                 "cache_write_tokens": self.cache_write_tokens,
                 "cost": self.cost,
+                "context_pct": self.context_pct,
             },
         }
 
@@ -100,6 +102,7 @@ class UsageUpdated:
             cache_read_tokens=data["cache_read_tokens"],
             cache_write_tokens=data["cache_write_tokens"],
             cost=data["cost"],
+            context_pct=data.get("context_pct", 0.0),
         )
 
 

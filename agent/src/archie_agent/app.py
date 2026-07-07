@@ -176,7 +176,7 @@ async def stream(websocket: WebSocket) -> None:
     # Send session info on connect
     info = SessionInfo(
         protocol_version=PROTOCOL_VERSION,
-        model=_agent.session.model_id,
+        model=_agent.session.model.name,
         session_id=_agent.session.session_id,
     )
     await websocket.send_text(serialize_event(info))
