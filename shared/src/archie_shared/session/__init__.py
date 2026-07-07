@@ -17,21 +17,19 @@ from archie_shared.session.identity import (
     split_id,
 )
 from archie_shared.session.log import (
-    EntryMetadata,
-    SessionLogEntry,
-    ToolCall,
+    MessageEntry,
+    MessageMetadata,
     write_entry,
 )
 
 __all__ = [
     "CONTAINER_PREFIX",
-    "EntryMetadata",
     "HistoryTurn",
+    "MessageEntry",
+    "MessageMetadata",
     "SESSION_PATTERN",
     "SessionDescriptor",
-    "SessionLogEntry",
     "StatusPayload",
-    "ToolCall",
     "container_name",
     "generate_session_id",
     "parse_container_name",

@@ -1,36 +1,38 @@
-"""Tests for session log persistence (log.py)."""
+"""Tests for session log persistence (log.py) — per-message schema."""
 
 import msgspec
-from archie_shared.session.log import EntryMetadata, SessionLogEntry, write_entry
+from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
 
 
-def test_write_entry_creates_file(tmp_path):
-    """write_entry creates the JSONL file and parent dirs."""
+def test_write_user_entry(tmp_path):
+    """User entries have metadata=None and create file + parent dirs."""
     path = tmp_path / "sessions" / "test.jsonl"
-    entry = SessionLogEntry(
+    entry = MessageEntry(
         id="01J3ABCDEF",
         when="2026-07-07T12:00:00+00:00",
-        user="hello",
-        assistant="hi there",
-        metadata=EntryMetadata(
-            model="bedrock-claude-sonnet-4-6", input_tokens=100, output_tokens=10
-        ),
+        role="user",
+        content="hello",
     )
     write_entry(path, entry)
     assert path.exists()
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 1
 
+    decoded = msgspec.json.decode(lines[0], type=MessageEntry)
+    assert decoded.role == "user"
+    assert decoded.content == "hello"
+    assert decoded.metadata is None
 
-def test_write_entry_roundtrip(tmp_path):
-    """Written entry can be decoded back to the same struct."""
+
+def test_write_assistant_entry(tmp_path):
+    """Assistant entries carry full metadata."""
     path = tmp_path / "test.jsonl"
-    entry = SessionLogEntry(
+    entry = MessageEntry(
         id="01J3XYZ",
         when="2026-07-07T12:00:00+00:00",
-        user="what is 2+2?",
-        assistant="4",
-        metadata=EntryMetadata(
+        role="assistant",
+        content="The answer is 4.",
+        metadata=MessageMetadata(
             model="bedrock-claude-sonnet-4-6",
             backend="bedrock",
             input_tokens=50,
@@ -42,60 +44,87 @@ def test_write_entry_roundtrip(tmp_path):
     write_entry(path, entry)
 
     line = path.read_text().strip()
-    decoded = msgspec.json.decode(line, type=SessionLogEntry)
-    assert decoded.id == "01J3XYZ"
-    assert decoded.user == "what is 2+2?"
-    assert decoded.assistant == "4"
+    decoded = msgspec.json.decode(line, type=MessageEntry)
+    assert decoded.role == "assistant"
+    assert decoded.content == "The answer is 4."
+    assert decoded.metadata is not None
+    assert decoded.metadata.model == "bedrock-claude-sonnet-4-6"
     assert decoded.metadata.backend == "bedrock"
+    assert decoded.metadata.input_tokens == 50
     assert decoded.metadata.cost == 0.000123
 
 
-def test_write_entry_assistant_none(tmp_path):
-    """assistant=None is encoded (not omitted by msgspec default)."""
+def test_roundtrip_encode_decode(tmp_path):
+    """Written entry can be decoded back to the same struct."""
     path = tmp_path / "test.jsonl"
-    entry = SessionLogEntry(
-        id="01J3INT",
+    entry = MessageEntry(
+        id="01J3RT",
         when="2026-07-07T12:00:00+00:00",
-        user="hi",
-        metadata=EntryMetadata(model="test", interrupted=True),
+        role="assistant",
+        content="hi",
+        metadata=MessageMetadata(
+            model="test-model",
+            cache_write_tokens=10,
+            interrupted=True,
+        ),
     )
     write_entry(path, entry)
 
     line = path.read_text().strip()
-    decoded = msgspec.json.decode(line, type=SessionLogEntry)
-    assert decoded.assistant is None
-    assert decoded.metadata.interrupted is True
+    decoded = msgspec.json.decode(line, type=MessageEntry)
+    assert decoded == entry
 
 
-def test_write_entry_append(tmp_path):
+def test_append_multiple(tmp_path):
     """Multiple writes append (one line per entry)."""
     path = tmp_path / "test.jsonl"
     for i in range(3):
-        entry = SessionLogEntry(
+        entry = MessageEntry(
             id=f"entry-{i}",
             when="2026-07-07T12:00:00+00:00",
-            user=f"msg {i}",
-            metadata=EntryMetadata(model="test"),
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"message {i}",
+            metadata=MessageMetadata(model="test") if i % 2 == 1 else None,
         )
         write_entry(path, entry)
 
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 3
 
+    # Verify alternating roles
+    entries = [msgspec.json.decode(line, type=MessageEntry) for line in lines]
+    assert entries[0].role == "user"
+    assert entries[1].role == "assistant"
+    assert entries[2].role == "user"
 
-def test_missing_backend_decodes():
-    """Old log without 'backend' decodes correctly (field is optional)."""
-    # Simulate an old log line without the backend field
-    old_json = (
-        '{"id":"old","when":"2026-01-01T00:00:00+00:00","user":"hi",'
-        '"metadata":{"model":"test","input_tokens":10,"output_tokens":5}}'
+
+def test_role_free_string():
+    """Role is a free string — any value accepted (future tool_result etc.)."""
+    entry = MessageEntry(
+        id="01J3TOOL",
+        when="2026-07-07T12:00:00+00:00",
+        role="tool_result",
+        content='{"output": "success"}',
     )
-    decoded = msgspec.json.decode(old_json, type=SessionLogEntry)
-    assert decoded.metadata.backend is None
-    assert decoded.metadata.model == "test"
+    encoded = msgspec.json.encode(entry)
+    decoded = msgspec.json.decode(encoded, type=MessageEntry)
+    assert decoded.role == "tool_result"
 
 
-def test_tools_default_empty():
-    """tools defaults to empty list."""
-    entry = SessionLogEntry(id="x", when="t", user="u", metadata=EntryMetadata(model="m"))
-    assert entry.tools == []
+def test_interrupted_empty_content(tmp_path):
+    """Interrupted assistant with empty content persists correctly."""
+    path = tmp_path / "test.jsonl"
+    entry = MessageEntry(
+        id="01J3INT",
+        when="2026-07-07T12:00:00+00:00",
+        role="assistant",
+        content="",
+        metadata=MessageMetadata(model="test", interrupted=True),
+    )
+    write_entry(path, entry)
+
+    line = path.read_text().strip()
+    decoded = msgspec.json.decode(line, type=MessageEntry)
+    assert decoded.content == ""
+    assert decoded.metadata is not None
+    assert decoded.metadata.interrupted is True
