@@ -13,7 +13,9 @@ import subprocess
 from archie_agent.exec.tools import tool
 
 
-@tool
+@tool(
+    guidelines=("Use `shell` for tests, builds, package commands, and git.",)
+)
 async def shell(command: str) -> dict:
     """Execute a shell command and return stdout, stderr, and exit code.
 

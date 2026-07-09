@@ -1,6 +1,6 @@
 """Tests for exec tools (fs + shell).
 
-All tests patch _WORKSPACE to point at a tmp_path so they run without /workspace/.
+All tests patch WORKSPACE to point at a tmp_path so they run without /workspace/.
 """
 
 from unittest.mock import patch
@@ -18,8 +18,8 @@ from archie_agent.exec.tools.fs import _resolve_path
 
 @pytest.fixture
 def workspace(tmp_path):
-    """Patch _WORKSPACE to a temporary directory."""
-    with patch("archie_agent.exec.tools.fs._WORKSPACE", tmp_path):
+    """Patch WORKSPACE to a temporary directory."""
+    with patch("archie_agent.exec.tools.fs.WORKSPACE", tmp_path):
         yield tmp_path
 
 
@@ -47,7 +47,7 @@ def test_resolve_path_relative(workspace):
 
 def test_resolve_path_absolute_under_workspace(workspace):
     """Absolute paths under /workspace/ are valid."""
-    # Patch uses tmp_path as _WORKSPACE, so we need to use that path
+    # Patch uses tmp_path as WORKSPACE, so we need to use that path
     resolved = _resolve_path(str(workspace / "src" / "main.py"))
     assert resolved == workspace / "src" / "main.py"
 
@@ -275,3 +275,34 @@ async def test_shell_stderr(workspace):
     result = await tools["shell"](command="echo err >&2")
     assert "err" in result["stderr"]
     assert result["exit_code"] == 0
+
+
+# --- get_tool_guidelines ---
+
+
+def test_get_tool_guidelines_returns_all_tools():
+    """get_tool_guidelines returns guidelines from all registered tools."""
+    from archie_agent.exec.tools import get_all_tools, get_tool_guidelines
+
+    guidelines = get_tool_guidelines()
+
+    # Every registered tool should have at least one guideline
+    assert len(guidelines) >= len(get_all_tools())
+
+    # Check representative entries from each tool
+    joined = "\n".join(guidelines)
+    assert "read" in joined
+    assert "write" in joined
+    assert "edit" in joined
+    assert "grep" in joined
+    assert "glob" in joined
+    assert "shell" in joined
+
+
+def test_get_tool_guidelines_deterministic_order():
+    """get_tool_guidelines returns the same order on repeated calls."""
+    from archie_agent.exec.tools import get_tool_guidelines
+
+    first = get_tool_guidelines()
+    second = get_tool_guidelines()
+    assert first == second

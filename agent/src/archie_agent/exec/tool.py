@@ -22,7 +22,7 @@ from archie_agent.tools import ToolRegistry, ToolSpec
 log = logging.getLogger(__name__)
 
 _RUNS_ROOT = Path("/tmp/archie-runs")
-_PYTHON = "/opt/archie/venv/bin/python"
+PYTHON = "/opt/archie/venv/bin/python"
 _MAX_RESULT_CHARS = 16_000
 
 
@@ -30,7 +30,7 @@ async def run_exec(
     source: str,
     *,
     run_root: Path = _RUNS_ROOT,
-    python: str = _PYTHON,
+    python: str = PYTHON,
     on_start: Callable[[asyncio.subprocess.Process], Any] | None = None,
 ) -> Envelope:
     """Execute model-authored Python via the runner subprocess.

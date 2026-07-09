@@ -20,7 +20,7 @@ from archie_agent.exec.tools import (
 )
 
 # The container's project mount point.
-_WORKSPACE = Path("/workspace")
+WORKSPACE = Path("/workspace")
 
 # Maximum characters per line before truncation.
 _LINE_LENGTH_CAP = 500
@@ -46,18 +46,18 @@ def _resolve_path(path: str) -> Path:
     p = Path(path)
 
     if p.is_absolute():
-        if not (str(p) == str(_WORKSPACE) or str(p).startswith(str(_WORKSPACE) + "/")):
+        if not (str(p) == str(WORKSPACE) or str(p).startswith(str(WORKSPACE) + "/")):
             raise PathValidationError(
                 f"Absolute path '{path}' is not under /workspace/. "
                 "Use relative paths or /workspace/ prefix."
             )
         resolved = p.resolve()
     else:
-        resolved = (_WORKSPACE / p).resolve()
+        resolved = (WORKSPACE / p).resolve()
 
     # After resolution, verify still under /workspace/
     try:
-        resolved.relative_to(_WORKSPACE.resolve())
+        resolved.relative_to(WORKSPACE.resolve())
     except ValueError:
         raise PathValidationError(
             f"Path '{path}' resolves outside /workspace/ (traversal detected)."
@@ -66,7 +66,7 @@ def _resolve_path(path: str) -> Path:
     return resolved
 
 
-@tool
+@tool(guidelines=("Use `read` to examine file contents.",))
 async def read(
     path: str, offset: int | None = None, limit: int | None = None, raw: bool = False
 ) -> str:
@@ -142,7 +142,7 @@ async def read(
     return header + "\n\n" + "\n".join(numbered)
 
 
-@tool
+@tool(guidelines=("Use `grep` to search file contents by regex pattern.",))
 async def grep(pattern: str, include: str | None = None, path: str | None = None) -> list[dict]:
     """Search file contents using regex via ripgrep.
 
@@ -164,7 +164,7 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
     if path:
         search_dir = _resolve_path(path)
     else:
-        search_dir = _WORKSPACE
+        search_dir = WORKSPACE
 
     if not search_dir.exists():
         raise PathValidationError(f"Search path does not exist: {path or '/workspace/'}")
@@ -216,7 +216,7 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
 
             # Make path relative to /workspace/
             try:
-                rel_path = str(Path(file_path).relative_to(_WORKSPACE))
+                rel_path = str(Path(file_path).relative_to(WORKSPACE))
             except ValueError:
                 rel_path = file_path
 
@@ -231,7 +231,7 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
     return results
 
 
-@tool
+@tool(guidelines=("Use `glob` to find files by name pattern.",))
 async def glob(pattern: str, path: str | None = None) -> list[str]:
     """Find files matching a glob pattern within the workspace.
 
@@ -252,7 +252,7 @@ async def glob(pattern: str, path: str | None = None) -> list[str]:
     if path:
         search_dir = _resolve_path(path)
     else:
-        search_dir = _WORKSPACE
+        search_dir = WORKSPACE
 
     if not search_dir.exists():
         raise PathValidationError(f"Search path does not exist: {path or '/workspace/'}")
@@ -265,7 +265,7 @@ async def glob(pattern: str, path: str | None = None) -> list[str]:
         for match in search_dir.glob(pattern):
             if match.is_file() and ".git" not in match.parts:
                 try:
-                    rel = str(match.relative_to(_WORKSPACE))
+                    rel = str(match.relative_to(WORKSPACE))
                     matches.append(rel)
                 except ValueError:
                     pass
@@ -276,7 +276,7 @@ async def glob(pattern: str, path: str | None = None) -> list[str]:
     return matches
 
 
-@tool
+@tool(guidelines=("Use `write` for new files or complete rewrites.",))
 async def write(path: str, content: str) -> None:
     """Write content to a file, creating parent directories as needed.
 
@@ -292,7 +292,11 @@ async def write(path: str, content: str) -> None:
     resolved.write_text(content, encoding="utf-8")
 
 
-@tool
+@tool(
+    guidelines=(
+        "Use `edit` to modify existing files — it shows a diff and is safer than a full rewrite.",
+    )
+)
 async def edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
     """Apply a string replacement edit to a file.
 

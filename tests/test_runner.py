@@ -35,6 +35,29 @@ def test_simple_return(run_dir):
     assert env.error is None
 
 
+def test_preinjected_modules_available(run_dir):
+    """os, json, re, Path, and asyncio are usable without import."""
+    _write_source(
+        run_dir,
+        "async def main():\n"
+        "    return {\n"
+        '        "sep": os.sep,\n'
+        '        "dumped": json.dumps({"x": 1}),\n'
+        '        "matched": bool(re.match(r"\\d+", "42")),\n'
+        '        "name": Path("/workspace/src/app.py").name,\n'
+        "    }\n",
+    )
+    run(run_dir)
+    env = _read_envelope(run_dir)
+    assert env.ok is True, env.error
+    assert env.return_value == {
+        "sep": "/",
+        "dumped": '{"x": 1}',
+        "matched": True,
+        "name": "app.py",
+    }
+
+
 def test_string_return(run_dir):
     _write_source(run_dir, 'async def main():\n    return "hello"\n')
     run(run_dir)
@@ -143,14 +166,14 @@ def test_missing_source_file(run_dir):
 
 def test_tool_call_recorded(run_dir):
     """Exec tools should be available and calls recorded in the audit log."""
-    # Patch _WORKSPACE so write goes to our tmp_path
+    # Patch WORKSPACE so write goes to our tmp_path
     workspace = run_dir / "workspace"
     workspace.mkdir()
     _write_source(
         run_dir,
         'async def main():\n    await write(path="test.txt", content="hi")\n    return "done"\n',
     )
-    with patch("archie_agent.exec.tools.fs._WORKSPACE", workspace):
+    with patch("archie_agent.exec.tools.fs.WORKSPACE", workspace):
         run(run_dir)
 
     env = _read_envelope(run_dir)
@@ -168,11 +191,11 @@ def test_tool_error_surfaces(run_dir):
         run_dir,
         'async def main():\n    return await read(path="nonexistent.txt")\n',
     )
-    # Don't patch _WORKSPACE — the file won't exist under /workspace either
+    # Don't patch WORKSPACE — the file won't exist under /workspace either
     # but let's patch to a tmp that has no file
     workspace = run_dir / "workspace"
     workspace.mkdir()
-    with patch("archie_agent.exec.tools.fs._WORKSPACE", workspace):
+    with patch("archie_agent.exec.tools.fs.WORKSPACE", workspace):
         run(run_dir)
 
     env = _read_envelope(run_dir)
