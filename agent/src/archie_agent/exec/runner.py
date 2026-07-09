@@ -66,8 +66,17 @@ def _build_namespace(calls: list[CallRecord]) -> dict:
 
     Imports exec tool functions and wraps each for audit logging.
     """
+    import json as _json
+    import os as _os
+    import re as _re
+    from pathlib import Path as _Path
+
     namespace = {
         "asyncio": asyncio,
+        "os": _os,
+        "json": _json,
+        "re": _re,
+        "Path": _Path,
         "__builtins__": __builtins__,
     }
 

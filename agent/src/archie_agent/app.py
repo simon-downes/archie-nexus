@@ -31,6 +31,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from archie_agent.harness import AgentHarness
 from archie_agent.llm.bedrock import BedrockClient
+from archie_agent.prompt import build_system_prompt
 from archie_agent.session import Session
 
 log = logging.getLogger(__name__)
@@ -79,20 +80,10 @@ async def lifespan(app):
         session_id=session_id,
     )
 
-    # System prompt — concise instructions; detailed tool docs are in the tool description
-    system_prompt = (
-        f"You are Archie, a helpful AI assistant.\nModel: {model.name}\n\n"
-        "You have access to an `exec` tool that runs Python code inside your container. "
-        "Use it to inspect and modify the /workspace project. The exec environment provides "
-        "async functions: read, write, edit, grep, glob, shell. Define `async def main()` "
-        "and return results.\n\n"
-        "Be concise and direct. Use tools proactively to answer questions."
-    )
-
     _agent = AgentHarness(
         session=session,
         llm_client=llm_client,
-        system_prompt=system_prompt,
+        system_prompt=build_system_prompt(model.name),
         log_dir=sessions_dir,
     )
 

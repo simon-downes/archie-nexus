@@ -40,16 +40,29 @@ class EditError(ToolError):
 _TOOLS: dict[str, object] = {}
 
 
-def tool(fn):
+def tool(fn=None, *, guidelines=()):
     """Decorator that registers an async function as an exec tool.
 
     Usage:
-        @tool
+        @tool(guidelines=("Use `read` to examine files.",))
         async def read(path, offset=None, limit=None, raw=False):
             ...
+
+        # Also works without arguments (no guidelines):
+        @tool
+        async def some_tool():
+            ...
     """
-    _TOOLS[fn.__name__] = fn
-    return fn
+
+    def decorator(f):
+        f._guidelines = guidelines
+        _TOOLS[f.__name__] = f
+        return f
+
+    if fn is not None:
+        # Called as bare @tool (no parentheses)
+        return decorator(fn)
+    return decorator
 
 
 def get_all_tools() -> dict:
@@ -62,3 +75,20 @@ def get_all_tools() -> dict:
     from archie_agent.exec.tools import fs, shell  # noqa: F401
 
     return dict(_TOOLS)
+
+
+def get_tool_guidelines() -> list[str]:
+    """Collect _guidelines from all registered exec tool functions.
+
+    Iterates tools in sorted name order for deterministic output.
+    Functions without a _guidelines attribute are silently skipped.
+
+    Returns:
+        Flat list of guideline strings aggregated from all tools.
+    """
+    guidelines: list[str] = []
+    for name in sorted(get_all_tools()):
+        fn = _TOOLS[name]
+        for g in getattr(fn, "_guidelines", ()):
+            guidelines.append(g)
+    return guidelines
