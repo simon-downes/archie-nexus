@@ -28,6 +28,24 @@ from archie_agent.session import Turn
 log = logging.getLogger(__name__)
 
 
+def _shape_tool_config_for_bedrock(neutral_config: list[dict]) -> list[dict]:
+    """Convert neutral tool configs to Bedrock's toolSpec format.
+
+    Neutral: [{"name": ..., "description": ..., "input_schema": {...}}]
+    Bedrock: [{"toolSpec": {"name": ..., "description": ..., "inputSchema": {"json": {...}}}}]
+    """
+    return [
+        {
+            "toolSpec": {
+                "name": item["name"],
+                "description": item["description"],
+                "inputSchema": {"json": item["input_schema"]},
+            }
+        }
+        for item in neutral_config
+    ]
+
+
 def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
     """Translate internal Turn objects to Bedrock's message format."""
     messages = []
@@ -36,7 +54,9 @@ def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
         for block in turn.content:
             match block:
                 case TextBlock(text=text):
-                    content_blocks.append({"text": text})
+                    # Bedrock rejects empty text blocks
+                    if text:
+                        content_blocks.append({"text": text})
                 case ToolUseBlock(tool_use_id=tid, name=name, input=inp):
                     content_blocks.append(
                         {"toolUse": {"toolUseId": tid, "name": name, "input": inp}}
@@ -46,12 +66,14 @@ def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
                         {
                             "toolResult": {
                                 "toolUseId": tid,
-                                "content": [{"text": content}],
+                                "content": [{"text": content or "empty"}],
                                 "status": "error" if is_error else "success",
                             }
                         }
                     )
-        messages.append({"role": turn.role, "content": content_blocks})
+        # Skip turns with no content blocks (e.g. interrupted empty assistant)
+        if content_blocks:
+            messages.append({"role": turn.role, "content": content_blocks})
     return messages
 
 
@@ -132,7 +154,7 @@ class BedrockClient:
         }
 
         if tool_config:
-            params["toolConfig"] = {"tools": tool_config}
+            params["toolConfig"] = {"tools": _shape_tool_config_for_bedrock(tool_config)}
 
         t0 = time.time()
         response = self._call_with_retry(params)

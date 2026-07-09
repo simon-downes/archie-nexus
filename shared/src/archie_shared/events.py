@@ -162,9 +162,82 @@ class TurnError:
         return cls(turn_index=turn_index, message=data["message"])
 
 
+@dataclass(frozen=True)
+class ToolCallEvent:
+    """The model requested a tool call."""
+
+    turn_index: int
+    tool_use_id: str
+    name: str
+    input_summary: str
+
+    def to_json(self) -> dict:
+        return {
+            "type": "tool_call",
+            "turn_index": self.turn_index,
+            "data": {
+                "tool_use_id": self.tool_use_id,
+                "name": self.name,
+                "input_summary": self.input_summary,
+            },
+        }
+
+    @classmethod
+    def from_json(cls, turn_index: int, data: dict) -> ToolCallEvent:
+        return cls(
+            turn_index=turn_index,
+            tool_use_id=data["tool_use_id"],
+            name=data["name"],
+            input_summary=data["input_summary"],
+        )
+
+
+@dataclass(frozen=True)
+class ToolResultEvent:
+    """Result from tool execution."""
+
+    turn_index: int
+    tool_use_id: str
+    is_error: bool
+    summary: str
+    duration_ms: int = 0
+    result_bytes: int = 0
+
+    def to_json(self) -> dict:
+        return {
+            "type": "tool_result",
+            "turn_index": self.turn_index,
+            "data": {
+                "tool_use_id": self.tool_use_id,
+                "is_error": self.is_error,
+                "summary": self.summary,
+                "duration_ms": self.duration_ms,
+                "result_bytes": self.result_bytes,
+            },
+        }
+
+    @classmethod
+    def from_json(cls, turn_index: int, data: dict) -> ToolResultEvent:
+        return cls(
+            turn_index=turn_index,
+            tool_use_id=data["tool_use_id"],
+            is_error=data["is_error"],
+            summary=data["summary"],
+            duration_ms=data.get("duration_ms", 0),
+            result_bytes=data.get("result_bytes", 0),
+        )
+
+
 # Union of all server→client events
 type ServerEvent = (
-    SessionInfo | TextDeltaEvent | UsageUpdated | TurnComplete | TurnInterrupted | TurnError
+    SessionInfo
+    | TextDeltaEvent
+    | UsageUpdated
+    | TurnComplete
+    | TurnInterrupted
+    | TurnError
+    | ToolCallEvent
+    | ToolResultEvent
 )
 
 
@@ -216,6 +289,8 @@ _SERVER_EVENT_TYPES: dict[str, type] = {
     "turn_complete": TurnComplete,
     "turn_interrupted": TurnInterrupted,
     "turn_error": TurnError,
+    "tool_call": ToolCallEvent,
+    "tool_result": ToolResultEvent,
 }
 
 _CLIENT_COMMAND_TYPES: dict[str, type] = {

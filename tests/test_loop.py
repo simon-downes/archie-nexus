@@ -5,16 +5,18 @@ import threading
 import pytest
 from archie_agent.events import (
     TextChunk,
+    ToolCall,
+    ToolResult,
     TurnDone,
     TurnFailed,
     TurnInterrupted,
     TurnUsage,
 )
-from archie_agent.llm._types import Done, TextDelta, Usage
+from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.loop import run_loop
 from archie_agent.session import Turn
-from archie_shared.types import TextBlock
+from archie_shared.types import TextBlock, ToolResultBlock
 
 # --- Helpers ---
 
@@ -238,3 +240,296 @@ async def test_partial_text_before_error():
     assert events[0] == TextChunk(text="partial")
     assert isinstance(events[-1], TurnFailed)
     assert "RuntimeError" in events[-1].error
+
+
+# --- Tool loop tests ---
+
+
+@pytest.mark.asyncio
+async def test_single_tool_round_trip():
+    """Model calls one tool, gets result, then answers with text."""
+    llm = FakeLLMClient(
+        responses=[
+            # First response: tool_use
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(tool_use_id="tu_1", name="exec", input={"source": "code"}),
+                Usage(input_tokens=100, output_tokens=20),
+                Done(stop_reason="tool_use"),
+            ],
+            # Second response: text answer
+            [
+                TextDelta(text="The answer is 42"),
+                Usage(input_tokens=200, output_tokens=15),
+                Done(stop_reason="end_turn"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+
+    async def execute_tool(block):
+        assert block.name == "exec"
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="return: 42")
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+    )
+    events = await _collect(gen)
+
+    # Expected: TurnUsage(first), ToolCall, ToolResult, TurnUsage(second), TextChunk, TurnDone
+    usage_events = [e for e in events if isinstance(e, TurnUsage)]
+    assert len(usage_events) == 2
+    assert usage_events[0].input_tokens == 100
+    assert usage_events[1].input_tokens == 200
+
+    tool_calls = [e for e in events if isinstance(e, ToolCall)]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "exec"
+    assert tool_calls[0].input == {"source": "code"}
+
+    tool_results = [e for e in events if isinstance(e, ToolResult)]
+    assert len(tool_results) == 1
+    assert tool_results[0].content == "return: 42"
+    assert not tool_results[0].is_error
+
+    assert events[-1] == TurnDone(stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+async def test_two_tools_batched():
+    """Model calls two tools in one response, both are executed and batched."""
+    llm = FakeLLMClient(
+        responses=[
+            # First response: two tool_use blocks
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(tool_use_id="tu_1", name="exec", input={"source": "a"}),
+                ToolUseStart(tool_use_id="tu_2", name="exec"),
+                ToolUseEvent(tool_use_id="tu_2", name="exec", input={"source": "b"}),
+                Usage(input_tokens=100, output_tokens=30),
+                Done(stop_reason="tool_use"),
+            ],
+            # Second response: text answer
+            [
+                TextDelta(text="Done"),
+                Usage(input_tokens=300, output_tokens=5),
+                Done(stop_reason="end_turn"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+    executed = []
+
+    async def execute_tool(block):
+        executed.append(block.tool_use_id)
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content=f"result_{block.tool_use_id}")
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+    )
+    events = await _collect(gen)
+
+    assert executed == ["tu_1", "tu_2"]
+
+    tool_calls = [e for e in events if isinstance(e, ToolCall)]
+    assert len(tool_calls) == 2
+
+    tool_results = [e for e in events if isinstance(e, ToolResult)]
+    assert len(tool_results) == 2
+
+    assert events[-1] == TurnDone(stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+async def test_iteration_cap():
+    """Exceeding max_iterations yields TurnFailed."""
+    # LLM always requests tools
+    responses = [
+        [
+            ToolUseStart(tool_use_id=f"tu_{i}", name="exec"),
+            ToolUseEvent(tool_use_id=f"tu_{i}", name="exec", input={"source": "x"}),
+            Usage(input_tokens=10, output_tokens=5),
+            Done(stop_reason="tool_use"),
+        ]
+        for i in range(5)
+    ]
+    llm = FakeLLMClient(responses=responses)
+    interrupt = threading.Event()
+
+    async def execute_tool(block):
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="ok")
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+        max_iterations=3,
+    )
+    events = await _collect(gen)
+
+    assert events[-1] == TurnFailed(error="max tool iterations")
+
+
+@pytest.mark.asyncio
+async def test_interrupt_mid_tool_history_repair():
+    """Interrupt during tool execution synthesises cancelled results."""
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(tool_use_id="tu_1", name="exec", input={"source": "a"}),
+                ToolUseStart(tool_use_id="tu_2", name="exec"),
+                ToolUseEvent(tool_use_id="tu_2", name="exec", input={"source": "b"}),
+                Usage(input_tokens=100, output_tokens=20),
+                Done(stop_reason="tool_use"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+    call_count = 0
+
+    async def execute_tool(block):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # After first tool, set interrupt
+            interrupt.set()
+            return ToolResultBlock(tool_use_id=block.tool_use_id, content="result_1")
+        # Should not reach here for second tool — interrupt triggers cancel
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="result_2")
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+    )
+    events = await _collect(gen)
+
+    assert any(isinstance(e, TurnInterrupted) for e in events)
+    # Only the first tool should have been executed
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_raises():
+    """execute_tool raising produces an error ToolResult and continues."""
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(tool_use_id="tu_1", name="exec", input={"source": "x"}),
+                Usage(input_tokens=100, output_tokens=10),
+                Done(stop_reason="tool_use"),
+            ],
+            # Model responds to the error
+            [
+                TextDelta(text="Sorry, error occurred"),
+                Usage(input_tokens=200, output_tokens=10),
+                Done(stop_reason="end_turn"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+
+    async def execute_tool(block):
+        raise RuntimeError("execution failed")
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+    )
+    events = await _collect(gen)
+
+    tool_results = [e for e in events if isinstance(e, ToolResult)]
+    assert len(tool_results) == 1
+    assert tool_results[0].is_error is True
+    assert "RuntimeError" in tool_results[0].content
+
+    # Loop continued and model responded
+    assert events[-1] == TurnDone(stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+async def test_messages_not_mutated_with_tools():
+    """Tool loop does not mutate the caller's messages list."""
+    messages = _make_messages()
+    original_len = len(messages)
+
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(tool_use_id="tu_1", name="exec", input={"source": "x"}),
+                Usage(input_tokens=100, output_tokens=10),
+                Done(stop_reason="tool_use"),
+            ],
+            [
+                TextDelta(text="done"),
+                Usage(input_tokens=200, output_tokens=5),
+                Done(stop_reason="end_turn"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+
+    async def execute_tool(block):
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="ok")
+
+    gen = run_loop(
+        messages=messages,
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+    )
+    await _collect(gen)
+
+    assert len(messages) == original_len
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_without_tool_use_is_terminal():
+    """max_tokens stop without tool_use blocks is terminal."""
+    llm = FakeLLMClient(
+        responses=[
+            [
+                TextDelta(text="truncated response"),
+                Usage(input_tokens=100, output_tokens=4096),
+                Done(stop_reason="max_tokens"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=lambda b: None,
+    )
+    events = await _collect(gen)
+
+    assert events[-1] == TurnDone(stop_reason="max_tokens")

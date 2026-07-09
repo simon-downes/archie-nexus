@@ -167,6 +167,168 @@ class ErrorMessage(Static):
         return self._content
 
 
+def _esc(text: str) -> str:
+    """Escape Rich markup characters in arbitrary text."""
+    return text.replace("[", r"\[").replace("]", r"\]")
+
+
+class ToolEntry(Widget):
+    """A single tool call within an IterationBlock.
+
+    Shows source code (collapsible) while pending, then completion metrics.
+    Click to expand/collapse the source beyond 10 lines.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    ToolEntry {
+        height: auto;
+        margin: 0;
+        padding: 0;
+    }
+    ToolEntry > .tool-header {
+        height: auto;
+    }
+    ToolEntry > .tool-source {
+        height: auto;
+        margin: 0 0 0 2;
+    }
+    """
+
+    _MAX_COLLAPSED_LINES = 10
+
+    def __init__(self, tool_use_id: str, name: str, source: str) -> None:
+        super().__init__()
+        self._tool_use_id = tool_use_id
+        self._name = name
+        self._source = source
+        self._expanded = False
+        self._completed = False
+        self._completion_text = ""
+
+    def compose(self) -> ComposeResult:
+        """Build the tool entry with header and source."""
+        yield Static(
+            f"[bold {theme.PRIMARY}]○[/] [bold]Exec[/]",
+            classes="tool-header",
+            markup=True,
+        )
+        yield Static(self._render_source(), classes="tool-source", markup=True)
+
+    def _render_source(self) -> str:
+        """Render source code with line limit and collapse indicator."""
+        if not self._source:
+            return ""
+        lines = self._source.split("\n")
+        if len(lines) <= self._MAX_COLLAPSED_LINES or self._expanded:
+            rendered = "\n".join(f"[dim]{_esc(line)}[/]" for line in lines)
+            if self._expanded and len(lines) > self._MAX_COLLAPSED_LINES:
+                rendered += "\n[dim italic]▲ click to collapse[/]"
+        else:
+            shown = lines[: self._MAX_COLLAPSED_LINES]
+            remaining = len(lines) - self._MAX_COLLAPSED_LINES
+            rendered = "\n".join(f"[dim]{_esc(line)}[/]" for line in shown)
+            rendered += f"\n[dim italic]▼ +{remaining} lines (click to expand)[/]"
+        return rendered
+
+    def complete(
+        self, is_error: bool, duration_ms: int, result_bytes: int, summary: str = ""
+    ) -> None:
+        """Mark this tool entry as complete with metrics."""
+        self._completed = True
+        colour = theme.ERROR if is_error else theme.SUCCESS
+
+        # Compute metrics
+        result_lines = max(1, result_bytes // 40) if result_bytes else 0  # rough estimate
+        result_tokens = result_bytes // 4 if result_bytes else 0
+
+        if is_error:
+            # Show the error message
+            error_msg = summary.split("\n")[0][:120] if summary else "error"
+            header = f"[bold {colour}]●[/] [bold]Exec[/] [dim red]{_esc(error_msg)}[/]"
+        else:
+            parts = []
+            if duration_ms:
+                if duration_ms < 1000:
+                    parts.append(f"{duration_ms}ms")
+                else:
+                    parts.append(f"{duration_ms / 1000:.1f}s")
+            if result_bytes:
+                parts.append(f"~{result_lines} lines")
+                parts.append(f"{result_bytes:,} bytes")
+                parts.append(f"~{result_tokens:,} tokens")
+            metrics = " · ".join(parts) if parts else "done"
+            header = f"[bold {colour}]●[/] [bold]Exec[/] [dim]{metrics}[/]"
+
+        try:
+            self.query_one(".tool-header", Static).update(header)
+        except Exception:
+            pass
+
+    def on_click(self) -> None:
+        """Toggle source expansion on click."""
+        lines = self._source.split("\n")
+        if len(lines) <= self._MAX_COLLAPSED_LINES:
+            return  # Nothing to expand
+        self._expanded = not self._expanded
+        try:
+            self.query_one(".tool-source", Static).update(self._render_source())
+        except Exception:
+            pass
+
+    def get_copy_text(self) -> str:
+        """Return source code for clipboard."""
+        return self._source
+
+
+class IterationBlock(Widget):
+    """A block showing tool calls for one agentic iteration.
+
+    Groups multiple tool calls from a single LLM response.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    IterationBlock {
+        margin: 0 0 0 0;
+        padding: 0 2;
+        height: auto;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._tool_entries: dict[str, ToolEntry] = {}
+
+    def add_pending(self, tool_use_id: str, name: str, source: str) -> None:
+        """Add a pending tool entry showing the source code."""
+        entry = ToolEntry(tool_use_id, name, source)
+        self._tool_entries[tool_use_id] = entry
+        self.mount(entry)
+
+    def complete_tool(
+        self,
+        tool_use_id: str,
+        is_error: bool,
+        duration_ms: int,
+        result_bytes: int,
+        summary: str = "",
+    ) -> None:
+        """Mark a tool entry as complete with metrics."""
+        entry = self._tool_entries.get(tool_use_id)
+        if entry:
+            entry.complete(is_error, duration_ms, result_bytes, summary)
+
+    def get_copy_text(self) -> str:
+        """Return all source code for clipboard."""
+        parts = []
+        for entry in self._tool_entries.values():
+            parts.append(entry.get_copy_text())
+        return "\n\n".join(parts)
+
+
 class Conversation(VerticalScroll):
     """Scrollable container for message blocks."""
 
@@ -187,6 +349,16 @@ class Conversation(VerticalScroll):
         self.mount(ErrorMessage(content))
         self.scroll_end(animate=False)
 
+    def begin_iteration(self) -> IterationBlock:
+        """Start a new iteration block for tool calls."""
+        block = IterationBlock()
+        self.mount(block)
+        self.scroll_end(animate=False)
+        return block
+
+    def end_iteration(self) -> None:
+        """Mark the current iteration as done (no-op, kept for interface compat)."""
+
     def add_assistant_message(self, content: str) -> None:
         """Add a complete assistant message (used for history replay)."""
         self.mount(AssistantMessage(content.rstrip("\n")))
@@ -205,6 +377,3 @@ class Conversation(VerticalScroll):
         self.mount(final, before=streaming)
         streaming.remove()
         self.scroll_end(animate=False)
-
-    def end_iteration(self) -> None:
-        """Mark the current iteration as done (no-op in v1, kept for interface compat)."""

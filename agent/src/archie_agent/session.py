@@ -47,6 +47,19 @@ class Turn:
 
 
 @dataclass
+class DisplayEntry:
+    """A non-LLM event for UI display and history replay.
+
+    These are NOT sent to the model — they exist for the TUI to render
+    errors and interruptions when replaying history.
+    """
+
+    role: str  # "error" or "interrupted"
+    content: str
+    turn_index: int = 0
+
+
+@dataclass
 class Session:
     """In-memory conversation state and token accounting.
 
@@ -58,6 +71,7 @@ class Session:
     model: ModelEntry
     session_id: str = ""
     turns: list[Turn] = field(default_factory=list)
+    display_entries: list[DisplayEntry] = field(default_factory=list)
     turn_index: int = field(default=0)
     total_input_tokens: int = 0
     total_output_tokens: int = 0

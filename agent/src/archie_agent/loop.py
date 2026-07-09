@@ -3,29 +3,31 @@
 This module owns the sync→async thread bridge for the LLM client. It has NO
 knowledge of WebSockets, persistence, session state, or Starlette.
 
-The single public function `run_loop()` is an async generator that:
-1. Spawns a sync worker thread to consume the LLM generator
-2. Bridges events via asyncio.Queue + call_soon_threadsafe
-3. Translates provider-specific StreamEvents → provider-neutral AgentEvents
-4. Respects an interrupt signal to cancel mid-stream
+The single public function `run_loop()` is an async generator that drives
+multi-turn tool loops: stream LLM → if tool_use → execute tools → append
+results → re-invoke → repeat until terminal or iteration cap.
 """
 
 import asyncio
 import logging
 import threading
-from collections.abc import AsyncGenerator, Generator
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 
 from archie_agent.events import (
     AgentEvent,
     TextChunk,
+    ToolCall,
+    ToolResult,
     TurnDone,
     TurnFailed,
     TurnInterrupted,
     TurnUsage,
 )
-from archie_agent.llm._types import Done, StreamEvent, TextDelta, Usage
+from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 
 if TYPE_CHECKING:
     from archie_agent.llm import LLMClient
@@ -36,6 +38,9 @@ log = logging.getLogger(__name__)
 # Sentinels pushed onto the queue by the worker thread
 _SENTINEL_DONE = object()
 
+# Default iteration cap for the tool loop
+_DEFAULT_MAX_ITERATIONS = 25
+
 
 @dataclass
 class _WorkerError:
@@ -44,34 +49,196 @@ class _WorkerError:
     msg: str
 
 
+@dataclass
+class _RequestResult:
+    """Result of a single LLM request (inner stream helper).
+
+    Used by the outer loop to decide whether to continue tool looping.
+    """
+
+    text_blocks: list[TextBlock] = field(default_factory=list)
+    tool_use_blocks: list[ToolUseBlock] = field(default_factory=list)
+    stop_reason: str | None = None
+    usage: TurnUsage | None = None
+    interrupted: bool = False
+    failed: bool = False
+    error_msg: str | None = None
+
+
 async def run_loop(
     *,
     messages: "list[Turn]",
     system: str,
     llm: "LLMClient",
     interrupt: threading.Event,
+    tool_config: list[dict] | None = None,
+    execute_tool: Callable[[ToolUseBlock], Awaitable[ToolResultBlock]] | None = None,
+    max_iterations: int = _DEFAULT_MAX_ITERATIONS,
 ) -> AsyncGenerator[AgentEvent]:
-    """Yield AgentEvents by streaming from the LLM client.
+    """Yield AgentEvents by streaming from the LLM client in a tool loop.
 
-    This is a pure async generator — it does not mutate `messages`, access any
-    external state, or perform I/O beyond the LLM call (which happens in the
-    worker thread).
+    This is a pure async generator — it does not mutate the caller's `messages`
+    list, access any external state, or perform I/O beyond the LLM call and the
+    injected execute_tool callable.
 
     Args:
-        messages: Conversation history (live reference, passed to llm.stream()).
+        messages: Conversation history (NOT mutated — copied internally).
         system: System prompt.
         llm: An LLM client implementing the LLMClient protocol.
-        interrupt: Threading event — when set, the worker closes the LLM generator
-                   and the loop yields TurnInterrupted.
+        interrupt: Threading event — when set, the loop terminates.
+        tool_config: Neutral tool configs to pass to the LLM.
+        execute_tool: Async callable to execute a tool_use block. If None,
+            tool_use stop reasons are treated as terminal.
+        max_iterations: Safety cap on tool loop iterations.
+    """
+    # Copy messages so we don't mutate the caller's list
+    working_messages: list[Turn] = list(messages)
+
+    for _iteration in range(max_iterations):
+        result = _RequestResult()
+
+        # Stream a single LLM request
+        async for event in _stream_once(
+            messages=working_messages,
+            system=system,
+            llm=llm,
+            interrupt=interrupt,
+            tool_config=tool_config,
+            result=result,
+        ):
+            yield event
+
+        # Always yield usage after each request
+        if result.usage is not None:
+            yield result.usage
+
+        # Handle failure/interrupt — stop the loop
+        if result.failed:
+            yield TurnFailed(error=result.error_msg or "unknown error")
+            return
+
+        if result.interrupted:
+            # If we have pending tool_use blocks, repair history
+            if result.tool_use_blocks and execute_tool:
+                # All tool_use blocks are orphaned — synthesise error results
+                from archie_agent.session import Turn as TurnType
+
+                repair_results = [
+                    ToolResultBlock(
+                        tool_use_id=block.tool_use_id,
+                        content="cancelled",
+                        is_error=True,
+                    )
+                    for block in result.tool_use_blocks
+                ]
+                working_messages.append(
+                    TurnType(role="assistant", content=result.text_blocks + result.tool_use_blocks)
+                )
+                working_messages.append(TurnType(role="user", content=repair_results))
+            yield TurnInterrupted()
+            return
+
+        # Decide: tool loop or terminal?
+        has_tool_use = bool(result.tool_use_blocks)
+        is_tool_use_stop = result.stop_reason == "tool_use"
+
+        if has_tool_use and is_tool_use_stop and execute_tool:
+            # --- Tool execution phase ---
+            from archie_agent.session import Turn as TurnType
+
+            # Append assistant turn (text + tool_use blocks)
+            working_messages.append(
+                TurnType(role="assistant", content=result.text_blocks + result.tool_use_blocks)
+            )
+
+            # Yield ToolCall events
+            for block in result.tool_use_blocks:
+                yield ToolCall(
+                    tool_use_id=block.tool_use_id,
+                    name=block.name,
+                    input=block.input,
+                )
+
+            # Execute tools, collecting results
+            tool_results: list[ToolResultBlock] = []
+            for block in result.tool_use_blocks:
+                if interrupt.is_set():
+                    # Interrupt during tool execution — repair remaining
+                    tool_results.append(
+                        ToolResultBlock(
+                            tool_use_id=block.tool_use_id,
+                            content="cancelled",
+                            is_error=True,
+                        )
+                    )
+                    # Also cancel any remaining blocks
+                    remaining_idx = result.tool_use_blocks.index(block) + 1
+                    for remaining_block in result.tool_use_blocks[remaining_idx:]:
+                        tool_results.append(
+                            ToolResultBlock(
+                                tool_use_id=remaining_block.tool_use_id,
+                                content="cancelled",
+                                is_error=True,
+                            )
+                        )
+                    working_messages.append(TurnType(role="user", content=tool_results))
+                    yield TurnInterrupted()
+                    return
+
+                try:
+                    result_block = await execute_tool(block)
+                except Exception as e:
+                    log.warning("execute_tool raised for %s: %s", block.name, e)
+                    result_block = ToolResultBlock(
+                        tool_use_id=block.tool_use_id,
+                        content=f"{type(e).__name__}: {e}",
+                        is_error=True,
+                    )
+
+                tool_results.append(result_block)
+
+                # Yield ToolResult event
+                yield ToolResult(
+                    tool_use_id=result_block.tool_use_id,
+                    content=result_block.content,
+                    is_error=result_block.is_error,
+                )
+
+            # Append batched tool results as a single user turn
+            working_messages.append(TurnType(role="user", content=tool_results))
+
+            # Continue the loop — re-invoke the LLM
+            continue
+
+        # --- Terminal: no more tools or max_tokens without tools ---
+        yield TurnDone(stop_reason=result.stop_reason or "end_turn")
+        return
+
+    # Iteration cap hit
+    yield TurnFailed(error="max tool iterations")
+
+
+async def _stream_once(
+    *,
+    messages: "list[Turn]",
+    system: str,
+    llm: "LLMClient",
+    interrupt: threading.Event,
+    tool_config: list[dict] | None,
+    result: _RequestResult,
+) -> AsyncGenerator[AgentEvent]:
+    """Stream a single LLM request.
+
+    Populates `result` with accumulated data and yields text events.
+    Does NOT yield TurnUsage, TurnDone, TurnFailed, or TurnInterrupted.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[StreamEvent | _WorkerError | object] = asyncio.Queue()
 
     def _worker() -> None:
-        """Sync thread: consume LLM generator, push events to async queue."""
         gen: Generator[StreamEvent] | None = None
         try:
-            gen = llm.stream(messages=messages, system=system, tool_config=None)
+            gen = llm.stream(messages=messages, system=system, tool_config=tool_config)
             for event in gen:
                 if interrupt.is_set():
                     gen.close()
@@ -86,38 +253,22 @@ async def run_loop(
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
 
-    # Drain the queue, translating StreamEvent → AgentEvent
-    stop_reason: str | None = None
-    pending_usage: TurnUsage | None = None
-    terminated = False  # True if we yielded TurnFailed or TurnInterrupted
+    # State for tool_use block accumulation
+    current_tool_use_id: str = ""
+    current_tool_name: str = ""
 
     try:
         while True:
             event = await queue.get()
 
-            # Sentinel: worker is done — could be normal completion or interrupt
             if event is _SENTINEL_DONE:
-                # If interrupt was set, the worker exited early
                 if interrupt.is_set():
-                    terminated = True
-                    yield TurnInterrupted()
+                    result.interrupted = True
                 break
 
-            # Worker error: yield TurnFailed and stop
             if isinstance(event, _WorkerError):
-                terminated = True
-                yield TurnFailed(error=event.msg)
-                # Drain remaining items until sentinel
-                while True:
-                    remaining = await queue.get()
-                    if remaining is _SENTINEL_DONE:
-                        break
-                break
-
-            # Check interrupt between processing events
-            if interrupt.is_set():
-                terminated = True
-                yield TurnInterrupted()
+                result.failed = True
+                result.error_msg = event.msg
                 # Drain until sentinel
                 while True:
                     remaining = await queue.get()
@@ -125,13 +276,34 @@ async def run_loop(
                         break
                 break
 
-            # Translate StreamEvent → AgentEvent
+            if interrupt.is_set():
+                result.interrupted = True
+                while True:
+                    remaining = await queue.get()
+                    if remaining is _SENTINEL_DONE:
+                        break
+                break
+
+            # Translate StreamEvent
             if isinstance(event, TextDelta):
+                result.text_blocks.append(TextBlock(text=event.text))
                 yield TextChunk(text=event.text)
 
+            elif isinstance(event, ToolUseStart):
+                current_tool_use_id = event.tool_use_id
+                current_tool_name = event.name
+
+            elif isinstance(event, ToolUseEvent):
+                result.tool_use_blocks.append(
+                    ToolUseBlock(
+                        tool_use_id=event.tool_use_id or current_tool_use_id,
+                        name=event.name or current_tool_name,
+                        input=event.input,
+                    )
+                )
+
             elif isinstance(event, Usage):
-                # Buffer usage — will be yielded after drain completes
-                pending_usage = TurnUsage(
+                result.usage = TurnUsage(
                     input_tokens=event.input_tokens,
                     output_tokens=event.output_tokens,
                     cache_read_tokens=event.cache_read_input_tokens,
@@ -139,26 +311,9 @@ async def run_loop(
                 )
 
             elif isinstance(event, Done):
-                # Record stop reason, do NOT break — continue draining until sentinel
-                stop_reason = event.stop_reason
-
-            else:
-                # Unknown event type (ToolUseStart, ToolUseEvent, etc.)
-                log.debug("Ignoring unhandled StreamEvent: %s", type(event).__name__)
+                result.stop_reason = event.stop_reason
 
     finally:
-        # Yield buffered events on normal completion only.
-        # NOTE: yield in finally of an async generator works correctly when the
-        # consumer exhausts the generator via `async for`. If the consumer calls
-        # aclose() or throws GeneratorExit, these yields are silently skipped —
-        # acceptable since that's an abnormal teardown path.
-        if not terminated:
-            if pending_usage is not None:
-                yield pending_usage
-            if stop_reason is not None:
-                yield TurnDone(stop_reason=stop_reason)
-
-        # Wait for thread to finish
         thread.join(timeout=5.0)
         if thread.is_alive():
             log.warning(

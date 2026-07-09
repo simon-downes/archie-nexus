@@ -50,4 +50,24 @@ class TurnInterrupted:
     """The user cancelled the turn (interrupt signal was set)."""
 
 
-type AgentEvent = TextChunk | TurnUsage | TurnDone | TurnFailed | TurnInterrupted
+@dataclass
+class ToolCall:
+    """The model requested a tool call (post-accumulation, one per block)."""
+
+    tool_use_id: str
+    name: str
+    input: dict
+
+
+@dataclass
+class ToolResult:
+    """Result from tool execution fed back to the model."""
+
+    tool_use_id: str
+    content: str
+    is_error: bool = False
+
+
+type AgentEvent = (
+    TextChunk | TurnUsage | TurnDone | TurnFailed | TurnInterrupted | ToolCall | ToolResult
+)

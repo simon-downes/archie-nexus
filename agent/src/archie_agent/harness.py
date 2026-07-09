@@ -3,13 +3,13 @@
 The harness owns:
 - Session state (in-memory transcript)
 - Turn lifecycle (_turn_active flag, interrupt)
+- Tool registry and execution
 - Persistence (writes per-message JSONL entries)
 - Wire event translation and broadcast to connected WebSocket clients
-
-It replaces the old AgentLoop class with a clean separation:
-pure loop (loop.py) yields AgentEvents → harness translates to wire events.
 """
 
+import asyncio
+import json
 import logging
 import threading
 from datetime import UTC, datetime
@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 
 from archie_shared.events import (
     TextDeltaEvent,
+    ToolCallEvent,
+    ToolResultEvent,
     TurnComplete,
     TurnError,
     TurnInterrupted,
@@ -26,11 +28,14 @@ from archie_shared.events import (
 )
 from archie_shared.models import calculate_cost
 from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
+from archie_shared.types import ToolResultBlock, ToolUseBlock
 from starlette.websockets import WebSocket
 from ulid import ULID
 
 from archie_agent.events import (
     TextChunk,
+    ToolCall,
+    ToolResult,
     TurnDone,
     TurnFailed,
     TurnUsage,
@@ -39,13 +44,25 @@ from archie_agent.events import (
     # Aliased: avoids collision with archie_shared.events.TurnInterrupted (wire event)
     TurnInterrupted as AgentTurnInterrupted,
 )
+from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.loop import run_loop
-from archie_agent.session import Session
+from archie_agent.session import DisplayEntry, Session
 
 if TYPE_CHECKING:
     from archie_agent.llm import LLMClient
 
 log = logging.getLogger(__name__)
+
+
+def _extract_duration_ms(content: str) -> int:
+    """Extract duration in ms from formatted result content."""
+    for line in content.split("\n"):
+        if line.startswith("duration:") and line.endswith("ms"):
+            try:
+                return int(line.removeprefix("duration:").removesuffix("ms").strip())
+            except ValueError:
+                pass
+    return 0
 
 
 class AgentHarness:
@@ -65,11 +82,18 @@ class AgentHarness:
         llm_client: "LLMClient",
         system_prompt: str,
         log_dir: Path,
+        *,
+        exec_python: str | None = None,
+        exec_run_root: Path | None = None,
     ) -> None:
         self.session = session
         self._llm = llm_client
         self._system_prompt = system_prompt
         self._log_dir = log_dir
+
+        # exec runner overrides (for testing)
+        self._exec_python = exec_python
+        self._exec_run_root = exec_run_root
 
         # Connected WebSocket clients for broadcast
         self.clients: set[WebSocket] = set()
@@ -77,6 +101,13 @@ class AgentHarness:
         # Turn state
         self._turn_active = False
         self._interrupt = threading.Event()
+
+        # Tool registry
+        self._registry = create_registry()
+        self._tool_config = self._registry.to_tool_config()
+
+        # Active runner subprocess for cancellation
+        self._active_proc: asyncio.subprocess.Process | None = None
 
     @property
     def log_path(self) -> Path:
@@ -90,10 +121,8 @@ class AgentHarness:
     async def handle_message(self, content: str) -> None:
         """Process a user message: stream LLM response and broadcast events.
 
-        This is the main entry point called by the WebSocket handler.
         Clears the interrupt flag at entry to prevent stale flags leaking.
         """
-        # Clear stale interrupt from previous turn
         self._interrupt.clear()
 
         if self._turn_active:
@@ -120,6 +149,8 @@ class AgentHarness:
                 system=self._system_prompt,
                 llm=self._llm,
                 interrupt=self._interrupt,
+                tool_config=self._tool_config,
+                execute_tool=self._execute_tool,
             )
 
             async for event in gen:
@@ -129,7 +160,6 @@ class AgentHarness:
 
                 elif isinstance(event, TurnUsage):
                     last_usage = event
-                    # Update session accumulators (including _last_input_tokens)
                     self.session.record_usage(
                         input_tokens=event.input_tokens,
                         output_tokens=event.output_tokens,
@@ -148,15 +178,46 @@ class AgentHarness:
                         )
                     )
 
+                elif isinstance(event, ToolCall):
+                    # Persist tool_call entry (JSON-serialised name+source)
+                    self._persist_tool_call(event)
+                    # Broadcast wire event
+                    input_summary = self._summarise_tool_input(event.input)
+                    await self._broadcast(
+                        ToolCallEvent(
+                            turn_index=turn_index,
+                            tool_use_id=event.tool_use_id,
+                            name=event.name,
+                            input_summary=input_summary,
+                        )
+                    )
+
+                elif isinstance(event, ToolResult):
+                    # Persist tool_result entry
+                    self._persist_tool_result(event)
+                    # Extract duration from content (format: "duration: NNNms")
+                    duration_ms = _extract_duration_ms(event.content)
+                    # Broadcast wire event
+                    summary = event.content[:200] if event.content else ""
+                    await self._broadcast(
+                        ToolResultEvent(
+                            turn_index=turn_index,
+                            tool_use_id=event.tool_use_id,
+                            is_error=event.is_error,
+                            summary=summary,
+                            duration_ms=duration_ms,
+                            result_bytes=len(event.content.encode("utf-8")) if event.content else 0,
+                        )
+                    )
+
                 elif isinstance(event, TurnDone):
-                    # Add assistant turn to transcript (with output_tokens for context_pct)
+                    # Add final assistant turn to transcript
                     self.session.add_turn(
                         role="assistant",
                         content=assistant_text,
                         turn_index=turn_index,
                         output_tokens=last_usage.output_tokens if last_usage else 0,
                     )
-                    # Persist assistant message with per-message cost
                     self._persist_assistant(
                         content=assistant_text,
                         usage=last_usage,
@@ -167,7 +228,6 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, TurnFailed):
-                    # Persist partial text if any accumulated before the error
                     if assistant_text:
                         self.session.add_turn(
                             role="assistant",
@@ -180,22 +240,32 @@ class AgentHarness:
                             usage=last_usage,
                             interrupted=True,
                         )
+                    # Persist and record the error for history replay
+                    self._persist_message(role="error", content=event.error)
+                    self.session.display_entries.append(
+                        DisplayEntry(role="error", content=event.error, turn_index=turn_index)
+                    )
                     await self._broadcast(TurnError(turn_index=turn_index, message=event.error))
 
                 elif isinstance(event, AgentTurnInterrupted):
-                    # Add partial assistant turn (may be empty, with output_tokens for context)
-                    self.session.add_turn(
-                        role="assistant",
-                        content=assistant_text,
-                        turn_index=turn_index,
-                        output_tokens=last_usage.output_tokens if last_usage else 0,
-                        interrupted=True,
-                    )
-                    # Persist partial assistant message
-                    self._persist_assistant(
-                        content=assistant_text,
-                        usage=last_usage,
-                        interrupted=True,
+                    # Only add to transcript if there's actual content
+                    if assistant_text:
+                        self.session.add_turn(
+                            role="assistant",
+                            content=assistant_text,
+                            turn_index=turn_index,
+                            output_tokens=last_usage.output_tokens if last_usage else 0,
+                            interrupted=True,
+                        )
+                        self._persist_assistant(
+                            content=assistant_text,
+                            usage=last_usage,
+                            interrupted=True,
+                        )
+                    # Persist and record the interruption for history replay
+                    self._persist_message(role="interrupted", content="")
+                    self.session.display_entries.append(
+                        DisplayEntry(role="interrupted", content="", turn_index=turn_index)
                     )
                     await self._broadcast(TurnInterrupted(turn_index=turn_index))
 
@@ -207,8 +277,81 @@ class AgentHarness:
             self._turn_active = False
 
     def interrupt(self) -> None:
-        """Signal the current turn to stop. Called from the WS read task."""
+        """Signal the current turn to stop. Also cancels any active subprocess."""
         self._interrupt.set()
+        self._cancel_active_proc()
+
+    async def _execute_tool(self, block: ToolUseBlock) -> ToolResultBlock:
+        """Execute a tool_use block and return a ToolResultBlock.
+
+        Uses the tool registry to find the handler. For `exec`, calls run_exec
+        directly with an on_start callback to capture the subprocess handle.
+        """
+        spec = self._registry.get(block.name)
+        if spec is None:
+            return ToolResultBlock(
+                tool_use_id=block.tool_use_id,
+                content=f"Unknown tool: {block.name}",
+                is_error=True,
+            )
+
+        try:
+            if block.name == "exec":
+                # exec tool: run via subprocess with on_start for cancellation
+                source = block.input.get("source", "")
+                kwargs: dict = {"on_start": self._on_proc_start}
+                if self._exec_python:
+                    kwargs["python"] = self._exec_python
+                if self._exec_run_root:
+                    kwargs["run_root"] = self._exec_run_root
+                envelope = await run_exec(source, **kwargs)
+                content = format_result(envelope)
+                is_error = not envelope.ok
+            else:
+                # Generic tool handler call
+                result = await spec.handler(**block.input)
+                content = str(result)
+                is_error = False
+        except Exception as e:
+            content = f"{type(e).__name__}: {e}"
+            is_error = True
+        finally:
+            self._active_proc = None
+
+        return ToolResultBlock(
+            tool_use_id=block.tool_use_id,
+            content=content,
+            is_error=is_error,
+        )
+
+    def _on_proc_start(self, proc: asyncio.subprocess.Process) -> None:
+        """Callback from run_exec to capture the active subprocess handle."""
+        self._active_proc = proc
+
+    def _cancel_active_proc(self) -> None:
+        """Cancel the active runner subprocess if any (SIGTERM, then KILL)."""
+        proc = self._active_proc
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+        # Schedule a kill after grace period (non-blocking)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.call_later(2.0, self._kill_proc, proc)
+        except RuntimeError:
+            # No running loop (called from non-async context) — skip delayed kill
+            pass
+
+    def _kill_proc(self, proc: asyncio.subprocess.Process) -> None:
+        """Kill a subprocess if it hasn't exited after grace period."""
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
 
     def _persist_message(self, role: str, content: str) -> None:
         """Persist a message entry to the JSONL log (best-effort)."""
@@ -223,6 +366,33 @@ class AgentHarness:
         except Exception:
             log.warning("Failed to persist %s message", role, exc_info=True)
 
+    def _persist_tool_call(self, event: ToolCall) -> None:
+        """Persist a tool_call entry (JSON content: {name, source})."""
+        try:
+            content = json.dumps({"name": event.name, **event.input}, ensure_ascii=False)
+            entry = MessageEntry(
+                id=str(ULID()),
+                when=datetime.now(UTC).isoformat(),
+                role="tool_call",
+                content=content,
+            )
+            write_entry(self.log_path, entry)
+        except Exception:
+            log.warning("Failed to persist tool_call", exc_info=True)
+
+    def _persist_tool_result(self, event: ToolResult) -> None:
+        """Persist a tool_result entry (content = model-facing result string)."""
+        try:
+            entry = MessageEntry(
+                id=str(ULID()),
+                when=datetime.now(UTC).isoformat(),
+                role="tool_result",
+                content=event.content,
+            )
+            write_entry(self.log_path, entry)
+        except Exception:
+            log.warning("Failed to persist tool_result", exc_info=True)
+
     def _persist_assistant(
         self,
         content: str,
@@ -231,7 +401,6 @@ class AgentHarness:
     ) -> None:
         """Persist an assistant message with metadata (best-effort)."""
         try:
-            # Compute per-message cost from this turn's tokens
             if usage:
                 cost = calculate_cost(
                     self.session.model.cost,
@@ -267,6 +436,11 @@ class AgentHarness:
             write_entry(self.log_path, entry)
         except Exception:
             log.warning("Failed to persist assistant message", exc_info=True)
+
+    @staticmethod
+    def _summarise_tool_input(input_dict: dict) -> str:
+        """Return tool input for wire events (full source for TUI display)."""
+        return input_dict.get("source", "")
 
     async def _broadcast(self, event) -> None:
         """Serialize and send an event to all connected WebSocket clients."""

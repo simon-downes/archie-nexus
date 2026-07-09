@@ -27,6 +27,7 @@ class FakeLLMClient:
         self._responses = responses
         self._delay = delay
         self._call_index = 0
+        self.last_tool_config: list[dict] | None = None
 
     def stream(
         self,
@@ -35,6 +36,7 @@ class FakeLLMClient:
         tool_config: list[dict] | None = None,
     ) -> Generator[StreamEvent]:
         """Yield the next scripted response sequence."""
+        self.last_tool_config = tool_config
         events = self._responses[self._call_index]
         self._call_index += 1
         first = True
