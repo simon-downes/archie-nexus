@@ -79,9 +79,14 @@ async def lifespan(app):
         session_id=session_id,
     )
 
-    # Minimal system prompt for v1
+    # System prompt — concise instructions; detailed tool docs are in the tool description
     system_prompt = (
-        f"You are Archie, a helpful AI assistant.\nModel: {model.name}\nBe concise and direct."
+        f"You are Archie, a helpful AI assistant.\nModel: {model.name}\n\n"
+        "You have access to an `exec` tool that runs Python code inside your container. "
+        "Use it to inspect and modify the /workspace project. The exec environment provides "
+        "async functions: read, write, edit, grep, glob, shell. Define `async def main()` "
+        "and return results.\n\n"
+        "Be concise and direct. Use tools proactively to answer questions."
     )
 
     _agent = AgentHarness(
@@ -119,6 +124,7 @@ async def history(request: Request) -> JSONResponse:
 
     Uses content-block array format, forward-compatible with tool blocks.
     Each turn includes turn_index for client reconciliation.
+    Includes error/interrupted entries for TUI replay.
     """
     if _agent is None:
         return JSONResponse([], status_code=503)
@@ -155,6 +161,19 @@ async def history(request: Request) -> JSONResponse:
                 "content": content_blocks,
             }
         )
+
+    # Append display entries (errors, interruptions) for TUI replay
+    for entry in _agent.session.display_entries:
+        turns.append(
+            {
+                "turn_index": entry.turn_index,
+                "role": entry.role,
+                "content": [{"type": "text", "text": entry.content}] if entry.content else [],
+            }
+        )
+
+    # Sort by turn_index so errors appear in correct position
+    turns.sort(key=lambda t: t["turn_index"])
 
     return JSONResponse(turns)
 

@@ -29,6 +29,9 @@ def _make_harness(
     tmp_path,
     responses: list[list],
     delay: float = 0.0,
+    *,
+    exec_python: str | None = None,
+    exec_run_root=None,
 ) -> AgentHarness:
     """Create a harness with FakeLLMClient and a tmp log dir."""
     model = _make_model()
@@ -43,6 +46,8 @@ def _make_harness(
         llm_client=llm,
         system_prompt="You are a test assistant.",
         log_dir=tmp_path,
+        exec_python=exec_python,
+        exec_run_root=exec_run_root,
     )
 
 
@@ -160,14 +165,17 @@ async def test_interrupt_mid_stream(tmp_path):
     assert "turn_interrupted" in event_types
     assert "turn_complete" not in event_types
 
-    # Verify persistence: user + partial assistant
+    # Verify persistence: user + partial assistant + interrupted marker
     log_path = tmp_path / "test-session-001.jsonl"
     lines = log_path.read_text().strip().splitlines()
-    assert len(lines) == 2
+    assert len(lines) == 3
 
     assistant_entry = msgspec.json.decode(lines[1], type=MessageEntry)
     assert assistant_entry.role == "assistant"
     assert assistant_entry.metadata.interrupted is True
+
+    interrupted_entry = msgspec.json.decode(lines[2], type=MessageEntry)
+    assert interrupted_entry.role == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -342,12 +350,120 @@ async def test_partial_text_before_error(tmp_path):
     # Partial text should be persisted
     log_path = tmp_path / "partial-err.jsonl"
     lines = log_path.read_text().strip().splitlines()
-    # user + partial assistant
-    assert len(lines) == 2
+    # user + partial assistant + error
+    assert len(lines) == 3
 
     assistant_entry = msgspec.json.decode(lines[1], type=MessageEntry)
     assert assistant_entry.content == "partial response"
     assert assistant_entry.metadata.interrupted is True
 
+    error_entry = msgspec.json.decode(lines[2], type=MessageEntry)
+    assert error_entry.role == "error"
+    assert "Connection reset" in error_entry.content
+
     # Turn should be released
     assert harness.turn_active is False
+
+
+# --- Tool orchestration tests ---
+
+
+@pytest.mark.asyncio
+async def test_tool_round_trip_persists_and_broadcasts(tmp_path):
+    """Full exec round-trip: persists ordered entries + broadcasts tool events."""
+    import sys
+
+    from archie_agent.llm._types import ToolUseEvent, ToolUseStart
+
+    harness = _make_harness(
+        tmp_path,
+        responses=[
+            # First: model calls exec
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(
+                    tool_use_id="tu_1",
+                    name="exec",
+                    input={"source": 'async def main():\n    return "hello"\n'},
+                ),
+                Usage(input_tokens=100, output_tokens=20),
+                Done(stop_reason="tool_use"),
+            ],
+            # Second: model answers
+            [
+                TextDelta(text="The result is hello"),
+                Usage(input_tokens=200, output_tokens=15),
+                Done(stop_reason="end_turn"),
+            ],
+        ],
+        exec_python=sys.executable,
+        exec_run_root=tmp_path / "runs",
+    )
+
+    ws = FakeWebSocket()
+    harness.clients.add(ws)
+
+    await harness.handle_message("run some code")
+
+    # Check JSONL log entries
+    log_path = harness.log_path
+    entries = [
+        msgspec.json.decode(line, type=MessageEntry) for line in log_path.read_bytes().splitlines()
+    ]
+    roles = [e.role for e in entries]
+    # Expected order: user → tool_call → tool_result → assistant
+    assert roles == ["user", "tool_call", "tool_result", "assistant"]
+
+    # Verify tool_call content is JSON {name, source}
+    tool_call_entry = entries[1]
+    tc_content = json.loads(tool_call_entry.content)
+    assert tc_content["name"] == "exec"
+    assert "async def main" in tc_content["source"]
+
+    # Verify tool_result content is the formatted result
+    tool_result_entry = entries[2]
+    assert "hello" in tool_result_entry.content
+
+    # Verify wire events include tool events
+    messages = [json.loads(m) for m in ws.messages]
+    types = [m["type"] for m in messages]
+    assert "tool_call" in types
+    assert "tool_result" in types
+    assert "turn_complete" in types
+
+
+@pytest.mark.asyncio
+async def test_usage_accumulates_across_tool_iterations(tmp_path):
+    """Token usage accumulates across multiple LLM requests in a tool turn."""
+    import sys
+
+    from archie_agent.llm._types import ToolUseEvent, ToolUseStart
+
+    harness = _make_harness(
+        tmp_path,
+        responses=[
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(
+                    tool_use_id="tu_1",
+                    name="exec",
+                    input={"source": "async def main(): return 1\n"},
+                ),
+                Usage(input_tokens=100, output_tokens=20),
+                Done(stop_reason="tool_use"),
+            ],
+            [
+                TextDelta(text="done"),
+                Usage(input_tokens=200, output_tokens=10),
+                Done(stop_reason="end_turn"),
+            ],
+        ],
+        exec_python=sys.executable,
+        exec_run_root=tmp_path / "runs",
+    )
+
+    await harness.handle_message("test")
+
+    # Total should be sum of both requests
+    assert harness.session.total_input_tokens == 300
+    assert harness.session.total_output_tokens == 30

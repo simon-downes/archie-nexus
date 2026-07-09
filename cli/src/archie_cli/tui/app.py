@@ -20,6 +20,8 @@ import httpx
 from archie_shared.events import (
     SessionInfo,
     TextDeltaEvent,
+    ToolCallEvent,
+    ToolResultEvent,
     TurnComplete,
     TurnError,
     TurnInterrupted,
@@ -30,7 +32,7 @@ from textual.binding import Binding
 from textual.widgets import Footer
 
 from archie_cli.tui import theme
-from archie_cli.tui.conversation import Conversation, StreamingMessage
+from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingMessage
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.throbber import Throbber
@@ -68,6 +70,7 @@ class ArchieApp(App):
         self._stream_text: str = ""
         self._turn_active: bool = False
         self._throbber: Throbber | None = None
+        self._iteration_block: IterationBlock | None = None
         self._last_esc_time: float = 0.0
 
     def compose(self) -> ComposeResult:
@@ -132,13 +135,18 @@ class ArchieApp(App):
             content_blocks = turn.get("content", [])
             # Extract text blocks only for display
             text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
-            if not text_parts:
-                continue
-            text = "\n".join(text_parts)
+            text = "\n".join(text_parts) if text_parts else ""
+
             if role == "user":
-                conv.add_user_message(text)
+                if text:
+                    conv.add_user_message(text)
             elif role == "assistant":
-                conv.add_assistant_message(text)
+                if text:
+                    conv.add_assistant_message(text)
+            elif role == "error":
+                conv.add_error(text or "Unknown error")
+            elif role == "interrupted":
+                conv.add_error("[interrupted]")
 
         return last_turn_index
 
@@ -200,6 +208,28 @@ class ArchieApp(App):
             self._show_error(event.message)
             self._end_turn()
 
+        elif isinstance(event, ToolCallEvent):
+            self._remove_throbber()
+            # Finalise any in-progress streaming text before showing tool activity
+            self._finalise_streaming()
+            # Start or reuse iteration block
+            if self._iteration_block is None:
+                self._iteration_block = conv.begin_iteration()
+            # Add pending entry showing source code
+            self._iteration_block.add_pending(event.tool_use_id, event.name, event.input_summary)
+            conv.scroll_end(animate=False)
+
+        elif isinstance(event, ToolResultEvent):
+            if self._iteration_block is not None:
+                self._iteration_block.complete_tool(
+                    event.tool_use_id,
+                    event.is_error,
+                    event.duration_ms,
+                    event.result_bytes,
+                    event.summary,
+                )
+                conv.scroll_end(animate=False)
+
     # --- Message flow ---
 
     def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
@@ -240,6 +270,7 @@ class ArchieApp(App):
         self._finalise_streaming()
         conv = self.query_one("#conversation", Conversation)
         conv.end_iteration()
+        self._iteration_block = None
         self._turn_active = False
         inp = self.query_one("#input", MessageInput)
         inp.disabled = False
