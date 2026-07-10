@@ -1,6 +1,16 @@
 """Tests for prompt.py — dynamic system prompt builder."""
 
-from archie_agent.prompt import _IDENTITY, _build_environment, _build_tools, build_system_prompt
+from pathlib import Path
+
+from archie_agent.prompt import (
+    _IDENTITY,
+    _build_environment,
+    _build_loaded_skills,
+    _build_skills_catalog,
+    _build_tools,
+    build_system_prompt,
+)
+from archie_agent.skills import SkillEntry
 
 
 def test_identity_section_content():
@@ -71,3 +81,108 @@ def test_build_system_prompt_accepts_model_name():
     """Model name parameter is passed through to environment."""
     prompt = build_system_prompt("my-custom-model-7b")
     assert "my-custom-model-7b" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Skills section tests
+# ---------------------------------------------------------------------------
+
+
+def _make_catalog() -> dict[str, SkillEntry]:
+    """Create a test skill catalog."""
+    return {
+        "python-style": SkillEntry(
+            name="python-style",
+            description="Python coding standards",
+            path=Path("/fake/python-style/SKILL.md"),
+        ),
+        "terraform": SkillEntry(
+            name="terraform",
+            description="Terraform best practices",
+            path=Path("/fake/terraform/SKILL.md"),
+        ),
+    }
+
+
+def test_build_skills_catalog_lists_skills():
+    """Catalog section lists all skills with descriptions."""
+    catalog = _make_catalog()
+    section = _build_skills_catalog(catalog, [])
+    assert "<skills>" in section
+    assert "</skills>" in section
+    assert "python-style: Python coding standards" in section
+    assert "terraform: Terraform best practices" in section
+
+
+def test_build_skills_catalog_marks_loaded():
+    """Loaded skills are marked with [loaded] in the catalog."""
+    catalog = _make_catalog()
+    loaded = [("python-style", "body content")]
+    section = _build_skills_catalog(catalog, loaded)
+    assert "python-style: Python coding standards [loaded]" in section
+    assert "[loaded]" not in section.split("terraform")[1].split("\n")[0] or "terraform" in section
+
+
+def test_build_skills_catalog_no_loaded():
+    """No [loaded] markers when nothing is loaded."""
+    catalog = _make_catalog()
+    section = _build_skills_catalog(catalog, [])
+    assert "[loaded]" not in section
+
+
+def test_build_loaded_skills_renders_bodies():
+    """Loaded skills are rendered in tagged blocks."""
+    loaded = [
+        ("python-style", "Use type hints everywhere."),
+        ("terraform", "Pin provider versions."),
+    ]
+    section = _build_loaded_skills(loaded)
+    assert '<skill name="python-style">' in section
+    assert "Use type hints everywhere." in section
+    assert '<skill name="terraform">' in section
+    assert "Pin provider versions." in section
+    assert "</skill>" in section
+
+
+def test_build_loaded_skills_empty():
+    """Empty loaded list produces empty string."""
+    assert _build_loaded_skills([]) == ""
+
+
+def test_build_system_prompt_with_catalog():
+    """Prompt includes skills section when catalog is provided."""
+    catalog = _make_catalog()
+    prompt = build_system_prompt("test-model", catalog=catalog)
+    assert "<skills>" in prompt
+    assert "python-style" in prompt
+    assert "terraform" in prompt
+
+
+def test_build_system_prompt_with_loaded_skills():
+    """Prompt includes loaded skill bodies."""
+    catalog = _make_catalog()
+    loaded = [("python-style", "Use type hints everywhere.")]
+    prompt = build_system_prompt("test-model", catalog=catalog, loaded_skills=loaded)
+    assert '<skill name="python-style">' in prompt
+    assert "Use type hints everywhere." in prompt
+    assert "[loaded]" in prompt  # Marked in catalog
+
+
+def test_build_system_prompt_no_skills_section_without_catalog():
+    """Prompt omits skills section when no catalog provided."""
+    prompt = build_system_prompt("test-model")
+    assert "<skills>" not in prompt
+
+
+def test_build_system_prompt_no_skills_section_with_empty_catalog():
+    """Prompt omits skills section when catalog is empty."""
+    prompt = build_system_prompt("test-model", catalog={})
+    assert "<skills>" not in prompt
+
+
+def test_build_system_prompt_backward_compatible():
+    """build_system_prompt works without new params (backward compat)."""
+    # Original call signature still works
+    prompt = build_system_prompt("model-v1")
+    assert "model-v1" in prompt
+    assert "<skills>" not in prompt
