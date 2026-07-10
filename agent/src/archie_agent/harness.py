@@ -46,7 +46,9 @@ from archie_agent.events import (
 )
 from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.loop import run_loop
+from archie_agent.prompt import build_system_prompt
 from archie_agent.session import DisplayEntry, Session
+from archie_agent.skills import create_skill_tool, discover_skills
 
 if TYPE_CHECKING:
     from archie_agent.llm import LLMClient
@@ -80,7 +82,7 @@ class AgentHarness:
         self,
         session: Session,
         llm_client: "LLMClient",
-        system_prompt: str,
+        model_name: str,
         log_dir: Path,
         *,
         exec_python: str | None = None,
@@ -88,7 +90,7 @@ class AgentHarness:
     ) -> None:
         self.session = session
         self._llm = llm_client
-        self._system_prompt = system_prompt
+        self._model_name = model_name
         self._log_dir = log_dir
 
         # exec runner overrides (for testing)
@@ -102,12 +104,26 @@ class AgentHarness:
         self._turn_active = False
         self._interrupt = threading.Event()
 
-        # Tool registry
+        # Skills: discover catalog and create mutable loaded list
+        self._skill_catalog = discover_skills()
+        self._loaded_skills: list[tuple[str, str]] = []
+
+        # Tool registry: exec + skill
         self._registry = create_registry()
+        skill_spec = create_skill_tool(self._skill_catalog, self._loaded_skills)
+        self._registry.register(skill_spec)
         self._tool_config = self._registry.to_tool_config()
 
         # Active runner subprocess for cancellation
         self._active_proc: asyncio.subprocess.Process | None = None
+
+    def _build_prompt(self) -> str:
+        """Build the system prompt incorporating current skill state."""
+        return build_system_prompt(
+            self._model_name,
+            catalog=self._skill_catalog if self._skill_catalog else None,
+            loaded_skills=self._loaded_skills if self._loaded_skills else None,
+        )
 
     @property
     def log_path(self) -> Path:
@@ -146,7 +162,7 @@ class AgentHarness:
         try:
             gen = run_loop(
                 messages=self.session.turns,
-                system=self._system_prompt,
+                system=self._build_prompt(),
                 llm=self._llm,
                 interrupt=self._interrupt,
                 tool_config=self._tool_config,
@@ -182,7 +198,7 @@ class AgentHarness:
                     # Persist tool_call entry (JSON-serialised name+source)
                     self._persist_tool_call(event)
                     # Broadcast wire event
-                    input_summary = self._summarise_tool_input(event.input)
+                    input_summary = self._summarise_tool_input(event.name, event.input)
                     await self._broadcast(
                         ToolCallEvent(
                             turn_index=turn_index,
@@ -437,10 +453,26 @@ class AgentHarness:
         except Exception:
             log.warning("Failed to persist assistant message", exc_info=True)
 
-    @staticmethod
-    def _summarise_tool_input(input_dict: dict) -> str:
-        """Return tool input for wire events (full source for TUI display)."""
-        return input_dict.get("source", "")
+    def _summarise_tool_input(self, tool_name: str, input_dict: dict) -> str:
+        """Return tool input for wire events (TUI display).
+
+        For exec: returns the source code.
+        For skill: returns the resolved file path being loaded/read.
+        """
+        if tool_name == "exec":
+            return input_dict.get("source", "")
+
+        if tool_name == "skill":
+            name = input_dict.get("name", "")
+            entry = self._skill_catalog.get(name)
+            if entry is None:
+                return name
+            file = input_dict.get("file")
+            if file:
+                return str(entry.path.parent / file)
+            return str(entry.path)
+
+        return ""
 
     async def _broadcast(self, event) -> None:
         """Serialize and send an event to all connected WebSocket clients."""

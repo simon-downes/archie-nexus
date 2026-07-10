@@ -7,9 +7,14 @@ for the Bedrock `system` field.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from archie_agent.exec.tool import PYTHON
 from archie_agent.exec.tools import get_tool_guidelines
 from archie_agent.exec.tools.fs import WORKSPACE
+
+if TYPE_CHECKING:
+    from archie_agent.skills import SkillEntry
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -139,16 +144,56 @@ def _build_tools() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
+
+
+def _build_skills_catalog(
+    catalog: dict[str, SkillEntry],
+    loaded_skills: list[tuple[str, str]],
+) -> str:
+    """Build the skills catalog section for the system prompt.
+
+    Lists all available skills with their descriptions. Skills that are
+    already loaded are marked with [loaded].
+    """
+    loaded_names = {name for name, _ in loaded_skills}
+    lines = ["<skills>", "Available skills (use the `skill` tool to load):"]
+    for name in sorted(catalog):
+        entry = catalog[name]
+        marker = " [loaded]" if name in loaded_names else ""
+        lines.append(f"- {name}: {entry.description}{marker}")
+    lines.append("</skills>")
+    return "\n".join(lines)
+
+
+def _build_loaded_skills(loaded_skills: list[tuple[str, str]]) -> str:
+    """Build the loaded skills section — each skill body in a tagged block."""
+    parts: list[str] = []
+    for name, body in loaded_skills:
+        parts.append(f'<skill name="{name}">\n{body}\n</skill>')
+    return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def build_system_prompt(model_name: str, workspace_dir: str = str(WORKSPACE)) -> str:
+def build_system_prompt(
+    model_name: str,
+    workspace_dir: str = str(WORKSPACE),
+    *,
+    catalog: dict[str, SkillEntry] | None = None,
+    loaded_skills: list[tuple[str, str]] | None = None,
+) -> str:
     """Assemble the full system prompt from sections.
 
     Args:
         model_name: Model identifier (e.g. "claude-sonnet-4-20250514").
         workspace_dir: Project root path inside the container.
+        catalog: Optional skill catalog for rendering the skills section.
+        loaded_skills: Optional list of (name, body) tuples for loaded skills.
 
     Returns:
         Complete system prompt string for the Bedrock system field.
@@ -158,4 +203,13 @@ def build_system_prompt(model_name: str, workspace_dir: str = str(WORKSPACE)) ->
         _build_environment(model_name, workspace_dir),
         _build_tools(),
     ]
+
+    # Skills sections (only when catalog is non-empty)
+    if catalog:
+        sections.append(_build_skills_catalog(catalog, loaded_skills or []))
+
+    # Loaded skill bodies
+    if loaded_skills:
+        sections.append(_build_loaded_skills(loaded_skills))
+
     return "\n\n".join(sections)

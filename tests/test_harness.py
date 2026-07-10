@@ -44,7 +44,7 @@ def _make_harness(
     return AgentHarness(
         session=session,
         llm_client=llm,
-        system_prompt="You are a test assistant.",
+        model_name="Test Model",
         log_dir=tmp_path,
         exec_python=exec_python,
         exec_run_root=exec_run_root,
@@ -197,7 +197,7 @@ async def test_llm_error(tmp_path):
     harness = AgentHarness(
         session=session,
         llm_client=_ErrorLLM(),
-        system_prompt="test",
+        model_name="Test Model",
         log_dir=tmp_path,
     )
 
@@ -331,7 +331,7 @@ async def test_partial_text_before_error(tmp_path):
     harness = AgentHarness(
         session=session,
         llm_client=_PartialErrorLLM(),
-        system_prompt="test",
+        model_name="Test Model",
         log_dir=tmp_path,
     )
 

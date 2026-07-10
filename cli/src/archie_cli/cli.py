@@ -238,6 +238,12 @@ def start():
     username = os.environ.get("USER", "archie")
     container_home = f"/home/{username}/.nexus"
 
+    # Skills directory: host ~/.agents mounted rw at the container user's home so
+    # discover_skills() (which scans Path.home()/.agents/skills) finds them.
+    agents_dir = Path.home() / ".agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    container_agents = f"/home/{username}/.agents"
+
     docker_cmd = [
         "docker",
         "run",
@@ -259,6 +265,8 @@ def start():
         f"{project_dir}:/workspace:rw",
         "-v",
         f"{nexus_home}:{container_home}:rw",
+        "-v",
+        f"{agents_dir}:{container_agents}:rw",
         "-w",
         "/workspace",
         IMAGE_TAG,

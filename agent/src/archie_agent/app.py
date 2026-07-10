@@ -31,7 +31,6 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from archie_agent.harness import AgentHarness
 from archie_agent.llm.bedrock import BedrockClient
-from archie_agent.prompt import build_system_prompt
 from archie_agent.session import Session
 
 log = logging.getLogger(__name__)
@@ -83,7 +82,7 @@ async def lifespan(app):
     _agent = AgentHarness(
         session=session,
         llm_client=llm_client,
-        system_prompt=build_system_prompt(model.name),
+        model_name=model.name,
         log_dir=sessions_dir,
     )
 
