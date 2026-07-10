@@ -17,13 +17,14 @@ to evolve mid-session as skills are loaded. The `ToolRegistry` in `tools.py` hol
 
 Nextgen reference: `src/archie/skills.py` (discovery) and `src/archie/tools/skill.py`
 (tool handler). Skills are YAML-frontmattered Markdown files at
-`{project}/.archie/skills/*/SKILL.md` and `~/.agents/skills/*/SKILL.md`.
+`~/.agents/skills/*/SKILL.md` and `~/.archie/skills/*/SKILL.md`.
 
 ## Requirements
 
-- MUST discover skills from `{project_dir}/.archie/skills/*/SKILL.md` and
-  `~/.agents/skills/*/SKILL.md` at session start
-  - AC: Skills in both directories are discovered; project skills override user skills
+- MUST discover skills from `~/.agents/skills/*/SKILL.md` and
+  `~/.archie/skills/*/SKILL.md` at session start
+  - AC: Skills in all directories are discovered; archie specific skills override general skills
+    with the same name
 - MUST parse YAML frontmatter to extract `name` and `description`
   - AC: Valid frontmatter produces a `SkillEntry`; malformed files are skipped with warning
 - MUST render a skills catalog in the system prompt listing names and descriptions
@@ -57,13 +58,14 @@ class SkillEntry:
     description: str
     path: Path  # absolute path to SKILL.md
 
-def discover_skills(project_dir: Path) -> dict[str, SkillEntry]:
-    """Scan user + project dirs, return catalog keyed by name."""
+def discover_skills() -> dict[str, SkillEntry]:
+    """Scan user skill directories, return catalog keyed by name."""
 ```
 
-Scans `~/.agents/skills/` first (lower priority), then `{project_dir}/.archie/skills/`
-(overwrites on collision). One level deep. Uses `yaml.safe_load` for frontmatter.
-`pyyaml` is already a dependency of `archie_shared`.
+Scans `~/.agents/skills/` first (lower priority), then
+`~/.archie/skills/` (higher priority, overwrites on collision). One level
+deep. Uses `yaml.safe_load` for frontmatter. `pyyaml` is already a dependency of
+`archie_shared`.
 
 ### 2. Skill tool handler (in `skills.py`)
 
@@ -101,8 +103,8 @@ New sections after tools:
 ### 4. Harness changes — per-turn prompt rebuild
 
 `AgentHarness.__init__` changes:
-- Receives `project_dir: Path` and `model_name: str` instead of `system_prompt: str`
-- Runs `discover_skills(project_dir)` → stores `self._skill_catalog`
+- Receives `model_name: str` instead of `system_prompt: str`
+- Runs `discover_skills()` → stores `self._skill_catalog`
 - Creates `self._loaded_skills: list[tuple[str, str]] = []`
 - Registers skill tool on registry
 - New `_build_prompt() -> str` called per-turn in `handle_message()`
@@ -115,27 +117,30 @@ Harness builds full registry:
 
 ### 6. Container mounts
 
-- `~/.agents/skills/` → mounted read-only into container
-- `{project}/.archie/skills/` → accessible via `/workspace/.archie/skills/`
+- `~/.agents/` → mounted read-only into container
 
 ## Milestones
 
 ### 1. Skill discovery module
 
 **Approach:**
-Port nextgen's `discover_skills()` logic. Scan user dir (lower priority) then project
-dir (higher priority). Parse YAML frontmatter, skip malformed files.
+Create `agent/src/archie_agent/skills.py` with `SkillEntry` dataclass and
+`discover_skills()` function. Scans `~/.agents/skills/` (lower priority) then
+`~/.archie/skills/` (higher priority). Parse YAML frontmatter, skip malformed files.
+No `project_dir` parameter — both paths are user-level.
 
 **Tasks:**
 - Create `agent/src/archie_agent/skills.py` with `SkillEntry` and `discover_skills()`
 - Implement `_scan_directory()` and `_parse_skill_file()`
-- Create `tests/test_skills.py` covering: discovery, override, malformed, missing dirs
+- Create `tests/test_skills.py` covering: discovery from both paths, override on name
+  collision (~/.archie wins over ~/.agents), malformed files, missing dirs
 
 **Edge Cases:**
 - Only one `---` delimiter → skip with warning
 - Frontmatter not a dict → skip
 - Missing name/description → skip
 - Permission errors → skip, don't crash
+- Neither directory exists → empty dict, no error
 
 **Deliverable:** `discover_skills()` returns a complete catalog from fixture directories.
 
@@ -191,20 +196,22 @@ builders. Maintain backward compat (params are optional).
 
 **Approach:**
 Modify `AgentHarness` to own skill state, rebuild prompt per-turn, register skill tool.
-Update `app.py` to pass new params.
+Update `app.py` to pass `model_name` instead of pre-built prompt.
 
 **Wiring:**
-- `__init__` receives `project_dir` and `model_name` (replacing `system_prompt`)
-- Runs discovery, creates loaded_skills list, registers skill tool
+- `__init__` receives `model_name: str` (replacing `system_prompt: str`)
+- Runs `discover_skills()` (no args — scans user-level paths), stores catalog
+- Creates loaded_skills list, registers skill tool
 - `_build_prompt()` called per-turn before `run_loop()`
-- `app.py` passes project_dir and model_name
+- `app.py` passes `model_name=model.name`
 
 **Tasks:**
-- Change `AgentHarness.__init__` signature
-- Add discovery, loaded_skills, skill tool registration
+- Change `AgentHarness.__init__` signature: replace `system_prompt` with `model_name`
+- Add `discover_skills()` call in `__init__`
+- Add `_loaded_skills` list, register skill tool
 - Add `_build_prompt()` method
 - Update `handle_message()` to use per-turn prompt
-- Update `app.py`
+- Update `app.py` to pass `model_name=model.name`
 - Update all test fixtures constructing harnesses
 - Add integration test: skill load → prompt includes body on next turn
 
