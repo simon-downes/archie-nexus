@@ -39,6 +39,14 @@ class ContentTypeError(ToolError):
     """URL returned non-text content (images, PDFs, etc.)."""
 
 
+class UnsupportedLanguageError(ToolError):
+    """Language not supported or grammar unavailable."""
+
+
+class FileTooLargeError(ToolError):
+    """File exceeds maximum size for parsing."""
+
+
 # --- Registration ---
 
 _TOOLS: dict[str, object] = {}
@@ -76,7 +84,7 @@ def get_all_tools() -> dict:
     into the model code's namespace.
     """
     # Import submodules to trigger @tool registration
-    from archie_agent.exec.tools import fs, shell, web  # noqa: F401
+    from archie_agent.exec.tools import code, fs, shell, web  # noqa: F401
 
     return dict(_TOOLS)
 

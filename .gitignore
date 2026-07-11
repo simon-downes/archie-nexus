@@ -14,3 +14,9 @@ wheels/
 
 # Pytest cache
 .pytest_cache/
+
+# Core dumps
+core
+
+# Session logs
+archie-*.jsonl

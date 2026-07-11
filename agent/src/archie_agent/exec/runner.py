@@ -227,6 +227,17 @@ def run(run_dir: Path) -> None:
     )
     envelope.write(run_dir)
 
+    # Clean up tree-sitter parser cache to prevent segfault during interpreter
+    # shutdown. The C-level Parser/Language destructor ordering is non-deterministic
+    # during GC, causing double-free crashes. Clearing while the interpreter is
+    # still alive gives deterministic destruction.
+    try:
+        from archie_agent.exec.tools.code import _parsers
+
+        _parsers.clear()
+    except (ImportError, AttributeError):
+        pass
+
 
 # --- SIGTERM handling for cancellation ---
 
