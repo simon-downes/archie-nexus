@@ -75,9 +75,7 @@ class TestModelSwitched:
 
     def test_from_json_defaults_supports_cache(self):
         """Missing supports_cache defaults to False (backward compat)."""
-        event = ModelSwitched.from_json(
-            {"model_key": "k", "model_name": "n"}
-        )
+        event = ModelSwitched.from_json({"model_key": "k", "model_name": "n"})
         assert event.supports_cache is False
 
     def test_serialize_round_trip(self):
