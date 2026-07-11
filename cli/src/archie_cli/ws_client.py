@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator
 
 import websockets
 from archie_shared.events import (
+    ClientCommand,
     InterruptCommand,
     MessageCommand,
     ServerEvent,
@@ -55,6 +56,12 @@ class WSClient:
             raise RuntimeError("Not connected")
         cmd = InterruptCommand()
         await self._ws.send(serialize_command(cmd))
+
+    async def send_command(self, command: ClientCommand) -> None:
+        """Send any ClientCommand to the agent."""
+        if self._ws is None:
+            raise RuntimeError("Not connected")
+        await self._ws.send(serialize_command(command))
 
     async def receive(self) -> AsyncGenerator[ServerEvent]:
         """Async generator yielding deserialized ServerEvent objects.
