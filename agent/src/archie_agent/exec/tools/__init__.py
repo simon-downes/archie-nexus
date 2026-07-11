@@ -35,6 +35,10 @@ class EditError(ToolError):
     """Edit failed: old text not found or ambiguous match."""
 
 
+class ContentTypeError(ToolError):
+    """URL returned non-text content (images, PDFs, etc.)."""
+
+
 # --- Registration ---
 
 _TOOLS: dict[str, object] = {}
@@ -72,7 +76,7 @@ def get_all_tools() -> dict:
     into the model code's namespace.
     """
     # Import submodules to trigger @tool registration
-    from archie_agent.exec.tools import fs, shell  # noqa: F401
+    from archie_agent.exec.tools import fs, shell, web  # noqa: F401
 
     return dict(_TOOLS)
 
