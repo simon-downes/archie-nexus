@@ -18,7 +18,9 @@ import time
 
 import httpx
 from archie_shared.events import (
+    ModelSwitched,
     SessionInfo,
+    SwitchModelCommand,
     TextDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -34,6 +36,7 @@ from textual.widgets import Footer
 from archie_cli.tui import theme
 from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingMessage
 from archie_cli.tui.input import MessageInput
+from archie_cli.tui.models_provider import ModelProvider
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.throbber import Throbber
 from archie_cli.ws_client import WSClient
@@ -46,6 +49,7 @@ class ArchieApp(App):
 
     TITLE = "Archie"
     CSS_PATH = "archie.tcss"
+    COMMANDS = App.COMMANDS | {ModelProvider}
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
@@ -159,8 +163,8 @@ class ArchieApp(App):
         """
         try:
             async for event in self._ws.receive():
-                if isinstance(event, SessionInfo):
-                    # SessionInfo is always handled immediately (no turn_index)
+                if isinstance(event, (SessionInfo, ModelSwitched)):
+                    # Session-level events have no turn_index — always dispatch immediately
                     self._handle_event(event)
                 elif self._buffering:
                     self._event_buffer.append(event)
@@ -178,6 +182,12 @@ class ArchieApp(App):
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
             status.model_name = event.model
+
+        elif isinstance(event, ModelSwitched):
+            status = self.query_one("#status", StatusBar)
+            status.model_name = event.model_name
+            status.supports_cache = event.supports_cache
+            self.notify(f"Switched to {event.model_name}")
 
         elif isinstance(event, TextDeltaEvent):
             self._remove_throbber()
@@ -333,3 +343,10 @@ class ArchieApp(App):
             self._receive_task.cancel()
         await self._ws.disconnect()
         await super().action_quit()
+
+    def switch_model(self, model_key: str) -> None:
+        """Send a model switch command to the agent (called by ModelProvider)."""
+        if self._turn_active:
+            self.notify("Cannot switch model during active turn", severity="warning")
+            return
+        asyncio.create_task(self._ws.send_command(SwitchModelCommand(model_key=model_key)))

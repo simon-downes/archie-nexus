@@ -228,6 +228,33 @@ class ToolResultEvent:
         )
 
 
+@dataclass(frozen=True)
+class ModelSwitched:
+    """Server confirms model switch. No turn_index (session-level event)."""
+
+    model_key: str
+    model_name: str
+    supports_cache: bool = False
+
+    def to_json(self) -> dict:
+        return {
+            "type": "model_switched",
+            "data": {
+                "model_key": self.model_key,
+                "model_name": self.model_name,
+                "supports_cache": self.supports_cache,
+            },
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> ModelSwitched:
+        return cls(
+            model_key=data["model_key"],
+            model_name=data["model_name"],
+            supports_cache=data.get("supports_cache", False),
+        )
+
+
 # Union of all server→client events
 type ServerEvent = (
     SessionInfo
@@ -238,6 +265,7 @@ type ServerEvent = (
     | TurnError
     | ToolCallEvent
     | ToolResultEvent
+    | ModelSwitched
 )
 
 
@@ -276,8 +304,25 @@ class InterruptCommand:
         return cls()
 
 
+@dataclass(frozen=True)
+class SwitchModelCommand:
+    """Client requests a model switch."""
+
+    model_key: str  # catalog key, e.g. "bedrock-claude-haiku-4-5"
+
+    def to_json(self) -> dict:
+        return {
+            "type": "switch_model",
+            "data": {"model_key": self.model_key},
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> SwitchModelCommand:
+        return cls(model_key=data["model_key"])
+
+
 # Union of all client→server commands
-type ClientCommand = MessageCommand | InterruptCommand
+type ClientCommand = MessageCommand | InterruptCommand | SwitchModelCommand
 
 
 # --- Serialization helpers ---
@@ -291,11 +336,13 @@ _SERVER_EVENT_TYPES: dict[str, type] = {
     "turn_error": TurnError,
     "tool_call": ToolCallEvent,
     "tool_result": ToolResultEvent,
+    "model_switched": ModelSwitched,
 }
 
 _CLIENT_COMMAND_TYPES: dict[str, type] = {
     "message": MessageCommand,
     "interrupt": InterruptCommand,
+    "switch_model": SwitchModelCommand,
 }
 
 
@@ -311,7 +358,7 @@ def deserialize_event(raw: str) -> ServerEvent:
     cls = _SERVER_EVENT_TYPES.get(event_type)
     if cls is None:
         raise ValueError(f"Unknown event type: {event_type}")
-    if cls is SessionInfo:
+    if cls in (SessionInfo, ModelSwitched):
         return cls.from_json(msg["data"])
     return cls.from_json(msg.get("turn_index", 0), msg["data"])
 

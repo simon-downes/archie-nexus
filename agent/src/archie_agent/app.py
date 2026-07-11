@@ -10,13 +10,17 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from archie_shared.config import home_dir
 from archie_shared.events import (
     PROTOCOL_VERSION,
     InterruptCommand,
     MessageCommand,
+    ModelSwitched,
     SessionInfo,
+    SwitchModelCommand,
+    TurnError,
     deserialize_command,
     serialize_event,
 )
@@ -33,10 +37,16 @@ from archie_agent.harness import AgentHarness
 from archie_agent.llm.bedrock import BedrockClient
 from archie_agent.session import Session
 
+if TYPE_CHECKING:
+    from archie_shared.models import ModelEntry
+    from archie_shared.schemas import NexusConfig
+
 log = logging.getLogger(__name__)
 
 # Module-level agent reference, set during lifespan
 _agent: AgentHarness | None = None
+_catalog: dict[str, "ModelEntry"] | None = None
+_config: "NexusConfig | None" = None
 
 # Strong references to active tasks (prevents GC of fire-and-forget coroutines)
 _active_tasks: set[asyncio.Task] = set()
@@ -45,14 +55,14 @@ _active_tasks: set[asyncio.Task] = set()
 @asynccontextmanager
 async def lifespan(app):
     """Initialize the agent loop on startup."""
-    global _agent
+    global _agent, _catalog, _config
 
-    config = load_nexus_config()
-    catalog = load_models(home_dir() / "models.yaml")
-    model = get_model(catalog, config.global_.model)
+    _config = load_nexus_config()
+    _catalog = load_models(home_dir() / "models.yaml")
+    model = get_model(_catalog, _config.global_.model)
 
     # Determine target region (model-specific or session default)
-    region = model.provider.region or config.global_.region
+    region = model.provider.region or _config.global_.region
 
     llm_client = BedrockClient(
         model_id=model.provider.endpoint,
@@ -74,7 +84,7 @@ async def lifespan(app):
     sessions_dir = home_dir() / "sessions"
 
     session = Session(
-        model_id=config.global_.model,
+        model_id=_config.global_.model,
         model=model,
         session_id=session_id,
     )
@@ -88,7 +98,7 @@ async def lifespan(app):
 
     log.info(
         "Agent started",
-        extra={"model": config.global_.model, "region": region, "session": session_id},
+        extra={"model": _config.global_.model, "region": region, "session": session_id},
     )
     yield
     log.info("Agent shutting down")
@@ -168,6 +178,64 @@ async def history(request: Request) -> JSONResponse:
     return JSONResponse(turns)
 
 
+async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket) -> None:
+    """Handle a model switch request.
+
+    Guards against active turns, validates the model key, rebuilds the LLM
+    client and session state, then broadcasts confirmation.
+    """
+    assert _agent is not None
+    assert _catalog is not None
+    assert _config is not None
+
+    turn_index = _agent.session.turn_index or 0
+
+    # Guard: cannot switch during active turn
+    if _agent.turn_active:
+        await websocket.send_text(
+            serialize_event(
+                TurnError(turn_index=turn_index, message="Cannot switch model during active turn")
+            )
+        )
+        return
+
+    # Validate model key
+    try:
+        new_model = get_model(_catalog, command.model_key)
+    except KeyError:
+        await websocket.send_text(
+            serialize_event(
+                TurnError(
+                    turn_index=turn_index,
+                    message=f"Unknown model: {command.model_key}",
+                )
+            )
+        )
+        return
+
+    # Rebuild LLM client
+    region = new_model.provider.region or _config.global_.region
+    new_llm = BedrockClient(
+        model_id=new_model.provider.endpoint,
+        region=region,
+        max_output_tokens=new_model.max_output_tokens,
+        can_cache=new_model.can_cache,
+    )
+
+    # Update harness state via public method
+    _agent.switch_model(command.model_key, new_model, new_llm)
+
+    # Broadcast confirmation to all clients
+    event = ModelSwitched(
+        model_key=command.model_key,
+        model_name=new_model.name,
+        supports_cache=new_model.can_cache,
+    )
+    await _agent._broadcast(event)
+
+    log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
+
+
 async def stream(websocket: WebSocket) -> None:
     """Bidirectional WebSocket endpoint for event streaming.
 
@@ -209,6 +277,8 @@ async def stream(websocket: WebSocket) -> None:
                 _active_tasks.add(task)
             elif isinstance(command, InterruptCommand):
                 _agent.interrupt()
+            elif isinstance(command, SwitchModelCommand):
+                await _handle_model_switch(command, websocket)
 
     except WebSocketDisconnect:
         pass

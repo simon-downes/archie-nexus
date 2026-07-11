@@ -51,6 +51,8 @@ from archie_agent.session import DisplayEntry, Session
 from archie_agent.skills import create_skill_tool, discover_skills
 
 if TYPE_CHECKING:
+    from archie_shared.models import ModelEntry
+
     from archie_agent.llm import LLMClient
 
 log = logging.getLogger(__name__)
@@ -124,6 +126,22 @@ class AgentHarness:
             catalog=self._skill_catalog if self._skill_catalog else None,
             loaded_skills=self._loaded_skills if self._loaded_skills else None,
         )
+
+    def switch_model(self, model_key: str, model: "ModelEntry", llm_client: "LLMClient") -> None:
+        """Switch the active model mid-session.
+
+        Updates the LLM client, session state, and model name used for prompt
+        rebuild on the next turn.
+
+        Args:
+            model_key: Catalog key for the model.
+            model: The new ModelEntry from the catalog.
+            llm_client: Pre-built LLM client for the new model.
+        """
+        self._llm = llm_client
+        self._model_name = model.name
+        self.session.model_id = model_key
+        self.session.model = model
 
     @property
     def log_path(self) -> Path:
