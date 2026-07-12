@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from archie_shared.events import (
+    StatusUpdated,
     TextDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -309,6 +310,10 @@ class AgentHarness:
 
         finally:
             self._turn_active = False
+            # Broadcast status refresh (git branch may have changed during the turn)
+            from archie_agent.app import _read_git_branch
+
+            await self._broadcast(StatusUpdated(git_branch=_read_git_branch()))
 
     def interrupt(self) -> None:
         """Signal the current turn to stop. Also cancels any active subprocess."""

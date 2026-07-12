@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
+import tempfile
 import time
 
 import httpx
 from archie_shared.events import (
     ModelSwitched,
     SessionInfo,
+    StatusUpdated,
     SwitchModelCommand,
     TextDeltaEvent,
     ToolCallEvent,
@@ -55,6 +59,7 @@ class ArchieApp(App):
         Binding("ctrl+q", "quit", "Quit"),
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+c", "copy_block", "Copy Block"),
+        Binding("ctrl+g", "editor", "Editor", show=False),
     ]
 
     def __init__(self, host: str, port: int) -> None:
@@ -163,7 +168,7 @@ class ArchieApp(App):
         """
         try:
             async for event in self._ws.receive():
-                if isinstance(event, (SessionInfo, ModelSwitched)):
+                if isinstance(event, (SessionInfo, ModelSwitched, StatusUpdated)):
                     # Session-level events have no turn_index — always dispatch immediately
                     self._handle_event(event)
                 elif self._buffering:
@@ -182,12 +187,17 @@ class ArchieApp(App):
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
             status.model_name = event.model
+            status.git_branch = event.git_branch
 
         elif isinstance(event, ModelSwitched):
             status = self.query_one("#status", StatusBar)
             status.model_name = event.model_name
             status.supports_cache = event.supports_cache
             self.notify(f"Switched to {event.model_name}")
+
+        elif isinstance(event, StatusUpdated):
+            status = self.query_one("#status", StatusBar)
+            status.git_branch = event.git_branch
 
         elif isinstance(event, TextDeltaEvent):
             self._remove_throbber()
@@ -346,6 +356,55 @@ class ArchieApp(App):
             self._receive_task.cancel()
         await self._ws.disconnect()
         await super().action_quit()
+
+    def action_editor(self) -> None:
+        """Open $EDITOR for message composition. Auto-submits on save."""
+        if self._turn_active:
+            return
+
+        editor = os.environ.get("EDITOR", "nano")
+        inp = self.query_one("#input", MessageInput)
+        current_text = inp.text
+
+        # Write current input to a tempfile
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, prefix="archie-")
+        try:
+            tmp.write(current_text)
+            tmp.close()
+            mtime_before = os.path.getmtime(tmp.name)
+
+            editor_error: str | None = None
+            with self.suspend():
+                try:
+                    subprocess.run([editor, tmp.name], check=False)
+                except FileNotFoundError:
+                    editor_error = f"Editor not found: {editor}"
+
+            if editor_error:
+                self.notify(editor_error, severity="error")
+                return
+
+            mtime_after = os.path.getmtime(tmp.name)
+            if mtime_after == mtime_before:
+                # Editor exited without saving — no-op
+                return
+
+            with open(tmp.name) as f:
+                content = f.read().strip()
+
+            if content:
+                inp.clear()
+                inp._history.append(content)
+                inp._history_idx = len(inp._history)
+                inp._draft = ""
+                inp.post_message(MessageInput.Submitted(content))
+            else:
+                inp.clear()
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     def switch_model(self, model_key: str) -> None:
         """Send a model switch command to the agent (called by ModelProvider)."""

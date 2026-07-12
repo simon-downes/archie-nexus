@@ -51,6 +51,33 @@ _config: "NexusConfig | None" = None
 # Strong references to active tasks (prevents GC of fire-and-forget coroutines)
 _active_tasks: set[asyncio.Task] = set()
 
+# Workspace path where .git/HEAD lives
+_WORKSPACE = "/workspace"
+
+
+def _read_git_branch() -> str:
+    """Read the current git branch from /workspace/.git/HEAD.
+
+    Returns:
+        Branch name, first 8 chars of detached HEAD hash, or "—" if unavailable.
+    """
+    try:
+        head_path = os.path.join(_WORKSPACE, ".git", "HEAD")
+        with open(head_path) as f:
+            content = f.read().strip()
+    except OSError:
+        return "—"
+
+    if not content:
+        return "—"
+
+    # Normal branch: "ref: refs/heads/<branch>"
+    if content.startswith("ref: refs/heads/"):
+        return content[len("ref: refs/heads/") :]
+
+    # Detached HEAD: raw commit hash
+    return content[:8]
+
 
 @asynccontextmanager
 async def lifespan(app):
@@ -254,6 +281,7 @@ async def stream(websocket: WebSocket) -> None:
         protocol_version=PROTOCOL_VERSION,
         model=_agent.session.model.name,
         session_id=_agent.session.session_id,
+        git_branch=_read_git_branch(),
     )
     await websocket.send_text(serialize_event(info))
 
