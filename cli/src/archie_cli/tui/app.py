@@ -221,8 +221,11 @@ class ArchieApp(App):
         elif isinstance(event, ToolCallEvent):
             self._remove_throbber()
             # Finalise any in-progress streaming text before showing tool activity
-            self._finalise_streaming()
-            # Start or reuse iteration block
+            # Also reset the iteration block — new text output means a new iteration
+            if self._streaming is not None:
+                self._finalise_streaming()
+                self._iteration_block = None
+            # Start a new iteration block if needed
             if self._iteration_block is None:
                 self._iteration_block = conv.begin_iteration()
             # Add pending entry showing source code

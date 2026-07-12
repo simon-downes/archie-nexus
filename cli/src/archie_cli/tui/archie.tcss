@@ -50,9 +50,12 @@ ErrorMessage {
 }
 
 /* --- Focus styling: left border accent --- */
+UserMessage:focus { border-left: thick $primary; }
 AssistantMessage:focus { border-left: thick $primary; }
 StreamingMessage:focus { border-left: thick $primary; }
 ErrorMessage:focus { border-left: thick $primary; }
+IterationBlock:focus { border-left: thick $primary; }
+ToolEntry:focus { border-left: thick $primary; }
 
 /* --- Status bar colours --- */
 StatusBar {
