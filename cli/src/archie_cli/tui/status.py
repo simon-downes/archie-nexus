@@ -37,6 +37,7 @@ class StatusBar(Widget):
 
     # Left section — session lifetime totals
     model_name: reactive[str] = reactive("—")
+    git_branch: reactive[str] = reactive("—")
     session_input: reactive[int] = reactive(0)
     session_output: reactive[int] = reactive(0)
     cache_read: reactive[int] = reactive(0)
@@ -59,6 +60,9 @@ class StatusBar(Widget):
     # --- Watchers: any reactive change triggers a display refresh ---
 
     def watch_model_name(self) -> None:
+        self._refresh_display()
+
+    def watch_git_branch(self) -> None:
         self._refresh_display()
 
     def watch_session_input(self) -> None:
@@ -111,7 +115,8 @@ class StatusBar(Widget):
 
         left.update(
             Text.from_markup(
-                f" [{theme.PRIMARY}]{self.model_name}[/]"
+                f" [{theme.MUTED}]⎇ {self.git_branch}[/]"
+                f" │ [{theme.PRIMARY}]{self.model_name}[/]"
                 f" │ In: [{theme.POSITIVE}]{in_val}[/]"
                 f"  Out: [{theme.POSITIVE_BRIGHT}]{self.session_output}[/]"
                 f" │ Ctx: {ctx_val}"

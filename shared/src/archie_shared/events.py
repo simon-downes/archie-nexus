@@ -28,6 +28,7 @@ class SessionInfo:
     protocol_version: int
     model: str
     session_id: str
+    git_branch: str = "—"
 
     def to_json(self) -> dict:
         return {
@@ -36,6 +37,7 @@ class SessionInfo:
                 "protocol_version": self.protocol_version,
                 "model": self.model,
                 "session_id": self.session_id,
+                "git_branch": self.git_branch,
             },
         }
 
@@ -45,6 +47,7 @@ class SessionInfo:
             protocol_version=data["protocol_version"],
             model=data["model"],
             session_id=data["session_id"],
+            git_branch=data.get("git_branch", "—"),
         )
 
 
@@ -255,6 +258,23 @@ class ModelSwitched:
         )
 
 
+@dataclass(frozen=True)
+class StatusUpdated:
+    """Post-turn status refresh. No turn_index (session-level event)."""
+
+    git_branch: str
+
+    def to_json(self) -> dict:
+        return {
+            "type": "status_updated",
+            "data": {"git_branch": self.git_branch},
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> StatusUpdated:
+        return cls(git_branch=data.get("git_branch", "—"))
+
+
 # Union of all server→client events
 type ServerEvent = (
     SessionInfo
@@ -266,6 +286,7 @@ type ServerEvent = (
     | ToolCallEvent
     | ToolResultEvent
     | ModelSwitched
+    | StatusUpdated
 )
 
 
@@ -337,6 +358,7 @@ _SERVER_EVENT_TYPES: dict[str, type] = {
     "tool_call": ToolCallEvent,
     "tool_result": ToolResultEvent,
     "model_switched": ModelSwitched,
+    "status_updated": StatusUpdated,
 }
 
 _CLIENT_COMMAND_TYPES: dict[str, type] = {
@@ -358,7 +380,7 @@ def deserialize_event(raw: str) -> ServerEvent:
     cls = _SERVER_EVENT_TYPES.get(event_type)
     if cls is None:
         raise ValueError(f"Unknown event type: {event_type}")
-    if cls in (SessionInfo, ModelSwitched):
+    if cls in (SessionInfo, ModelSwitched, StatusUpdated):
         return cls.from_json(msg["data"])
     return cls.from_json(msg.get("turn_index", 0), msg["data"])
 
