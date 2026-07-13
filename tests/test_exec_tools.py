@@ -277,6 +277,29 @@ async def test_shell_stderr(workspace):
     assert result["exit_code"] == 0
 
 
+async def test_shell_runs_in_workspace(workspace, monkeypatch, tmp_path):
+    """shell() runs in /workspace when it exists (aligns with file tools)."""
+    from archie_agent.exec.tools import shell as shell_mod
+
+    monkeypatch.setattr(shell_mod, "_WORKSPACE", tmp_path)
+    tools = get_all_tools()
+    result = await tools["shell"](command="pwd")
+    assert result["stdout"].strip() == str(tmp_path)
+
+
+async def test_shell_falls_back_when_workspace_absent(workspace, monkeypatch):
+    """shell() inherits CWD when /workspace is absent (host-side runs)."""
+    from pathlib import Path
+
+    from archie_agent.exec.tools import shell as shell_mod
+
+    monkeypatch.setattr(shell_mod, "_WORKSPACE", Path("/nonexistent-workspace-xyz"))
+    tools = get_all_tools()
+    result = await tools["shell"](command="echo ok")
+    assert result["stdout"].strip() == "ok"
+    assert result["exit_code"] == 0
+
+
 # --- get_tool_guidelines ---
 
 
