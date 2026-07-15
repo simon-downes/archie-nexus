@@ -198,8 +198,20 @@ async def _exec_handler(source: str, **kwargs) -> str:
 
 
 def create_registry() -> ToolRegistry:
-    """Create a ToolRegistry with the exec tool registered."""
+    """Create a ToolRegistry with exec and native tools registered.
+
+    Registers:
+    - exec: the code-mode tool (subprocess runner)
+    - All native tool specs (read, grep, glob, etc.) generated from @tool fns
+
+    Name collisions are guarded: native tools named 'exec' or 'skill' are
+    skipped (they would conflict with the separately-registered tools).
+    """
+    from archie_agent.exec.native import make_native_specs
+
     registry = ToolRegistry()
+
+    # Register exec first (code-mode tool)
     registry.register(
         ToolSpec(
             name="exec",
@@ -212,4 +224,13 @@ def create_registry() -> ToolRegistry:
             handler=_exec_handler,
         )
     )
+
+    # Register native tool specs (generated from @tool-decorated functions)
+    reserved_names = {"exec", "skill"}
+    for spec in make_native_specs():
+        if spec.name in reserved_names:
+            log.warning("Skipping native tool %r — name conflicts with reserved tool", spec.name)
+            continue
+        registry.register(spec)
+
     return registry

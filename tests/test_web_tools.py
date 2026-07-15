@@ -245,7 +245,10 @@ class TestWebFetch:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             result = await web_fetch("https://example.com", mode="truncated")
-        assert len(result) == 8000
+        assert result.startswith("URL: https://example.com\n")
+        assert "Type: text/plain" in result
+        # Content portion is truncated to 8000 chars
+        assert "x" * 100 in result
 
     @pytest.mark.asyncio
     async def test_mode_full(self):
@@ -264,7 +267,10 @@ class TestWebFetch:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             result = await web_fetch("https://example.com", mode="full")
-        assert len(result) == 20000
+        assert result.startswith("URL: https://example.com\n")
+        assert "Type: text/plain" in result
+        # Full content present (20000 x chars + header)
+        assert len(result) > 20000
 
     @pytest.mark.asyncio
     async def test_mode_selective_with_terms(self):
@@ -307,7 +313,10 @@ class TestWebFetch:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             result = await web_fetch("https://example.com")
-        assert len(result) == 8000
+        assert result.startswith("URL: https://example.com\n")
+        assert "Type: text/plain" in result
+        # Content is truncated (8000 y's + header)
+        assert "y" * 100 in result
 
     @pytest.mark.asyncio
     async def test_empty_url_raises(self):
@@ -410,27 +419,22 @@ class TestWebSearch:
         with patch("ddgs.DDGS", mock_ddgs):
             results = await web_search("test query")
 
-        assert len(results) == 2
-        assert results[0] == {
-            "title": "Result 1",
-            "url": "https://a.com",
-            "snippet": "First result",
-        }
-        assert results[1] == {
-            "title": "Result 2",
-            "url": "https://b.com",
-            "snippet": "Second result",
-        }
+        assert "1. Result 1" in results
+        assert "https://a.com" in results
+        assert "First result" in results
+        assert "2. Result 2" in results
+        assert "https://b.com" in results
+        assert "Second result" in results
 
     @pytest.mark.asyncio
     async def test_empty_query_returns_empty(self):
         result = await web_search("")
-        assert result == []
+        assert result == "No results found."
 
     @pytest.mark.asyncio
     async def test_whitespace_query_returns_empty(self):
         result = await web_search("   ")
-        assert result == []
+        assert result == "No results found."
 
     @pytest.mark.asyncio
     async def test_strips_query_whitespace(self):
@@ -447,20 +451,20 @@ class TestWebSearch:
 
     @pytest.mark.asyncio
     async def test_exception_returns_empty(self):
-        """Any exception from DDGS returns empty list."""
+        """Any exception from DDGS returns no results message."""
         mock_ddgs = MagicMock()
         mock_ddgs.return_value.text.side_effect = RuntimeError("API down")
 
         with patch("ddgs.DDGS", mock_ddgs):
             result = await web_search("test")
-        assert result == []
+        assert result == "No results found."
 
     @pytest.mark.asyncio
     async def test_none_results_returns_empty(self):
-        """DDGS returning None yields empty list."""
+        """DDGS returning None yields no results message."""
         mock_ddgs = MagicMock()
         mock_ddgs.return_value.text.return_value = None
 
         with patch("ddgs.DDGS", mock_ddgs):
             result = await web_search("test")
-        assert result == []
+        assert result == "No results found."

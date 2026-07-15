@@ -454,9 +454,9 @@ class TestCodeIntegration:
         f = tmp_path / "app.py"
         f.write_text("def main():\n    pass\n\ndef helper():\n    pass\n")
         result = await code(path="app.py")
-        assert len(result) == 2
-        assert result[0]["name"] == "main"
-        assert result[1]["name"] == "helper"
+        assert "app.py (python," in result
+        assert "def main()" in result
+        assert "def helper()" in result
 
     @pytest.mark.asyncio
     async def test_directory_mode(self, tmp_path, monkeypatch):
@@ -464,16 +464,18 @@ class TestCodeIntegration:
         (tmp_path / "a.py").write_text("def foo(): pass\n")
         (tmp_path / "b.py").write_text("def bar(): pass\n")
         result = await code(path=".")
-        assert len(result) == 2
-        assert all("file" in r for r in result)
+        assert "a.py" in result
+        assert "b.py" in result
+        assert "foo" in result
+        assert "bar" in result
 
     @pytest.mark.asyncio
     async def test_name_search(self, tmp_path, monkeypatch):
         monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
         (tmp_path / "a.py").write_text("def foo(): pass\ndef bar(): pass\n")
         result = await code(path="a.py", name="foo")
-        assert len(result) == 1
-        assert result[0]["name"] == "foo"
+        assert "foo" in result
+        assert "bar" not in result
 
     @pytest.mark.asyncio
     async def test_language_filter(self, tmp_path, monkeypatch):
@@ -481,9 +483,8 @@ class TestCodeIntegration:
         (tmp_path / "a.py").write_text("def foo(): pass\n")
         (tmp_path / "b.js").write_text("function bar() {}\n")
         result = await code(path=".", language="python")
-        names = {r["name"] for r in result}
-        assert "foo" in names
-        assert "bar" not in names
+        assert "foo" in result
+        assert "bar" not in result
 
     @pytest.mark.asyncio
     async def test_nonexistent_path_raises(self, tmp_path, monkeypatch):
@@ -497,8 +498,7 @@ class TestCodeIntegration:
         (tmp_path / "good.py").write_text("def foo(): pass\n")
         (tmp_path / "bad.py").write_bytes(b"\x00binary content")
         result = await code(path=".")
-        assert len(result) == 1
-        assert result[0]["name"] == "foo"
+        assert "foo" in result
 
     @pytest.mark.asyncio
     async def test_symbol_dict_structure(self, tmp_path, monkeypatch):
@@ -506,12 +506,7 @@ class TestCodeIntegration:
         f = tmp_path / "test.py"
         f.write_text("class Foo:\n    def bar(self):\n        pass\n")
         result = await code(path="test.py")
-        assert len(result) == 1
-        sym = result[0]
-        assert "name" in sym
-        assert "kind" in sym
-        assert "line" in sym
-        assert "end_line" in sym
-        assert "signature" in sym
-        assert "children" in sym
-        assert sym["children"][0]["kind"] == "method"
+        assert "Foo" in result
+        assert "bar" in result
+        assert "class" in result
+        assert "method" in result

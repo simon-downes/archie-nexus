@@ -25,14 +25,14 @@ _WORKSPACE = Path("/workspace")
 
 
 @tool(guidelines=("Use `shell` for tests, builds, package commands, and git.",))
-async def shell(command: str) -> dict:
+async def shell(command: str) -> str:
     """Execute a shell command and return stdout, stderr, and exit code.
 
     Args:
         command: Shell command to execute.
 
     Returns:
-        Dict with keys: {"stdout": str, "stderr": str, "exit_code": int}.
+        Formatted string: "$ {command}\\n[exit: {code}]\\n{output}".
         Non-zero exit is returned as data, not raised as an exception.
     """
     loop = asyncio.get_running_loop()
@@ -47,8 +47,15 @@ async def shell(command: str) -> dict:
         ),
     )
 
-    return {
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "exit_code": result.returncode,
-    }
+    # Combine stdout and stderr (stderr after stdout, if present)
+    parts: list[str] = []
+    if result.stdout:
+        parts.append(result.stdout.rstrip("\n"))
+    if result.stderr:
+        parts.append(result.stderr.rstrip("\n"))
+    output = "\n".join(parts)
+
+    header = f"$ {command}\n[exit: {result.returncode}]"
+    if output:
+        return f"{header}\n{output}"
+    return header

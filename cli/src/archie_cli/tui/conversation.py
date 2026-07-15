@@ -175,8 +175,8 @@ def _esc(text: str) -> str:
 class ToolEntry(Widget):
     """A single tool call within an IterationBlock.
 
-    Shows source code (collapsible) while pending, then completion metrics.
-    Click to expand/collapse the source beyond 10 lines.
+    For exec: shows source code (collapsible) while pending, then completion metrics.
+    For native tools: shows a Rich-formatted one-liner that updates on completion.
     """
 
     can_focus = True
@@ -198,29 +198,37 @@ class ToolEntry(Widget):
 
     _MAX_COLLAPSED_LINES = 10
 
-    def __init__(self, tool_use_id: str, name: str, source: str) -> None:
+    def __init__(self, tool_use_id: str, name: str, input_summary: str) -> None:
         super().__init__()
         self._tool_use_id = tool_use_id
         self._name = name
-        self._source = source
+        self._input_summary = input_summary
+        self._is_exec = name == "exec"
         self._expanded = False
         self._completed = False
-        self._completion_text = ""
 
     def compose(self) -> ComposeResult:
-        """Build the tool entry with header and source."""
-        yield Static(
-            f"[bold {theme.PRIMARY}]○[/] [bold]Exec[/]",
-            classes="tool-header",
-            markup=True,
-        )
-        yield Static(self._render_source(), classes="tool-source", markup=True)
+        """Build the tool entry with header and optional source."""
+        if self._is_exec:
+            yield Static(
+                f"[bold {theme.PRIMARY}]○[/] [bold]Exec[/]",
+                classes="tool-header",
+                markup=True,
+            )
+            yield Static(self._render_source(), classes="tool-source", markup=True)
+        else:
+            # Native tool: show the Rich-formatted pending summary
+            yield Static(
+                f"[bold {theme.PRIMARY}]○[/] {self._input_summary}",
+                classes="tool-header",
+                markup=True,
+            )
 
     def _render_source(self) -> str:
-        """Render source code with line limit and collapse indicator."""
-        if not self._source:
+        """Render exec source code with line limit and collapse indicator."""
+        if not self._input_summary:
             return ""
-        lines = self._source.split("\n")
+        lines = self._input_summary.split("\n")
         if len(lines) <= self._MAX_COLLAPSED_LINES or self._expanded:
             rendered = "\n".join(f"[dim]{_esc(line)}[/]" for line in lines)
             if self._expanded and len(lines) > self._MAX_COLLAPSED_LINES:
@@ -235,31 +243,39 @@ class ToolEntry(Widget):
     def complete(
         self, is_error: bool, duration_ms: int, result_bytes: int, summary: str = ""
     ) -> None:
-        """Mark this tool entry as complete with metrics."""
+        """Mark this tool entry as complete with metrics.
+
+        For exec: shows metrics (duration, bytes, tokens).
+        For native tools: replaces header with the Rich-formatted completion summary.
+        """
         self._completed = True
         colour = theme.ERROR if is_error else theme.SUCCESS
 
-        # Compute metrics
-        result_lines = max(1, result_bytes // 40) if result_bytes else 0  # rough estimate
-        result_tokens = result_bytes // 4 if result_bytes else 0
-
-        if is_error:
-            # Show the error message
-            error_msg = summary.split("\n")[0][:120] if summary else "error"
-            header = f"[bold {colour}]●[/] [bold]Exec[/] [dim red]{_esc(error_msg)}[/]"
+        if self._is_exec:
+            if is_error:
+                error_msg = summary.split("\n")[0][:120] if summary else "error"
+                header = f"[bold {colour}]●[/] [bold]Exec[/] [dim red]{_esc(error_msg)}[/]"
+            else:
+                parts = []
+                if duration_ms:
+                    if duration_ms < 1000:
+                        parts.append(f"{duration_ms}ms")
+                    else:
+                        parts.append(f"{duration_ms / 1000:.1f}s")
+                if result_bytes:
+                    result_lines = max(1, result_bytes // 40)
+                    parts.append(f"~{result_lines} lines")
+                    parts.append(f"{result_bytes:,} bytes")
+                metrics = " · ".join(parts) if parts else "done"
+                header = f"[bold {colour}]●[/] [bold]Exec[/] [dim]{metrics}[/]"
         else:
-            parts = []
-            if duration_ms:
-                if duration_ms < 1000:
-                    parts.append(f"{duration_ms}ms")
-                else:
-                    parts.append(f"{duration_ms / 1000:.1f}s")
-            if result_bytes:
-                parts.append(f"~{result_lines} lines")
-                parts.append(f"{result_bytes:,} bytes")
-                parts.append(f"~{result_tokens:,} tokens")
-            metrics = " · ".join(parts) if parts else "done"
-            header = f"[bold {colour}]●[/] [bold]Exec[/] [dim]{metrics}[/]"
+            # Native tool: summary is the Rich-formatted completion string
+            if summary:
+                header = f"[bold {colour}]●[/] {summary}"
+            elif is_error:
+                header = f"[bold {colour}]●[/] {self._input_summary} — [red]error[/]"
+            else:
+                header = f"[bold {colour}]●[/] {self._input_summary}"
 
         try:
             self.query_one(".tool-header", Static).update(header)
@@ -267,10 +283,12 @@ class ToolEntry(Widget):
             pass
 
     def on_click(self) -> None:
-        """Toggle source expansion on click."""
-        lines = self._source.split("\n")
+        """Toggle source expansion on click (exec only)."""
+        if not self._is_exec:
+            return
+        lines = self._input_summary.split("\n")
         if len(lines) <= self._MAX_COLLAPSED_LINES:
-            return  # Nothing to expand
+            return
         self._expanded = not self._expanded
         try:
             self.query_one(".tool-source", Static).update(self._render_source())
@@ -278,8 +296,8 @@ class ToolEntry(Widget):
             pass
 
     def get_copy_text(self) -> str:
-        """Return source code for clipboard."""
-        return self._source
+        """Return source code (exec) or summary (native) for clipboard."""
+        return self._input_summary
 
 
 class IterationBlock(Widget):

@@ -76,30 +76,37 @@ async def web_fetch(url: str, mode: str = "selective", search_terms: str | None 
 
     # Apply mode
     if mode == "truncated":
-        return text[:8000]
+        text_content = text[:8000]
     elif mode == "full":
-        return text
+        text_content = text
     else:
         # selective mode
         if search_terms:
-            return _extract_selective(text, search_terms)
-        # No search terms — fall back to truncated
-        return text[:8000]
+            text_content = _extract_selective(text, search_terms)
+        else:
+            # No search terms — fall back to truncated
+            text_content = text[:8000]
+
+    # Prepend metadata header
+    size = len(text_content)
+    ct_short = content_type.split(";")[0].strip() if content_type else "unknown"
+    header = f"URL: {url}\nType: {ct_short} · {size} chars\n\n"
+    return header + text_content
 
 
 @tool(guidelines=("Use `web_search` to find information on the web.",))
-async def web_search(query: str) -> list[dict]:
+async def web_search(query: str) -> str:
     """Search the web using DuckDuckGo.
 
     Args:
         query: Search query string.
 
     Returns:
-        List of result dicts: [{"title": str, "url": str, "snippet": str}, ...]
-        Empty list if no results or on error.
+        Formatted numbered results with title, URL, and snippet.
+        Returns "No results found." if no results or on error.
     """
     if not query or not query.strip():
-        return []
+        return "No results found."
 
     from ddgs import DDGS
 
@@ -108,19 +115,19 @@ async def web_search(query: str) -> list[dict]:
             query.strip(), safesearch="off", backend="auto", max_results=8
         )
     except Exception:
-        return []
+        return "No results found."
 
     if not results:
-        return []
+        return "No results found."
 
-    return [
-        {
-            "title": r.get("title", ""),
-            "url": r.get("href", ""),
-            "snippet": r.get("body", ""),
-        }
-        for r in results
-    ]
+    lines: list[str] = []
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "(no title)")
+        url = r.get("href", "")
+        snippet = r.get("body", "")
+        lines.append(f"{i}. {title}\n   {url}\n   {snippet}")
+
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

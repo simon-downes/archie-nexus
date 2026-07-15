@@ -52,7 +52,7 @@ class FileTooLargeError(ToolError):
 _TOOLS: dict[str, object] = {}
 
 
-def tool(fn=None, *, guidelines=()):
+def tool(fn=None, *, guidelines=(), native: bool = True):
     """Decorator that registers an async function as an exec tool.
 
     Usage:
@@ -64,10 +64,16 @@ def tool(fn=None, *, guidelines=()):
         @tool
         async def some_tool():
             ...
+
+        # Mark a tool as code-mode-only (excluded from native registration):
+        @tool(native=False)
+        async def internal_tool():
+            ...
     """
 
     def decorator(f):
         f._guidelines = guidelines
+        f._native = native
         _TOOLS[f.__name__] = f
         return f
 

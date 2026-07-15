@@ -45,6 +45,17 @@ def test_build_tools_contains_strategy():
     assert "shell" in tools
 
 
+def test_build_tools_contains_native_guidance():
+    """Tools section includes native-vs-exec guidance."""
+    tools = _build_tools()
+    assert "Native tools" in tools
+    assert "read" in tools
+    assert "web_fetch" in tools
+    assert "exec" in tools
+    # Should explain when to use exec vs native
+    assert "Chain" in tools or "chain" in tools or "multi-step" in tools
+
+
 def test_build_tools_contains_guidelines():
     """Tools section includes aggregated guidelines from exec tools."""
     tools = _build_tools()
