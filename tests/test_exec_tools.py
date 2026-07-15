@@ -195,7 +195,10 @@ async def test_glob_finds_files(workspace):
     (workspace / "c.txt").write_text("c")
     tools = get_all_tools()
     result = await tools["glob"](pattern="*.py")
-    assert result == ["a.py", "b.py"]
+    assert "2 files, most recent first" in result
+    assert "a.py" in result
+    assert "b.py" in result
+    assert "c.txt" not in result
 
 
 async def test_glob_recursive(workspace):
@@ -209,7 +212,7 @@ async def test_glob_recursive(workspace):
 async def test_glob_no_matches(workspace):
     tools = get_all_tools()
     result = await tools["glob"](pattern="*.xyz")
-    assert result == []
+    assert result == "No files found."
 
 
 async def test_glob_empty_pattern(workspace):
@@ -225,17 +228,16 @@ async def test_grep_finds_matches(workspace):
     (workspace / "code.py").write_text("def hello():\n    pass\n")
     tools = get_all_tools()
     result = await tools["grep"](pattern="hello")
-    assert len(result) >= 1
-    assert result[0]["path"] == "code.py"
-    assert result[0]["line"] == 1
-    assert "hello" in result[0]["text"]
+    assert "code.py:" in result
+    assert "hello" in result
+    assert "1|" in result or "1 |" in result
 
 
 async def test_grep_no_matches(workspace):
     (workspace / "code.py").write_text("def hello():\n    pass\n")
     tools = get_all_tools()
     result = await tools["grep"](pattern="nonexistent_xyz")
-    assert result == []
+    assert result == "No matches found."
 
 
 async def test_grep_with_include(workspace):
@@ -243,9 +245,8 @@ async def test_grep_with_include(workspace):
     (workspace / "b.txt").write_text("target\n")
     tools = get_all_tools()
     result = await tools["grep"](pattern="target", include="*.py")
-    paths = [r["path"] for r in result]
-    assert "a.py" in paths
-    assert "b.txt" not in paths
+    assert "a.py:" in result
+    assert "b.txt" not in result
 
 
 async def test_grep_empty_pattern(workspace):
@@ -260,21 +261,22 @@ async def test_grep_empty_pattern(workspace):
 async def test_shell_basic(workspace):
     tools = get_all_tools()
     result = await tools["shell"](command="echo hello")
-    assert result["stdout"].strip() == "hello"
-    assert result["exit_code"] == 0
+    assert "$ echo hello" in result
+    assert "[exit: 0]" in result
+    assert "hello" in result
 
 
 async def test_shell_nonzero_exit(workspace):
     tools = get_all_tools()
     result = await tools["shell"](command="exit 42")
-    assert result["exit_code"] == 42
+    assert "[exit: 42]" in result
 
 
 async def test_shell_stderr(workspace):
     tools = get_all_tools()
     result = await tools["shell"](command="echo err >&2")
-    assert "err" in result["stderr"]
-    assert result["exit_code"] == 0
+    assert "err" in result
+    assert "[exit: 0]" in result
 
 
 async def test_shell_runs_in_workspace(workspace, monkeypatch, tmp_path):
@@ -284,7 +286,7 @@ async def test_shell_runs_in_workspace(workspace, monkeypatch, tmp_path):
     monkeypatch.setattr(shell_mod, "_WORKSPACE", tmp_path)
     tools = get_all_tools()
     result = await tools["shell"](command="pwd")
-    assert result["stdout"].strip() == str(tmp_path)
+    assert str(tmp_path) in result
 
 
 async def test_shell_falls_back_when_workspace_absent(workspace, monkeypatch):
@@ -296,8 +298,8 @@ async def test_shell_falls_back_when_workspace_absent(workspace, monkeypatch):
     monkeypatch.setattr(shell_mod, "_WORKSPACE", Path("/nonexistent-workspace-xyz"))
     tools = get_all_tools()
     result = await tools["shell"](command="echo ok")
-    assert result["stdout"].strip() == "ok"
-    assert result["exit_code"] == 0
+    assert "ok" in result
+    assert "[exit: 0]" in result
 
 
 # --- get_tool_guidelines ---

@@ -50,6 +50,7 @@ from archie_agent.loop import run_loop
 from archie_agent.prompt import build_system_prompt
 from archie_agent.session import DisplayEntry, Session
 from archie_agent.skills import create_skill_tool, discover_skills
+from archie_agent.tool_formatters import format_tool_complete, format_tool_pending
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -119,6 +120,9 @@ class AgentHarness:
 
         # Active runner subprocess for cancellation
         self._active_proc: asyncio.subprocess.Process | None = None
+
+        # Pending tool calls: tool_use_id → (name, input) for format_tool_complete
+        self._pending_tools: dict[str, tuple[str, dict]] = {}
 
     def _build_prompt(self) -> str:
         """Build the system prompt incorporating current skill state."""
@@ -216,8 +220,10 @@ class AgentHarness:
                 elif isinstance(event, ToolCall):
                     # Persist tool_call entry (JSON-serialised name+source)
                     self._persist_tool_call(event)
-                    # Broadcast wire event
-                    input_summary = self._summarise_tool_input(event.name, event.input)
+                    # Store input for format_tool_complete when result arrives
+                    self._pending_tools[event.tool_use_id] = (event.name, event.input)
+                    # Broadcast wire event with Rich-formatted pending summary
+                    input_summary = format_tool_pending(event.name, event.input)
                     await self._broadcast(
                         ToolCallEvent(
                             turn_index=turn_index,
@@ -232,8 +238,16 @@ class AgentHarness:
                     self._persist_tool_result(event)
                     # Extract duration from content (format: "duration: NNNms")
                     duration_ms = _extract_duration_ms(event.content)
+                    # Produce Rich-formatted completion summary
+                    pending = self._pending_tools.pop(event.tool_use_id, None)
+                    if pending:
+                        tool_name, tool_input = pending
+                        summary = format_tool_complete(
+                            tool_name, tool_input, event.content, event.is_error
+                        )
+                    else:
+                        summary = event.content[:200] if event.content else ""
                     # Broadcast wire event
-                    summary = event.content[:200] if event.content else ""
                     await self._broadcast(
                         ToolResultEvent(
                             turn_index=turn_index,
@@ -475,27 +489,6 @@ class AgentHarness:
             write_entry(self.log_path, entry)
         except Exception:
             log.warning("Failed to persist assistant message", exc_info=True)
-
-    def _summarise_tool_input(self, tool_name: str, input_dict: dict) -> str:
-        """Return tool input for wire events (TUI display).
-
-        For exec: returns the source code.
-        For skill: returns the resolved file path being loaded/read.
-        """
-        if tool_name == "exec":
-            return input_dict.get("source", "")
-
-        if tool_name == "skill":
-            name = input_dict.get("name", "")
-            entry = self._skill_catalog.get(name)
-            if entry is None:
-                return name
-            file = input_dict.get("file")
-            if file:
-                return str(entry.path.parent / file)
-            return str(entry.path)
-
-        return ""
 
     async def _broadcast(self, event) -> None:
         """Serialize and send an event to all connected WebSocket clients."""

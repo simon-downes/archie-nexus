@@ -293,29 +293,6 @@ def _filter_symbols(symbols: list[Symbol], name: str) -> list[Symbol]:
     return results
 
 
-def _search_symbols(files: list[Path], name: str) -> list[dict]:
-    """Search for symbols by name across multiple files."""
-    results: list[dict] = []
-
-    for f in files:
-        try:
-            symbols = _parse_file(f)
-        except Exception:
-            continue
-
-        matches = _filter_symbols(symbols, name)
-        if matches:
-            rel = str(f.relative_to(WORKSPACE))
-            for s in matches:
-                d = s.to_dict()
-                d["file"] = rel
-                results.append(d)
-
-        if len(results) >= _MAX_RESULTS:
-            break
-
-    return results[:_MAX_RESULTS]
-
 
 # ---------------------------------------------------------------------------
 # File parsing
@@ -324,6 +301,17 @@ def _search_symbols(files: list[Path], name: str) -> list[dict]:
 
 def _parse_file(file_path: Path, language: str | None = None) -> list[Symbol]:
     """Parse a single file and return its symbols."""
+    symbols, _ = _parse_file_with_lines(file_path, language)
+    return symbols
+
+
+def _parse_file_with_lines(
+    file_path: Path, language: str | None = None
+) -> tuple[list[Symbol], int]:
+    """Parse a single file and return (symbols, line_count).
+
+    Used by code() to avoid reading the file twice just to count lines.
+    """
     ext = file_path.suffix
     lang_name = _EXTENSION_MAP.get(ext)
 
@@ -334,7 +322,7 @@ def _parse_file(file_path: Path, language: str | None = None) -> list[Symbol]:
         )
 
     if language and lang_name != language:
-        return []
+        return [], 0
 
     # Size check
     try:
@@ -357,13 +345,16 @@ def _parse_file(file_path: Path, language: str | None = None) -> list[Symbol]:
     if b"\x00" in content[:8192]:
         raise BinaryFileError(f"Binary file detected: {file_path.name}")
 
+    # Count lines from the content we already have
+    line_count = content.count(b"\n") + 1
+
     # Parse with tree-sitter
     parser = _get_parser(lang_name)
     tree = parser.parse(content)
 
     # Extract symbols
     extractor = _EXTRACTORS.get(lang_name, _extract_generic)
-    return extractor(tree.root_node, content)
+    return extractor(tree.root_node, content), line_count
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +367,7 @@ async def code(
     path: str | None = None,
     name: str | None = None,
     language: str | None = None,
-) -> list[dict]:
+) -> str:
     """Structural code intelligence — extract symbol definitions from source files.
 
     Args:
@@ -385,8 +376,7 @@ async def code(
         language: Filter by language (python, typescript, javascript, tsx, php, go, rust, css, hcl).
 
     Returns:
-        List of symbol dicts with keys: name, kind, line, end_line, signature,
-        children (optional), file (optional, in directory/search modes).
+        Formatted symbol outline showing names, kinds, line ranges, and signatures.
     """
     resolved = _resolve_path(path or "")
 
@@ -394,29 +384,95 @@ async def code(
         raise FileNotFoundError(f"Path not found: {path}")
 
     if resolved.is_file():
-        symbols = _parse_file(resolved, language)
+        symbols, lines_count = _parse_file_with_lines(resolved, language)
         if name:
             symbols = _filter_symbols(symbols, name)
-        return [s.to_dict() for s in symbols]
+        if not symbols:
+            return "No symbols found."
+        # File mode: show outline
+        rel = str(resolved.relative_to(WORKSPACE))
+        lang_name = _EXTENSION_MAP.get(resolved.suffix, "unknown")
+        header = f"{rel} ({lang_name}, {lines_count} lines)"
+        return header + "\n" + _format_symbols(symbols, indent=0)
     else:
         # Directory mode
         files = await _discover_files(resolved, language)
         if name:
-            return _search_symbols(files, name)
-        # Return all symbols from all files
-        all_symbols: list[dict] = []
+            results = _search_symbols_raw(files, name)
+            if not results:
+                return "No symbols found."
+            # Search mode: compact format
+            lines: list[str] = []
+            for sym, rel_path in results[:_MAX_RESULTS]:
+                lines.append(f"{rel_path}:{sym.line}-{sym.end_line} — {sym.signature}")
+            output = "\n".join(lines)
+            if len(results) > _MAX_RESULTS:
+                output += f"\n\nShowing {_MAX_RESULTS} of {len(results)} — narrow your query."
+            return output
+        # Overview mode: outline per file
+        output_lines: list[str] = []
+        total_symbols = 0
         for f in files:
             try:
-                syms = _parse_file(f, language)
+                syms, lines_count = _parse_file_with_lines(f, language)
                 if syms:
                     rel = str(f.relative_to(WORKSPACE))
-                    for s in syms:
-                        d = s.to_dict()
-                        d["file"] = rel
-                        all_symbols.append(d)
+                    lang_name = _EXTENSION_MAP.get(f.suffix, "unknown")
+                    output_lines.append(f"{rel} ({lang_name}, {lines_count} lines)")
+                    output_lines.append(_format_symbols(syms, indent=0))
+                    output_lines.append("")
+                    total_symbols += _count_symbols(syms)
+                    if total_symbols >= _MAX_RESULTS * 4:  # ~200 symbols cap
+                        output_lines.append(
+                            f"… truncated at {total_symbols} symbols — narrow path or use name filter."
+                        )
+                        break
             except Exception:
                 continue
-        return all_symbols
+        if not output_lines:
+            return "No symbols found."
+        return "\n".join(output_lines).rstrip()
+
+
+def _format_symbols(symbols: list[Symbol], indent: int) -> str:
+    """Format symbols as an indented outline."""
+    lines: list[str] = []
+    prefix = "  " * indent
+    for sym in symbols:
+        lines.append(f"{prefix}{sym.signature} [{sym.kind}, line {sym.line}-{sym.end_line}]")
+        if sym.children:
+            lines.append(_format_symbols(sym.children, indent + 1))
+    return "\n".join(lines)
+
+
+def _count_symbols(symbols: list[Symbol]) -> int:
+    """Count total symbols including children."""
+    count = len(symbols)
+    for sym in symbols:
+        count += _count_symbols(sym.children)
+    return count
+
+
+def _search_symbols_raw(files: list[Path], name: str) -> list[tuple[Symbol, str]]:
+    """Search for symbols by name, returning Symbol + relative path pairs."""
+    results: list[tuple[Symbol, str]] = []
+
+    for f in files:
+        try:
+            symbols = _parse_file(f)
+        except Exception:
+            continue
+
+        matches = _filter_symbols(symbols, name)
+        if matches:
+            rel = str(f.relative_to(WORKSPACE))
+            for s in matches:
+                results.append((s, rel))
+
+        if len(results) >= _MAX_RESULTS * 4:  # collect extra for truncation message
+            break
+
+    return results
 
 
 # ---------------------------------------------------------------------------

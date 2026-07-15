@@ -152,8 +152,42 @@ def test_create_registry():
     assert spec.name == "exec"
     assert "source" in spec.schema["properties"]
     config = reg.to_tool_config()
-    assert len(config) == 1
-    assert config[0]["name"] == "exec"
+    # exec + 9 native tools = 10 total
+    assert len(config) == 10
+    names = {c["name"] for c in config}
+    assert "exec" in names
+    assert "read" in names
+    assert "grep" in names
+    assert "glob" in names
+    assert "edit" in names
+    assert "write" in names
+    assert "shell" in names
+    assert "web_fetch" in names
+    assert "web_search" in names
+    assert "code" in names
+
+
+def test_create_registry_native_schemas_valid():
+    """Each native tool has a well-formed JSON schema."""
+    reg = create_registry()
+    config = reg.to_tool_config()
+    for tool_cfg in config:
+        schema = tool_cfg["input_schema"]
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        # Required fields are a subset of properties
+        if "required" in schema:
+            for req in schema["required"]:
+                assert req in schema["properties"]
+
+
+def test_create_registry_no_name_collision():
+    """Native tools don't collide with reserved names (exec, skill)."""
+    reg = create_registry()
+    # skill isn't registered by create_registry (harness does it separately)
+    # but exec should exist and not be overwritten
+    spec = reg.get("exec")
+    assert spec.schema["properties"].get("source") is not None
 
 
 # --- error_envelope ---

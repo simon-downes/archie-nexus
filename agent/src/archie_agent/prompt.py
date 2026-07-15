@@ -55,31 +55,46 @@ def _build_environment(model_name: str, workspace_dir: str) -> str:
 _TOOLS_STRATEGY = """\
 ## Tools
 
-You have one external tool: `exec`. It runs Python code in a fresh subprocess
-inside the workspace. Define `async def main()` — it will be awaited and its
-return value captured.
+You have native tools (`read`, `grep`, `glob`, `edit`, `write`, `shell`,
+`web_fetch`, `web_search`, `code`) for single operations, plus `exec` for
+multi-step Python code.
 
-**Use `exec` to complete a whole related step in ONE call:** search, filter, read
-multiple files, compute, edit, and return only the useful result. Don't make many
-small calls for independent reads or searches. Make another call when new results
-change the plan, or after edits that need validation.
+### When to use which
 
-### Execution model
+**Native tools** — prefer for single operations:
+- Reading a file → `read`
+- Searching file contents → `grep`
+- Finding files → `glob`
+- Editing a file → `edit`
+- Creating/overwriting a file → `write`
+- Running a command → `shell`
+- Fetching a URL → `web_fetch`
+- Searching the web → `web_search`
+- Exploring code structure → `code`
 
-- Each `exec` call starts fresh — variables, imports, and state do not persist.
-- Pre-injected (no import needed): `asyncio`, `os`, `json`, `re`, `Path`, plus the
-  helper functions `read`, `write`, `edit`, `grep`, `glob`, `shell`.
-- Full Python stdlib is available via `import`.
-- Batch independent I/O with `asyncio.gather`; run dependent steps sequentially.
-- Return concise structured data. Filter in Python; don't dump whole files unless
-  necessary.
-- Results come back as `return: <json>`, `return (repr): ...`, `stdout:`,
-  `stderr:`, or `error: <Type>: <message>`.
+**`exec`** — use when you need to:
+- Chain multiple steps with data flowing between them
+- Filter or transform large output before returning
+- Loop over results or use conditional logic
+- Batch independent I/O with `asyncio.gather`
+
+### Native tool behavior
+
+- Paths are relative to the workspace root (e.g. `src/app.py`).
+- `read` returns line-numbered text; `read(path, raw=True)` returns plain text.
+- `grep` returns results grouped by file with line numbers, most recently modified first.
+- `glob` returns a file list sorted by modification time (most recent first).
+- `edit` returns a unified diff showing the change.
+- `write` returns a confirmation with path and line count.
+- `shell` returns `$ command\\n[exit: N]\\noutput` — always check the exit code.
+- `code` returns a structural outline of symbols with line ranges.
+- All tools raise exceptions on errors (path validation, file not found, etc.).
+- A successful write or edit means the change is applied. Do not re-read to verify.
 
 ### Never use shell for file work
 
 `shell` is a last resort. Do NOT use it to read, search, list, or modify files —
-use the helpers instead. They return line numbers, structured data, and diffs
+use the native tools instead. They return line numbers, structured data, and diffs
 that shell output lacks, and they enforce path safety.
 
 - `cat`/`head`/`tail` → `read`
@@ -89,39 +104,38 @@ that shell output lacks, and they enforce path safety.
 
 Reserve `shell` for tests, builds, package commands, and git.
 
-### Helper behavior
+### exec tool
 
-- Paths are relative to the workspace root (e.g. `src/app.py`).
-- `read(path)` returns line-numbered text like `    1| content`; `read(path, raw=True)`
-  returns plain text.
-- `grep(pattern, include="*.py")` returns `[{"path", "line", "text"}, ...]`.
-- `glob(pattern)` returns a sorted list of paths.
-- `edit(...)` returns a unified diff.
-- `shell(...)` returns `{"stdout", "stderr", "exit_code"}` — always check `exit_code`;
-  non-zero is data, not an exception.
-- Helper errors raise exceptions. Catch them only when recovery is useful.
+`exec` runs Python code in a fresh subprocess inside the workspace. Define
+`async def main()` — it will be awaited and its return value captured.
 
-### Working rules
+**Use `exec` to complete a whole related step in ONE call:** search, filter, read
+multiple files, compute, edit, and return only the useful result.
 
-- Inspect relevant files before editing, unless creating a new file or the
-  requested overwrite is unambiguous.
-- Prefer `edit` for existing files — it shows a diff.
-- After edits, run the narrowest relevant validation first, then broader tests if
-  needed.
-- Return only the facts, diffs, errors, or test results needed for the next decision.
+- Each `exec` call starts fresh — variables, imports, and state do not persist.
+- Pre-injected (no import needed): `asyncio`, `os`, `json`, `re`, `Path`, plus the
+  helper functions `read`, `write`, `edit`, `grep`, `glob`, `shell`, `web_fetch`,
+  `web_search`, `code`.
+- Full Python stdlib is available via `import`.
+- Batch independent I/O with `asyncio.gather`; run dependent steps sequentially.
+- Return concise structured data. Filter in Python; don't dump whole files unless
+  necessary.
+- Results come back as `return: <json>`, `return (repr): ...`, `stdout:`,
+  `stderr:`, or `error: <Type>: <message>`.
 
 ### Patterns
 
-**Search, filter, and read in one call:**
+**Search, filter, and read in one call (use exec):**
 ```python
 async def main():
     hits = await grep(pattern="TODO", include="*.py")
-    files = sorted({h["path"] for h in hits})
+    # grep returns a string — parse file paths from it if needed
+    files = sorted({line.split(":")[0] for line in hits.split("\\n") if "|" in line})
     contents = await asyncio.gather(*(read(path=f) for f in files[:5]))
     return {"files": files, "contents": contents}
 ```
 
-**Edit and validate:**
+**Edit and validate (use exec):**
 ```python
 async def main():
     diff = await edit(path="src/utils.py", old="return a - b", new="return a + b")

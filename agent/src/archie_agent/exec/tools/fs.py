@@ -25,6 +25,12 @@ WORKSPACE = Path("/workspace")
 # Maximum characters per line before truncation.
 _LINE_LENGTH_CAP = 500
 
+# Maximum file groups to show in grep output.
+_GREP_MAX_GROUPS = 50
+
+# Maximum files to show in glob output.
+_GLOB_MAX_FILES = 100
+
 
 def _resolve_path(path: str) -> Path:
     """Resolve a path relative to /workspace/ and validate it.
@@ -143,7 +149,7 @@ async def read(
 
 
 @tool(guidelines=("Use `grep` to search file contents by regex pattern.",))
-async def grep(pattern: str, include: str | None = None, path: str | None = None) -> list[dict]:
+async def grep(pattern: str, include: str | None = None, path: str | None = None) -> str:
     """Search file contents using regex via ripgrep.
 
     Args:
@@ -152,8 +158,8 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
         path: Directory to search in (relative to /workspace/, default: /workspace/).
 
     Returns:
-        List of match dicts: [{"path": str, "line": int, "text": str}, ...]
-        Empty list if no matches found.
+        Formatted results grouped by file (most recently modified first).
+        Each file group shows matching lines with line numbers.
 
     Raises:
         PathValidationError: Search path is outside /workspace/.
@@ -191,13 +197,13 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
 
     # rg exit codes: 0 = matches, 1 = no matches, 2+ = error
     if proc.returncode == 1:
-        return []
+        return "No matches found."
     if proc.returncode not in (0, 1) and proc.returncode is not None:
         stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"ripgrep error (exit {proc.returncode}): {stderr_text}")
 
-    # Parse JSON output
-    results: list[dict] = []
+    # Parse JSON output into per-file groups
+    file_matches: dict[str, list[tuple[int, str]]] = {}
     stdout_text = stdout_bytes.decode("utf-8", errors="replace")
 
     for line in stdout_text.strip().split("\n"):
@@ -220,19 +226,54 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
             except ValueError:
                 rel_path = file_path
 
-            results.append(
-                {
-                    "path": rel_path,
-                    "line": line_number,
-                    "text": text,
-                }
-            )
+            if rel_path not in file_matches:
+                file_matches[rel_path] = []
+            file_matches[rel_path].append((line_number, text))
 
-    return results
+    if not file_matches:
+        return "No matches found."
+
+    # Sort files by mtime descending (most recently modified first)
+    files_with_mtime: list[tuple[str, float, list[tuple[int, str]]]] = []
+    for rel_path, matches in file_matches.items():
+        abs_path = WORKSPACE / rel_path
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        files_with_mtime.append((rel_path, mtime, matches))
+
+    files_with_mtime.sort(key=lambda x: x[1], reverse=True)
+
+    # Format output — cap at 50 file groups
+    total_files = len(files_with_mtime)
+    display_files = files_with_mtime[:_GREP_MAX_GROUPS]
+
+    output_lines: list[str] = []
+    for rel_path, _mtime, matches in display_files:
+        # Determine line number width for alignment
+        width = len(str(max(ln for ln, _ in matches))) if matches else 1
+        output_lines.append(f"{rel_path}:")
+        for lineno, text in matches:
+            if len(text) > _LINE_LENGTH_CAP:
+                text = text[:_LINE_LENGTH_CAP] + "...[truncated]"
+            output_lines.append(f"  {lineno:>{width}}| {text}")
+        output_lines.append("")  # blank line between file groups
+
+    # Remove trailing blank line
+    if output_lines and output_lines[-1] == "":
+        output_lines.pop()
+
+    if total_files > _GREP_MAX_GROUPS:
+        output_lines.append(
+            f"\nShowing {_GREP_MAX_GROUPS} of {total_files} files — narrow your query."
+        )
+
+    return "\n".join(output_lines)
 
 
 @tool(guidelines=("Use `glob` to find files by name pattern.",))
-async def glob(pattern: str, path: str | None = None) -> list[str]:
+async def glob(pattern: str, path: str | None = None) -> str:
     """Find files matching a glob pattern within the workspace.
 
     Args:
@@ -240,8 +281,8 @@ async def glob(pattern: str, path: str | None = None) -> list[str]:
         path: Directory to search from (relative to /workspace/, default: /workspace/).
 
     Returns:
-        List of relative file paths sorted alphabetically.
-        Empty list if no matches.
+        Formatted file list sorted by modification time (most recent first),
+        with a header showing count.
 
     Raises:
         PathValidationError: Search path is outside /workspace/.
@@ -260,29 +301,53 @@ async def glob(pattern: str, path: str | None = None) -> list[str]:
     if not search_dir.is_dir():
         raise PathValidationError(f"Not a directory: {path or '/workspace/'}")
 
-    matches: list[str] = []
+    # Collect matching files with mtime
+    files_with_mtime: list[tuple[str, float]] = []
     try:
         for match in search_dir.glob(pattern):
             if match.is_file() and ".git" not in match.parts:
                 try:
                     rel = str(match.relative_to(WORKSPACE))
-                    matches.append(rel)
-                except ValueError:
+                    mtime = match.stat().st_mtime
+                    files_with_mtime.append((rel, mtime))
+                except (ValueError, OSError):
                     pass
     except OSError:
         pass
 
-    matches.sort()
-    return matches
+    if not files_with_mtime:
+        return "No files found."
+
+    # Sort by mtime descending (most recently modified first)
+    files_with_mtime.sort(key=lambda x: x[1], reverse=True)
+
+    # Cap at 100 files
+    total_count = len(files_with_mtime)
+    display_files = files_with_mtime[:_GLOB_MAX_FILES]
+
+    # Format output
+    if total_count > _GLOB_MAX_FILES:
+        header = f"{_GLOB_MAX_FILES} files shown of {total_count}, most recent first. Narrow the pattern for more."
+    else:
+        header = f"{total_count} files, most recent first"
+
+    lines = [header, ""]
+    for rel_path, _ in display_files:
+        lines.append(rel_path)
+
+    return "\n".join(lines)
 
 
 @tool(guidelines=("Use `write` for new files or complete rewrites.",))
-async def write(path: str, content: str) -> None:
+async def write(path: str, content: str) -> str:
     """Write content to a file, creating parent directories as needed.
 
     Args:
         path: File path (relative to /workspace/ or absolute under /workspace/).
         content: Content to write to the file.
+
+    Returns:
+        Confirmation string with path and line count.
 
     Raises:
         PathValidationError: Path is outside /workspace/.
@@ -290,6 +355,8 @@ async def write(path: str, content: str) -> None:
     resolved = _resolve_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content, encoding="utf-8")
+    line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    return f"Written: {path} ({line_count} lines)"
 
 
 @tool(
