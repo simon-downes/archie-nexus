@@ -6,6 +6,7 @@ from archie_agent.prompt import (
     _IDENTITY,
     _build_environment,
     _build_loaded_skills,
+    _build_project_context,
     _build_skills_catalog,
     _build_tools,
     build_system_prompt,
@@ -197,3 +198,54 @@ def test_build_system_prompt_backward_compatible():
     prompt = build_system_prompt("model-v1")
     assert "model-v1" in prompt
     assert "<skills>" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Project context (AGENTS.md) tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_project_context_reads_agents_md(tmp_path):
+    """AGENTS.md contents are wrapped in an <agents.md> block."""
+    (tmp_path / "AGENTS.md").write_text("# Project rules\nUse tabs.", encoding="utf-8")
+    section = _build_project_context(str(tmp_path))
+    assert section == "<agents.md>\n# Project rules\nUse tabs.\n</agents.md>"
+
+
+def test_build_project_context_absent_returns_empty(tmp_path):
+    """No AGENTS.md → empty string."""
+    assert _build_project_context(str(tmp_path)) == ""
+
+
+def test_build_project_context_empty_file_returns_empty(tmp_path):
+    """Empty/whitespace-only AGENTS.md → empty string."""
+    (tmp_path / "AGENTS.md").write_text("   \n\n", encoding="utf-8")
+    assert _build_project_context(str(tmp_path)) == ""
+
+
+def test_build_system_prompt_includes_agents_md(tmp_path):
+    """Prompt includes AGENTS.md content when present in the workspace."""
+    (tmp_path / "AGENTS.md").write_text("Always run ruff.", encoding="utf-8")
+    prompt = build_system_prompt("test-model", str(tmp_path))
+    assert "<agents.md>" in prompt
+    assert "Always run ruff." in prompt
+
+
+def test_build_system_prompt_omits_agents_md_when_absent(tmp_path):
+    """Prompt omits the <agents.md> block when no AGENTS.md exists."""
+    prompt = build_system_prompt("test-model", str(tmp_path))
+    assert "<agents.md>" not in prompt
+
+
+def test_agents_md_after_skills_before_loaded_skills(tmp_path):
+    """<agents.md> renders after the skills catalog and before loaded skill bodies."""
+    (tmp_path / "AGENTS.md").write_text("Project context here.", encoding="utf-8")
+    catalog = _make_catalog()
+    loaded = [("python-style", "Use type hints.")]
+    prompt = build_system_prompt(
+        "test-model", str(tmp_path), catalog=catalog, loaded_skills=loaded
+    )
+    skills_pos = prompt.index("<skills>")
+    agents_pos = prompt.index("<agents.md>")
+    loaded_pos = prompt.index('<skill name="python-style">')
+    assert skills_pos < agents_pos < loaded_pos

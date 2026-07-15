@@ -7,6 +7,7 @@ for the Bedrock `system` field.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from archie_agent.exec.tool import PYTHON
@@ -190,6 +191,28 @@ def _build_loaded_skills(loaded_skills: list[tuple[str, str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Project context (AGENTS.md)
+# ---------------------------------------------------------------------------
+
+
+def _build_project_context(workspace_dir: str) -> str:
+    """Build the project-context section from the workspace's AGENTS.md.
+
+    Reads ``{workspace_dir}/AGENTS.md`` at prompt-build time and wraps its
+    contents in an ``<agents.md>`` block. Returns an empty string if the file
+    is absent, empty, or unreadable.
+    """
+    try:
+        agents_md = (Path(workspace_dir) / "AGENTS.md").read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ""
+    agents_md = agents_md.strip()
+    if not agents_md:
+        return ""
+    return f"<agents.md>\n{agents_md}\n</agents.md>"
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -209,8 +232,8 @@ def build_system_prompt(
         catalog: Optional skill catalog for rendering the skills section.
         loaded_skills: Optional list of (name, body) tuples for loaded skills.
 
-    Returns:
-        Complete system prompt string for the Bedrock system field.
+    Reads ``{workspace_dir}/AGENTS.md`` at build time (if present) and includes
+    it as an ``<agents.md>`` block for project-specific context.
     """
     sections = [
         _IDENTITY,
@@ -221,6 +244,11 @@ def build_system_prompt(
     # Skills sections (only when catalog is non-empty)
     if catalog:
         sections.append(_build_skills_catalog(catalog, loaded_skills or []))
+
+    # Project context (AGENTS.md), between skills catalog and loaded skill bodies
+    project_context = _build_project_context(workspace_dir)
+    if project_context:
+        sections.append(project_context)
 
     # Loaded skill bodies
     if loaded_skills:
