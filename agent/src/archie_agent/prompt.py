@@ -77,7 +77,8 @@ multi-step Python code.
 - Chain multiple steps with data flowing between them
 - Filter or transform large output before returning
 - Loop over results or use conditional logic
-- Batch independent I/O with `asyncio.gather`
+- Batch independent I/O with `asyncio.gather` (pass `return_exceptions=True`
+  when any call might fail, e.g. reading files that may not exist)
 
 ### Native tool behavior
 
@@ -119,6 +120,10 @@ multiple files, compute, edit, and return only the useful result.
   `web_search`, `code`.
 - Full Python stdlib is available via `import`.
 - Batch independent I/O with `asyncio.gather`; run dependent steps sequentially.
+  `gather` fails fast by default — one raised exception discards the whole
+  batch. Pass `return_exceptions=True` when any call might fail (e.g. reading
+  files that may not exist), then check each result with `isinstance(r,
+  BaseException)`.
 - Return concise structured data. Filter in Python; don't dump whole files unless
   necessary.
 - Results come back as `return: <json>`, `return (repr): ...`, `stdout:`,
@@ -132,7 +137,13 @@ async def main():
     hits = await grep(pattern="TODO", include="*.py")
     # grep returns a string — parse file paths from it if needed
     files = sorted({line.split(":")[0] for line in hits.split("\\n") if "|" in line})
-    contents = await asyncio.gather(*(read(path=f) for f in files[:5]))
+    # return_exceptions=True so one missing/unreadable file doesn't sink the batch
+    results = await asyncio.gather(
+        *(read(path=f) for f in files[:5]), return_exceptions=True
+    )
+    contents = {
+        f: r for f, r in zip(files, results) if not isinstance(r, BaseException)
+    }
     return {"files": files, "contents": contents}
 ```
 
