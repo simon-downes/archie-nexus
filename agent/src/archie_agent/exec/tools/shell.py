@@ -12,16 +12,8 @@ silently operate on the runtime instead of the project.
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
-from pathlib import Path
-
 from archie_agent.exec.tools import tool
-
-# The container's project mount. Commands run here so shell/git align with
-# the file tools (see fs.py). Falls back to None (inherit CWD) when absent,
-# e.g. running host-side tests outside the container.
-_WORKSPACE = Path("/workspace")
+from archie_agent.exec.tools._subprocess import run_shell
 
 
 @tool(guidelines=("Use `shell` for tests, builds, package commands, and git.",))
@@ -35,17 +27,7 @@ async def shell(command: str) -> str:
         Formatted string: "$ {command}\\n[exit: {code}]\\n{output}".
         Non-zero exit is returned as data, not raised as an exception.
     """
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(  # noqa: S603, S602
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=_WORKSPACE if _WORKSPACE.is_dir() else None,
-        ),
-    )
+    result = await run_shell(command)
 
     # Combine stdout and stderr (stderr after stdout, if present)
     parts: list[str] = []

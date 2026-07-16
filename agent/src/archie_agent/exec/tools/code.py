@@ -8,7 +8,6 @@ Imports are deferred (tree-sitter loaded on first use per language).
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +21,7 @@ from archie_agent.exec.tools import (
     tool,
 )
 from archie_agent.exec.tools.fs import WORKSPACE
+from archie_agent.exec.tools._subprocess import run_exec
 
 # Maximum file size to parse (skip generated/minified files)
 _MAX_FILE_SIZE = 500_000  # 500KB
@@ -219,21 +219,15 @@ async def _discover_files(dir_path: Path, language: str | None = None) -> list[P
     ripgrep is a hard dependency (installed in the container image); there is
     no fallback.
     """
-    proc = await asyncio.create_subprocess_exec(
-        "rg",
-        "--files",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(dir_path),
-    )
-    stdout, stderr = await proc.communicate()
+    result = await run_exec("rg", "--files", cwd=dir_path)
 
-    if proc.returncode not in (0, 1) and proc.returncode is not None:
-        stderr_text = stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ripgrep error (exit {proc.returncode}): {stderr_text}")
+    if result.returncode not in (0, 1) and result.returncode is not None:
+        raise RuntimeError(
+            f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}"
+        )
 
     files: list[Path] = []
-    for line in stdout.decode("utf-8", errors="replace").strip().split("\n"):
+    for line in result.stdout.strip().split("\n"):
         if not line:
             continue
         p = (dir_path / line).resolve()

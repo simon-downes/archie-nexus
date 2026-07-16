@@ -18,8 +18,11 @@ from archie_agent.exec.tools.fs import _resolve_path
 
 @pytest.fixture
 def workspace(tmp_path):
-    """Patch WORKSPACE to a temporary directory."""
-    with patch("archie_agent.exec.tools.fs.WORKSPACE", tmp_path):
+    """Patch WORKSPACE to a temporary directory (both fs and subprocess wrapper)."""
+    with (
+        patch("archie_agent.exec.tools.fs.WORKSPACE", tmp_path),
+        patch("archie_agent.exec.tools._subprocess.WORKSPACE", tmp_path),
+    ):
         yield tmp_path
 
 
@@ -224,6 +227,47 @@ async def test_glob_respects_gitignore(workspace):
     assert "skip.py" not in result
 
 
+async def test_glob_works_when_process_cwd_differs(workspace, monkeypatch, tmp_path):
+    """Regression: glob must work when the process CWD is not the search dir.
+
+    In the container the agent runs from /opt/archie (runtime), not /workspace.
+    ripgrep anchors -g globs to the process CWD, so a path-prefixed pattern
+    returned nothing. glob now runs rg with cwd=search_dir, so it must find
+    files regardless of where the process itself is running from.
+    """
+    (workspace / "sub").mkdir()
+    (workspace / "sub" / "found.py").write_text("x")
+
+    # Simulate the process running from an unrelated directory.
+    elsewhere = tmp_path.parent / "elsewhere-cwd"
+    elsewhere.mkdir(exist_ok=True)
+    monkeypatch.chdir(elsewhere)
+
+    tools = get_all_tools()
+    result = await tools["glob"](pattern="sub/**/*.py")
+    assert "sub/found.py" in result
+
+
+async def test_glob_excludes_noise_dirs_for_broad_pattern(workspace):
+    """A broad `**/*` whitelist must not flood output with .venv/node_modules.
+
+    An explicit `-g` whitelist overrides .gitignore in ripgrep, so glob adds
+    explicit negations for common noise directories.
+    """
+    (workspace / "real.py").write_text("x")
+    for noise in (".venv", "node_modules", "__pycache__"):
+        d = workspace / noise / "pkg"
+        d.mkdir(parents=True)
+        (d / "junk.py").write_text("x")
+
+    tools = get_all_tools()
+    result = await tools["glob"](pattern="**/*")
+    assert "real.py" in result
+    assert ".venv" not in result
+    assert "node_modules" not in result
+    assert "__pycache__" not in result
+
+
 async def test_glob_no_matches(workspace):
     tools = get_all_tools()
     result = await tools["glob"](pattern="*.xyz")
@@ -294,23 +338,23 @@ async def test_shell_stderr(workspace):
     assert "[exit: 0]" in result
 
 
-async def test_shell_runs_in_workspace(workspace, monkeypatch, tmp_path):
-    """shell() runs in /workspace when it exists (aligns with file tools)."""
-    from archie_agent.exec.tools import shell as shell_mod
+async def test_shell_runs_in_workspace(workspace, tmp_path):
+    """shell() runs in /workspace when it exists (aligns with file tools).
 
-    monkeypatch.setattr(shell_mod, "_WORKSPACE", tmp_path)
+    The `workspace` fixture patches _subprocess.WORKSPACE to tmp_path.
+    """
     tools = get_all_tools()
     result = await tools["shell"](command="pwd")
     assert str(tmp_path) in result
 
 
-async def test_shell_falls_back_when_workspace_absent(workspace, monkeypatch):
+async def test_shell_falls_back_when_workspace_absent(monkeypatch):
     """shell() inherits CWD when /workspace is absent (host-side runs)."""
     from pathlib import Path
 
-    from archie_agent.exec.tools import shell as shell_mod
+    from archie_agent.exec.tools import _subprocess as sp_mod
 
-    monkeypatch.setattr(shell_mod, "_WORKSPACE", Path("/nonexistent-workspace-xyz"))
+    monkeypatch.setattr(sp_mod, "WORKSPACE", Path("/nonexistent-workspace-xyz"))
     tools = get_all_tools()
     result = await tools["shell"](command="echo ok")
     assert "ok" in result
