@@ -209,6 +209,21 @@ async def test_glob_recursive(workspace):
     assert "src/mod.py" in result
 
 
+async def test_glob_respects_gitignore(workspace):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    (workspace / ".gitignore").write_text("ignored/\n")
+    ignored = workspace / "ignored"
+    ignored.mkdir()
+    (ignored / "skip.py").write_text("")
+    (workspace / "keep.py").write_text("")
+    tools = get_all_tools()
+    result = await tools["glob"](pattern="**/*.py")
+    assert "keep.py" in result
+    assert "skip.py" not in result
+
+
 async def test_glob_no_matches(workspace):
     tools = get_all_tools()
     result = await tools["glob"](pattern="*.xyz")

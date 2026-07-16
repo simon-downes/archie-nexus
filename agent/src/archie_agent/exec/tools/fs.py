@@ -1,7 +1,7 @@
 """Filesystem tools — read, grep, glob, write, edit.
 
 These run INSIDE the container. All paths are relative to /workspace/
-(the container's project mount). Uses ripgrep for grep, pathlib for glob.
+(the container's project mount). Uses ripgrep for both grep and glob.
 """
 
 from __future__ import annotations
@@ -276,6 +276,8 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
 async def glob(pattern: str, path: str | None = None) -> str:
     """Find files matching a glob pattern within the workspace.
 
+    Uses ripgrep, so results respect .gitignore and matching is recursive.
+
     Args:
         pattern: Glob pattern (e.g. '**/*.py', 'src/**/*.ts', '*.md').
         path: Directory to search from (relative to /workspace/, default: /workspace/).
@@ -286,6 +288,7 @@ async def glob(pattern: str, path: str | None = None) -> str:
 
     Raises:
         PathValidationError: Search path is outside /workspace/.
+        RuntimeError: ripgrep failed.
     """
     if not pattern:
         raise PathValidationError("Pattern must not be empty")
@@ -301,19 +304,38 @@ async def glob(pattern: str, path: str | None = None) -> str:
     if not search_dir.is_dir():
         raise PathValidationError(f"Not a directory: {path or '/workspace/'}")
 
-    # Collect matching files with mtime
+    # Discover matching files via ripgrep (respects .gitignore). ripgrep is a
+    # hard dependency (installed in the container image); there is no fallback.
+    proc = await asyncio.create_subprocess_exec(
+        "rg",
+        "--files",
+        "-g",
+        pattern,
+        "-g",
+        "!.git/",
+        str(search_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+
+    # rg exit codes: 0 = matches, 1 = no matches, 2+ = error
+    if proc.returncode not in (0, 1) and proc.returncode is not None:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ripgrep error (exit {proc.returncode}): {stderr_text}")
+
+    # Collect matching files with mtime (rg cannot sort by mtime)
     files_with_mtime: list[tuple[str, float]] = []
-    try:
-        for match in search_dir.glob(pattern):
-            if match.is_file() and ".git" not in match.parts:
-                try:
-                    rel = str(match.relative_to(WORKSPACE))
-                    mtime = match.stat().st_mtime
-                    files_with_mtime.append((rel, mtime))
-                except (ValueError, OSError):
-                    pass
-    except OSError:
-        pass
+    for line in stdout_bytes.decode("utf-8", errors="replace").strip().split("\n"):
+        if not line:
+            continue
+        match = Path(line)
+        try:
+            rel = str(match.relative_to(WORKSPACE))
+            mtime = match.stat().st_mtime
+            files_with_mtime.append((rel, mtime))
+        except (ValueError, OSError):
+            pass
 
     if not files_with_mtime:
         return "No files found."
