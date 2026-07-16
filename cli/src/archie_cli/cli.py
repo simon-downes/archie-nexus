@@ -208,8 +208,13 @@ def build(no_cache: bool):
 
 
 @main.command()
-def start():
-    """Start a new agent session."""
+@click.option("-d", "--detach", is_flag=True, help="Start without attaching TUI")
+def start(detach: bool):
+    """Start a new agent session.
+
+    By default, attaches an interactive TUI after the container is ready.
+    Use -d/--detach to start headless (print connection info and exit).
+    """
     check_docker()
     check_image(IMAGE_TAG)
 
@@ -279,9 +284,17 @@ def start():
     # Wait for agent to be ready
     port = wait_for_ready(cname, docker_cmd)
 
+    # Always print session ID (visible in scrollback if TUI crashes)
     click.echo(f"Session: {session_id}")
-    click.echo(f"Container: {cname}")
-    click.echo(f"Agent: http://127.0.0.1:{port}")
+
+    if detach:
+        click.echo(f"Container: {cname}")
+        click.echo(f"Agent: http://127.0.0.1:{port}")
+    else:
+        from archie_cli.tui.app import ArchieApp
+
+        app = ArchieApp(host="127.0.0.1", port=int(port))
+        app.run()
 
 
 @main.command(name="ls")

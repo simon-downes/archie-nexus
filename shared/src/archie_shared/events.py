@@ -29,6 +29,10 @@ class SessionInfo:
     model: str
     session_id: str
     git_branch: str = "—"
+    cost_per_m_input: float = 0.0
+    cost_per_m_output: float = 0.0
+    cost_per_m_cache_read: float = 0.0
+    cost_per_m_cache_write: float = 0.0
 
     def to_json(self) -> dict:
         return {
@@ -38,21 +42,56 @@ class SessionInfo:
                 "model": self.model,
                 "session_id": self.session_id,
                 "git_branch": self.git_branch,
+                "cost": {
+                    "input": self.cost_per_m_input,
+                    "output": self.cost_per_m_output,
+                    "cache_read": self.cost_per_m_cache_read,
+                    "cache_write": self.cost_per_m_cache_write,
+                },
             },
         }
 
     @classmethod
     def from_json(cls, data: dict) -> SessionInfo:
+        cost = data.get("cost", {})
         return cls(
             protocol_version=data["protocol_version"],
             model=data["model"],
             session_id=data["session_id"],
             git_branch=data.get("git_branch", "—"),
+            cost_per_m_input=cost.get("input", 0.0),
+            cost_per_m_output=cost.get("output", 0.0),
+            cost_per_m_cache_read=cost.get("cache_read", 0.0),
+            cost_per_m_cache_write=cost.get("cache_write", 0.0),
         )
 
 
 @dataclass(frozen=True)
-class TextDeltaEvent:
+class IterationStart:
+    """Signals the start of a new tool-loop iteration.
+
+    The client uses this to open a fresh visual block deterministically,
+    independent of token-usage metadata. `index` is the 0-based iteration
+    number within the current turn.
+    """
+
+    turn_index: int
+    index: int
+
+    def to_json(self) -> dict:
+        return {
+            "type": "iteration_start",
+            "turn_index": self.turn_index,
+            "data": {"index": self.index},
+        }
+
+    @classmethod
+    def from_json(cls, turn_index: int, data: dict) -> IterationStart:
+        return cls(turn_index=turn_index, index=data.get("index", 0))
+
+
+@dataclass(frozen=True)
+class TextDelta:
     """A chunk of streamed assistant text."""
 
     turn_index: int
@@ -66,45 +105,46 @@ class TextDeltaEvent:
         }
 
     @classmethod
-    def from_json(cls, turn_index: int, data: dict) -> TextDeltaEvent:
+    def from_json(cls, turn_index: int, data: dict) -> TextDelta:
         return cls(turn_index=turn_index, text=data["text"])
 
 
 @dataclass(frozen=True)
-class UsageUpdated:
-    """Token usage snapshot emitted after each LLM request."""
+class Usage:
+    """Per-request token usage emitted after each LLM request.
+
+    Token fields are for that single request only.
+    context_pct is server-computed (session-level context window percentage).
+    """
 
     turn_index: int
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
-    cost: float
     context_pct: float = 0.0
 
     def to_json(self) -> dict:
         return {
-            "type": "usage_updated",
+            "type": "usage",
             "turn_index": self.turn_index,
             "data": {
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
                 "cache_read_tokens": self.cache_read_tokens,
                 "cache_write_tokens": self.cache_write_tokens,
-                "cost": self.cost,
                 "context_pct": self.context_pct,
             },
         }
 
     @classmethod
-    def from_json(cls, turn_index: int, data: dict) -> UsageUpdated:
+    def from_json(cls, turn_index: int, data: dict) -> Usage:
         return cls(
             turn_index=turn_index,
             input_tokens=data["input_tokens"],
             output_tokens=data["output_tokens"],
             cache_read_tokens=data["cache_read_tokens"],
             cache_write_tokens=data["cache_write_tokens"],
-            cost=data["cost"],
             context_pct=data.get("context_pct", 0.0),
         )
 
@@ -166,7 +206,7 @@ class TurnError:
 
 
 @dataclass(frozen=True)
-class ToolCallEvent:
+class ToolCall:
     """The model requested a tool call."""
 
     turn_index: int
@@ -186,7 +226,7 @@ class ToolCallEvent:
         }
 
     @classmethod
-    def from_json(cls, turn_index: int, data: dict) -> ToolCallEvent:
+    def from_json(cls, turn_index: int, data: dict) -> ToolCall:
         return cls(
             turn_index=turn_index,
             tool_use_id=data["tool_use_id"],
@@ -196,7 +236,7 @@ class ToolCallEvent:
 
 
 @dataclass(frozen=True)
-class ToolResultEvent:
+class ToolResult:
     """Result from tool execution."""
 
     turn_index: int
@@ -220,7 +260,7 @@ class ToolResultEvent:
         }
 
     @classmethod
-    def from_json(cls, turn_index: int, data: dict) -> ToolResultEvent:
+    def from_json(cls, turn_index: int, data: dict) -> ToolResult:
         return cls(
             turn_index=turn_index,
             tool_use_id=data["tool_use_id"],
@@ -238,6 +278,10 @@ class ModelSwitched:
     model_key: str
     model_name: str
     supports_cache: bool = False
+    cost_per_m_input: float = 0.0
+    cost_per_m_output: float = 0.0
+    cost_per_m_cache_read: float = 0.0
+    cost_per_m_cache_write: float = 0.0
 
     def to_json(self) -> dict:
         return {
@@ -246,15 +290,26 @@ class ModelSwitched:
                 "model_key": self.model_key,
                 "model_name": self.model_name,
                 "supports_cache": self.supports_cache,
+                "cost": {
+                    "input": self.cost_per_m_input,
+                    "output": self.cost_per_m_output,
+                    "cache_read": self.cost_per_m_cache_read,
+                    "cache_write": self.cost_per_m_cache_write,
+                },
             },
         }
 
     @classmethod
     def from_json(cls, data: dict) -> ModelSwitched:
+        cost = data.get("cost", {})
         return cls(
             model_key=data["model_key"],
             model_name=data["model_name"],
             supports_cache=data.get("supports_cache", False),
+            cost_per_m_input=cost.get("input", 0.0),
+            cost_per_m_output=cost.get("output", 0.0),
+            cost_per_m_cache_read=cost.get("cache_read", 0.0),
+            cost_per_m_cache_write=cost.get("cache_write", 0.0),
         )
 
 
@@ -278,13 +333,14 @@ class StatusUpdated:
 # Union of all server→client events
 type ServerEvent = (
     SessionInfo
-    | TextDeltaEvent
-    | UsageUpdated
+    | IterationStart
+    | TextDelta
+    | Usage
     | TurnComplete
     | TurnInterrupted
     | TurnError
-    | ToolCallEvent
-    | ToolResultEvent
+    | ToolCall
+    | ToolResult
     | ModelSwitched
     | StatusUpdated
 )
@@ -350,13 +406,14 @@ type ClientCommand = MessageCommand | InterruptCommand | SwitchModelCommand
 
 _SERVER_EVENT_TYPES: dict[str, type] = {
     "session_info": SessionInfo,
-    "text_delta": TextDeltaEvent,
-    "usage_updated": UsageUpdated,
+    "iteration_start": IterationStart,
+    "text_delta": TextDelta,
+    "usage": Usage,
     "turn_complete": TurnComplete,
     "turn_interrupted": TurnInterrupted,
     "turn_error": TurnError,
-    "tool_call": ToolCallEvent,
-    "tool_result": ToolResultEvent,
+    "tool_call": ToolCall,
+    "tool_result": ToolResult,
     "model_switched": ModelSwitched,
     "status_updated": StatusUpdated,
 }

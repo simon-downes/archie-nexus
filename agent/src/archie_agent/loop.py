@@ -19,15 +19,27 @@ from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 
 from archie_agent.events import (
     AgentEvent,
-    TextChunk,
+    IterationStart,
+    TextDelta,
     ToolCall,
     ToolResult,
-    TurnDone,
-    TurnFailed,
+    TurnComplete,
+    TurnError,
     TurnInterrupted,
-    TurnUsage,
+    Usage,
 )
-from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
+from archie_agent.llm._types import (
+    Done,
+    StreamEvent,
+    ToolUseEvent,
+    ToolUseStart,
+)
+from archie_agent.llm._types import (
+    TextDelta as LLMTextDelta,
+)
+from archie_agent.llm._types import (
+    Usage as LLMUsage,
+)
 
 if TYPE_CHECKING:
     from archie_agent.llm import LLMClient
@@ -59,7 +71,7 @@ class _RequestResult:
     text_blocks: list[TextBlock] = field(default_factory=list)
     tool_use_blocks: list[ToolUseBlock] = field(default_factory=list)
     stop_reason: str | None = None
-    usage: TurnUsage | None = None
+    usage: Usage | None = None
     interrupted: bool = False
     failed: bool = False
     error_msg: str | None = None
@@ -95,6 +107,9 @@ async def run_loop(
     working_messages: list[Turn] = list(messages)
 
     for _iteration in range(max_iterations):
+        # Signal the start of a new iteration so the client can open a fresh
+        # visual block deterministically (decoupled from usage metadata).
+        yield IterationStart(index=_iteration)
         result = _RequestResult()
 
         # Stream a single LLM request
@@ -108,13 +123,9 @@ async def run_loop(
         ):
             yield event
 
-        # Always yield usage after each request
-        if result.usage is not None:
-            yield result.usage
-
         # Handle failure/interrupt — stop the loop
         if result.failed:
-            yield TurnFailed(error=result.error_msg or "unknown error")
+            yield TurnError(error=result.error_msg or "unknown error")
             return
 
         if result.interrupted:
@@ -141,6 +152,12 @@ async def run_loop(
         # Decide: tool loop or terminal?
         has_tool_use = bool(result.tool_use_blocks)
         is_tool_use_stop = result.stop_reason == "tool_use"
+
+        # Emit per-request usage (billing). May be absent when the provider
+        # omits usage metadata on a tool-use response; block boundaries are
+        # handled separately via IterationStart.
+        if result.usage is not None:
+            yield result.usage
 
         if has_tool_use and is_tool_use_stop and execute_tool:
             # --- Tool execution phase ---
@@ -211,11 +228,11 @@ async def run_loop(
             continue
 
         # --- Terminal: no more tools or max_tokens without tools ---
-        yield TurnDone(stop_reason=result.stop_reason or "end_turn")
+        yield TurnComplete(stop_reason=result.stop_reason or "end_turn")
         return
 
     # Iteration cap hit
-    yield TurnFailed(error="max tool iterations")
+    yield TurnError(error="max tool iterations")
 
 
 async def _stream_once(
@@ -230,7 +247,7 @@ async def _stream_once(
     """Stream a single LLM request.
 
     Populates `result` with accumulated data and yields text events.
-    Does NOT yield TurnUsage, TurnDone, TurnFailed, or TurnInterrupted.
+    Does NOT yield Usage, TurnComplete, TurnError, or TurnInterrupted.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[StreamEvent | _WorkerError | object] = asyncio.Queue()
@@ -285,9 +302,9 @@ async def _stream_once(
                 break
 
             # Translate StreamEvent
-            if isinstance(event, TextDelta):
+            if isinstance(event, LLMTextDelta):
                 result.text_blocks.append(TextBlock(text=event.text))
-                yield TextChunk(text=event.text)
+                yield TextDelta(text=event.text)
 
             elif isinstance(event, ToolUseStart):
                 current_tool_use_id = event.tool_use_id
@@ -302,8 +319,8 @@ async def _stream_once(
                     )
                 )
 
-            elif isinstance(event, Usage):
-                result.usage = TurnUsage(
+            elif isinstance(event, LLMUsage):
+                result.usage = Usage(
                     input_tokens=event.input_tokens,
                     output_tokens=event.output_tokens,
                     cache_read_tokens=event.cache_read_input_tokens,

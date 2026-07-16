@@ -98,7 +98,7 @@ async def test_normal_flow(tmp_path):
 
     # Verify wire event sequence
     assert "text_delta" in event_types
-    assert "usage_updated" in event_types
+    assert "usage" in event_types
     assert "turn_complete" in event_types
 
     # Verify session state
@@ -252,7 +252,7 @@ async def test_turn_already_active(tmp_path):
 
 @pytest.mark.asyncio
 async def test_usage_updates_context_pct(tmp_path):
-    """TurnUsage updates session._last_input_tokens for context_pct."""
+    """Usage updates session._last_input_tokens for context_pct."""
     harness = _make_harness(
         tmp_path,
         responses=[

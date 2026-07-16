@@ -115,7 +115,7 @@ class Session:
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
     ) -> None:
-        """Update all token accumulators and context tracking from a TurnUsage event.
+        """Update all token accumulators and context tracking from a Usage event.
 
         This is the single entry point for recording per-request token usage.
         Keeps context-window logic encapsulated (where context_pct lives).

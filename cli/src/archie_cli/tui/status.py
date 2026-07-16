@@ -3,7 +3,7 @@
 Shows: model │ in:fresh/cache_read/cache_write out:output │ ctx:N% │ $cost │ session_id
 
 Token counts are session totals (lifetime, only climb). Updated from
-UsageUpdated wire events which carry cumulative totals.
+Usage wire events which carry per-request values (accumulated client-side).
 """
 
 from rich.text import Text

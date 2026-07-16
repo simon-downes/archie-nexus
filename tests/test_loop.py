@@ -4,13 +4,18 @@ import threading
 
 import pytest
 from archie_agent.events import (
-    TextChunk,
+    IterationStart,
     ToolCall,
     ToolResult,
-    TurnDone,
-    TurnFailed,
+    TurnComplete,
+    TurnError,
     TurnInterrupted,
-    TurnUsage,
+)
+from archie_agent.events import (
+    TextDelta as AgentTextDelta,
+)
+from archie_agent.events import (
+    Usage as AgentUsage,
 )
 from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.fake import FakeLLMClient
@@ -61,10 +66,11 @@ async def test_normal_flow():
     events = await _collect(gen)
 
     assert events == [
-        TextChunk(text="Hello"),
-        TextChunk(text=" world"),
-        TurnUsage(input_tokens=100, output_tokens=10, cache_read_tokens=5, cache_write_tokens=2),
-        TurnDone(stop_reason="end_turn"),
+        IterationStart(index=0),
+        AgentTextDelta(text="Hello"),
+        AgentTextDelta(text=" world"),
+        AgentUsage(input_tokens=100, output_tokens=10, cache_read_tokens=5, cache_write_tokens=2),
+        TurnComplete(stop_reason="end_turn"),
     ]
 
 
@@ -86,8 +92,8 @@ async def test_usage_before_done_ordering():
     events = await _collect(gen)
 
     # TurnUsage always comes before TurnDone
-    assert events[-2] == TurnUsage(input_tokens=50, output_tokens=5)
-    assert events[-1] == TurnDone(stop_reason="end_turn")
+    assert events[-2] == AgentUsage(input_tokens=50, output_tokens=5)
+    assert events[-1] == TurnComplete(stop_reason="end_turn")
 
 
 @pytest.mark.asyncio
@@ -99,7 +105,7 @@ async def test_empty_response():
     gen = run_loop(messages=_make_messages(), system="test", llm=llm, interrupt=interrupt)
     events = await _collect(gen)
 
-    assert events == [TurnDone(stop_reason="end_turn")]
+    assert events == [IterationStart(index=0), TurnComplete(stop_reason="end_turn")]
 
 
 @pytest.mark.asyncio
@@ -123,14 +129,15 @@ async def test_interrupt_mid_stream():
     events = []
     async for event in gen:
         events.append(event)
-        if isinstance(event, TextChunk) and event.text == "chunk1":
+        if isinstance(event, AgentTextDelta) and event.text == "chunk1":
             # Set interrupt after first chunk
             interrupt.set()
 
     # Should have chunk1, then TurnInterrupted (no TurnDone)
-    assert events[0] == TextChunk(text="chunk1")
+    assert events[0] == IterationStart(index=0)
+    assert events[1] == AgentTextDelta(text="chunk1")
     assert any(isinstance(e, TurnInterrupted) for e in events)
-    assert not any(isinstance(e, TurnDone) for e in events)
+    assert not any(isinstance(e, TurnComplete) for e in events)
 
 
 @pytest.mark.asyncio
@@ -154,7 +161,7 @@ async def test_interrupt_before_first_event():
     # Worker sees interrupt immediately, closes gen, sends sentinel
     # Drain loop sees interrupt on sentinel arrival
     assert any(isinstance(e, TurnInterrupted) for e in events)
-    assert not any(isinstance(e, TextChunk) for e in events)
+    assert not any(isinstance(e, AgentTextDelta) for e in events)
 
 
 @pytest.mark.asyncio
@@ -175,9 +182,10 @@ async def test_worker_error():
     gen = run_loop(messages=_make_messages(), system="test", llm=_ErrorLLM(), interrupt=interrupt)
     events = await _collect(gen)
 
-    assert len(events) == 1
-    assert isinstance(events[0], TurnFailed)
-    assert "RuntimeError: Connection refused" in events[0].error
+    assert len(events) == 2
+    assert events[0] == IterationStart(index=0)
+    assert isinstance(events[1], TurnError)
+    assert "RuntimeError: Connection refused" in events[1].error
 
 
 @pytest.mark.asyncio
@@ -208,12 +216,14 @@ async def test_multiple_stream_calls():
 
     gen1 = run_loop(messages=_make_messages(), system="test", llm=llm, interrupt=interrupt)
     events1 = await _collect(gen1)
-    assert events1[0] == TextChunk(text="first")
+    assert events1[0] == IterationStart(index=0)
+    assert events1[1] == AgentTextDelta(text="first")
 
     interrupt.clear()
     gen2 = run_loop(messages=_make_messages(), system="test", llm=llm, interrupt=interrupt)
     events2 = await _collect(gen2)
-    assert events2[0] == TextChunk(text="second")
+    assert events2[0] == IterationStart(index=0)
+    assert events2[1] == AgentTextDelta(text="second")
 
 
 @pytest.mark.asyncio
@@ -237,8 +247,9 @@ async def test_partial_text_before_error():
     events = await _collect(gen)
 
     # Should get TextChunk then TurnFailed
-    assert events[0] == TextChunk(text="partial")
-    assert isinstance(events[-1], TurnFailed)
+    assert events[0] == IterationStart(index=0)
+    assert events[1] == AgentTextDelta(text="partial")
+    assert isinstance(events[-1], TurnError)
     assert "RuntimeError" in events[-1].error
 
 
@@ -281,8 +292,8 @@ async def test_single_tool_round_trip():
     )
     events = await _collect(gen)
 
-    # Expected: TurnUsage(first), ToolCall, ToolResult, TurnUsage(second), TextChunk, TurnDone
-    usage_events = [e for e in events if isinstance(e, TurnUsage)]
+    # Expected: AgentUsage(first), ToolCall, ToolResult, AgentUsage(second), TextChunk, TurnDone
+    usage_events = [e for e in events if isinstance(e, AgentUsage)]
     assert len(usage_events) == 2
     assert usage_events[0].input_tokens == 100
     assert usage_events[1].input_tokens == 200
@@ -297,7 +308,62 @@ async def test_single_tool_round_trip():
     assert tool_results[0].content == "return: 42"
     assert not tool_results[0].is_error
 
-    assert events[-1] == TurnDone(stop_reason="end_turn")
+    assert events[-1] == TurnComplete(stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+async def test_iteration_start_emitted_per_iteration():
+    """Regression (Bug 2): each tool-loop iteration begins with an IterationStart
+    event so the client can open a fresh visual block deterministically, even
+    when a tool-use response omits Usage metadata. Two tool iterations followed
+    by a terminal text answer must yield three IterationStart events, each before
+    that iteration's content.
+    """
+    llm = FakeLLMClient(
+        responses=[
+            # Iteration 0: tool_use WITHOUT Usage metadata
+            [
+                ToolUseStart(tool_use_id="tu_1", name="exec"),
+                ToolUseEvent(tool_use_id="tu_1", name="exec", input={"source": "a"}),
+                Done(stop_reason="tool_use"),
+            ],
+            # Iteration 1: another tool_use WITHOUT Usage metadata
+            [
+                ToolUseStart(tool_use_id="tu_2", name="exec"),
+                ToolUseEvent(tool_use_id="tu_2", name="exec", input={"source": "b"}),
+                Done(stop_reason="tool_use"),
+            ],
+            # Iteration 2: terminal text answer
+            [
+                TextDelta(text="done"),
+                Usage(input_tokens=50, output_tokens=5),
+                Done(stop_reason="end_turn"),
+            ],
+        ]
+    )
+    interrupt = threading.Event()
+
+    async def execute_tool(block):
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="ok")
+
+    gen = run_loop(
+        messages=_make_messages(),
+        system="test",
+        llm=llm,
+        interrupt=interrupt,
+        tool_config=[{"name": "exec", "description": "test", "input_schema": {}}],
+        execute_tool=execute_tool,
+    )
+    events = await _collect(gen)
+
+    # Three iterations → three IterationStart events with sequential indices.
+    starts = [e for e in events if isinstance(e, IterationStart)]
+    assert [e.index for e in starts] == [0, 1, 2]
+
+    # Each ToolCall must be preceded by an IterationStart (block boundary).
+    types = [type(e).__name__ for e in events]
+    first_toolcall = types.index("ToolCall")
+    assert "IterationStart" in types[:first_toolcall]
 
 
 @pytest.mark.asyncio
@@ -347,7 +413,7 @@ async def test_two_tools_batched():
     tool_results = [e for e in events if isinstance(e, ToolResult)]
     assert len(tool_results) == 2
 
-    assert events[-1] == TurnDone(stop_reason="end_turn")
+    assert events[-1] == TurnComplete(stop_reason="end_turn")
 
 
 @pytest.mark.asyncio
@@ -380,7 +446,7 @@ async def test_iteration_cap():
     )
     events = await _collect(gen)
 
-    assert events[-1] == TurnFailed(error="max tool iterations")
+    assert events[-1] == TurnError(error="max tool iterations")
 
 
 @pytest.mark.asyncio
@@ -466,7 +532,7 @@ async def test_execute_tool_raises():
     assert "RuntimeError" in tool_results[0].content
 
     # Loop continued and model responded
-    assert events[-1] == TurnDone(stop_reason="end_turn")
+    assert events[-1] == TurnComplete(stop_reason="end_turn")
 
 
 @pytest.mark.asyncio
@@ -532,4 +598,4 @@ async def test_max_tokens_without_tool_use_is_terminal():
     )
     events = await _collect(gen)
 
-    assert events[-1] == TurnDone(stop_reason="max_tokens")
+    assert events[-1] == TurnComplete(stop_reason="max_tokens")

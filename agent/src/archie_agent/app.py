@@ -7,9 +7,11 @@ Endpoints:
 """
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from archie_shared.config import home_dir
@@ -26,12 +28,14 @@ from archie_shared.events import (
 )
 from archie_shared.models import get_model, load_models
 from archie_shared.schemas import load_nexus_config
+from archie_shared.session.log import MessageEntry, write_entry
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from ulid import ULID
 
 from archie_agent.harness import AgentHarness
 from archie_agent.llm.bedrock import BedrockClient
@@ -257,6 +261,10 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
         model_key=command.model_key,
         model_name=new_model.name,
         supports_cache=new_model.can_cache,
+        cost_per_m_input=new_model.cost.input,
+        cost_per_m_output=new_model.cost.output,
+        cost_per_m_cache_read=new_model.cost.cache_read,
+        cost_per_m_cache_write=new_model.cost.cache_write,
     )
     await _agent._broadcast(event)
 
@@ -282,6 +290,10 @@ async def stream(websocket: WebSocket) -> None:
         model=_agent.session.model.name,
         session_id=_agent.session.session_id,
         git_branch=_read_git_branch(),
+        cost_per_m_input=_agent.session.model.cost.input,
+        cost_per_m_output=_agent.session.model.cost.output,
+        cost_per_m_cache_read=_agent.session.model.cost.cache_read,
+        cost_per_m_cache_write=_agent.session.model.cost.cache_write,
     )
     await websocket.send_text(serialize_event(info))
 
@@ -314,10 +326,43 @@ async def stream(websocket: WebSocket) -> None:
         _agent.clients.discard(websocket)
 
 
+async def shell_log(request: Request) -> JSONResponse:
+    """Log a direct shell command (! prefix) to the session JSONL.
+
+    Accepts JSON: {command: str, exit_code: int, output: str}.
+    Writes a MessageEntry with role="shell".
+    """
+    if _agent is None:
+        return JSONResponse({"error": "no session"}, status_code=503)
+
+    try:
+        body = await request.json()
+        content = json.dumps(
+            {
+                "command": body.get("command", ""),
+                "exit_code": body.get("exit_code", 0),
+                "output": body.get("output", ""),
+            },
+            ensure_ascii=False,
+        )
+        entry = MessageEntry(
+            id=str(ULID()),
+            when=datetime.now(UTC).isoformat(),
+            role="shell",
+            content=content,
+        )
+        write_entry(_agent.log_path, entry)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        log.warning("Failed to log shell command", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 app = Starlette(
     routes=[
         Route("/status", status, methods=["GET"]),
         Route("/history", history, methods=["GET"]),
+        Route("/shell", shell_log, methods=["POST"]),
         WebSocketRoute("/stream", stream),
     ],
     lifespan=lifespan,
