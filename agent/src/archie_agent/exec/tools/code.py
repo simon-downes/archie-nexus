@@ -20,8 +20,8 @@ from archie_agent.exec.tools import (
     UnsupportedLanguageError,
     tool,
 )
-from archie_agent.exec.tools.fs import WORKSPACE
 from archie_agent.exec.tools._subprocess import run_exec
+from archie_agent.exec.tools.fs import WORKSPACE
 
 # Maximum file size to parse (skip generated/minified files)
 _MAX_FILE_SIZE = 500_000  # 500KB

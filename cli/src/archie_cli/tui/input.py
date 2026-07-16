@@ -56,6 +56,16 @@ class MessageInput(TextArea):
         last_line = self.document.get_line(last_row)
         return col >= len(last_line)
 
+    # Numpad keys that some terminals send as distinct key events
+    _NUMPAD_MAP: dict[str, str] = {
+        "divide": "/",
+        "multiply": "*",
+        "subtract": "-",
+        "add": "+",
+        "decimal": ".",
+        "separator": ".",
+    }
+
     async def _on_key(self, event) -> None:
         """Override key handling for chat-style Enter behaviour and history.
 
@@ -63,7 +73,27 @@ class MessageInput(TextArea):
         - Shift+Enter: insert a newline (the "escape hatch" for multiline)
         - Up (at start): cycle to previous history entry
         - Down (at end): cycle to next history entry / restore draft
+        - Numpad arithmetic keys: insert their character
         """
+        # Numpad key mapping
+        if event.key in self._NUMPAD_MAP:
+            event.prevent_default()
+            event.stop()
+            self.insert(self._NUMPAD_MAP[event.key])
+            return
+        if event.key in ("kp_enter",):
+            # Treat numpad Enter as regular Enter (submit)
+            event.prevent_default()
+            event.stop()
+            content = self.text.strip()
+            if content:
+                self._history.append(content)
+                self._history_idx = len(self._history)
+                self._draft = ""
+                self.post_message(self.Submitted(content))
+                self.clear()
+            return
+
         if event.key == "enter":
             event.prevent_default()
             event.stop()

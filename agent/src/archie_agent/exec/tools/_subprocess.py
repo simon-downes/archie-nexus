@@ -72,7 +72,7 @@ async def run_exec(
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout)
         else:
             stdout_b, stderr_b = await proc.communicate()
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         raise

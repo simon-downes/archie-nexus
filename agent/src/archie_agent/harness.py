@@ -17,15 +17,32 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from archie_shared.events import (
+    IterationStart as WireIterationStart,
+)
+from archie_shared.events import (
     StatusUpdated,
-    TextDeltaEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    TurnComplete,
-    TurnError,
-    TurnInterrupted,
-    UsageUpdated,
     serialize_event,
+)
+from archie_shared.events import (
+    TextDelta as WireTextDelta,
+)
+from archie_shared.events import (
+    ToolCall as WireToolCall,
+)
+from archie_shared.events import (
+    ToolResult as WireToolResult,
+)
+from archie_shared.events import (
+    TurnComplete as WireTurnComplete,
+)
+from archie_shared.events import (
+    TurnError as WireTurnError,
+)
+from archie_shared.events import (
+    TurnInterrupted as WireTurnInterrupted,
+)
+from archie_shared.events import (
+    Usage as WireUsage,
 )
 from archie_shared.models import calculate_cost
 from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
@@ -34,16 +51,14 @@ from starlette.websockets import WebSocket
 from ulid import ULID
 
 from archie_agent.events import (
-    TextChunk,
+    IterationStart,
+    TextDelta,
     ToolCall,
     ToolResult,
-    TurnDone,
-    TurnFailed,
-    TurnUsage,
-)
-from archie_agent.events import (
-    # Aliased: avoids collision with archie_shared.events.TurnInterrupted (wire event)
-    TurnInterrupted as AgentTurnInterrupted,
+    TurnComplete,
+    TurnError,
+    TurnInterrupted,
+    Usage,
 )
 from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.loop import run_loop
@@ -166,7 +181,7 @@ class AgentHarness:
 
         if self._turn_active:
             turn_index = self.session.turn_index or 1
-            await self._broadcast(TurnError(turn_index=turn_index, message="Turn already active"))
+            await self._broadcast(WireTurnError(turn_index=turn_index, message="Turn already active"))
             return
 
         self._turn_active = True
@@ -180,7 +195,7 @@ class AgentHarness:
 
         # Run the pure loop and consume events
         assistant_text = ""
-        last_usage: TurnUsage | None = None
+        last_usage: Usage | None = None
 
         try:
             gen = run_loop(
@@ -193,11 +208,16 @@ class AgentHarness:
             )
 
             async for event in gen:
-                if isinstance(event, TextChunk):
-                    assistant_text += event.text
-                    await self._broadcast(TextDeltaEvent(turn_index=turn_index, text=event.text))
+                if isinstance(event, IterationStart):
+                    await self._broadcast(
+                        WireIterationStart(turn_index=turn_index, index=event.index)
+                    )
 
-                elif isinstance(event, TurnUsage):
+                elif isinstance(event, TextDelta):
+                    assistant_text += event.text
+                    await self._broadcast(WireTextDelta(turn_index=turn_index, text=event.text))
+
+                elif isinstance(event, Usage):
                     last_usage = event
                     self.session.record_usage(
                         input_tokens=event.input_tokens,
@@ -206,13 +226,12 @@ class AgentHarness:
                         cache_write_tokens=event.cache_write_tokens,
                     )
                     await self._broadcast(
-                        UsageUpdated(
+                        WireUsage(
                             turn_index=turn_index,
-                            input_tokens=self.session.total_input_tokens,
-                            output_tokens=self.session.total_output_tokens,
-                            cache_read_tokens=self.session.total_cache_read_tokens,
-                            cache_write_tokens=self.session.total_cache_write_tokens,
-                            cost=self.session.total_cost,
+                            input_tokens=event.input_tokens,
+                            output_tokens=event.output_tokens,
+                            cache_read_tokens=event.cache_read_tokens,
+                            cache_write_tokens=event.cache_write_tokens,
                             context_pct=self.session.context_pct,
                         )
                     )
@@ -225,7 +244,7 @@ class AgentHarness:
                     # Broadcast wire event with Rich-formatted pending summary
                     input_summary = format_tool_pending(event.name, event.input)
                     await self._broadcast(
-                        ToolCallEvent(
+                        WireToolCall(
                             turn_index=turn_index,
                             tool_use_id=event.tool_use_id,
                             name=event.name,
@@ -249,7 +268,7 @@ class AgentHarness:
                         summary = event.content[:200] if event.content else ""
                     # Broadcast wire event
                     await self._broadcast(
-                        ToolResultEvent(
+                        WireToolResult(
                             turn_index=turn_index,
                             tool_use_id=event.tool_use_id,
                             is_error=event.is_error,
@@ -259,7 +278,7 @@ class AgentHarness:
                         )
                     )
 
-                elif isinstance(event, TurnDone):
+                elif isinstance(event, TurnComplete):
                     # Add final assistant turn to transcript
                     self.session.add_turn(
                         role="assistant",
@@ -273,10 +292,10 @@ class AgentHarness:
                         interrupted=False,
                     )
                     await self._broadcast(
-                        TurnComplete(turn_index=turn_index, stop_reason=event.stop_reason)
+                        WireTurnComplete(turn_index=turn_index, stop_reason=event.stop_reason)
                     )
 
-                elif isinstance(event, TurnFailed):
+                elif isinstance(event, TurnError):
                     if assistant_text:
                         self.session.add_turn(
                             role="assistant",
@@ -294,9 +313,9 @@ class AgentHarness:
                     self.session.display_entries.append(
                         DisplayEntry(role="error", content=event.error, turn_index=turn_index)
                     )
-                    await self._broadcast(TurnError(turn_index=turn_index, message=event.error))
+                    await self._broadcast(WireTurnError(turn_index=turn_index, message=event.error))
 
-                elif isinstance(event, AgentTurnInterrupted):
+                elif isinstance(event, TurnInterrupted):
                     # Only add to transcript if there's actual content
                     if assistant_text:
                         self.session.add_turn(
@@ -316,11 +335,11 @@ class AgentHarness:
                     self.session.display_entries.append(
                         DisplayEntry(role="interrupted", content="", turn_index=turn_index)
                     )
-                    await self._broadcast(TurnInterrupted(turn_index=turn_index))
+                    await self._broadcast(WireTurnInterrupted(turn_index=turn_index))
 
         except Exception as e:
             log.exception("Error in harness event consumption")
-            await self._broadcast(TurnError(turn_index=turn_index, message=str(e)))
+            await self._broadcast(WireTurnError(turn_index=turn_index, message=str(e)))
 
         finally:
             self._turn_active = False
@@ -449,7 +468,7 @@ class AgentHarness:
     def _persist_assistant(
         self,
         content: str,
-        usage: TurnUsage | None,
+        usage: Usage | None,
         interrupted: bool,
     ) -> None:
         """Persist an assistant message with metadata (best-effort)."""

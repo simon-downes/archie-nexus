@@ -100,10 +100,10 @@ def test_websocket_message_and_events(client):
             if event["type"] == "turn_complete":
                 break
 
-        # Should have text_delta(s), usage_updated, turn_complete
+        # Should have text_delta(s), usage, turn_complete
         types = [e["type"] for e in events]
         assert "text_delta" in types
-        assert "usage_updated" in types
+        assert "usage" in types
         assert types[-1] == "turn_complete"
 
         # All events should have turn_index = 1

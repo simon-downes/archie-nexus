@@ -268,3 +268,39 @@ class TestHistoryCycling:
         inp._cursor_row = 0
         inp._cursor_col = 5
         assert not inp._at_end()
+
+
+class TestNumpadMap:
+    """Regression (Bug 1): numpad keys use Textual's real functional-key names.
+
+    Textual 8.x reports numpad keys via the Kitty keyboard protocol as bare
+    names (divide/multiply/subtract/add/decimal/separator) with NO 'kp_' prefix.
+    A stale 'kp_'-prefixed map silently never matched, so numpad symbols did not
+    insert. These tests pin the map to the names Textual actually emits.
+    """
+
+    def test_map_uses_textual_functional_key_names(self):
+        from archie_cli.tui.input import MessageInput
+
+        assert MessageInput._NUMPAD_MAP == {
+            "divide": "/",
+            "multiply": "*",
+            "subtract": "-",
+            "add": "+",
+            "decimal": ".",
+            "separator": ".",
+        }
+
+    def test_no_stale_kp_prefixed_keys(self):
+        from archie_cli.tui.input import MessageInput
+
+        assert not any(k.startswith("kp_") for k in MessageInput._NUMPAD_MAP)
+
+    def test_map_names_are_real_textual_keys(self):
+        """Guard against Textual renaming these keys in a future version."""
+        from archie_cli.tui.input import MessageInput
+        from textual._keyboard_protocol import FUNCTIONAL_KEYS
+
+        valid = set(FUNCTIONAL_KEYS.values())
+        for key in MessageInput._NUMPAD_MAP:
+            assert key in valid, f"{key!r} is not a real Textual functional key"

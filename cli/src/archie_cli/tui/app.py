@@ -21,17 +21,18 @@ import time
 
 import httpx
 from archie_shared.events import (
+    IterationStart,
     ModelSwitched,
     SessionInfo,
     StatusUpdated,
     SwitchModelCommand,
-    TextDeltaEvent,
-    ToolCallEvent,
-    ToolResultEvent,
+    TextDelta,
+    ToolCall,
+    ToolResult,
     TurnComplete,
     TurnError,
     TurnInterrupted,
-    UsageUpdated,
+    Usage,
 )
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -73,6 +74,8 @@ class ArchieApp(App):
         self._port = port
         self._ws = WSClient()
         self._receive_task: asyncio.Task | None = None
+        self._reconnecting: bool = False
+        self._shutting_down: bool = False
 
         # UI state
         self._streaming: StreamingMessage | None = None
@@ -81,6 +84,26 @@ class ArchieApp(App):
         self._throbber: Throbber | None = None
         self._iteration_block: IterationBlock | None = None
         self._last_esc_time: float = 0.0
+
+        # Session state for local accumulation
+        self._session_id: str = ""
+        self._cumulative_input: int = 0
+        self._cumulative_output: int = 0
+        self._cumulative_cache_read: int = 0
+        self._cumulative_cache_write: int = 0
+        self._cumulative_cost: float = 0.0
+        self._cost_per_m_input: float = 0.0
+        self._cost_per_m_output: float = 0.0
+        self._cost_per_m_cache_read: float = 0.0
+        self._cost_per_m_cache_write: float = 0.0
+
+        # Live output estimation (chars/4, reconciled on Usage)
+        self._estimated_output: int = 0
+
+        # Direct shell (! prefix) state
+        self._shell_active: bool = False
+        self._shell_proc: asyncio.subprocess.Process | None = None
+        self._shell_command: str = ""
 
     def compose(self) -> ComposeResult:
         """Build the main UI layout."""
@@ -101,7 +124,7 @@ class ArchieApp(App):
             ws_url = f"ws://{self._host}:{self._port}/stream"
             await self._ws.connect(ws_url)
         except Exception as e:
-            self._show_error(f"Connection failed: {e}")
+            self._show_client_error(f"Connection failed: {e}")
             return
 
         # Start receive loop FIRST — events buffer in _event_buffer
@@ -165,6 +188,10 @@ class ArchieApp(App):
         During the buffering phase (before history is fetched), events are
         stored in _event_buffer. After reconciliation, events are dispatched
         directly.
+
+        When the generator ends because the connection dropped, we surface a
+        client error and kick off a reconnect attempt. A clean shutdown
+        (quit) does neither.
         """
         try:
             async for event in self._ws.receive():
@@ -177,7 +204,64 @@ class ArchieApp(App):
                     self._handle_event(event)
         except Exception as e:
             log.warning("WS receive loop error: %s", e)
-            self._show_error(f"Connection lost: {e}")
+            if not self._shutting_down:
+                self._show_client_error(f"Connection lost: {e}")
+                self._end_turn()
+                self._schedule_reconnect()
+            return
+
+        # Generator ended without raising — connection closed underneath us.
+        if not self._shutting_down:
+            self._show_client_error("Connection lost: the agent closed the stream.")
+            self._end_turn()
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self) -> None:
+        """Start a background reconnect task if one isn't already running."""
+        if self._reconnecting or self._shutting_down:
+            return
+        self._reconnecting = True
+        asyncio.create_task(self._reconnect())
+
+    async def _reconnect(self) -> None:
+        """Reconnect to the agent with backoff and resync via /history.
+
+        On success, restarts the receive loop and replays any missed turns.
+        Retries a bounded number of times before giving up and asking the
+        user to relaunch.
+        """
+        ws_url = f"ws://{self._host}:{self._port}/stream"
+        delays = [1.0, 2.0, 4.0, 8.0, 8.0]
+        try:
+            for attempt, delay in enumerate(delays, start=1):
+                if self._shutting_down:
+                    return
+                await asyncio.sleep(delay)
+                try:
+                    await self._ws.connect(ws_url)
+                except Exception as e:  # noqa: BLE001 — retry on any connect failure
+                    log.warning("Reconnect attempt %d failed: %s", attempt, e)
+                    continue
+
+                # Reconnected — buffer incoming events, resync history, replay.
+                self._event_buffer = []
+                self._buffering = True
+                self._receive_task = asyncio.create_task(self._receive_loop())
+                last_turn_index = await self._load_history()
+                self._buffering = False
+                for event in self._event_buffer:
+                    if getattr(event, "turn_index", 0) > last_turn_index:
+                        self._handle_event(event)
+                self._event_buffer = []
+                self.notify("Reconnected to agent")
+                return
+
+            self._show_client_error(
+                "Reconnect failed after several attempts. "
+                "Relaunch the client to continue."
+            )
+        finally:
+            self._reconnecting = False
 
     def _handle_event(self, event) -> None:
         """Dispatch one server event to the appropriate widget update."""
@@ -188,33 +272,80 @@ class ArchieApp(App):
             status.session_id = event.session_id
             status.model_name = event.model
             status.git_branch = event.git_branch
+            # Store cost rates for local cost computation
+            self._session_id = event.session_id
+            self._cost_per_m_input = event.cost_per_m_input
+            self._cost_per_m_output = event.cost_per_m_output
+            self._cost_per_m_cache_read = event.cost_per_m_cache_read
+            self._cost_per_m_cache_write = event.cost_per_m_cache_write
 
         elif isinstance(event, ModelSwitched):
             status = self.query_one("#status", StatusBar)
             status.model_name = event.model_name
             status.supports_cache = event.supports_cache
+            # Update cost rates for future Usage events
+            self._cost_per_m_input = event.cost_per_m_input
+            self._cost_per_m_output = event.cost_per_m_output
+            self._cost_per_m_cache_read = event.cost_per_m_cache_read
+            self._cost_per_m_cache_write = event.cost_per_m_cache_write
             self.notify(f"Switched to {event.model_name}")
 
         elif isinstance(event, StatusUpdated):
             status = self.query_one("#status", StatusBar)
             status.git_branch = event.git_branch
 
-        elif isinstance(event, TextDeltaEvent):
+        elif isinstance(event, IterationStart):
+            # Deterministic block boundary: finalise any in-progress streaming
+            # and reset the iteration block so the next TextDelta/ToolCall opens
+            # a fresh visual block. Decoupled from Usage metadata.
+            if self._streaming is not None:
+                self._finalise_streaming()
+            self._iteration_block = None
+
+        elif isinstance(event, TextDelta):
             self._remove_throbber()
             if self._streaming is None:
                 self._streaming = conv.begin_streaming()
                 self._turn_active = True
             self._stream_text += event.text
             self._streaming.append(event.text)
+            # Live output estimation
+            self._estimated_output += len(event.text) // 4
+            status = self.query_one("#status", StatusBar)
+            status.session_output = self._cumulative_output + self._estimated_output
             conv.scroll_end(animate=False)
 
-        elif isinstance(event, UsageUpdated):
+        elif isinstance(event, Usage):
+            # Accumulate per-request values locally
+            self._cumulative_input += event.input_tokens
+            self._cumulative_output += event.output_tokens
+            self._cumulative_cache_read += event.cache_read_tokens
+            self._cumulative_cache_write += event.cache_write_tokens
+            # Reset output estimation — reconcile with real value
+            self._estimated_output = 0
+            # Compute cost delta for this request using current rates
+            from archie_shared.models import CostConfig, calculate_cost
+
+            cost_config = CostConfig(
+                input=self._cost_per_m_input,
+                output=self._cost_per_m_output,
+                cache_read=self._cost_per_m_cache_read,
+                cache_write=self._cost_per_m_cache_write,
+            )
+            self._cumulative_cost += calculate_cost(
+                cost_config,
+                event.input_tokens,
+                event.output_tokens,
+                event.cache_read_tokens,
+                event.cache_write_tokens,
+            )
+            # Update status bar with real values
             status = self.query_one("#status", StatusBar)
-            status.session_input = event.input_tokens
-            status.session_output = event.output_tokens
-            status.cache_read = event.cache_read_tokens
-            status.cache_write = event.cache_write_tokens
-            status.pricing_label = f"${event.cost:.4f}"
+            status.session_input = self._cumulative_input
+            status.session_output = self._cumulative_output
+            status.cache_read = self._cumulative_cache_read
+            status.cache_write = self._cumulative_cache_write
+            status.pricing_label = f"${self._cumulative_cost:.4f}"
             status.context_pct = event.context_pct
 
         elif isinstance(event, TurnComplete):
@@ -228,21 +359,19 @@ class ArchieApp(App):
             self._show_error(event.message)
             self._end_turn()
 
-        elif isinstance(event, ToolCallEvent):
+        elif isinstance(event, ToolCall):
             self._remove_throbber()
             # Finalise any in-progress streaming text before showing tool activity
-            # Also reset the iteration block — new text output means a new iteration
             if self._streaming is not None:
                 self._finalise_streaming()
-                self._iteration_block = None
             # Start a new iteration block if needed
             if self._iteration_block is None:
                 self._iteration_block = conv.begin_iteration()
-            # Add pending entry showing source code
+            # Add pending entry
             self._iteration_block.add_pending(event.tool_use_id, event.name, event.input_summary)
             conv.scroll_end(animate=False)
 
-        elif isinstance(event, ToolResultEvent):
+        elif isinstance(event, ToolResult):
             if self._iteration_block is not None:
                 self._iteration_block.complete_tool(
                     event.tool_use_id,
@@ -257,6 +386,20 @@ class ArchieApp(App):
 
     def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
         """Handle user message submission."""
+        content = event.content
+
+        # Direct shell: ! prefix bypasses the LLM entirely
+        if content.startswith("!"):
+            command = content[1:].strip()
+            if not command:
+                return
+            if self._shell_active:
+                conv = self.query_one("#conversation", Conversation)
+                conv.add_client_error("Shell command already running")
+                return
+            asyncio.create_task(self._run_direct_shell(command))
+            return
+
         if self._turn_active:
             return
 
@@ -282,8 +425,76 @@ class ArchieApp(App):
         try:
             await self._ws.send_message(content)
         except Exception as e:
-            self._show_error(f"Send failed: {e}")
+            self._show_client_error(f"Send failed: {e}")
             self._end_turn()
+            # A send failure means the socket is dead; try to recover.
+            self._schedule_reconnect()
+
+    async def _run_direct_shell(self, command: str) -> None:
+        """Execute a command in the session container via docker exec.
+
+        Runs async so the TUI stays responsive. Output is displayed in a
+        ShellOutput widget. Errors (docker exec failure) use ClientErrorMessage.
+        """
+        from archie_shared.session.identity import container_name
+
+        conv = self.query_one("#conversation", Conversation)
+        self._shell_active = True
+        self._shell_command = command
+        max_output_lines = 10_000
+        timeout = 30
+
+        try:
+            cname = container_name(self._session_id)
+            self._shell_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", "-w", "/workspace", cname, "bash", "-c", command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(
+                    self._shell_proc.communicate(), timeout=timeout
+                )
+            except TimeoutError:
+                self._shell_proc.kill()
+                await self._shell_proc.wait()
+                conv.add_shell_output(command, "(timed out)", exit_code=124)
+                self._log_shell(command, 124, "(timed out)")
+                return
+
+            exit_code = self._shell_proc.returncode or 0
+            output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+
+            # Truncate large output
+            lines = output.split("\n")
+            if len(lines) > max_output_lines:
+                output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
+
+            conv.add_shell_output(command, output.rstrip(), exit_code=exit_code)
+            self._log_shell(command, exit_code, output)
+
+        except Exception as e:
+            conv.add_client_error(f"Docker exec failed: {e}")
+        finally:
+            self._shell_active = False
+            self._shell_proc = None
+            self._shell_command = ""
+
+    def _log_shell(self, command: str, exit_code: int, output: str) -> None:
+        """Best-effort POST to /shell endpoint to log command in session."""
+        asyncio.create_task(self._log_shell_async(command, exit_code, output))
+
+    async def _log_shell_async(self, command: str, exit_code: int, output: str) -> None:
+        """Async POST to /shell endpoint."""
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"http://{self._host}:{self._port}/shell",
+                    json={"command": command, "exit_code": exit_code, "output": output},
+                    timeout=5,
+                )
+        except Exception:
+            pass  # Best-effort
 
     # --- UI helpers ---
 
@@ -318,9 +529,18 @@ class ArchieApp(App):
             self._throbber = None
 
     def _show_error(self, message: str) -> None:
-        """Display an error message in the conversation."""
+        """Display an agent/server error message in the conversation."""
         conv = self.query_one("#conversation", Conversation)
         conv.add_error(message)
+
+    def _show_client_error(self, message: str) -> None:
+        """Display a client/transport error, marked as local to this client.
+
+        These originate in the TUI or WebSocket transport and are NOT recorded
+        in the session log, so they are styled distinctly from agent errors.
+        """
+        conv = self.query_one("#conversation", Conversation)
+        conv.add_client_error(message)
 
     # --- Actions ---
 
@@ -334,10 +554,17 @@ class ArchieApp(App):
                 self.notify("Copied to clipboard")
 
     def action_cancel(self) -> None:
-        """Esc — signal the agent to interrupt.
+        """Esc — signal the agent to interrupt, or kill running shell command.
 
         When idle, double-tap within 500ms clears the input.
         """
+        if self._shell_active and self._shell_proc is not None:
+            self._shell_proc.kill()
+            conv = self.query_one("#conversation", Conversation)
+            cmd = self._shell_command or "?"
+            conv.add_shell_output(cmd, "(interrupted)", exit_code=130)
+            self._log_shell(cmd, 130, "(interrupted)")
+            return
         if self._turn_active:
             asyncio.create_task(self._ws.send_interrupt())
             self._last_esc_time = 0
@@ -352,6 +579,7 @@ class ArchieApp(App):
 
     async def action_quit(self) -> None:
         """Graceful shutdown: disconnect WS and exit."""
+        self._shutting_down = True
         if self._receive_task is not None:
             self._receive_task.cancel()
         await self._ws.disconnect()

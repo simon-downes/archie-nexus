@@ -29,19 +29,32 @@ class WSClient:
     def __init__(self) -> None:
         self._ws: ClientConnection | None = None
 
+    @property
+    def connected(self) -> bool:
+        """True if a connection object is currently held (may still be closing)."""
+        return self._ws is not None
+
     async def connect(self, url: str) -> WSClient:
         """Connect to the agent WebSocket endpoint.
 
+        Enables keepalive pings so a dropped connection is detected promptly
+        rather than silently going stale during a long turn.
+
         Raises websockets.exceptions.WebSocketException on failure.
         """
-        self._ws = await websockets.connect(url)
+        self._ws = await websockets.connect(
+            url,
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=5,
+        )
         return self
 
     async def disconnect(self) -> None:
         """Close the WebSocket connection cleanly."""
         if self._ws is not None:
-            await self._ws.close()
-            self._ws = None
+            ws, self._ws = self._ws, None
+            await ws.close()
 
     async def send_message(self, content: str) -> None:
         """Send a MessageCommand to the agent."""
@@ -66,7 +79,10 @@ class WSClient:
     async def receive(self) -> AsyncGenerator[ServerEvent]:
         """Async generator yielding deserialized ServerEvent objects.
 
-        Yields events until the connection is closed.
+        Yields events until the connection is closed. On an unexpected close
+        (keepalive timeout, network drop, server crash), re-raises
+        ``ConnectionClosed`` so the caller can surface it and reconnect. The
+        connection reference is cleared first so ``connected`` reflects reality.
         """
         if self._ws is None:
             raise RuntimeError("Not connected")
@@ -77,5 +93,10 @@ class WSClient:
                     yield event
                 except (ValueError, KeyError) as e:
                     log.warning("Malformed event from server: %s", e)
+        except websockets.exceptions.ConnectionClosedOK:
+            # Clean close (e.g. we called disconnect) — terminate quietly.
+            self._ws = None
         except websockets.exceptions.ConnectionClosed:
-            log.debug("WebSocket connection closed")
+            # Unexpected close — surface it so the app can reconnect.
+            self._ws = None
+            raise
