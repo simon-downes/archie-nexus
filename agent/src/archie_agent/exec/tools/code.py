@@ -26,9 +26,6 @@ from archie_agent.exec.tools.fs import WORKSPACE
 # Maximum file size to parse (skip generated/minified files)
 _MAX_FILE_SIZE = 500_000  # 500KB
 
-# Directories to always skip (fallback path only; rg handles via .gitignore)
-_SKIP_DIRS = {"node_modules", ".venv", "venv", "__pycache__", "build", "dist", ".git", ".tox"}
-
 # Maximum symbols returned in search mode
 _MAX_RESULTS = 50
 
@@ -217,21 +214,23 @@ def _resolve_path(path: str) -> Path:
 
 
 async def _discover_files(dir_path: Path, language: str | None = None) -> list[Path]:
-    """Discover source files using ripgrep (respects .gitignore)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "rg",
-            "--files",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(dir_path),
-        )
-        stdout, _ = await proc.communicate()
-    except OSError:
-        return _discover_files_fallback(dir_path, language)
+    """Discover source files using ripgrep (respects .gitignore).
 
-    if proc.returncode not in (0, 1):
-        return _discover_files_fallback(dir_path, language)
+    ripgrep is a hard dependency (installed in the container image); there is
+    no fallback.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "rg",
+        "--files",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(dir_path),
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode not in (0, 1) and proc.returncode is not None:
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ripgrep error (exit {proc.returncode}): {stderr_text}")
 
     files: list[Path] = []
     for line in stdout.decode("utf-8", errors="replace").strip().split("\n"):
@@ -249,30 +248,6 @@ async def _discover_files(dir_path: Path, language: str | None = None) -> list[P
             continue
         files.append(p)
 
-    return files
-
-
-def _discover_files_fallback(dir_path: Path, language: str | None = None) -> list[Path]:
-    """Fallback file discovery without ripgrep."""
-    files: list[Path] = []
-    try:
-        for p in dir_path.rglob("*"):
-            if any(skip in p.parts for skip in _SKIP_DIRS):
-                continue
-            if not p.is_file():
-                continue
-            if p.suffix not in _EXTENSION_MAP:
-                continue
-            if language and _EXTENSION_MAP[p.suffix] != language:
-                continue
-            try:
-                if p.stat().st_size > _MAX_FILE_SIZE:
-                    continue
-            except OSError:
-                continue
-            files.append(p)
-    except OSError:
-        pass
     return files
 
 

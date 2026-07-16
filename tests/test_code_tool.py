@@ -13,7 +13,7 @@ from archie_agent.exec.tools import (
 from archie_agent.exec.tools.code import (
     WORKSPACE,
     Symbol,
-    _discover_files_fallback,
+    _discover_files,
     _extract_css,
     _extract_go,
     _extract_hcl,
@@ -126,34 +126,39 @@ class TestParseFile:
 
 
 class TestDiscovery:
-    """Tests for file discovery fallback."""
+    """Tests for ripgrep-based file discovery."""
 
-    def test_fallback_finds_python_files(self, tmp_path):
+    async def test_finds_python_files(self, tmp_path):
         (tmp_path / "a.py").write_text("x = 1")
         (tmp_path / "b.txt").write_text("not source")
-        files = _discover_files_fallback(tmp_path)
+        files = await _discover_files(tmp_path)
         assert len(files) == 1
         assert files[0].suffix == ".py"
 
-    def test_fallback_skips_node_modules(self, tmp_path):
-        nm = tmp_path / "node_modules"
-        nm.mkdir()
-        (nm / "pkg.js").write_text("module.exports = {}")
-        (tmp_path / "app.js").write_text("function main() {}")
-        files = _discover_files_fallback(tmp_path)
-        assert all("node_modules" not in str(f) for f in files)
+    async def test_respects_gitignore(self, tmp_path):
+        import subprocess
 
-    def test_fallback_language_filter(self, tmp_path):
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / ".gitignore").write_text("ignored/\n")
+        ignored = tmp_path / "ignored"
+        ignored.mkdir()
+        (ignored / "skip.py").write_text("x = 1")
+        (tmp_path / "app.py").write_text("y = 2")
+        files = await _discover_files(tmp_path)
+        assert all("ignored" not in str(f) for f in files)
+        assert any(f.name == "app.py" for f in files)
+
+    async def test_language_filter(self, tmp_path):
         (tmp_path / "a.py").write_text("x = 1")
         (tmp_path / "b.js").write_text("const x = 1")
-        files = _discover_files_fallback(tmp_path, language="python")
+        files = await _discover_files(tmp_path, language="python")
         assert len(files) == 1
         assert files[0].suffix == ".py"
 
-    def test_fallback_skips_large_files(self, tmp_path):
+    async def test_skips_large_files(self, tmp_path):
         (tmp_path / "big.py").write_bytes(b"x" * 600_000)
         (tmp_path / "small.py").write_text("x = 1")
-        files = _discover_files_fallback(tmp_path)
+        files = await _discover_files(tmp_path)
         assert len(files) == 1
         assert "small" in files[0].name
 
