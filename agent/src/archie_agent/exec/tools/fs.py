@@ -6,7 +6,6 @@ These run INSIDE the container. All paths are relative to /workspace/
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 import json
 from pathlib import Path
@@ -18,6 +17,7 @@ from archie_agent.exec.tools import (
     PathValidationError,
     tool,
 )
+from archie_agent.exec.tools._subprocess import run_exec
 
 # The container's project mount point.
 WORKSPACE = Path("/workspace")
@@ -30,6 +30,17 @@ _GREP_MAX_GROUPS = 50
 
 # Maximum files to show in glob output.
 _GLOB_MAX_FILES = 100
+
+# Noise directories excluded from glob/discovery. An explicit `-g <pattern>`
+# whitelist overrides .gitignore in ripgrep, and /workspace is not itself a git
+# repo (projects are nested), so gitignore alone does not exclude these. These
+# explicit negations always win over the whitelist.
+_NOISE_EXCLUDES = (
+    "!.git/",
+    "!**/.venv/**",
+    "!**/node_modules/**",
+    "!**/__pycache__/**",
+)
 
 
 def _resolve_path(path: str) -> Path:
@@ -188,23 +199,22 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
     cmd.append(pattern)
     cmd.append(str(search_dir))
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    # Run with cwd=search_dir so a `-g include` glob anchors to the search
+    # directory (rg matches globs relative to CWD). The search path arg stays
+    # absolute so emitted match paths are absolute and relativizable below.
+    result = await run_exec(*cmd, cwd=search_dir)
 
     # rg exit codes: 0 = matches, 1 = no matches, 2+ = error
-    if proc.returncode == 1:
+    if result.returncode == 1:
         return "No matches found."
-    if proc.returncode not in (0, 1) and proc.returncode is not None:
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ripgrep error (exit {proc.returncode}): {stderr_text}")
+    if result.returncode not in (0, 1) and result.returncode is not None:
+        raise RuntimeError(
+            f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}"
+        )
 
     # Parse JSON output into per-file groups
     file_matches: dict[str, list[tuple[int, str]]] = {}
-    stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+    stdout_text = result.stdout
 
     for line in stdout_text.strip().split("\n"):
         if not line:
@@ -304,35 +314,41 @@ async def glob(pattern: str, path: str | None = None) -> str:
     if not search_dir.is_dir():
         raise PathValidationError(f"Not a directory: {path or '/workspace/'}")
 
-    # Discover matching files via ripgrep (respects .gitignore). ripgrep is a
-    # hard dependency (installed in the container image); there is no fallback.
-    proc = await asyncio.create_subprocess_exec(
+    # Discover matching files via ripgrep. Run with cwd=search_dir so rg's
+    # `-g` glob patterns anchor to the search directory (rg matches globs
+    # relative to CWD, not the path arg). Noise dirs are excluded explicitly
+    # because the whitelist pattern overrides .gitignore. ripgrep is a hard
+    # dependency (installed in the container image); there is no fallback.
+    exclude_args: list[str] = []
+    for ex in _NOISE_EXCLUDES:
+        exclude_args.extend(["-g", ex])
+    result = await run_exec(
         "rg",
         "--files",
         "-g",
         pattern,
-        "-g",
-        "!.git/",
-        str(search_dir),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        *exclude_args,
+        ".",
+        cwd=search_dir,
     )
-    stdout_bytes, stderr_bytes = await proc.communicate()
 
     # rg exit codes: 0 = matches, 1 = no matches, 2+ = error
-    if proc.returncode not in (0, 1) and proc.returncode is not None:
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ripgrep error (exit {proc.returncode}): {stderr_text}")
+    if result.returncode not in (0, 1) and result.returncode is not None:
+        raise RuntimeError(
+            f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}"
+        )
 
-    # Collect matching files with mtime (rg cannot sort by mtime)
+    # Collect matching files with mtime (rg cannot sort by mtime). rg emits
+    # paths relative to search_dir (with a leading ./); resolve to absolute,
+    # then present relative to /workspace.
     files_with_mtime: list[tuple[str, float]] = []
-    for line in stdout_bytes.decode("utf-8", errors="replace").strip().split("\n"):
+    for line in result.stdout.strip().split("\n"):
         if not line:
             continue
-        match = Path(line)
+        abs_path = (search_dir / line).resolve()
         try:
-            rel = str(match.relative_to(WORKSPACE))
-            mtime = match.stat().st_mtime
+            rel = str(abs_path.relative_to(WORKSPACE))
+            mtime = abs_path.stat().st_mtime
             files_with_mtime.append((rel, mtime))
         except (ValueError, OSError):
             pass

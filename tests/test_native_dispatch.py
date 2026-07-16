@@ -149,7 +149,7 @@ async def test_native_shell_dispatch(tmp_path, monkeypatch):
     """Native shell tool returns formatted $ command + exit code."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr("archie_agent.exec.tools.shell._WORKSPACE", workspace)
+    monkeypatch.setattr("archie_agent.exec.tools._subprocess.WORKSPACE", workspace)
 
     responses = [
         [
@@ -510,7 +510,7 @@ async def test_native_shell_input_summary(tmp_path, monkeypatch):
     """format_tool_pending returns Rich markup for native shell."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr("archie_agent.exec.tools.shell._WORKSPACE", workspace)
+    monkeypatch.setattr("archie_agent.exec.tools._subprocess.WORKSPACE", workspace)
 
     responses = [
         [
