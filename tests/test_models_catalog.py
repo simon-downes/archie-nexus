@@ -3,7 +3,9 @@
 import pytest
 from archie_shared.models import (
     DEFAULT_MODELS,
+    BedrockProvider,
     CostConfig,
+    OllamaProvider,
     calculate_cost,
     get_model,
     load_models,
@@ -22,8 +24,10 @@ def test_default_models_all_have_required_fields():
     for key, model in DEFAULT_MODELS.items():
         assert model.name, f"{key} missing name"
         assert model.context > 0, f"{key} has invalid context"
-        assert model.provider.name in ("bedrock", "ollama"), f"{key} has unknown provider"
-        assert model.provider.endpoint, f"{key} missing endpoint"
+        assert isinstance(model.provider, (BedrockProvider, OllamaProvider)), (
+            f"{key} has unknown provider type"
+        )
+        assert model.provider.model_id, f"{key} missing model_id"
 
 
 def test_default_model_key_format():
@@ -52,8 +56,8 @@ def test_load_models_with_override(monkeypatch, tmp_path):
         "  name: Custom Sonnet\n"
         "  context: 500000\n"
         "  provider:\n"
-        "    name: bedrock\n"
-        "    endpoint: eu.anthropic.claude-sonnet-4-6\n"
+        "    type: bedrock\n"
+        "    model_id: eu.anthropic.claude-sonnet-4-6\n"
         "  can_cache: true\n"
     )
     catalog = load_models(overrides_path=models_file)
@@ -70,8 +74,8 @@ def test_load_models_adds_new_key(monkeypatch, tmp_path):
         "  name: Custom Model\n"
         "  context: 64000\n"
         "  provider:\n"
-        "    name: bedrock\n"
-        "    endpoint: custom.model-id\n"
+        "    type: bedrock\n"
+        "    model_id: custom.model-id\n"
         "    region: us-east-1\n"
     )
     catalog = load_models(overrides_path=models_file)
@@ -96,7 +100,8 @@ def test_load_models_explicit_path(tmp_path):
         "  name: Custom Ollama\n"
         "  context: 32000\n"
         "  provider:\n"
-        "    name: ollama\n"
+        "    type: ollama\n"
+        "    model_id: custom:latest\n"
         "    endpoint: localhost:11434\n"
     )
     catalog = load_models(overrides_path=custom_path)

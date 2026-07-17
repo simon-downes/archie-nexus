@@ -38,7 +38,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
 from archie_agent.harness import AgentHarness
-from archie_agent.llm.bedrock import BedrockClient
+from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
 
 if TYPE_CHECKING:
@@ -92,15 +92,7 @@ async def lifespan(app):
     _catalog = load_models(home_dir() / "models.yaml")
     model = get_model(_catalog, _config.global_.model)
 
-    # Determine target region (model-specific or session default)
-    region = model.provider.region or _config.global_.region
-
-    llm_client = BedrockClient(
-        model_id=model.provider.endpoint,
-        region=region,
-        max_output_tokens=model.max_output_tokens,
-        can_cache=model.can_cache,
-    )
+    llm_client = create_llm_client(model, _config.global_.region)
 
     session_id = os.environ.get("ARCHIE_SESSION_ID")
     if not session_id:
@@ -129,7 +121,7 @@ async def lifespan(app):
 
     log.info(
         "Agent started",
-        extra={"model": _config.global_.model, "region": region, "session": session_id},
+        extra={"model": _config.global_.model, "region": _config.global_.region, "session": session_id},
     )
     yield
     log.info("Agent shutting down")
@@ -245,13 +237,7 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
         return
 
     # Rebuild LLM client
-    region = new_model.provider.region or _config.global_.region
-    new_llm = BedrockClient(
-        model_id=new_model.provider.endpoint,
-        region=region,
-        max_output_tokens=new_model.max_output_tokens,
-        can_cache=new_model.can_cache,
-    )
+    new_llm = create_llm_client(new_model, _config.global_.region)
 
     # Update harness state via public method
     _agent.switch_model(command.model_key, new_model, new_llm)

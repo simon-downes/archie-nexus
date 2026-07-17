@@ -10,7 +10,7 @@ from archie_shared.events import (
     serialize_command,
     serialize_event,
 )
-from archie_shared.models import CostConfig, ModelEntry, ProviderConfig
+from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
 
 
 class TestSwitchModelCommand:
@@ -120,7 +120,7 @@ class TestModelSwitchHandler:
         test_model_a = ModelEntry(
             name="Test Model A",
             context=200_000,
-            provider=ProviderConfig(name="bedrock", endpoint="test-a-endpoint", region="us-east-1"),
+            provider=BedrockProvider(model_id="test-a-endpoint", region="us-east-1"),
             cost=CostConfig(input=3.0, output=15.0),
             max_output_tokens=4096,
             can_cache=True,
@@ -128,7 +128,7 @@ class TestModelSwitchHandler:
         test_model_b = ModelEntry(
             name="Test Model B",
             context=100_000,
-            provider=ProviderConfig(name="bedrock", endpoint="test-b-endpoint", region=None),
+            provider=BedrockProvider(model_id="test-b-endpoint"),
             cost=CostConfig(input=1.0, output=5.0),
             max_output_tokens=8192,
             can_cache=False,
@@ -150,15 +150,15 @@ class TestModelSwitchHandler:
 
         catalog = {"model-a": test_model_a, "model-b": test_model_b}
 
-        # Mock BedrockClient so it doesn't try to connect to AWS
-        class FakeBedrockClient:
-            def __init__(self, model_id, region, max_output_tokens=32_768, can_cache=False):
+        # Mock create_llm_client so it doesn't try to connect to AWS/Ollama
+        class FakeLLMClient:
+            def __init__(self, model_id="", region="", **kwargs):
                 self.model_id = model_id
-                self._region = region
-                self.max_output_tokens = max_output_tokens
-                self._cache_supported = can_cache
 
-        monkeypatch.setattr(app_module, "BedrockClient", FakeBedrockClient)
+        def fake_create_llm_client(model, default_region):
+            return FakeLLMClient(model_id=model.provider.model_id)
+
+        monkeypatch.setattr(app_module, "create_llm_client", fake_create_llm_client)
 
         # Monkeypatch module-level state
         monkeypatch.setattr(app_module, "_agent", harness)
@@ -285,10 +285,23 @@ class TestModelSwitchHandler:
     async def test_switch_model_uses_config_region_fallback(
         self, tmp_path, monkeypatch, _setup_app
     ):
-        """Model with no explicit region uses config.global_.region."""
+        """Model with no explicit region uses config.global_.region via factory."""
         harness, _ = _setup_app
-
+        import archie_agent.app as app_module
         from archie_agent.app import _handle_model_switch
+
+        # Track what the factory receives
+        factory_calls = []
+
+        def tracking_factory(model, default_region):
+            factory_calls.append((model.provider.model_id, default_region))
+
+            class FakeClient:
+                model_id = model.provider.model_id
+
+            return FakeClient()
+
+        monkeypatch.setattr(app_module, "create_llm_client", tracking_factory)
 
         class FakeWS:
             async def send_text(self, data):
@@ -297,8 +310,8 @@ class TestModelSwitchHandler:
         cmd = SwitchModelCommand(model_key="model-b")
         await _handle_model_switch(cmd, FakeWS())
 
-        # model-b has region=None, so should fall back to config's us-west-2
-        assert harness._llm._region == "us-west-2"
+        # model-b has region=None, so factory should receive config's us-west-2
+        assert factory_calls[-1] == ("test-b-endpoint", "us-west-2")
 
 
 # ---------------------------------------------------------------------------
@@ -319,13 +332,13 @@ class TestModelProvider:
             "model-haiku": ModelEntry(
                 name="Claude Haiku 4.5",
                 context=200_000,
-                provider=ProviderConfig(name="bedrock", endpoint="ep-haiku"),
+                provider=BedrockProvider(model_id="ep-haiku"),
                 cost=CostConfig(input=1.0, output=5.0),
             ),
             "model-sonnet": ModelEntry(
                 name="Claude Sonnet 4.6",
                 context=200_000,
-                provider=ProviderConfig(name="bedrock", endpoint="ep-sonnet"),
+                provider=BedrockProvider(model_id="ep-sonnet"),
                 cost=CostConfig(input=3.0, output=15.0),
             ),
         }
@@ -360,7 +373,7 @@ class TestModelProvider:
             "model-sonnet": ModelEntry(
                 name="Claude Sonnet 4.6",
                 context=200_000,
-                provider=ProviderConfig(name="bedrock", endpoint="ep"),
+                provider=BedrockProvider(model_id="ep"),
                 cost=CostConfig(input=3.0, output=15.0),
             ),
         }
