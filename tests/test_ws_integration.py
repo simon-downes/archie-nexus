@@ -43,10 +43,10 @@ def mock_events():
 
 @pytest.fixture
 def client(mock_env, mock_events):
-    """Create a TestClient with mocked Bedrock."""
+    """Create a TestClient with mocked LLM client."""
     with patch.dict(os.environ, mock_env):
         mock_bedrock = _make_mock_bedrock_client(mock_events)
-        with patch("archie_agent.app.BedrockClient", return_value=mock_bedrock):
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
             from archie_agent.app import app
 
             with TestClient(app) as c:
@@ -173,7 +173,7 @@ def test_websocket_tool_turn(mock_env, tmp_path):
     mock_bedrock.stream = stream_fn
 
     with patch.dict(os.environ, mock_env):
-        with patch("archie_agent.app.BedrockClient", return_value=mock_bedrock):
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
             # Simpler approach: just patch run_exec to avoid needing the subprocess
             from unittest.mock import AsyncMock
 

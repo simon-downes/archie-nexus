@@ -5,7 +5,7 @@ Default models are defined in code; users can override or add models via
 <ARCHIE_HOME_DIR>/models.yaml.
 
 Key format: provider-model (e.g. bedrock-claude-sonnet-4-6).
-The actual inference profile ID lives in provider.endpoint.
+The actual inference profile ID or model tag lives in provider.model_id.
 """
 
 import msgspec
@@ -22,18 +22,37 @@ class CostConfig(msgspec.Struct):
     cache_write: float = 0.0
 
 
-class ProviderConfig(msgspec.Struct):
-    """LLM provider configuration.
+class BedrockProvider(msgspec.Struct, tag="bedrock"):
+    """Bedrock provider configuration.
 
     Attributes:
-        name: Provider backend ("bedrock" or "ollama").
-        endpoint: Bedrock inference profile ID, or ollama host:port.
-        region: Bedrock region override. None means use session default.
+        model_id: Bedrock inference profile ID (e.g. "eu.anthropic.claude-sonnet-4-6").
+        region: Region override. None means use session default.
     """
 
-    name: str
-    endpoint: str
+    model_id: str
     region: str | None = None
+
+
+class OllamaProvider(msgspec.Struct, tag="ollama"):
+    """Ollama provider configuration.
+
+    Attributes:
+        model_id: Ollama model tag (e.g. "qwen3.6:35b").
+        endpoint: Host:port of the ollama server.
+    """
+
+    model_id: str
+    endpoint: str = "host.docker.internal:11434"
+
+
+# Type alias for provider config union (used in ModelEntry annotation)
+ProviderConfig = BedrockProvider | OllamaProvider
+
+
+def provider_name(provider: ProviderConfig) -> str:
+    """Return the provider backend name (e.g. 'bedrock', 'ollama')."""
+    return provider.__struct_config__.tag
 
 
 class ModelEntry(msgspec.Struct):
@@ -64,37 +83,35 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
     "bedrock-claude-fable-5": ModelEntry(
         name="Claude Fable 5",
         context=1_000_000,
-        provider=ProviderConfig(name="bedrock", endpoint="eu.anthropic.claude-fable-5"),
+        provider=BedrockProvider(model_id="eu.anthropic.claude-fable-5"),
         can_cache=True,
         cost=CostConfig(input=11.0, output=55.0, cache_read=1.10, cache_write=13.75),
     ),
     "bedrock-claude-sonnet-4-6": ModelEntry(
         name="Claude Sonnet 4.6",
         context=1_000_000,
-        provider=ProviderConfig(name="bedrock", endpoint="eu.anthropic.claude-sonnet-4-6"),
+        provider=BedrockProvider(model_id="eu.anthropic.claude-sonnet-4-6"),
         can_cache=True,
         cost=CostConfig(input=3.3, output=16.5, cache_read=0.33, cache_write=4.125),
     ),
     "bedrock-claude-haiku-4-5": ModelEntry(
         name="Claude Haiku",
         context=200_000,
-        provider=ProviderConfig(
-            name="bedrock", endpoint="eu.anthropic.claude-haiku-4-5-20251001-v1:0"
-        ),
+        provider=BedrockProvider(model_id="eu.anthropic.claude-haiku-4-5-20251001-v1:0"),
         can_cache=True,
         cost=CostConfig(input=1.1, output=5.5, cache_read=0.11, cache_write=1.375),
     ),
     "bedrock-claude-opus-4-6": ModelEntry(
         name="Claude Opus 4.6",
         context=1_000_000,
-        provider=ProviderConfig(name="bedrock", endpoint="eu.anthropic.claude-opus-4-6-v1"),
+        provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-6-v1"),
         can_cache=True,
         cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875),
     ),
     "bedrock-claude-opus-4-8": ModelEntry(
         name="Claude Opus 4.8",
         context=1_000_000,
-        provider=ProviderConfig(name="bedrock", endpoint="eu.anthropic.claude-opus-4-8"),
+        provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-8"),
         can_cache=True,
         cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875),
     ),
@@ -102,34 +119,28 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
     "bedrock-glm-5": ModelEntry(
         name="GLM 5",
         context=200_000,
-        provider=ProviderConfig(name="bedrock", endpoint="zai.glm-5", region="eu-west-2"),
+        provider=BedrockProvider(model_id="zai.glm-5", region="eu-west-2"),
         max_output_tokens=128_000,
         cost=CostConfig(input=1.55, output=4.96),
     ),
     "bedrock-qwen3-coder-next": ModelEntry(
         name="Qwen3 Coder Next",
         context=256_000,
-        provider=ProviderConfig(
-            name="bedrock", endpoint="qwen.qwen3-coder-next", region="eu-west-2"
-        ),
+        provider=BedrockProvider(model_id="qwen.qwen3-coder-next", region="eu-west-2"),
         max_output_tokens=16_000,
         cost=CostConfig(input=0.60, output=1.44),
     ),
     "bedrock-qwen3-coder-480b": ModelEntry(
         name="Qwen3 Coder 480B A35B",
         context=128_000,
-        provider=ProviderConfig(
-            name="bedrock", endpoint="qwen.qwen3-coder-480b-a35b-v1:0", region="eu-west-2"
-        ),
+        provider=BedrockProvider(model_id="qwen.qwen3-coder-480b-a35b-v1:0", region="eu-west-2"),
         max_output_tokens=16_000,
         cost=CostConfig(input=1.225, output=4.8825),
     ),
     "bedrock-kimi-k2-5": ModelEntry(
         name="Kimi K2.5",
         context=256_000,
-        provider=ProviderConfig(
-            name="bedrock", endpoint="moonshotai.kimi-k2.5", region="eu-west-2"
-        ),
+        provider=BedrockProvider(model_id="moonshotai.kimi-k2.5", region="eu-west-2"),
         max_output_tokens=16_000,
         cost=CostConfig(input=0.72, output=3.60),
     ),
@@ -137,13 +148,13 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
     "ollama-qwen3-6-35b": ModelEntry(
         name="Qwen 3.6 35B",
         context=128_000,
-        provider=ProviderConfig(name="ollama", endpoint="localhost:11434"),
+        provider=OllamaProvider(model_id="qwen3.6:35b"),
         max_output_tokens=16_000,
     ),
     "ollama-gemma4-31b": ModelEntry(
         name="Gemma 4 31B",
         context=128_000,
-        provider=ProviderConfig(name="ollama", endpoint="localhost:11434"),
+        provider=OllamaProvider(model_id="gemma4:31b"),
         max_output_tokens=16_000,
     ),
 }

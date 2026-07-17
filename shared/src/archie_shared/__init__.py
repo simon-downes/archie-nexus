@@ -21,12 +21,15 @@ from archie_shared.events import (
     serialize_event,
 )
 from archie_shared.models import (
+    BedrockProvider,
     CostConfig,
     ModelEntry,
+    OllamaProvider,
     ProviderConfig,
     calculate_cost,
     get_model,
     load_models,
+    provider_name,
 )
 from archie_shared.schemas import (
     AgentConfig,
@@ -41,6 +44,7 @@ from archie_shared.types import ContentBlock, TextBlock, ToolResultBlock, ToolUs
 
 __all__ = [
     "AgentConfig",
+    "BedrockProvider",
     "ClientCommand",
     "CliConfig",
     "ConfigError",
@@ -51,6 +55,7 @@ __all__ = [
     "MessageCommand",
     "ModelEntry",
     "NexusConfig",
+    "OllamaProvider",
     "PROTOCOL_VERSION",
     "ProviderConfig",
     "ServerEvent",
@@ -75,6 +80,7 @@ __all__ = [
     "load_config",
     "load_models",
     "load_nexus_config",
+    "provider_name",
     "serialize_command",
     "serialize_event",
 ]

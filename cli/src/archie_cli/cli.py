@@ -256,6 +256,7 @@ def start(detach: bool):
         "--rm",
         "--name",
         cname,
+        "--add-host=host.docker.internal:host-gateway",
         "-p",
         f"127.0.0.1:0:{CONTAINER_PORT}",
         "-e",

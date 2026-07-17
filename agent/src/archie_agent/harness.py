@@ -44,7 +44,7 @@ from archie_shared.events import (
 from archie_shared.events import (
     Usage as WireUsage,
 )
-from archie_shared.models import calculate_cost
+from archie_shared.models import calculate_cost, provider_name
 from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
 from archie_shared.types import ToolResultBlock, ToolUseBlock
 from starlette.websockets import WebSocket
@@ -483,7 +483,7 @@ class AgentHarness:
                 )
                 metadata = MessageMetadata(
                     model=self.session.model_id,
-                    backend=self.session.model.provider.name,
+                    backend=provider_name(self.session.model.provider),
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
                     cache_read_tokens=usage.cache_read_tokens,
@@ -494,7 +494,7 @@ class AgentHarness:
             else:
                 metadata = MessageMetadata(
                     model=self.session.model_id,
-                    backend=self.session.model.provider.name,
+                    backend=provider_name(self.session.model.provider),
                     interrupted=interrupted,
                 )
 
