@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from archie_shared.config import ConfigError
-from archie_shared.schemas import NexusConfig, expand_project_root, load_nexus_config
+from archie_shared.schemas import NexusConfig, expand_workspace_root, load_nexus_config
 
 # --- Tests: load_nexus_config with defaults ---
 
@@ -14,7 +14,7 @@ def test_load_nexus_config_no_file_returns_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = load_nexus_config()
     assert config.global_.model == "bedrock-claude-sonnet-4-6"
-    assert config.global_.project_root == "~/dev"
+    assert config.global_.workspace_root == "~/dev"
     assert config.global_.region == "eu-west-1"
 
 
@@ -36,7 +36,7 @@ def test_load_nexus_config_full(tmp_path):
     cfg.write_text(
         "global:\n"
         "  model: bedrock-claude-opus-4-6\n"
-        "  project_root: ~/projects\n"
+        "  workspace_root: ~/projects\n"
         "  region: us-east-1\n"
         "cli: {}\n"
         "agent: {}\n"
@@ -44,7 +44,7 @@ def test_load_nexus_config_full(tmp_path):
     )
     config = load_nexus_config(path=cfg)
     assert config.global_.model == "bedrock-claude-opus-4-6"
-    assert config.global_.project_root == "~/projects"
+    assert config.global_.workspace_root == "~/projects"
     assert config.global_.region == "us-east-1"
 
 
@@ -135,20 +135,20 @@ def test_orchestrator_config_unknown_key_rejected(tmp_path):
         load_nexus_config(path=cfg)
 
 
-# --- Tests: expand_project_root ---
+# --- Tests: expand_workspace_root ---
 
 
-def test_expand_project_root_tilde():
-    """Tilde in project_root is expanded."""
+def test_expand_workspace_root_tilde():
+    """Tilde in workspace_root is expanded."""
     config = NexusConfig()
-    result = expand_project_root(config)
+    result = expand_workspace_root(config)
     assert result == Path.home() / "dev"
 
 
-def test_expand_project_root_absolute(tmp_path):
+def test_expand_workspace_root_absolute(tmp_path):
     """Absolute path is unchanged."""
     from archie_shared.schemas import GlobalConfig
 
-    config = NexusConfig(global_=GlobalConfig(project_root=str(tmp_path / "projects")))
-    result = expand_project_root(config)
+    config = NexusConfig(global_=GlobalConfig(workspace_root=str(tmp_path / "projects")))
+    result = expand_workspace_root(config)
     assert result == tmp_path / "projects"

@@ -2,7 +2,7 @@
 
 Determines which project directory to use as the working context.
 The logic: walk up from the current working directory to find the first
-directory that's a direct child of project_root (e.g. ~/dev/myproject).
+directory that's a direct child of workspace_root (e.g. ~/dev/myproject).
 
 This gives IDE-like behaviour — launching archie from ~/dev/myproject/src/lib
 still treats ~/dev/myproject as the project root, so file tools see the
@@ -11,14 +11,14 @@ whole project tree.
 
 from pathlib import Path
 
-DEFAULT_PROJECT_ROOT = Path.home() / "dev"
+DEFAULT_WORKSPACE_ROOT = Path.home() / "dev"
 
 
-def detect_project_dir(cwd: Path | None = None, project_root: Path | None = None) -> Path:
+def detect_project_dir(cwd: Path | None = None, workspace_root: Path | None = None) -> Path:
     """Detect the project directory by walking up from cwd.
 
     Finds the first ancestor of cwd (or cwd itself) that's a direct child
-    of project_root. Falls back to cwd if it's not under project_root.
+    of workspace_root. Falls back to cwd if it's not under workspace_root.
 
     Examples:
         detect_project_dir(Path("~/dev/myproj/src"), Path("~/dev"))
@@ -29,7 +29,7 @@ def detect_project_dir(cwd: Path | None = None, project_root: Path | None = None
 
     Args:
         cwd: Current working directory (resolved/absolute). Defaults to Path.cwd().
-        project_root: The parent directory that contains all projects.
+        workspace_root: The parent directory that contains all workspaces.
             Defaults to ~/dev.
 
     Returns:
@@ -37,19 +37,19 @@ def detect_project_dir(cwd: Path | None = None, project_root: Path | None = None
     """
     if cwd is None:
         cwd = Path.cwd()
-    if project_root is None:
-        project_root = DEFAULT_PROJECT_ROOT
+    if workspace_root is None:
+        workspace_root = DEFAULT_WORKSPACE_ROOT
 
     # Resolve both to ensure consistent comparison
     cwd = cwd.resolve()
-    project_root = project_root.resolve()
+    workspace_root = workspace_root.resolve()
 
-    # Walk up from cwd, checking if each ancestor is a direct child of project_root
+    # Walk up from cwd, checking if each ancestor is a direct child of workspace_root
     current = cwd
     while current != current.parent:  # Stop at filesystem root
-        if current.parent == project_root:
+        if current.parent == workspace_root:
             return current
         current = current.parent
 
-    # Fallback: cwd is not under project_root, use cwd as-is
+    # Fallback: cwd is not under workspace_root, use cwd as-is
     return cwd
