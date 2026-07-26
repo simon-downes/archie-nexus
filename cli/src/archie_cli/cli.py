@@ -113,18 +113,18 @@ def start(detach: bool, workspace: str | None):
             json={"workspace": ws_name},
             timeout=60.0,
         )
-    except httpx.ConnectError:
+    except httpx.HTTPError as exc:
         raise click.ClickException(
-            f"Cannot connect to the orchestrator at {url}.\n"
+            f"Cannot reach the orchestrator at {url}: {exc}\n"
             "Start it first with: archie serve"
         ) from None
 
     if response.status_code == 400:
-        raise click.ClickException(response.json().get("error", "Bad request"))
+        raise click.ClickException(_error_body(response, "Bad request"))
     if response.status_code != 200:
         raise click.ClickException(
             f"Orchestrator error ({response.status_code}): "
-            f"{response.json().get('error', 'unknown error')}"
+            f"{_error_body(response)}"
         )
 
     import msgspec
@@ -141,7 +141,7 @@ def start(detach: bool, workspace: str | None):
 
     if detach:
         click.echo(f"Container: {descriptor.container_name}")
-        click.echo(f"Agent: http://127.0.0.1:{descriptor.port}")
+        click.echo(f"Agent: http://{profile.host}:{descriptor.port}")
     else:
         from archie_cli.tui.app import ArchieApp
 
@@ -201,6 +201,19 @@ def _resolve_prefix(
 def _profile_url(profile) -> str:
     """Return the base HTTP URL for an OrchestratorProfile."""
     return f"http://{profile.host}:{profile.port}"
+
+
+def _error_body(response: httpx.Response, default: str = "unknown error") -> str:
+    """Safely extract an error message from a response body.
+
+    Falls back to a truncated raw body when the response is not JSON, so a
+    non-JSON error page never raises an uncaught traceback.
+    """
+    try:
+        return response.json().get("error", default)
+    except (ValueError, AttributeError):
+        text = response.text.strip()
+        return text[:200] if text else default
 
 
 def _parse_archie_host(env_host: str):
@@ -330,14 +343,18 @@ def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -
     try:
         response = httpx.get(f"{url}/sessions", timeout=5.0)
         response.raise_for_status()
-    except httpx.ConnectError:
-        click.echo(f"  ✗ Unreachable: {url}")
-        return
     except httpx.HTTPStatusError as exc:
         click.echo(f"  ✗ Error {exc.response.status_code} from {url}")
         return
+    except httpx.HTTPError:
+        click.echo(f"  ✗ Unreachable: {url}")
+        return
 
-    sessions = msgspec.json.decode(response.content, type=list[SessionDescriptor])
+    try:
+        sessions = msgspec.json.decode(response.content, type=list[SessionDescriptor])
+    except msgspec.DecodeError:
+        click.echo(f"  ✗ Unexpected response from {url}")
+        return
 
     if not sessions:
         click.echo("No running sessions.")
@@ -389,7 +406,7 @@ def attach(session_id: str | None):
 
     config = load_nexus_config()
 
-    if session_id is not None and "/" in session_id:
+    if session_id is not None:
         profile, sid_prefix = _resolve_target(session_id, config)
     else:
         profile = get_profile(config.orchestrator)
@@ -426,7 +443,7 @@ def stop(session_id: str | None):
 
     config = load_nexus_config()
 
-    if session_id is not None and "/" in session_id:
+    if session_id is not None:
         profile, sid_prefix = _resolve_target(session_id, config)
     else:
         profile = get_profile(config.orchestrator)
@@ -445,9 +462,9 @@ def stop(session_id: str | None):
         stop_response = httpx.delete(
             f"{url}/sessions/{target.session_id}", timeout=15.0
         )
-    except httpx.ConnectError:
+    except httpx.HTTPError as exc:
         raise click.ClickException(
-            f"Cannot connect to the orchestrator at {url}.\n"
+            f"Cannot reach the orchestrator at {url}: {exc}\n"
             "Start it first with: archie serve"
         ) from None
 
@@ -457,7 +474,7 @@ def stop(session_id: str | None):
         )
     if stop_response.status_code != 200:
         raise click.ClickException(
-            f"Failed to stop session: {stop_response.json().get('error', 'unknown error')}"
+            f"Failed to stop session: {_error_body(stop_response)}"
         )
 
     click.echo(f"✓ Stopped session: {target.session_id}")

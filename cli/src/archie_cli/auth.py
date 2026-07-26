@@ -336,9 +336,9 @@ def auth_push(profile: str):
             content=cred_path.read_bytes(),
             timeout=10.0,
         )
-    except httpx.ConnectError:
+    except httpx.HTTPError as exc:
         raise click.ClickException(
-            f"Cannot connect to orchestrator at {url}.\n"
+            f"Cannot reach orchestrator at {url}: {exc}\n"
             "Ensure 'archie serve' is running on the remote host."
         ) from None
 

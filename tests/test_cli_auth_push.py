@@ -77,11 +77,12 @@ def test_auth_push_orchestrator_unreachable_errors(monkeypatch, tmp_path):
     with patch("archie_cli.auth.httpx") as mock_httpx:
         mock_httpx.post.side_effect = real_httpx.ConnectError("refused")
         mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPError = real_httpx.HTTPError
         runner = CliRunner()
         result = runner.invoke(main, ["auth", "push", "gpu-box"])
 
     assert result.exit_code != 0
-    assert "Cannot connect" in result.output
+    assert "Cannot reach orchestrator" in result.output
 
 
 def test_auth_push_http_error_reported(monkeypatch, tmp_path):

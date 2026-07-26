@@ -211,6 +211,7 @@ def test_ls_unreachable_profile_shown_gracefully(monkeypatch, tmp_path):
         mock_httpx.get.side_effect = real_httpx.ConnectError("refused")
         mock_httpx.ConnectError = real_httpx.ConnectError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
+        mock_httpx.HTTPError = real_httpx.HTTPError
         runner = CliRunner()
         result = runner.invoke(main, ["ls"])
 
