@@ -39,16 +39,27 @@ class WebConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Web UI-specific settings (placeholder for future fields)."""
 
 
-class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
-    """Orchestrator-specific settings.
-
-    Attributes:
-        host: Bind/connect host for the orchestrator HTTP server.
-        port: Bind/connect port for the orchestrator HTTP server.
-    """
+class OrchestratorProfile(msgspec.Struct, forbid_unknown_fields=True):
+    """A single orchestrator target (host + port)."""
 
     host: str = "127.0.0.1"
     port: int = 7600
+
+
+class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Orchestrator configuration — profiles keyed by name.
+
+    Named profiles are resolved by the CLI for multi-host addressing.
+    The 'default' profile (or OrchestratorProfile() if absent) is used
+    for commands that don't specify a profile.
+    """
+
+    profiles: dict[str, OrchestratorProfile] = msgspec.field(default_factory=dict)
+
+
+def get_profile(config: OrchestratorConfig, name: str = "default") -> OrchestratorProfile:
+    """Get a named profile, falling back to hardcoded defaults if absent."""
+    return config.profiles.get(name, OrchestratorProfile())
 
 
 class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):

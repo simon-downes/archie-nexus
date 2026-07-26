@@ -21,6 +21,7 @@ import time
 
 import httpx
 from archie_shared.events import (
+    PROTOCOL_VERSION,
     IterationStart,
     ModelSwitched,
     SessionInfo,
@@ -306,6 +307,13 @@ class ArchieApp(App):
             self._cost_per_m_output = event.cost_per_m_output
             self._cost_per_m_cache_read = event.cost_per_m_cache_read
             self._cost_per_m_cache_write = event.cost_per_m_cache_write
+            # Warn if the session's protocol version is newer than this client supports
+            if event.protocol_version > PROTOCOL_VERSION:
+                self._show_client_error(
+                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
+                    f"this client supports v{PROTOCOL_VERSION}. "
+                    "Some features may not work — consider updating the CLI."
+                )
 
         elif isinstance(event, ModelSwitched):
             status = self.query_one("#status", StatusBar)

@@ -105,24 +105,60 @@ def test_load_nexus_config_respects_archie_home_dir(monkeypatch, tmp_path):
     assert config.global_.region == "eu-central-1"
 
 
-# --- Tests: OrchestratorConfig ---
+# --- Tests: OrchestratorConfig / OrchestratorProfile ---
 
 
 def test_orchestrator_config_defaults(monkeypatch, tmp_path):
-    """Config without orchestrator key → defaults (host=127.0.0.1, port=7600)."""
+    """Config without orchestrator key → empty profiles dict."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = load_nexus_config()
-    assert config.orchestrator.host == "127.0.0.1"
-    assert config.orchestrator.port == 7600
+    assert config.orchestrator.profiles == {}
 
 
-def test_orchestrator_config_port_override(tmp_path):
-    """orchestrator.port in config overrides the default."""
+def test_get_profile_default_fallback(monkeypatch, tmp_path):
+    """get_profile with empty profiles → OrchestratorProfile() defaults."""
+    from archie_shared.schemas import get_profile
+
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = load_nexus_config()
+    profile = get_profile(config.orchestrator)
+    assert profile.host == "127.0.0.1"
+    assert profile.port == 7600
+
+
+def test_get_profile_named(tmp_path):
+    """Named profile loaded from config is returned by get_profile."""
+    from archie_shared.schemas import get_profile
+
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("orchestrator:\n  port: 8800\n")
+    cfg.write_text(
+        "orchestrator:\n"
+        "  profiles:\n"
+        "    gpu-box:\n"
+        "      host: 192.168.1.50\n"
+        "      port: 7601\n"
+    )
     config = load_nexus_config(path=cfg)
-    assert config.orchestrator.port == 8800
-    assert config.orchestrator.host == "127.0.0.1"  # default
+    profile = get_profile(config.orchestrator, "gpu-box")
+    assert profile.host == "192.168.1.50"
+    assert profile.port == 7601
+
+
+def test_get_profile_missing_name_falls_back_to_defaults(tmp_path):
+    """Requesting an unknown profile name falls back to OrchestratorProfile() defaults."""
+    from archie_shared.schemas import get_profile
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "orchestrator:\n"
+        "  profiles:\n"
+        "    other:\n"
+        "      host: 10.0.0.1\n"
+    )
+    config = load_nexus_config(path=cfg)
+    profile = get_profile(config.orchestrator, "nonexistent")
+    assert profile.host == "127.0.0.1"
+    assert profile.port == 7600
 
 
 def test_orchestrator_config_unknown_key_rejected(tmp_path):

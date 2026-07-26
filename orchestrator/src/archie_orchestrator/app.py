@@ -279,6 +279,53 @@ async def get_session_metrics(request: Request) -> Response:
     return Response(msgspec.json.encode(result), media_type="application/json")
 
 
+async def push_credentials(request: Request) -> Response:
+    """POST /credentials — receive and atomically write credentials.yaml.
+
+    Body: raw YAML content of the credentials file.
+    Writes to ~/.nexus/credentials.yaml with 0600 permissions (atomic).
+    Credential contents are never logged.
+    """
+    import os as _os
+    import tempfile
+
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "Empty credentials body"}, status_code=400)
+    # Enforce a reasonable cap — credentials.yaml should never be larger than this
+    _max_cred_size = 1 * 1024 * 1024  # 1 MiB
+    if len(body) > _max_cred_size:
+        return JSONResponse(
+            {"error": f"Credentials body too large (max {_max_cred_size} bytes)"},
+            status_code=413,
+        )
+
+    cred_path = home_dir() / "credentials.yaml"
+    cred_path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd = tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=cred_path.parent,
+        prefix=".credentials-",
+        suffix=".tmp",
+        delete=False,
+    )
+    try:
+        tmp_fd.write(body)
+        tmp_fd.close()
+        _os.chmod(tmp_fd.name, 0o600)
+        _os.replace(tmp_fd.name, cred_path)
+    except Exception:
+        try:
+            _os.unlink(tmp_fd.name)
+        except OSError:
+            pass
+        raise
+
+    log.info("Credentials received")
+    return JSONResponse({"status": "ok"})
+
+
 # ---------------------------------------------------------------------------
 # Global exception handler
 # ---------------------------------------------------------------------------
@@ -311,6 +358,7 @@ app = Starlette(
         Route("/sessions/{session_id}/shell", proxy_shell, methods=["POST"]),
         Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
         Route("/metrics", get_metrics, methods=["GET"]),
+        Route("/credentials", push_credentials, methods=["POST"]),
         WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
     ],
     exception_handlers={Exception: unhandled_exception_handler},
