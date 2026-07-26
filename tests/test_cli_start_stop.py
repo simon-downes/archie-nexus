@@ -140,7 +140,11 @@ def test_start_launches_tui_when_not_detached(monkeypatch, tmp_path):
             runner = CliRunner()
             runner.invoke(main, ["start", "--workspace", "myproject"])
 
-    mock_tui.assert_called_once_with(host="127.0.0.1", port=32771)
+    mock_tui.assert_called_once_with(
+        ws_url="ws://127.0.0.1:7600/sessions/myproject-01abc12345/stream",
+        api_url="http://127.0.0.1:7600/sessions/myproject-01abc12345",
+        container_name="archie-myproject-01abc12345",
+    )
     mock_tui.return_value.run.assert_called_once()
 
 

@@ -1,10 +1,14 @@
 """Starlette application for the archie orchestrator.
 
 Routes:
-  GET    /health                — liveness probe; returns {"status": "ok"}
-  GET    /sessions              — list running archie sessions
-  POST   /sessions              — start a new session
-  DELETE /sessions/{session_id} — stop a running session
+  GET    /health                          — liveness probe
+  GET    /sessions                        — list running archie sessions
+  POST   /sessions                        — start a new session
+  DELETE /sessions/{session_id}           — stop a running session
+  GET    /sessions/{session_id}/status    — proxy to session /status
+  GET    /sessions/{session_id}/history   — proxy to session /history
+  POST   /sessions/{session_id}/shell     — proxy to session /shell
+  WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
 """
 
 import asyncio
@@ -15,10 +19,11 @@ from archie_shared.schemas import load_nexus_config
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 
 from archie_orchestrator.docker import list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
+from archie_orchestrator.proxy import proxy_history, proxy_shell, proxy_status, proxy_stream
 
 # ---------------------------------------------------------------------------
 # Lifespan — load config once at startup
@@ -118,5 +123,9 @@ app = Starlette(
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),
         Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
+        Route("/sessions/{session_id}/status", proxy_status, methods=["GET"]),
+        Route("/sessions/{session_id}/history", proxy_history, methods=["GET"]),
+        Route("/sessions/{session_id}/shell", proxy_shell, methods=["POST"]),
+        WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
     ],
 )

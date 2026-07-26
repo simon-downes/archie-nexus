@@ -5,8 +5,10 @@ description = "Archie orchestrator — host-side control plane"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "archie-shared",
+    "httpx>=0.27",
     "starlette>=0.40",
     "uvicorn>=0.30",
+    "websockets>=13",
 ]
 
 [build-system]
