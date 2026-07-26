@@ -53,10 +53,10 @@ def parse_container_name(name: str) -> str | None:
 def split_id(session_id: str) -> tuple[str, str]:
     """Split a session ID into (workspace, ulid_prefix).
 
-    The ULID prefix is the last 10 characters; everything before the final
-    hyphen is the workspace name (which may itself contain hyphens).
+    Splits on the final hyphen: the segment after it is the ULID suffix, and
+    everything before it is the workspace name (which may itself contain
+    hyphens). Returns (session_id, "") if there is no hyphen.
     """
-    # Last 10 chars after the final hyphen
     last_hyphen = session_id.rfind("-")
     if last_hyphen == -1:
         return session_id, ""

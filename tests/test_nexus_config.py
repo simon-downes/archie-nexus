@@ -144,8 +144,13 @@ def test_get_profile_named(tmp_path):
     assert profile.port == 7601
 
 
-def test_get_profile_missing_name_falls_back_to_defaults(tmp_path):
-    """Requesting an unknown profile name falls back to OrchestratorProfile() defaults."""
+def test_get_profile_unknown_explicit_name_raises(tmp_path):
+    """Requesting an unknown *explicit* profile name raises KeyError.
+
+    Silently returning localhost defaults for a typo'd name would be a footgun.
+    Only the implicit 'default' name falls back to defaults.
+    """
+    import pytest
     from archie_shared.schemas import get_profile
 
     cfg = tmp_path / "config.yaml"
@@ -156,9 +161,8 @@ def test_get_profile_missing_name_falls_back_to_defaults(tmp_path):
         "      host: 10.0.0.1\n"
     )
     config = load_nexus_config(path=cfg)
-    profile = get_profile(config.orchestrator, "nonexistent")
-    assert profile.host == "127.0.0.1"
-    assert profile.port == 7600
+    with pytest.raises(KeyError):
+        get_profile(config.orchestrator, "nonexistent")
 
 
 def test_orchestrator_config_unknown_key_rejected(tmp_path):

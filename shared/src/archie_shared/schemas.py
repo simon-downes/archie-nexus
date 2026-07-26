@@ -39,7 +39,7 @@ class WebConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Web UI-specific settings (placeholder for future fields)."""
 
 
-class OrchestratorProfile(msgspec.Struct, forbid_unknown_fields=True):
+class OrchestratorProfile(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """A single orchestrator target (host + port)."""
 
     host: str = "127.0.0.1"
@@ -58,8 +58,19 @@ class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
 
 
 def get_profile(config: OrchestratorConfig, name: str = "default") -> OrchestratorProfile:
-    """Get a named profile, falling back to hardcoded defaults if absent."""
-    return config.profiles.get(name, OrchestratorProfile())
+    """Get a named profile.
+
+    The implicit ``default`` profile falls back to hardcoded localhost defaults
+    when no ``default`` profile is configured. Any *explicitly requested* profile
+    name that does not exist raises KeyError — silently returning localhost for a
+    typo'd name would be a footgun.
+    """
+    profile = config.profiles.get(name)
+    if profile is not None:
+        return profile
+    if name == "default":
+        return OrchestratorProfile()
+    raise KeyError(name)
 
 
 class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
