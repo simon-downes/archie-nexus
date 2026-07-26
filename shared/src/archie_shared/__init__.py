@@ -36,8 +36,11 @@ from archie_shared.schemas import (
     CliConfig,
     GlobalConfig,
     NexusConfig,
+    OrchestratorConfig,
+    OrchestratorProfile,
     WebConfig,
     expand_workspace_root,
+    get_profile,
     load_nexus_config,
 )
 from archie_shared.types import ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock
@@ -56,6 +59,8 @@ __all__ = [
     "ModelEntry",
     "NexusConfig",
     "OllamaProvider",
+    "OrchestratorConfig",
+    "OrchestratorProfile",
     "PROTOCOL_VERSION",
     "ProviderConfig",
     "ServerEvent",
@@ -76,6 +81,7 @@ __all__ = [
     "deserialize_event",
     "expand_workspace_root",
     "get_model",
+    "get_profile",
     "home_dir",
     "load_config",
     "load_models",

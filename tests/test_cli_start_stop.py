@@ -66,7 +66,7 @@ def test_start_detach_prints_session_info(monkeypatch, tmp_path):
         mock_httpx.ConnectError = real_httpx.ConnectError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
         runner = CliRunner()
-        result = runner.invoke(main, ["start", "--detach", "--workspace", "myproject"])
+        result = runner.invoke(main, ["start", "--detach", "myproject"])
 
     assert result.exit_code == 0, result.output
     assert "myproject-01abc12345" in result.output
@@ -84,7 +84,7 @@ def test_start_sends_correct_workspace(monkeypatch, tmp_path):
         mock_httpx.ConnectError = real_httpx.ConnectError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
         runner = CliRunner()
-        runner.invoke(main, ["start", "--detach", "--workspace", "my-app"])
+        runner.invoke(main, ["start", "--detach", "my-app"])
 
     mock_httpx.post.assert_called_once()
     call_kwargs = mock_httpx.post.call_args
@@ -102,7 +102,7 @@ def test_start_orchestrator_unreachable(monkeypatch, tmp_path):
         mock_httpx.ConnectError = real_httpx.ConnectError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
         runner = CliRunner()
-        result = runner.invoke(main, ["start", "--detach", "--workspace", "myproject"])
+        result = runner.invoke(main, ["start", "--detach", "myproject"])
 
     assert result.exit_code != 0
     assert "archie serve" in result.output
@@ -119,7 +119,7 @@ def test_start_workspace_not_found_400(monkeypatch, tmp_path):
         mock_httpx.ConnectError = real_httpx.ConnectError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
         runner = CliRunner()
-        result = runner.invoke(main, ["start", "--detach", "--workspace", "bad"])
+        result = runner.invoke(main, ["start", "--detach", "bad"])
 
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
@@ -138,7 +138,7 @@ def test_start_launches_tui_when_not_detached(monkeypatch, tmp_path):
         with patch("archie_cli.tui.app.ArchieApp") as mock_tui:
             mock_tui.return_value.run = MagicMock()
             runner = CliRunner()
-            runner.invoke(main, ["start", "--workspace", "myproject"])
+            runner.invoke(main, ["start", "myproject"])
 
     mock_tui.assert_called_once_with(
         ws_url="ws://127.0.0.1:7600/sessions/myproject-01abc12345/stream",

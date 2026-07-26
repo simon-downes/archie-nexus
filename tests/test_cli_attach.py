@@ -130,7 +130,7 @@ def test_start_non_detach_uses_proxy_urls(monkeypatch, tmp_path):
         with patch("archie_cli.tui.app.ArchieApp") as mock_app:
             mock_app.return_value.run = MagicMock()
             runner = CliRunner()
-            runner.invoke(main, ["start", "--workspace", "myproject"])
+            runner.invoke(main, ["start", "myproject"])
 
     mock_app.assert_called_once_with(
         ws_url="ws://127.0.0.1:7600/sessions/myproject-01abc12345/stream",

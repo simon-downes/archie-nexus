@@ -12,6 +12,7 @@ import secrets
 from datetime import UTC, datetime
 
 import click
+import httpx
 from archie_shared.credentials import (
     PROVIDERS,
     InteractiveReauthRequired,
@@ -299,6 +300,55 @@ def status():
                 click.echo(f)
         else:
             click.echo("  (empty)")
+
+
+@auth.command(name="push")
+@click.argument("profile")
+def auth_push(profile: str):
+    """Push local credentials to a remote orchestrator.
+
+    Reads ~/.nexus/credentials.yaml and POSTs it to the named profile's
+    orchestrator at POST /credentials. The remote orchestrator writes the
+    file atomically with 0600 permissions.
+    """
+    from archie_shared.config import home_dir
+    from archie_shared.schemas import load_nexus_config
+
+    config = load_nexus_config()
+    prof = config.orchestrator.profiles.get(profile)
+    if prof is None:
+        raise click.ClickException(
+            f"Unknown profile: '{profile}'.\n"
+            "Add it to ~/.nexus/config.yaml under orchestrator.profiles."
+        )
+
+    cred_path = home_dir() / "credentials.yaml"
+    if not cred_path.exists():
+        raise click.ClickException(
+            "No local credentials.yaml found.\n"
+            "Run 'archie auth bedrock' or 'archie auth set' to create credentials first."
+        )
+
+    url = f"http://{prof.host}:{prof.port}"
+    try:
+        resp = httpx.post(
+            f"{url}/credentials",
+            content=cred_path.read_bytes(),
+            timeout=10.0,
+        )
+    except httpx.ConnectError:
+        raise click.ClickException(
+            f"Cannot connect to orchestrator at {url}.\n"
+            "Ensure 'archie serve' is running on the remote host."
+        ) from None
+
+    if resp.status_code == 200:
+        click.echo(f"✓ Credentials pushed to {profile} ({prof.host}:{prof.port})")
+    else:
+        raise click.ClickException(
+            f"Push failed: HTTP {resp.status_code}\n"
+            f"{resp.text[:200]}"
+        )
 
 
 def _store_tokens(service: str, tokens: dict, provider: OAuthProvider) -> None:

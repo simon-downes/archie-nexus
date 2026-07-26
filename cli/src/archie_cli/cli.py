@@ -73,20 +73,25 @@ def build(no_cache: bool):
 
 @main.command()
 @click.option("-d", "--detach", is_flag=True, help="Start without attaching TUI")
-@click.option("-w", "--workspace", default=None, help="Workspace name (default: detected from cwd)")
+@click.argument("workspace", required=False, default=None)
 def start(detach: bool, workspace: str | None):
     """Start a new agent session.
+
+    WORKSPACE may be a plain workspace name ('myproject') or prefixed with a
+    profile ('gpu-box/myproject'). Defaults to the current project directory.
 
     By default, attaches an interactive TUI after the container is ready.
     Use -d/--detach to start headless (print connection info and exit).
     """
-    from archie_shared.schemas import expand_workspace_root, load_nexus_config
+    from archie_shared.schemas import expand_workspace_root, get_profile, load_nexus_config
+
+    config = load_nexus_config()
 
     if workspace is None:
-        config = load_nexus_config()
-        workspace = detect_project_dir(
-            workspace_root=expand_workspace_root(config)
-        ).name
+        ws_name = detect_project_dir(workspace_root=expand_workspace_root(config)).name
+        profile = get_profile(config.orchestrator)
+    else:
+        profile, ws_name = _resolve_target(workspace, config)
 
     # Ensure home dir and default config exist (pre-flight for fresh installs)
     from archie_shared.config import home_dir
@@ -101,11 +106,11 @@ def start(detach: bool, workspace: str | None):
             '  workspace_root: "~/dev"\n'
         )
 
-    url = _orchestrator_url()
+    url = _profile_url(profile)
     try:
         response = httpx.post(
             f"{url}/sessions",
-            json={"workspace": workspace},
+            json={"workspace": ws_name},
             timeout=60.0,
         )
     except httpx.ConnectError:
@@ -140,7 +145,10 @@ def start(detach: bool, workspace: str | None):
     else:
         from archie_cli.tui.app import ArchieApp
 
-        ws_url, api_url = _session_urls(descriptor.session_id)
+        base = _profile_url(profile)
+        ws_base = base.replace("http://", "ws://")
+        ws_url = f"{ws_base}/sessions/{descriptor.session_id}/stream"
+        api_url = f"{base}/sessions/{descriptor.session_id}"
         app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=descriptor.container_name)
         app.run()
 
@@ -190,22 +198,64 @@ def _resolve_prefix(
     return _pick_session(matches)
 
 
-def _session_urls(session_id: str) -> tuple[str, str]:
-    """Return (ws_url, api_url) for a session via the orchestrator proxy."""
-    base = _orchestrator_url()
-    ws_base = base.replace("http://", "ws://")
-    return (
-        f"{ws_base}/sessions/{session_id}/stream",
-        f"{base}/sessions/{session_id}",
-    )
+def _profile_url(profile) -> str:
+    """Return the base HTTP URL for an OrchestratorProfile."""
+    return f"http://{profile.host}:{profile.port}"
 
 
-def _orchestrator_url() -> str:
-    """Return the base URL for the orchestrator from config."""
-    from archie_shared.schemas import load_nexus_config
+def _parse_archie_host(env_host: str):
+    """Parse ARCHIE_HOST='host:port' or 'host' into an OrchestratorProfile.
 
-    cfg = load_nexus_config()
-    return f"http://{cfg.orchestrator.host}:{cfg.orchestrator.port}"
+    Raises click.ClickException on malformed port.
+    """
+    from archie_shared.schemas import OrchestratorProfile
+
+    host, _, raw_port = env_host.partition(":")
+    if raw_port:
+        try:
+            port = int(raw_port)
+        except ValueError:
+            raise click.ClickException(
+                f"Invalid ARCHIE_HOST value '{env_host}': port must be an integer."
+            ) from None
+    else:
+        port = 7600
+    return OrchestratorProfile(host=host, port=port)
+
+
+def _resolve_target(arg: str, config) -> tuple:
+    """Parse a 'profile/value' or 'value' positional argument.
+
+    Respects ARCHIE_HOST env var (overrides profile resolution for all commands).
+    When ARCHIE_HOST is set and arg contains a '/', the profile prefix is stripped
+    so the remainder is used as the workspace/session value.
+
+    Returns:
+        (OrchestratorProfile, value) where value is the workspace or session ID remainder.
+
+    Raises:
+        click.ClickException: If the profile name is unknown or ARCHIE_HOST is malformed.
+    """
+    from archie_shared.schemas import get_profile
+
+    env_host = os.environ.get("ARCHIE_HOST", "")
+    if env_host:
+        # Strip profile prefix if present — host comes from env, value is the remainder
+        _, sep, remainder = arg.partition("/")
+        value = remainder if sep else arg
+        return _parse_archie_host(env_host), value
+
+    if "/" in arg:
+        profile_name, value = arg.split("/", 1)
+        profile = config.orchestrator.profiles.get(profile_name)
+        if profile is None:
+            raise click.ClickException(
+                f"Unknown profile: '{profile_name}'.\n"
+                "Add it to ~/.nexus/config.yaml under orchestrator.profiles."
+            )
+        return profile, value
+
+    return get_profile(config.orchestrator), arg
 
 
 @main.command()
@@ -216,39 +266,76 @@ def serve():
 
     \b
     orchestrator:
-      host: 127.0.0.1
-      port: 7600
+      profiles:
+        default:
+          host: 0.0.0.0
+          port: 7600
     """
-    from archie_shared.schemas import load_nexus_config
+    from archie_shared.schemas import get_profile, load_nexus_config
 
     cfg = load_nexus_config()
-    host = cfg.orchestrator.host
-    port = cfg.orchestrator.port
+    profile = get_profile(cfg.orchestrator)
+    host = profile.host
+    port = profile.port
 
     click.echo(f"Starting archie orchestrator on {host}:{port}")
     uvicorn.run("archie_orchestrator.app:app", host=host, port=port)
 
 
 @main.command(name="ls")
-def ls_cmd():
-    """List running agent sessions."""
-    url = _orchestrator_url()
+@click.argument("profile", required=False, default=None)
+def ls_cmd(profile: str | None):
+    """List running agent sessions.
+
+    With no argument, lists sessions across all configured profiles (plus the
+    implicit default). With a profile name, lists sessions for that profile only.
+    """
+    from archie_shared.schemas import get_profile, load_nexus_config
+
+    config = load_nexus_config()
+
+    # ARCHIE_HOST env override: query that single address regardless of profiles
+    env_host = os.environ.get("ARCHIE_HOST", "")
+    if env_host:
+        _print_sessions_for_profile(_profile_url(_parse_archie_host(env_host)), label="ARCHIE_HOST")
+        return
+
+    if profile is not None:
+        # Single named profile
+        prof = config.orchestrator.profiles.get(profile)
+        if prof is None:
+            raise click.ClickException(
+                f"Unknown profile: '{profile}'.\n"
+                "Add it to ~/.nexus/config.yaml under orchestrator.profiles."
+            )
+        _print_sessions_for_profile(_profile_url(prof), label=profile)
+    else:
+        # All profiles: explicit ones + implicit default
+        all_profiles: dict[str, object] = {"default": get_profile(config.orchestrator)}
+        for name, prof in config.orchestrator.profiles.items():
+            all_profiles[name] = prof
+
+        multiple = len(all_profiles) > 1
+        for label, prof in all_profiles.items():
+            _print_sessions_for_profile(_profile_url(prof), label=label, show_label=multiple)
+
+
+def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -> None:
+    """Fetch and print sessions for a single orchestrator URL."""
+    import msgspec
+
+    if show_label:
+        click.echo(f"\n[{label}]")
+
     try:
         response = httpx.get(f"{url}/sessions", timeout=5.0)
         response.raise_for_status()
     except httpx.ConnectError:
-        raise click.ClickException(
-            f"Cannot connect to the orchestrator at {url}.\n"
-            "Start it first with: archie serve"
-        ) from None
+        click.echo(f"  ✗ Unreachable: {url}")
+        return
     except httpx.HTTPStatusError as exc:
-        raise click.ClickException(
-            f"Orchestrator returned an error: {exc.response.status_code}\n"
-            f"Check 'archie serve' output for details."
-        ) from None
-
-    import msgspec
-    from archie_shared.session import SessionDescriptor
+        click.echo(f"  ✗ Error {exc.response.status_code} from {url}")
+        return
 
     sessions = msgspec.json.decode(response.content, type=list[SessionDescriptor])
 
@@ -256,10 +343,8 @@ def ls_cmd():
         click.echo("No running sessions.")
         return
 
-    # Header
     click.echo(f"{'SESSION ID':<40} {'STATUS':<20} {'PORT'}")
     click.echo(f"{'-' * 40} {'-' * 20} {'-' * 6}")
-
     for s in sessions:
         port_str = str(s.port) if s.port else "-"
         click.echo(f"{s.session_id:<40} {s.raw_docker_status:<20} {port_str}")
@@ -273,8 +358,16 @@ def shell(session_id: str | None):
     Resolves the session via the orchestrator, then execs directly.
     Supports prefix matching on session ID. If no session specified or match
     is ambiguous, displays a picker.
+
+    Note: shell always uses the default orchestrator profile for session resolution
+    and runs docker exec locally. Profile-prefixed session IDs are not supported
+    because docker exec requires local container access.
     """
-    url = _orchestrator_url()
+    from archie_shared.schemas import get_profile, load_nexus_config
+
+    config = load_nexus_config()
+    profile = get_profile(config.orchestrator)
+    url = _profile_url(profile)
     sessions = _fetch_sessions(url)
     target = _resolve_prefix(sessions, session_id)
 
@@ -288,14 +381,28 @@ def shell(session_id: str | None):
 def attach(session_id: str | None):
     """Attach an interactive TUI to a running session.
 
-    Supports prefix matching on session ID. If no session specified or match
-    is ambiguous, displays a picker.
+    SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
+    Supports prefix matching. If no session specified and only one is running,
+    attaches automatically.
     """
-    url = _orchestrator_url()
-    sessions = _fetch_sessions(url)
-    target = _resolve_prefix(sessions, session_id)
+    from archie_shared.schemas import get_profile, load_nexus_config
 
-    ws_url, api_url = _session_urls(target.session_id)
+    config = load_nexus_config()
+
+    if session_id is not None and "/" in session_id:
+        profile, sid_prefix = _resolve_target(session_id, config)
+    else:
+        profile = get_profile(config.orchestrator)
+        sid_prefix = session_id
+
+    url = _profile_url(profile)
+    sessions = _fetch_sessions(url)
+    target = _resolve_prefix(sessions, sid_prefix)
+
+    base = _profile_url(profile)
+    ws_base = base.replace("http://", "ws://")
+    ws_url = f"{ws_base}/sessions/{target.session_id}/stream"
+    api_url = f"{base}/sessions/{target.session_id}"
 
     from archie_cli.tui.app import ArchieApp
 
@@ -308,56 +415,30 @@ def attach(session_id: str | None):
 def stop(session_id: str | None):
     """Stop a running agent session.
 
+    SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
+    Supports prefix matching. If omitted and only one session is running,
+    stops it automatically.
+
     The container is destroyed (--rm) but the session JSONL log is preserved
     on the host at ~/.nexus/sessions/{session_id}.jsonl.
-
-    Supports prefix matching on session ID.
     """
-    url = _orchestrator_url()
+    from archie_shared.schemas import get_profile, load_nexus_config
 
-    # Fetch running sessions from orchestrator for prefix resolution
-    try:
-        sessions_response = httpx.get(f"{url}/sessions", timeout=5.0)
-        sessions_response.raise_for_status()
-    except httpx.ConnectError:
-        raise click.ClickException(
-            f"Cannot connect to the orchestrator at {url}.\n"
-            "Start it first with: archie serve"
-        ) from None
-    except httpx.HTTPStatusError as exc:
-        raise click.ClickException(
-            f"Orchestrator returned an error: {exc.response.status_code}"
-        ) from None
+    config = load_nexus_config()
 
-    import msgspec
+    if session_id is not None and "/" in session_id:
+        profile, sid_prefix = _resolve_target(session_id, config)
+    else:
+        profile = get_profile(config.orchestrator)
+        sid_prefix = session_id
 
-    try:
-        sessions = msgspec.json.decode(sessions_response.content, type=list[SessionDescriptor])
-    except msgspec.DecodeError as exc:
-        raise click.ClickException(
-            f"Unexpected response from orchestrator: {exc}"
-        ) from None
+    url = _profile_url(profile)
+    sessions = _fetch_sessions(url)
 
     if not sessions:
         raise click.ClickException("No running sessions.")
 
-    # Client-side prefix resolution (same logic as shell/attach)
-    if session_id is None:
-        if len(sessions) == 1:
-            target = sessions[0]
-        else:
-            target = _pick_session(sessions)
-    else:
-        matches = [s for s in sessions if s.session_id.startswith(session_id)]
-        if len(matches) == 0:
-            raise click.ClickException(
-                f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
-            )
-        elif len(matches) == 1:
-            target = matches[0]
-        else:
-            click.echo(f"Multiple sessions match '{session_id}':")
-            target = _pick_session(matches)
+    target = _resolve_prefix(sessions, sid_prefix)
 
     # Stop via orchestrator
     try:
