@@ -13,10 +13,13 @@ Routes:
 
 import asyncio
 import logging
+import sqlite3
 import traceback
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import msgspec
+from archie_shared.config import home_dir
 from archie_shared.schemas import load_nexus_config
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -26,6 +29,7 @@ from starlette.routing import Route, WebSocketRoute
 from archie_orchestrator import configure_logging
 from archie_orchestrator.docker import DockerError, list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
+from archie_orchestrator.metrics import MetricsWriter
 from archie_orchestrator.proxy import (
     get_active_ws_connections,
     proxy_history,
@@ -48,7 +52,21 @@ async def lifespan(app: Starlette):
     app.state.config = load_nexus_config()
     sessions = list_sessions()
     log.info("Discovered %d running sessions", len(sessions))
+
+    # Start metrics writer background task
+    db_path = home_dir() / "metrics.db"
+    writer = MetricsWriter(db_path)
+    app.state.metrics_writer = writer
+    metrics_task = asyncio.create_task(writer.run())
+
     yield
+
+    metrics_task.cancel()
+    try:
+        await metrics_task
+    except asyncio.CancelledError:
+        pass
+
     active = get_active_ws_connections()
     log.info("Orchestrator stopping (%d active connections)", active)
 
@@ -129,6 +147,139 @@ async def session_delete(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# Metrics API
+# ---------------------------------------------------------------------------
+
+
+def _query_metrics(
+    db_path: Path,
+    session_id: str | None = None,
+    since: str | None = None,
+) -> dict:
+    """Query aggregated metrics from SQLite. Returns a metrics dict.
+
+    Args:
+        db_path: Path to the SQLite database.
+        session_id: If given, restrict to rows for this session.
+        since: Optional ISO date string (YYYY-MM-DD). Filters to rows with
+            timestamp >= since.
+
+    Returns:
+        Dict with total_cost, total_requests, token totals, and by_model breakdown.
+    """
+    empty = {
+        "total_cost": 0.0,
+        "total_requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "by_model": {},
+    }
+
+    if not db_path.exists():
+        return empty
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        log.error("Metrics DB open failed: %s", exc)
+        return empty
+
+    try:
+        # Build WHERE clauses
+        conditions = []
+        params: list = []
+        if session_id is not None:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        if since is not None:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        # Aggregate totals
+        row = conn.execute(
+            f"SELECT "
+            f"  COALESCE(SUM(cost), 0.0) AS total_cost, "
+            f"  COUNT(*) AS total_requests, "
+            f"  COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+            f"  COALESCE(SUM(output_tokens), 0) AS output_tokens, "
+            f"  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, "
+            f"  COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens "
+            f"FROM requests {where}",
+            params,
+        ).fetchone()
+
+        if row is None or row["total_requests"] == 0:
+            if session_id is not None:
+                raise KeyError(session_id)
+            return empty
+
+        # by_model breakdown
+        model_rows = conn.execute(
+            f"SELECT model, "
+            f"  COALESCE(SUM(cost), 0.0) AS cost, "
+            f"  COUNT(*) AS requests "
+            f"FROM requests {where} "
+            f"GROUP BY model",
+            params,
+        ).fetchall()
+
+        by_model = {
+            r["model"]: {"cost": r["cost"], "requests": r["requests"]}
+            for r in model_rows
+        }
+
+        return {
+            "total_cost": row["total_cost"],
+            "total_requests": row["total_requests"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "cache_read_tokens": row["cache_read_tokens"],
+            "cache_write_tokens": row["cache_write_tokens"],
+            "by_model": by_model,
+        }
+    except KeyError:
+        raise
+    except sqlite3.Error as exc:
+        log.error("Metrics DB query failed: %s", exc)
+        return empty
+    finally:
+        conn.close()
+
+
+async def get_metrics(request: Request) -> Response:
+    """GET /metrics — aggregate metrics across all sessions.
+
+    Optional query params:
+        since=YYYY-MM-DD  — filter to entries captured on or after this date.
+    """
+    since = request.query_params.get("since")
+    db_path = home_dir() / "metrics.db"
+    result = await asyncio.to_thread(_query_metrics, db_path, since=since)
+    return Response(msgspec.json.encode(result), media_type="application/json")
+
+
+async def get_session_metrics(request: Request) -> Response:
+    """GET /sessions/{session_id}/metrics — metrics for a single session.
+
+    Returns 404 if no metrics have been recorded for that session.
+    """
+    session_id = request.path_params["session_id"]
+    db_path = home_dir() / "metrics.db"
+    try:
+        result = await asyncio.to_thread(_query_metrics, db_path, session_id=session_id)
+    except KeyError:
+        return JSONResponse(
+            {"error": f"No metrics found for session '{session_id}'"},
+            status_code=404,
+        )
+    return Response(msgspec.json.encode(result), media_type="application/json")
+
+
+# ---------------------------------------------------------------------------
 # Global exception handler
 # ---------------------------------------------------------------------------
 
@@ -158,6 +309,8 @@ app = Starlette(
         Route("/sessions/{session_id}/status", proxy_status, methods=["GET"]),
         Route("/sessions/{session_id}/history", proxy_history, methods=["GET"]),
         Route("/sessions/{session_id}/shell", proxy_shell, methods=["POST"]),
+        Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
+        Route("/metrics", get_metrics, methods=["GET"]),
         WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
     ],
     exception_handlers={Exception: unhandled_exception_handler},
