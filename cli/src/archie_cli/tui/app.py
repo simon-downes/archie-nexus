@@ -78,6 +78,8 @@ class ArchieApp(App):
         self._receive_task: asyncio.Task | None = None
         self._reconnecting: bool = False
         self._shutting_down: bool = False
+        # Warn-once guard for protocol-version mismatch (avoids refire on reconnect)
+        self._protocol_warned: bool = False
         # Highest turn_index already rendered — used for history dedup on reconnect
         self._last_displayed_turn: int = 0
 
@@ -274,6 +276,13 @@ class ArchieApp(App):
                 # Reconnected — buffer incoming events, resync history (deduped), replay.
                 self._event_buffer = []
                 self._buffering = True
+                # Cancel any stale receive loop before starting a fresh one.
+                if self._receive_task is not None and not self._receive_task.done():
+                    self._receive_task.cancel()
+                    try:
+                        await self._receive_task
+                    except asyncio.CancelledError:
+                        pass
                 self._receive_task = asyncio.create_task(self._receive_loop())
                 since = self._last_displayed_turn
                 last_turn_index = await self._load_history_since(since)
@@ -308,7 +317,8 @@ class ArchieApp(App):
             self._cost_per_m_cache_read = event.cost_per_m_cache_read
             self._cost_per_m_cache_write = event.cost_per_m_cache_write
             # Warn if the session's protocol version is newer than this client supports
-            if event.protocol_version > PROTOCOL_VERSION:
+            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
+                self._protocol_warned = True
                 self._show_client_error(
                     f"Protocol version mismatch: session uses v{event.protocol_version}, "
                     f"this client supports v{PROTOCOL_VERSION}. "
