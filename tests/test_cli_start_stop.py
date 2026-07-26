@@ -100,6 +100,7 @@ def test_start_orchestrator_unreachable(monkeypatch, tmp_path):
     with patch("archie_cli.cli.httpx") as mock_httpx:
         mock_httpx.post.side_effect = real_httpx.ConnectError("refused")
         mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPError = real_httpx.HTTPError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
         runner = CliRunner()
         result = runner.invoke(main, ["start", "--detach", "myproject"])

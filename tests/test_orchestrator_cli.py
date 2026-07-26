@@ -86,6 +86,7 @@ def test_ls_orchestrator_unreachable(monkeypatch, tmp_path):
     with patch("archie_cli.cli.httpx") as mock_httpx:
         mock_httpx.get.side_effect = real_httpx.ConnectError("Connection refused")
         mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPError = real_httpx.HTTPError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
         runner = CliRunner()
         result = runner.invoke(ls_cmd)
