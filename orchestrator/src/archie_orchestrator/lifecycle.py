@@ -5,6 +5,7 @@ All functions are synchronous — callers should use asyncio.to_thread()
 when invoking from an async context.
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from archie_orchestrator.docker import (
 # orchestrator/src/archie_orchestrator/lifecycle.py → repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+log = logging.getLogger(__name__)
+
 
 def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     """Start a new agent container session for the given workspace.
@@ -45,8 +48,9 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
 
     Raises:
         ValueError: If the workspace directory does not exist under workspace_root.
-        RuntimeError: If the image is missing, docker run fails, or the container
-            does not become ready within the timeout.
+        RuntimeError: If the image is missing locally.
+        DockerError: If docker run fails or the container does not become ready
+            within the timeout.
     """
     # 1. Resolve and validate workspace path
     # Reject names with path separators or traversal sequences to prevent
@@ -131,6 +135,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     # 8. Wait for ready; raises RuntimeError on crash or timeout
     port_str = wait_for_ready(cname, docker_cmd)
 
+    log.info("Session started: %s (workspace: %s)", session_id, workspace)
     return SessionDescriptor(
         session_id=session_id,
         container_name=cname,
@@ -154,3 +159,4 @@ def stop_session(session_id: str) -> None:
     if target is None:
         raise KeyError(f"No running session with ID '{session_id}'")
     stop_container(target.container_name)
+    log.info("Session stopped: %s", session_id)

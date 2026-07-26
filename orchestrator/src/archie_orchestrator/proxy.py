@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 
 import httpx
 import websockets
@@ -20,6 +21,17 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from archie_orchestrator.docker import list_sessions
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Active WebSocket connection counter (used by app.py shutdown log)
+# ---------------------------------------------------------------------------
+
+_active_ws_connections: int = 0
+
+
+def get_active_ws_connections() -> int:
+    """Return the current number of active WebSocket proxy connections."""
+    return _active_ws_connections
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +171,10 @@ async def proxy_stream(websocket: WebSocket) -> None:
     target_url = f"ws://127.0.0.1:{session.port}/stream"
     await websocket.accept()
 
+    global _active_ws_connections
+    _active_ws_connections += 1
+    log.info("Client connected: %s", session_id)
+
     try:
         async with websockets.connect(target_url) as backend:
 
@@ -190,8 +206,20 @@ async def proxy_stream(websocket: WebSocket) -> None:
                 except (asyncio.CancelledError, Exception):
                     pass
 
-    except (ConnectionRefusedError, OSError):
+    except (ConnectionRefusedError, OSError) as exc:
+        log.warning("Backend unreachable for %s: %s", session_id, exc)
         try:
             await websocket.close(code=4002, reason="Session unreachable")
         except Exception:
             pass
+    except Exception as exc:  # noqa: BLE001 — catch-all for unexpected errors
+        tb = traceback.extract_tb(exc.__traceback__)
+        origin = f"{tb[-1].filename}:{tb[-1].lineno}" if tb else "unknown"
+        log.error("WS proxy error for %s: %s (at %s)", session_id, exc, origin)
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except Exception:
+            pass
+    finally:
+        _active_ws_connections -= 1
+        log.info("Client disconnected: %s", session_id)
