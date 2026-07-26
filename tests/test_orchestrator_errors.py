@@ -77,7 +77,9 @@ def test_unhandled_exception_returns_500(caplog):
     assert resp.status_code == 500
     body = resp.json()
     assert body["error"] == "Internal server error"
-    assert "something exploded" in body["detail"]
+    # Internal exception detail must NOT leak to the client (logged only).
+    assert "detail" not in body
+    assert "something exploded" not in resp.text
     assert any("Unhandled error" in r.message for r in caplog.records)
     assert any("something exploded" in r.message for r in caplog.records)
 

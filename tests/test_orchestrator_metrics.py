@@ -460,5 +460,5 @@ def test_db_write_failure_logged_no_crash(tmp_path, caplog):
     finally:
         conn.close()
 
-    assert any("Metrics DB write failed" in r.message for r in caplog.records)
+    assert any("Metrics DB row write failed" in r.message for r in caplog.records)
 

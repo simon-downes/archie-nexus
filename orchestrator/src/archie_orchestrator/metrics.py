@@ -58,6 +58,11 @@ _INSERT = (
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
+# Bound the ingest queue so a stalled writer applies backpressure instead of
+# growing memory unbounded. Bound the per-wake batch drain for the same reason.
+_QUEUE_MAXSIZE = 10_000
+_MAX_BATCH = 500
+
 
 # ---------------------------------------------------------------------------
 # Rate tracking
@@ -93,7 +98,9 @@ class MetricsWriter:
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(
+            maxsize=_QUEUE_MAXSIZE
+        )
         self._rates: dict[str, SessionRates] = {}
 
     @property
@@ -116,12 +123,15 @@ class MetricsWriter:
                 # Block until at least one item is available
                 item = await self._queue.get()
                 batch = [item]
-                # Drain any additional queued items (non-blocking)
-                while not self._queue.empty():
+                # Drain additional queued items (non-blocking), bounded so a
+                # large backlog is written in chunks rather than one giant batch.
+                while len(batch) < _MAX_BATCH and not self._queue.empty():
                     batch.append(self._queue.get_nowait())
                 self._process_batch(conn, batch)
         except asyncio.CancelledError:
-            # Drain remaining items before exit
+            # Best-effort drain of whatever is currently queued before exit.
+            # Items dropped earlier by a full queue (put_nowait) are not
+            # recoverable here; this only flushes what is still buffered.
             remaining = []
             while not self._queue.empty():
                 remaining.append(self._queue.get_nowait())
@@ -167,11 +177,19 @@ class MetricsWriter:
                     rows.append(row)
 
         if rows:
-            try:
-                conn.executemany(_INSERT, rows)
-                conn.commit()
-            except sqlite3.Error as exc:
-                log.error("Metrics DB write failed: %s", exc)
+            # Insert per-row so one malformed row cannot drop the whole batch.
+            written = 0
+            for row in rows:
+                try:
+                    conn.execute(_INSERT, row)
+                    written += 1
+                except sqlite3.Error as exc:
+                    log.error("Metrics DB row write failed: %s", exc)
+            if written:
+                try:
+                    conn.commit()
+                except sqlite3.Error as exc:
+                    log.error("Metrics DB commit failed: %s", exc)
 
     def _handle_session_info(self, session_id: str, event: dict) -> None:
         data = event.get("data", {})
@@ -223,8 +241,14 @@ class MetricsWriter:
             + cw_tok * rates.cache_write
         ) / 1_000_000
 
-        turn_index = event.get("turn_index", 0)
-        context_pct = data.get("context_pct", 0.0)
+        try:
+            turn_index = int(event.get("turn_index", 0))
+        except (TypeError, ValueError):
+            turn_index = 0
+        try:
+            context_pct = float(data.get("context_pct", 0.0))
+        except (TypeError, ValueError):
+            context_pct = 0.0
         timestamp = datetime.now(UTC).isoformat()
 
         return (

@@ -18,6 +18,7 @@ import logging
 import sqlite3
 import traceback
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import msgspec
@@ -55,8 +56,10 @@ log = logging.getLogger(__name__)
 async def lifespan(app: Starlette):
     """Load NexusConfig at startup and store on app state."""
     configure_logging()
+    app.state.start_time = datetime.now(UTC)
     app.state.config = load_nexus_config()
-    sessions = list_sessions()
+    # list_sessions() shells out to docker (blocking) — keep it off the loop.
+    sessions = await asyncio.to_thread(list_sessions)
     log.info("Discovered %d running sessions", len(sessions))
 
     # Start metrics writer background task
@@ -64,6 +67,15 @@ async def lifespan(app: Starlette):
     writer = MetricsWriter(db_path)
     app.state.metrics_writer = writer
     metrics_task = asyncio.create_task(writer.run())
+
+    def _log_metrics_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("Metrics writer task exited unexpectedly: %s", exc)
+
+    metrics_task.add_done_callback(_log_metrics_task_done)
 
     yield
 
@@ -260,9 +272,20 @@ async def get_metrics(request: Request) -> Response:
     """GET /metrics — aggregate metrics across all sessions.
 
     Optional query params:
-        since=YYYY-MM-DD  — filter to entries captured on or after this date.
+        since=<ISO 8601>  — filter to entries with timestamp >= this value.
+            Interpreted as UTC (stored timestamps are UTC). Accepts a date
+            (YYYY-MM-DD) or a full ISO datetime. Non-ISO values return 400.
     """
     since = request.query_params.get("since")
+    if since is not None:
+        try:
+            datetime.fromisoformat(since)
+        except ValueError:
+            return JSONResponse(
+                {"error": "Invalid 'since' — expected ISO 8601 (e.g. 2026-01-31 "
+                 "or 2026-01-31T12:00:00), interpreted as UTC."},
+                status_code=400,
+            )
     db_path = home_dir() / "metrics.db"
     result = await asyncio.to_thread(_query_metrics, db_path, since=since)
     return Response(msgspec.json.encode(result), media_type="application/json")
@@ -342,8 +365,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     tb = traceback.extract_tb(exc.__traceback__)
     origin = f"{tb[-1].filename}:{tb[-1].lineno}" if tb else "unknown"
     log.error("Unhandled error: %s (at %s)", exc, origin)
+    # Do not leak internal exception detail to the client.
     return JSONResponse(
-        {"error": "Internal server error", "detail": str(exc)},
+        {"error": "Internal server error"},
         status_code=500,
     )
 
