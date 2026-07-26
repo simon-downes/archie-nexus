@@ -21,12 +21,10 @@ from archie_orchestrator.docker import list_sessions
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
-_START_TIME = datetime.now(UTC)
 
-
-def _uptime() -> str:
+def _uptime(start_time: datetime) -> str:
     """Return a human-readable uptime string (e.g. '2h 15m' or '3m')."""
-    delta = datetime.now(UTC) - _START_TIME
+    delta = datetime.now(UTC) - start_time
     hours, remainder = divmod(int(delta.total_seconds()), 3600)
     minutes, _ = divmod(remainder, 60)
     if hours > 0:
@@ -69,7 +67,7 @@ async def sessions_page(request: Request) -> HTMLResponse:
         "sessions.html",
         {
             "sessions": session_data,
-            "uptime": _uptime(),
+            "uptime": _uptime(request.app.state.start_time),
             "version": _get_version(),
         },
     )
