@@ -1,6 +1,7 @@
 """Starlette application for the archie orchestrator.
 
 Routes:
+  GET    /                                — web console (session list)
   GET    /health                          — liveness probe
   GET    /sessions                        — list running archie sessions
   POST   /sessions                        — start a new session
@@ -9,6 +10,7 @@ Routes:
   GET    /sessions/{session_id}/history   — proxy to session /history
   POST   /sessions/{session_id}/shell     — proxy to session /shell
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
+  GET    /static/*                        — static files (CSS, etc.)
 """
 
 import asyncio
@@ -24,7 +26,8 @@ from archie_shared.schemas import load_nexus_config
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route, WebSocketRoute
+from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.staticfiles import StaticFiles
 
 from archie_orchestrator import configure_logging
 from archie_orchestrator.docker import DockerError, list_sessions
@@ -37,6 +40,9 @@ from archie_orchestrator.proxy import (
     proxy_status,
     proxy_stream,
 )
+from archie_orchestrator.web import sessions_page
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 log = logging.getLogger(__name__)
 
@@ -349,6 +355,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app = Starlette(
     lifespan=lifespan,
     routes=[
+        Route("/", sessions_page, methods=["GET"]),
         Route("/health", health),
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),
@@ -360,6 +367,7 @@ app = Starlette(
         Route("/metrics", get_metrics, methods=["GET"]),
         Route("/credentials", push_credentials, methods=["POST"]),
         WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
+        Mount("/static", app=StaticFiles(directory=str(_STATIC_DIR)), name="static"),
     ],
     exception_handlers={Exception: unhandled_exception_handler},
 )
