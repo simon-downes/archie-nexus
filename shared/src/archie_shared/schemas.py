@@ -39,10 +39,22 @@ class WebConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Web UI-specific settings (placeholder for future fields)."""
 
 
+class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Orchestrator-specific settings.
+
+    Attributes:
+        host: Bind/connect host for the orchestrator HTTP server.
+        port: Bind/connect port for the orchestrator HTTP server.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 7600
+
+
 class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Top-level application configuration.
 
-    Maps to config.yaml with sections: global, cli, agent, web.
+    Maps to config.yaml with sections: global, cli, agent, web, orchestrator.
     The `global` key is renamed to `global_` in Python (reserved keyword).
     """
 
@@ -50,6 +62,7 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     cli: CliConfig = msgspec.field(default_factory=CliConfig)
     agent: AgentConfig = msgspec.field(default_factory=AgentConfig)
     web: WebConfig = msgspec.field(default_factory=WebConfig)
+    orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
 
 
 def load_nexus_config(path: Path | None = None) -> NexusConfig:
