@@ -19,6 +19,9 @@ from archie_shared.session import (
 )
 
 CONTAINER_PORT = "8080"
+# Container-side username. Fixed at image build time (Dockerfile ARG USERNAME),
+# independent of the host user running the orchestrator.
+CONTAINER_USER = "archie"
 IMAGE_TAG = "archie:latest"
 
 log = logging.getLogger(__name__)
@@ -82,7 +85,9 @@ def run_container(cmd: list[str]) -> None:
     Raises:
         DockerError: If docker run returns a non-zero exit code.
     """
-    log.debug("docker %s", " ".join(cmd[1:4]))  # log first few args only (avoid leaking secrets)
+    # Log only the docker subcommand — never the full argv, which contains
+    # -e/-v pairs that may include secrets (credentials, tokens).
+    log.debug("docker run (%d args)", len(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise DockerError(
