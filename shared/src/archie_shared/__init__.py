@@ -37,7 +37,7 @@ from archie_shared.schemas import (
     GlobalConfig,
     NexusConfig,
     WebConfig,
-    expand_project_root,
+    expand_workspace_root,
     load_nexus_config,
 )
 from archie_shared.types import ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock
@@ -74,7 +74,7 @@ __all__ = [
     "calculate_cost",
     "deserialize_command",
     "deserialize_event",
-    "expand_project_root",
+    "expand_workspace_root",
     "get_model",
     "home_dir",
     "load_config",

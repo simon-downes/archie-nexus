@@ -1,17 +1,40 @@
 """Starlette application for the archie orchestrator.
 
 Routes:
-  GET /health   — liveness probe; returns {"status": "ok"}
-  GET /sessions — list running archie sessions as JSON-serialized SessionDescriptors
+  GET    /health                — liveness probe; returns {"status": "ok"}
+  GET    /sessions              — list running archie sessions
+  POST   /sessions              — start a new session
+  DELETE /sessions/{session_id} — stop a running session
 """
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import msgspec
+from archie_shared.schemas import load_nexus_config
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from archie_orchestrator.docker import list_sessions
+from archie_orchestrator.lifecycle import start_session, stop_session
+
+# ---------------------------------------------------------------------------
+# Lifespan — load config once at startup
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    """Load NexusConfig at startup and store on app state."""
+    app.state.config = load_nexus_config()
+    yield
+
+
+# ---------------------------------------------------------------------------
+# Route handlers
+# ---------------------------------------------------------------------------
 
 
 async def health(request: Request) -> JSONResponse:
@@ -19,16 +42,81 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-async def sessions(request: Request) -> Response:
+async def sessions_get(request: Request) -> Response:
     """Return running archie sessions as a JSON array of SessionDescriptors."""
     result = list_sessions()
     content = msgspec.json.encode(result)
     return Response(content, media_type="application/json")
 
 
+async def sessions_post(request: Request) -> Response:
+    """Start a new agent session.
+
+    Request body: {"workspace": "<name>"}
+
+    Returns:
+        200 + SessionDescriptor on success.
+        400 if workspace key is missing or directory not found.
+        500 on Docker/startup failure.
+    """
+    try:
+        body = await request.body()
+        data = msgspec.json.decode(body, type=dict)
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    workspace = data.get("workspace")
+    if not workspace or not isinstance(workspace, str):
+        return JSONResponse(
+            {"error": "Missing or invalid 'workspace' field in request body"},
+            status_code=400,
+        )
+
+    config = request.app.state.config
+
+    try:
+        descriptor = await asyncio.to_thread(start_session, workspace, config)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    content = msgspec.json.encode(descriptor)
+    return Response(content, media_type="application/json")
+
+
+async def session_delete(request: Request) -> Response:
+    """Stop a running session by exact session ID.
+
+    Returns:
+        200 + {"stopped": "<session_id>"} on success.
+        404 if no session with that ID is running.
+    """
+    session_id = request.path_params["session_id"]
+
+    try:
+        await asyncio.to_thread(stop_session, session_id)
+    except KeyError:
+        return JSONResponse(
+            {"error": f"No running session with ID '{session_id}'"},
+            status_code=404,
+        )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"stopped": session_id})
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
 app = Starlette(
+    lifespan=lifespan,
     routes=[
         Route("/health", health),
-        Route("/sessions", sessions),
-    ]
+        Route("/sessions", sessions_get, methods=["GET"]),
+        Route("/sessions", sessions_post, methods=["POST"]),
+        Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
+    ],
 )

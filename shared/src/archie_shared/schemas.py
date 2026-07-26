@@ -18,12 +18,12 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     Attributes:
         model: Active model key from the catalog.
-        project_root: Base directory for project detection.
+        workspace_root: Base directory containing workspace projects.
         region: Session default AWS region (fallback for geo-inference models).
     """
 
     model: str = "bedrock-claude-sonnet-4-6"
-    project_root: str = "~/dev"
+    workspace_root: str = "~/dev"
     region: str = "eu-west-1"
 
 
@@ -89,6 +89,6 @@ def load_nexus_config(path: Path | None = None) -> NexusConfig:
     return load_config(default_path, NexusConfig)
 
 
-def expand_project_root(config: NexusConfig) -> Path:
-    """Expand the project_root path (tilde expansion)."""
-    return Path(config.global_.project_root).expanduser()
+def expand_workspace_root(config: NexusConfig) -> Path:
+    """Expand the workspace_root path (tilde expansion)."""
+    return Path(config.global_.workspace_root).expanduser()
