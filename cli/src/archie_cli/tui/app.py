@@ -63,19 +63,22 @@ class ArchieApp(App):
         Binding("ctrl+g", "editor", "Editor", show=False),
     ]
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, ws_url: str, api_url: str, container_name: str) -> None:
         super().__init__()
 
         # Register custom theme
         self.register_theme(theme.THEME)
         self.theme = "archie"
 
-        self._host = host
-        self._port = port
+        self._ws_url = ws_url
+        self._api_url = api_url
+        self._container_name = container_name
         self._ws = WSClient()
         self._receive_task: asyncio.Task | None = None
         self._reconnecting: bool = False
         self._shutting_down: bool = False
+        # Highest turn_index already rendered — used for history dedup on reconnect
+        self._last_displayed_turn: int = 0
 
         # UI state
         self._streaming: StreamingMessage | None = None
@@ -121,8 +124,7 @@ class ArchieApp(App):
         self.query_one("#input", MessageInput).focus()
 
         try:
-            ws_url = f"ws://{self._host}:{self._port}/stream"
-            await self._ws.connect(ws_url)
+            await self._ws.connect(self._ws_url)
         except Exception as e:
             self._show_client_error(f"Connection failed: {e}")
             return
@@ -148,22 +150,31 @@ class ArchieApp(App):
 
         Returns the highest turn_index in the history (0 if empty).
         """
+        return await self._load_history_since(0)
+
+    async def _load_history_since(self, since: int) -> int:
+        """Fetch history and render only turns with turn_index > since.
+
+        Returns the highest turn_index rendered (or since if none rendered).
+        """
         conv = self.query_one("#conversation", Conversation)
-        last_turn_index = 0
+        last_turn_index = since
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"http://{self._host}:{self._port}/history", timeout=5.0)
+                resp = await client.get(f"{self._api_url}/history", timeout=5.0)
                 if resp.status_code != 200:
-                    return 0
+                    return since
                 turns = resp.json()
         except Exception as e:
             log.warning("Failed to load history: %s", e)
-            return 0
+            return since
 
         for turn in turns:
             role = turn.get("role")
             turn_index = turn.get("turn_index", 0)
             last_turn_index = max(last_turn_index, turn_index)
+            if turn_index <= since:
+                continue  # already displayed — skip
             content_blocks = turn.get("content", [])
             # Extract text blocks only for display
             text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
@@ -180,6 +191,7 @@ class ArchieApp(App):
             elif role == "interrupted":
                 conv.add_error("[interrupted]")
 
+        self._last_displayed_turn = last_turn_index
         return last_turn_index
 
     async def _receive_loop(self) -> None:
@@ -207,47 +219,63 @@ class ArchieApp(App):
             if not self._shutting_down:
                 self._show_client_error(f"Connection lost: {e}")
                 self._end_turn()
-                self._schedule_reconnect()
+                close_code = getattr(getattr(e, "rcvd", None), "code", None)
+                self._schedule_reconnect(close_code)
             return
 
         # Generator ended without raising — connection closed underneath us.
         if not self._shutting_down:
             self._show_client_error("Connection lost: the agent closed the stream.")
             self._end_turn()
-            self._schedule_reconnect()
+            self._schedule_reconnect(None)
 
-    def _schedule_reconnect(self) -> None:
+    def _schedule_reconnect(self, close_code: int | None = None) -> None:
         """Start a background reconnect task if one isn't already running."""
         if self._reconnecting or self._shutting_down:
             return
         self._reconnecting = True
-        asyncio.create_task(self._reconnect())
+        asyncio.create_task(self._reconnect(close_code))
 
-    async def _reconnect(self) -> None:
+    async def _reconnect(self, close_code: int | None = None) -> None:
         """Reconnect to the agent with backoff and resync via /history.
 
-        On success, restarts the receive loop and replays any missed turns.
-        Retries a bounded number of times before giving up and asking the
-        user to relaunch.
+        Close-code handling:
+        - 4004 (session not found): give up immediately.
+        - 4002 (backend unreachable) / 1006 (abnormal) / None: retry with backoff.
+
+        On success, restarts the receive loop and replays any missed turns
+        (deduplicated by turn_index).
+
+        Total retry window is 30s before giving up.
         """
-        ws_url = f"ws://{self._host}:{self._port}/stream"
-        delays = [1.0, 2.0, 4.0, 8.0, 8.0]
+        if close_code == 4004:
+            self._show_client_error("Session has ended. Relaunch to start a new session.")
+            self._reconnecting = False
+            return
+
+        start = asyncio.get_event_loop().time()
+        deadline = start + 30.0
+        delays = [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
         try:
             for attempt, delay in enumerate(delays, start=1):
                 if self._shutting_down:
                     return
+                if asyncio.get_event_loop().time() + delay > deadline:
+                    break
+                self.notify("Reconnecting...", timeout=delay)
                 await asyncio.sleep(delay)
                 try:
-                    await self._ws.connect(ws_url)
+                    await self._ws.connect(self._ws_url)
                 except Exception as e:  # noqa: BLE001 — retry on any connect failure
                     log.warning("Reconnect attempt %d failed: %s", attempt, e)
                     continue
 
-                # Reconnected — buffer incoming events, resync history, replay.
+                # Reconnected — buffer incoming events, resync history (deduped), replay.
                 self._event_buffer = []
                 self._buffering = True
                 self._receive_task = asyncio.create_task(self._receive_loop())
-                last_turn_index = await self._load_history()
+                since = self._last_displayed_turn
+                last_turn_index = await self._load_history_since(since)
                 self._buffering = False
                 for event in self._event_buffer:
                     if getattr(event, "turn_index", 0) > last_turn_index:
@@ -257,7 +285,7 @@ class ArchieApp(App):
                 return
 
             self._show_client_error(
-                "Reconnect failed after several attempts. "
+                "Reconnect failed after 30s. "
                 "Relaunch the client to continue."
             )
         finally:
@@ -436,8 +464,6 @@ class ArchieApp(App):
         Runs async so the TUI stays responsive. Output is displayed in a
         ShellOutput widget. Errors (docker exec failure) use ClientErrorMessage.
         """
-        from archie_shared.session.identity import container_name
-
         conv = self.query_one("#conversation", Conversation)
         self._shell_active = True
         self._shell_command = command
@@ -445,7 +471,7 @@ class ArchieApp(App):
         timeout = 30
 
         try:
-            cname = container_name(self._session_id)
+            cname = self._container_name
             self._shell_proc = await asyncio.create_subprocess_exec(
                 "docker", "exec", "-w", "/workspace", cname, "bash", "-c", command,
                 stdout=asyncio.subprocess.PIPE,
@@ -489,7 +515,7 @@ class ArchieApp(App):
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(
-                    f"http://{self._host}:{self._port}/shell",
+                    f"{self._api_url}/shell",
                     json={"command": command, "exit_code": exit_code, "output": output},
                     timeout=5,
                 )
