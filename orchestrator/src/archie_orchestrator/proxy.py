@@ -184,12 +184,12 @@ async def proxy_stream(websocket: WebSocket) -> None:
     _writer = getattr(websocket.app.state, "metrics_writer", None)
     metrics_queue = _writer.queue if _writer is not None else None
 
-    global _active_ws_connections
-    _active_ws_connections += 1
     log.info("Client connected: %s", session_id)
 
+    global _active_ws_connections
+    _active_ws_connections += 1
     try:
-        async with websockets.connect(target_url) as backend:
+        async with websockets.connect(target_url, open_timeout=10) as backend:
 
             async def client_to_backend() -> None:
                 try:
@@ -224,8 +224,19 @@ async def proxy_stream(websocket: WebSocket) -> None:
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("WS relay task error for %s: %s", session_id, exc)
+            # Surface (log) any exception from the task that completed first,
+            # otherwise backend relay errors are silently swallowed.
+            for task in done:
+                try:
+                    task.result()
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("WS relay task error for %s: %s", session_id, exc)
 
     except (ConnectionRefusedError, OSError) as exc:
         log.warning("Backend unreachable for %s: %s", session_id, exc)
