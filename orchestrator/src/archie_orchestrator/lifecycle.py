@@ -6,7 +6,6 @@ when invoking from an async context.
 """
 
 import logging
-import os
 from pathlib import Path
 
 from archie_shared.config import home_dir
@@ -19,6 +18,7 @@ from archie_shared.session import (
 
 from archie_orchestrator.docker import (
     CONTAINER_PORT,
+    CONTAINER_USER,
     IMAGE_TAG,
     check_image,
     list_sessions,
@@ -91,10 +91,10 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     agents_dir = Path.home() / ".agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
-    # 5. Derive container-side paths from username
-    username = os.environ.get("USER", "archie")
-    container_home = f"/home/{username}/.nexus"
-    container_agents = f"/home/{username}/.agents"
+    # 5. Derive container-side paths from the fixed container username
+    #    (see CONTAINER_USER — not the host user running the orchestrator).
+    container_home = f"/home/{CONTAINER_USER}/.nexus"
+    container_agents = f"/home/{CONTAINER_USER}/.agents"
 
     # 6. Construct docker run command (mirrors cli.py start command)
     agent_dir = REPO_ROOT / "agent"
@@ -132,8 +132,17 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     # 7. Start container
     run_container(docker_cmd)
 
-    # 8. Wait for ready; raises RuntimeError on crash or timeout
-    port_str = wait_for_ready(cname, docker_cmd)
+    # 8. Wait for ready; raises RuntimeError on crash or timeout.
+    #    On failure, tear down the container we started so a stuck/timed-out
+    #    container is not left running (--rm only covers exit/crash).
+    try:
+        port_str = wait_for_ready(cname, docker_cmd)
+    except RuntimeError:
+        try:
+            stop_container(cname)
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            log.warning("Cleanup after failed start failed for %s: %s", cname, exc)
+        raise
 
     log.info("Session started: %s (workspace: %s)", session_id, workspace)
     return SessionDescriptor(
