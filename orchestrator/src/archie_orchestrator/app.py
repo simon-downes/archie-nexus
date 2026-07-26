@@ -12,6 +12,8 @@ Routes:
 """
 
 import asyncio
+import logging
+import traceback
 from contextlib import asynccontextmanager
 
 import msgspec
@@ -21,9 +23,18 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 
-from archie_orchestrator.docker import list_sessions
+from archie_orchestrator import configure_logging
+from archie_orchestrator.docker import DockerError, list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
-from archie_orchestrator.proxy import proxy_history, proxy_shell, proxy_status, proxy_stream
+from archie_orchestrator.proxy import (
+    get_active_ws_connections,
+    proxy_history,
+    proxy_shell,
+    proxy_status,
+    proxy_stream,
+)
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Lifespan — load config once at startup
@@ -33,8 +44,13 @@ from archie_orchestrator.proxy import proxy_history, proxy_shell, proxy_status, 
 @asynccontextmanager
 async def lifespan(app: Starlette):
     """Load NexusConfig at startup and store on app state."""
+    configure_logging()
     app.state.config = load_nexus_config()
+    sessions = list_sessions()
+    log.info("Discovered %d running sessions", len(sessions))
     yield
+    active = get_active_ws_connections()
+    log.info("Orchestrator stopping (%d active connections)", active)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +99,7 @@ async def sessions_post(request: Request) -> Response:
         descriptor = await asyncio.to_thread(start_session, workspace, config)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except RuntimeError as exc:
+    except (DockerError, RuntimeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     content = msgspec.json.encode(descriptor)
@@ -106,10 +122,26 @@ async def session_delete(request: Request) -> Response:
             {"error": f"No running session with ID '{session_id}'"},
             status_code=404,
         )
-    except RuntimeError as exc:
+    except (DockerError, RuntimeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     return JSONResponse({"stopped": session_id})
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler
+# ---------------------------------------------------------------------------
+
+
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch unexpected exceptions, log with origin, return 500."""
+    tb = traceback.extract_tb(exc.__traceback__)
+    origin = f"{tb[-1].filename}:{tb[-1].lineno}" if tb else "unknown"
+    log.error("Unhandled error: %s (at %s)", exc, origin)
+    return JSONResponse(
+        {"error": "Internal server error", "detail": str(exc)},
+        status_code=500,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,4 +160,5 @@ app = Starlette(
         Route("/sessions/{session_id}/shell", proxy_shell, methods=["POST"]),
         WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
     ],
+    exception_handlers={Exception: unhandled_exception_handler},
 )

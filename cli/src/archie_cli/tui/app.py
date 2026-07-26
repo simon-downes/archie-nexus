@@ -255,7 +255,7 @@ class ArchieApp(App):
 
         start = asyncio.get_event_loop().time()
         deadline = start + 30.0
-        delays = [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
+        delays = [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
         try:
             for attempt, delay in enumerate(delays, start=1):
                 if self._shutting_down:

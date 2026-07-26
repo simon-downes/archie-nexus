@@ -6,6 +6,7 @@ starting, stopping, and health-checking containers.
 """
 
 import json
+import logging
 import subprocess
 import time
 import urllib.error
@@ -20,6 +21,23 @@ from archie_shared.session import (
 CONTAINER_PORT = "8080"
 IMAGE_TAG = "archie:latest"
 
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class DockerError(Exception):
+    """Raised when a Docker CLI command fails."""
+
+    def __init__(self, command: str | list, stderr: str, returncode: int) -> None:
+        self.command = command if isinstance(command, str) else " ".join(str(c) for c in command)
+        self.stderr = stderr
+        self.returncode = returncode
+        super().__init__(f"Docker command failed ({self.command}): {stderr.strip()}")
+
 
 # ---------------------------------------------------------------------------
 # Low-level subprocess helpers
@@ -28,12 +46,9 @@ IMAGE_TAG = "archie:latest"
 
 def _container_running(name: str) -> bool:
     """Return True if the named container is currently running."""
-    result = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Running}}", name],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    cmd = ["docker", "inspect", "-f", "{{.State.Running}}", name]
+    log.debug("docker %s", " ".join(cmd[1:]))
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
@@ -65,11 +80,16 @@ def run_container(cmd: list[str]) -> None:
         cmd: Full docker run command list (starting with "docker").
 
     Raises:
-        RuntimeError: If docker run returns a non-zero exit code.
+        DockerError: If docker run returns a non-zero exit code.
     """
+    log.debug("docker %s", " ".join(cmd[1:4]))  # log first few args only (avoid leaking secrets)
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        raise RuntimeError(f"docker run failed:\n{result.stderr.strip()}")
+        raise DockerError(
+            command=cmd[:3],
+            stderr=result.stderr,
+            returncode=result.returncode,
+        )
 
 
 def stop_container(name: str) -> None:
@@ -79,8 +99,9 @@ def stop_container(name: str) -> None:
         name: Docker container name.
 
     Raises:
-        RuntimeError: If docker stop returns a non-zero exit code.
+        DockerError: If docker stop returns a non-zero exit code.
     """
+    log.debug("docker stop %s", name)
     result = subprocess.run(
         ["docker", "stop", name],
         capture_output=True,
@@ -88,7 +109,11 @@ def stop_container(name: str) -> None:
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"docker stop failed:\n{result.stderr.strip()}")
+        raise DockerError(
+            command=["docker", "stop", name],
+            stderr=result.stderr,
+            returncode=result.returncode,
+        )
 
 
 def wait_for_ready(
@@ -107,7 +132,7 @@ def wait_for_ready(
         timeout: Maximum seconds to wait before raising.
 
     Raises:
-        RuntimeError: If the container crashes or the timeout is exceeded.
+        DockerError: If the container crashes or the timeout is exceeded.
     """
     deadline = time.monotonic() + timeout
     port: str | None = None
@@ -115,11 +140,15 @@ def wait_for_ready(
     while time.monotonic() < deadline:
         if not _container_running(name):
             debug_cmd = [a for a in docker_run_cmd if a != "--rm"]
-            raise RuntimeError(
-                f"Container '{name}' exited during startup (removed by --rm).\n"
-                f"To debug, re-run without --rm:\n"
-                f"  {' '.join(debug_cmd)}\n"
-                f"Then inspect with: docker logs {name}"
+            raise DockerError(
+                command=["docker", "inspect", name],
+                stderr=(
+                    f"Container '{name}' exited during startup (removed by --rm).\n"
+                    f"To debug, re-run without --rm:\n"
+                    f"  {' '.join(debug_cmd)}\n"
+                    f"Then inspect with: docker logs {name}"
+                ),
+                returncode=1,
             )
         if port is None:
             port = _query_port(name)
@@ -127,14 +156,16 @@ def wait_for_ready(
             return port
         time.sleep(0.5)
 
-    raise RuntimeError(
-        f"Container '{name}' did not become ready within {timeout:.0f}s.\n"
-        f"Check logs: docker logs {name}"
+    raise DockerError(
+        command=["docker", "inspect", name],
+        stderr=f"Container '{name}' did not become ready within {timeout:.0f}s.\nCheck logs: docker logs {name}",
+        returncode=1,
     )
 
 
 def _query_port(name: str) -> str | None:
     """Query the mapped host port for a container. Returns port string or None."""
+    log.debug("docker port %s %s", name, CONTAINER_PORT)
     result = subprocess.run(
         ["docker", "port", name, CONTAINER_PORT],
         capture_output=True,
@@ -153,12 +184,9 @@ def list_sessions() -> list[SessionDescriptor]:
 
     Identifies archie-nexus containers by name pattern via parse_container_name.
     """
-    result = subprocess.run(
-        ["docker", "ps", "--filter", f"name={CONTAINER_PREFIX}", "--format", "{{json .}}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    cmd = ["docker", "ps", "--filter", f"name={CONTAINER_PREFIX}", "--format", "{{json .}}"]
+    log.debug("docker ps --filter name=%s", CONTAINER_PREFIX)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0 or not result.stdout.strip():
         return []
 
