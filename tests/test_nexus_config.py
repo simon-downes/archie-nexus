@@ -105,6 +105,36 @@ def test_load_nexus_config_respects_archie_home_dir(monkeypatch, tmp_path):
     assert config.global_.region == "eu-central-1"
 
 
+# --- Tests: OrchestratorConfig ---
+
+
+def test_orchestrator_config_defaults(monkeypatch, tmp_path):
+    """Config without orchestrator key → defaults (host=127.0.0.1, port=7600)."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = load_nexus_config()
+    assert config.orchestrator.host == "127.0.0.1"
+    assert config.orchestrator.port == 7600
+
+
+def test_orchestrator_config_port_override(tmp_path):
+    """orchestrator.port in config overrides the default."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("orchestrator:\n  port: 8800\n")
+    config = load_nexus_config(path=cfg)
+    assert config.orchestrator.port == 8800
+    assert config.orchestrator.host == "127.0.0.1"  # default
+
+
+def test_orchestrator_config_unknown_key_rejected(tmp_path):
+    """Unknown key under orchestrator raises ConfigError."""
+    from archie_shared.config import ConfigError
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("orchestrator:\n  unknown_key: oops\n")
+    with pytest.raises(ConfigError, match="Validation error"):
+        load_nexus_config(path=cfg)
+
+
 # --- Tests: expand_project_root ---
 
 

@@ -10,6 +10,8 @@ import urllib.request
 from pathlib import Path
 
 import click
+import httpx
+import uvicorn
 from archie_shared.session import (
     SessionDescriptor,
     container_name,
@@ -298,12 +300,58 @@ def start(detach: bool):
         app.run()
 
 
+def _orchestrator_url() -> str:
+    """Return the base URL for the orchestrator from config."""
+    from archie_shared.schemas import load_nexus_config
+
+    cfg = load_nexus_config()
+    return f"http://{cfg.orchestrator.host}:{cfg.orchestrator.port}"
+
+
+@main.command()
+def serve():
+    """Start the archie orchestrator (foreground HTTP server).
+
+    Binds to 127.0.0.1:7600 by default. Override via ~/.nexus/config.yaml:
+
+    \b
+    orchestrator:
+      host: 127.0.0.1
+      port: 7600
+    """
+    from archie_shared.schemas import load_nexus_config
+
+    cfg = load_nexus_config()
+    host = cfg.orchestrator.host
+    port = cfg.orchestrator.port
+
+    click.echo(f"Starting archie orchestrator on {host}:{port}")
+    uvicorn.run("archie_orchestrator.app:app", host=host, port=port)
+
+
 @main.command(name="ls")
 def ls_cmd():
     """List running agent sessions."""
-    check_docker()
+    url = _orchestrator_url()
+    try:
+        response = httpx.get(f"{url}/sessions", timeout=5.0)
+        response.raise_for_status()
+    except httpx.ConnectError:
+        raise click.ClickException(
+            f"Cannot connect to the orchestrator at {url}.\n"
+            "Start it first with: archie serve"
+        ) from None
+    except httpx.HTTPStatusError as exc:
+        raise click.ClickException(
+            f"Orchestrator returned an error: {exc.response.status_code}\n"
+            f"Check 'archie serve' output for details."
+        ) from None
 
-    sessions = list_sessions()
+    import msgspec
+    from archie_shared.session import SessionDescriptor
+
+    sessions = msgspec.json.decode(response.content, type=list[SessionDescriptor])
+
     if not sessions:
         click.echo("No running sessions.")
         return

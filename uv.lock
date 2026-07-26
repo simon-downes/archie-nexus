@@ -7,6 +7,7 @@ members = [
     "archie-agent",
     "archie-cli",
     "archie-nexus",
+    "archie-orchestrator",
     "archie-shared",
 ]
 
@@ -87,6 +88,7 @@ name = "archie-cli"
 version = "0.1.0"
 source = { editable = "cli" }
 dependencies = [
+    { name = "archie-orchestrator" },
     { name = "archie-shared" },
     { name = "boto3" },
     { name = "click" },
@@ -99,6 +101,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "archie-orchestrator", editable = "orchestrator" },
     { name = "archie-shared", editable = "shared" },
     { name = "boto3", specifier = ">=1.35" },
     { name = "click", specifier = ">=8,<9" },
@@ -118,6 +121,7 @@ source = { virtual = "." }
 dev = [
     { name = "archie-agent" },
     { name = "archie-cli" },
+    { name = "archie-orchestrator" },
     { name = "archie-shared" },
     { name = "httpx" },
     { name = "pytest" },
@@ -131,11 +135,29 @@ dev = [
 dev = [
     { name = "archie-agent", editable = "agent" },
     { name = "archie-cli", editable = "cli" },
+    { name = "archie-orchestrator", editable = "orchestrator" },
     { name = "archie-shared", editable = "shared" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=9" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.15" },
+]
+
+[[package]]
+name = "archie-orchestrator"
+version = "0.1.0"
+source = { editable = "orchestrator" }
+dependencies = [
+    { name = "archie-shared" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "archie-shared", editable = "shared" },
+    { name = "starlette", specifier = ">=0.40" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [[package]]
