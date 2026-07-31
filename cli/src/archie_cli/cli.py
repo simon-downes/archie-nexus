@@ -23,6 +23,22 @@ def main():
     """Archie — personal AI platform."""
 
 
+# Ensure ConfigError surfaces as a clean ClickException rather than a raw traceback.
+_orig_main_invoke = main.invoke
+
+
+def _main_invoke(ctx):
+    from archie_shared.config import ConfigError as _ConfigError
+
+    try:
+        return _orig_main_invoke(ctx)
+    except _ConfigError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+main.invoke = _main_invoke
+
+
 # Register subcommand groups
 from archie_cli.auth import auth  # noqa: E402
 
