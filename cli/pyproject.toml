@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Archie CLI client"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "archie-orchestrator",
     "archie-shared",
     "boto3>=1.35",
     "click>=8,<9",

@@ -1,162 +1,42 @@
-"""Archie CLI — container lifecycle management."""
+"""Archie CLI — orchestrator protocol client."""
 
-import json
 import os
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import click
-from archie_shared.session import (
-    SessionDescriptor,
-    container_name,
-    generate_session_id,
-    parse_container_name,
-)
+import httpx
+import uvicorn
+from archie_shared.session import SessionDescriptor
 
 from archie_cli.project import detect_project_dir
 
 # Repo root: cli.py is at {repo}/cli/src/archie_cli/cli.py → parents[3] = repo root
-REPO_ROOT = Path(__file__).resolve().parents[3]
-IMAGE_TAG = "archie:latest"
-CONTAINER_PORT = "8080"
-
-
-def check_docker() -> None:
-    """Verify Docker daemon is reachable. Raises ClickException if not."""
-    try:
-        result = subprocess.run(["docker", "info"], capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        raise click.ClickException(
-            "Docker is not installed or not in PATH.\n"
-            "Install Docker: https://docs.docker.com/get-docker/"
-        ) from None
-    if result.returncode != 0:
-        raise click.ClickException(
-            "Docker is not available. Ensure:\n"
-            "  1. Docker daemon is running\n"
-            "  2. Your user has permission to use Docker\n"
-            f"\nDocker error: {result.stderr.strip()}"
-        )
-
-
-def check_image(tag: str) -> None:
-    """Verify a Docker image exists locally. Raises ClickException if not."""
-    result = subprocess.run(
-        ["docker", "image", "inspect", tag], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        raise click.ClickException(f"Image '{tag}' not found.\nBuild it with: archie build")
-
-
-def _container_running(name: str) -> bool:
-    """Check if a container is running via docker inspect."""
-    result = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Running}}", name],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0 and result.stdout.strip() == "true"
-
-
-def _query_port(name: str) -> str | None:
-    """Query the mapped host port for a container. Returns port string or None."""
-    result = subprocess.run(
-        ["docker", "port", name, CONTAINER_PORT],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    # Output is like "127.0.0.1:32771" — extract the port from the first line
-    line = result.stdout.strip().splitlines()[0]
-    return line.rsplit(":", 1)[-1]
-
-
-def _status_ok(port: str) -> bool:
-    """Check if the agent /status endpoint responds with 200."""
-    try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/status")
-        with urllib.request.urlopen(req, timeout=1):
-            return True
-    except (urllib.error.URLError, OSError):
-        return False
-
-
-def wait_for_ready(name: str, docker_run_cmd: list[str], timeout: float = 30.0) -> str:
-    """Wait for a container's agent to be ready. Returns the host port.
-
-    Polls container liveness, port publication, and agent /status endpoint.
-    Raises ClickException on crash or timeout with debug guidance.
-    """
-    deadline = time.monotonic() + timeout
-    port: str | None = None
-
-    while time.monotonic() < deadline:
-        if not _container_running(name):
-            # Container crashed and --rm removed it. Guide the user to debug.
-            debug_cmd = [a for a in docker_run_cmd if a != "--rm"]
-            raise click.ClickException(
-                f"Container '{name}' exited during startup (removed by --rm).\n"
-                f"To debug, re-run without --rm:\n"
-                f"  {' '.join(debug_cmd)}\n"
-                f"Then inspect with: docker logs {name}"
-            )
-        if port is None:
-            port = _query_port(name)
-        if port and _status_ok(port):
-            return port
-        time.sleep(0.5)
-
-    raise click.ClickException(
-        f"Container '{name}' did not become ready within {timeout:.0f}s.\n"
-        f"Check logs: docker logs {name}"
-    )
-
-
-def list_sessions() -> list[SessionDescriptor]:
-    """List running archie containers as typed SessionDescriptors.
-
-    Identifies archie-nexus containers by name pattern via parse_container_name.
-    """
-    from archie_shared.session import CONTAINER_PREFIX
-
-    result = subprocess.run(
-        ["docker", "ps", "--filter", f"name={CONTAINER_PREFIX}", "--format", "{{json .}}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
-    sessions = []
-    for line in result.stdout.strip().splitlines():
-        data = json.loads(line)
-        name = data.get("Names", "")
-        session_id = parse_container_name(name)
-        if session_id is None:
-            continue
-        port_str = _query_port(name)
-        sessions.append(
-            SessionDescriptor(
-                session_id=session_id,
-                container_name=name,
-                port=int(port_str) if port_str else None,
-                raw_docker_status=data.get("Status", ""),
-            )
-        )
-    return sessions
+# Needed by `archie build` (direct Docker command — not routed via orchestrator).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_IMAGE_TAG = "archie:latest"
 
 
 @click.group()
 def main():
     """Archie — personal AI platform."""
+
+
+# Ensure ConfigError surfaces as a clean ClickException rather than a raw traceback.
+_orig_main_invoke = main.invoke
+
+
+def _main_invoke(ctx):
+    from archie_shared.config import ConfigError as _ConfigError
+
+    try:
+        return _orig_main_invoke(ctx)
+    except _ConfigError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+main.invoke = _main_invoke
 
 
 # Register subcommand groups
@@ -169,14 +49,14 @@ main.add_command(auth)
 @click.option("--no-cache", is_flag=True, help="Build without Docker layer cache.")
 def build(no_cache: bool):
     """Build the archie agent Docker image."""
-    dockerfile = REPO_ROOT / "Dockerfile"
+    dockerfile = _REPO_ROOT / "Dockerfile"
     if not dockerfile.exists():
         raise click.ClickException(f"Dockerfile not found at {dockerfile}")
 
     username = os.environ.get("USER", "archie")
     uid = str(os.getuid())
 
-    click.echo(f"Building image: {IMAGE_TAG}")
+    click.echo(f"Building image: {_IMAGE_TAG}")
     click.echo(f"  User: {username} (UID {uid})")
     click.echo(f"  Dockerfile: {dockerfile}")
     click.echo()
@@ -185,7 +65,7 @@ def build(no_cache: bool):
         "docker",
         "build",
         "--tag",
-        IMAGE_TAG,
+        _IMAGE_TAG,
         "--build-arg",
         f"USERNAME={username}",
         "--build-arg",
@@ -197,121 +77,307 @@ def build(no_cache: bool):
     if no_cache:
         cmd.append("--no-cache")
 
-    cmd.append(str(REPO_ROOT))
+    cmd.append(str(_REPO_ROOT))
 
     result = subprocess.run(cmd, check=False)
 
     if result.returncode != 0:
         sys.exit(result.returncode)
 
-    click.echo(f"\n✓ Image '{IMAGE_TAG}' built successfully.")
+    click.echo(f"\n✓ Image '{_IMAGE_TAG}' built successfully.")
 
 
 @main.command()
 @click.option("-d", "--detach", is_flag=True, help="Start without attaching TUI")
-def start(detach: bool):
+@click.argument("workspace", required=False, default=None)
+def start(detach: bool, workspace: str | None):
     """Start a new agent session.
+
+    WORKSPACE may be a plain workspace name ('myproject') or prefixed with a
+    profile ('gpu-box/myproject'). Defaults to the current project directory.
 
     By default, attaches an interactive TUI after the container is ready.
     Use -d/--detach to start headless (print connection info and exit).
     """
-    check_docker()
-    check_image(IMAGE_TAG)
+    from archie_shared.schemas import expand_workspace_root, get_profile, load_nexus_config
 
-    session_id = generate_session_id(project=detect_project_dir().name)
-    cname = container_name(session_id)
-    agent_dir = REPO_ROOT / "agent"
-    shared_dir = REPO_ROOT / "shared"
-    project_dir = str(detect_project_dir())
+    config = load_nexus_config()
 
-    # Ensure home dir exists (config.yaml is optional; dir must exist for mount)
+    if workspace is None:
+        ws_name = detect_project_dir(workspace_root=expand_workspace_root(config)).name
+        profile = get_profile(config.orchestrator)
+    else:
+        profile, ws_name = _resolve_target(workspace, config)
+
+    # Ensure home dir and default config exist (pre-flight for fresh installs)
     from archie_shared.config import home_dir
 
     nexus_home = home_dir()
     nexus_home.mkdir(parents=True, exist_ok=True)
-
-    # Write default config if none exists
     config_file = nexus_home / "config.yaml"
     if not config_file.exists():
         config_file.write_text(
             'global:\n  model: "bedrock-claude-sonnet-4-6"\n'
             '  region: "eu-west-1"\n'
-            '  project_root: "~/dev"\n'
+            '  workspace_root: "~/dev"\n'
         )
 
-    # Determine container home path (symmetric with host)
-    username = os.environ.get("USER", "archie")
-    container_home = f"/home/{username}/.nexus"
+    url = _profile_url(profile)
+    try:
+        response = httpx.post(
+            f"{url}/sessions",
+            json={"workspace": ws_name},
+            timeout=60.0,
+        )
+    except httpx.HTTPError as exc:
+        raise click.ClickException(
+            f"Cannot reach the orchestrator at {url}: {exc}\n"
+            "Start it first with: archie serve"
+        ) from None
 
-    # Skills directory: host ~/.agents mounted rw at the container user's home so
-    # discover_skills() (which scans Path.home()/.agents/skills) finds them.
-    agents_dir = Path.home() / ".agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    container_agents = f"/home/{username}/.agents"
+    if response.status_code == 400:
+        raise click.ClickException(_error_body(response, "Bad request"))
+    if response.status_code != 200:
+        raise click.ClickException(
+            f"Orchestrator error ({response.status_code}): "
+            f"{_error_body(response)}"
+        )
 
-    docker_cmd = [
-        "docker",
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        cname,
-        "--add-host=host.docker.internal:host-gateway",
-        "-p",
-        f"127.0.0.1:0:{CONTAINER_PORT}",
-        "-e",
-        f"ARCHIE_HOME_DIR={container_home}",
-        "-e",
-        f"ARCHIE_SESSION_ID={session_id}",
-        "-v",
-        f"{agent_dir}:/opt/archie/agent:rw",
-        "-v",
-        f"{shared_dir}:/opt/archie/shared:ro",
-        "-v",
-        f"{project_dir}:/workspace:rw",
-        "-v",
-        f"{nexus_home}:{container_home}:rw",
-        "-v",
-        f"{agents_dir}:{container_agents}:rw",
-        "-w",
-        "/workspace",
-        IMAGE_TAG,
-    ]
+    import msgspec
 
-    result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise click.ClickException(f"Failed to start container:\n{result.stderr.strip()}")
-
-    # Wait for agent to be ready
-    port = wait_for_ready(cname, docker_cmd)
+    try:
+        descriptor = msgspec.json.decode(response.content, type=SessionDescriptor)
+    except msgspec.DecodeError as exc:
+        raise click.ClickException(
+            f"Unexpected response from orchestrator: {exc}"
+        ) from None
 
     # Always print session ID (visible in scrollback if TUI crashes)
-    click.echo(f"Session: {session_id}")
+    click.echo(f"Session: {descriptor.session_id}")
 
     if detach:
-        click.echo(f"Container: {cname}")
-        click.echo(f"Agent: http://127.0.0.1:{port}")
+        click.echo(f"Container: {descriptor.container_name}")
+        click.echo(f"Agent: http://{profile.host}:{descriptor.port}")
     else:
         from archie_cli.tui.app import ArchieApp
 
-        app = ArchieApp(host="127.0.0.1", port=int(port))
+        base = _profile_url(profile)
+        ws_base = base.replace("http://", "ws://")
+        ws_url = f"{ws_base}/sessions/{descriptor.session_id}/stream"
+        api_url = f"{base}/sessions/{descriptor.session_id}"
+        app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=descriptor.container_name)
         app.run()
 
 
-@main.command(name="ls")
-def ls_cmd():
-    """List running agent sessions."""
-    check_docker()
+def _fetch_sessions(url: str) -> list[SessionDescriptor]:
+    """Fetch running sessions from the orchestrator. Raises ClickException on error."""
+    try:
+        response = httpx.get(f"{url}/sessions", timeout=5.0)
+        response.raise_for_status()
+    except httpx.ConnectError:
+        raise click.ClickException(
+            f"Cannot connect to the orchestrator at {url}.\n"
+            "Start it first with: archie serve"
+        ) from None
+    except httpx.HTTPStatusError as exc:
+        raise click.ClickException(
+            f"Orchestrator returned an error: {exc.response.status_code}"
+        ) from None
 
-    sessions = list_sessions()
+    import msgspec
+
+    try:
+        return msgspec.json.decode(response.content, type=list[SessionDescriptor])
+    except msgspec.DecodeError as exc:
+        raise click.ClickException(
+            f"Unexpected response from orchestrator: {exc}"
+        ) from None
+
+
+def _resolve_prefix(
+    sessions: list[SessionDescriptor],
+    session_id: str | None,
+) -> SessionDescriptor:
+    """Resolve a session by prefix match or picker. Raises ClickException on failure."""
+    if not sessions:
+        raise click.ClickException("No running sessions. Start one with: archie start")
+    if session_id is None:
+        return sessions[0] if len(sessions) == 1 else _pick_session(sessions)
+    matches = [s for s in sessions if s.session_id.startswith(session_id)]
+    if len(matches) == 0:
+        raise click.ClickException(
+            f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
+        )
+    if len(matches) == 1:
+        return matches[0]
+    click.echo(f"Multiple sessions match '{session_id}':")
+    return _pick_session(matches)
+
+
+def _profile_url(profile) -> str:
+    """Return the base HTTP URL for an OrchestratorProfile."""
+    return f"http://{profile.host}:{profile.port}"
+
+
+def _error_body(response: httpx.Response, default: str = "unknown error") -> str:
+    """Safely extract an error message from a response body.
+
+    Falls back to a truncated raw body when the response is not JSON, so a
+    non-JSON error page never raises an uncaught traceback.
+    """
+    try:
+        return response.json().get("error", default)
+    except (ValueError, AttributeError):
+        text = response.text.strip()
+        return text[:200] if text else default
+
+
+def _parse_archie_host(env_host: str):
+    """Parse ARCHIE_HOST='host:port' or 'host' into an OrchestratorProfile.
+
+    Raises click.ClickException on malformed port.
+    """
+    from archie_shared.schemas import OrchestratorProfile
+
+    host, _, raw_port = env_host.partition(":")
+    if raw_port:
+        try:
+            port = int(raw_port)
+        except ValueError:
+            raise click.ClickException(
+                f"Invalid ARCHIE_HOST value '{env_host}': port must be an integer."
+            ) from None
+    else:
+        port = 7600
+    return OrchestratorProfile(host=host, port=port)
+
+
+def _resolve_target(arg: str, config) -> tuple:
+    """Parse a 'profile/value' or 'value' positional argument.
+
+    Respects ARCHIE_HOST env var (overrides profile resolution for all commands).
+    When ARCHIE_HOST is set and arg contains a '/', the profile prefix is stripped
+    so the remainder is used as the workspace/session value.
+
+    Returns:
+        (OrchestratorProfile, value) where value is the workspace or session ID remainder.
+
+    Raises:
+        click.ClickException: If the profile name is unknown or ARCHIE_HOST is malformed.
+    """
+    from archie_shared.schemas import get_profile
+
+    env_host = os.environ.get("ARCHIE_HOST", "")
+    if env_host:
+        # Strip profile prefix if present — host comes from env, value is the remainder
+        _, sep, remainder = arg.partition("/")
+        value = remainder if sep else arg
+        return _parse_archie_host(env_host), value
+
+    if "/" in arg:
+        profile_name, value = arg.split("/", 1)
+        profile = config.orchestrator.profiles.get(profile_name)
+        if profile is None:
+            raise click.ClickException(
+                f"Unknown profile: '{profile_name}'.\n"
+                "Add it to ~/.nexus/config.yaml under orchestrator.profiles."
+            )
+        return profile, value
+
+    return get_profile(config.orchestrator), arg
+
+
+@main.command()
+def serve():
+    """Start the archie orchestrator (foreground HTTP server).
+
+    Binds to 127.0.0.1:7600 by default. Override via ~/.nexus/config.yaml:
+
+    \b
+    orchestrator:
+      profiles:
+        default:
+          host: 0.0.0.0
+          port: 7600
+    """
+    from archie_shared.schemas import get_profile, load_nexus_config
+
+    cfg = load_nexus_config()
+    profile = get_profile(cfg.orchestrator)
+    host = profile.host
+    port = profile.port
+
+    click.echo(f"Starting archie orchestrator on {host}:{port}")
+    uvicorn.run("archie_orchestrator.app:app", host=host, port=port)
+
+
+@main.command(name="ls")
+@click.argument("profile", required=False, default=None)
+def ls_cmd(profile: str | None):
+    """List running agent sessions.
+
+    With no argument, lists sessions across all configured profiles (plus the
+    implicit default). With a profile name, lists sessions for that profile only.
+    """
+    from archie_shared.schemas import get_profile, load_nexus_config
+
+    config = load_nexus_config()
+
+    # ARCHIE_HOST env override: query that single address regardless of profiles
+    env_host = os.environ.get("ARCHIE_HOST", "")
+    if env_host:
+        _print_sessions_for_profile(_profile_url(_parse_archie_host(env_host)), label="ARCHIE_HOST")
+        return
+
+    if profile is not None:
+        # Single named profile
+        prof = config.orchestrator.profiles.get(profile)
+        if prof is None:
+            raise click.ClickException(
+                f"Unknown profile: '{profile}'.\n"
+                "Add it to ~/.nexus/config.yaml under orchestrator.profiles."
+            )
+        _print_sessions_for_profile(_profile_url(prof), label=profile)
+    else:
+        # All profiles: explicit ones + implicit default
+        all_profiles: dict[str, object] = {"default": get_profile(config.orchestrator)}
+        for name, prof in config.orchestrator.profiles.items():
+            all_profiles[name] = prof
+
+        multiple = len(all_profiles) > 1
+        for label, prof in all_profiles.items():
+            _print_sessions_for_profile(_profile_url(prof), label=label, show_label=multiple)
+
+
+def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -> None:
+    """Fetch and print sessions for a single orchestrator URL."""
+    import msgspec
+
+    if show_label:
+        click.echo(f"\n[{label}]")
+
+    try:
+        response = httpx.get(f"{url}/sessions", timeout=5.0)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        click.echo(f"  ✗ Error {exc.response.status_code} from {url}")
+        return
+    except httpx.HTTPError:
+        click.echo(f"  ✗ Unreachable: {url}")
+        return
+
+    try:
+        sessions = msgspec.json.decode(response.content, type=list[SessionDescriptor])
+    except msgspec.DecodeError:
+        click.echo(f"  ✗ Unexpected response from {url}")
+        return
+
     if not sessions:
         click.echo("No running sessions.")
         return
 
-    # Header
     click.echo(f"{'SESSION ID':<40} {'STATUS':<20} {'PORT'}")
     click.echo(f"{'-' * 40} {'-' * 20} {'-' * 6}")
-
     for s in sessions:
         port_str = str(s.port) if s.port else "-"
         click.echo(f"{s.session_id:<40} {s.raw_docker_status:<20} {port_str}")
@@ -322,46 +388,23 @@ def ls_cmd():
 def shell(session_id: str | None):
     """Open an interactive bash shell in a running session.
 
+    Resolves the session via the orchestrator, then execs directly.
     Supports prefix matching on session ID. If no session specified or match
     is ambiguous, displays a picker.
+
+    Note: shell always uses the default orchestrator profile for session resolution
+    and runs docker exec locally. Profile-prefixed session IDs are not supported
+    because docker exec requires local container access.
     """
-    check_docker()
+    from archie_shared.schemas import get_profile, load_nexus_config
 
-    sessions = list_sessions()
-    if not sessions:
-        raise click.ClickException("No running sessions. Start one with: archie start")
+    config = load_nexus_config()
+    profile = get_profile(config.orchestrator)
+    url = _profile_url(profile)
+    sessions = _fetch_sessions(url)
+    target = _resolve_prefix(sessions, session_id)
 
-    # Resolve target session
-    if session_id is None:
-        if len(sessions) == 1:
-            target = sessions[0]
-        else:
-            target = _pick_session(sessions)
-    else:
-        matches = [s for s in sessions if s.session_id.startswith(session_id)]
-        if len(matches) == 0:
-            raise click.ClickException(
-                f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
-            )
-        elif len(matches) == 1:
-            target = matches[0]
-        else:
-            click.echo(f"Multiple sessions match '{session_id}':")
-            target = _pick_session(matches)
-
-    # Check if /workspace exists in the container before using -w
-    check = subprocess.run(
-        ["docker", "exec", target.container_name, "test", "-d", "/workspace"],
-        capture_output=True,
-        check=False,
-    )
-
-    if check.returncode == 0:
-        exec_cmd = ["docker", "exec", "-it", "-w", "/workspace", target.container_name, "bash"]
-    else:
-        click.echo("Warning: /workspace not found in container. Rebuild image with: archie build")
-        exec_cmd = ["docker", "exec", "-it", target.container_name, "bash"]
-
+    exec_cmd = ["docker", "exec", "-it", "-w", "/workspace", target.container_name, "bash"]
     result = subprocess.run(exec_cmd, check=False)
     sys.exit(result.returncode)
 
@@ -371,43 +414,32 @@ def shell(session_id: str | None):
 def attach(session_id: str | None):
     """Attach an interactive TUI to a running session.
 
-    Supports prefix matching on session ID. If no session specified or match
-    is ambiguous, displays a picker.
+    SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
+    Supports prefix matching. If no session specified and only one is running,
+    attaches automatically.
     """
-    check_docker()
+    from archie_shared.schemas import get_profile, load_nexus_config
 
-    sessions = list_sessions()
-    if not sessions:
-        raise click.ClickException("No running sessions. Start one with: archie start")
+    config = load_nexus_config()
 
-    # Resolve target session (same logic as shell)
-    if session_id is None:
-        if len(sessions) == 1:
-            target = sessions[0]
-        else:
-            target = _pick_session(sessions)
+    if session_id is not None:
+        profile, sid_prefix = _resolve_target(session_id, config)
     else:
-        matches = [s for s in sessions if s.session_id.startswith(session_id)]
-        if len(matches) == 0:
-            raise click.ClickException(
-                f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
-            )
-        elif len(matches) == 1:
-            target = matches[0]
-        else:
-            click.echo(f"Multiple sessions match '{session_id}':")
-            target = _pick_session(matches)
+        profile = get_profile(config.orchestrator)
+        sid_prefix = session_id
 
-    port = target.port
-    if not port:
-        raise click.ClickException(
-            f"Session '{target.session_id}' has no published port.\n"
-            "It may still be starting. Try again shortly."
-        )
+    url = _profile_url(profile)
+    sessions = _fetch_sessions(url)
+    target = _resolve_prefix(sessions, sid_prefix)
+
+    base = _profile_url(profile)
+    ws_base = base.replace("http://", "ws://")
+    ws_url = f"{ws_base}/sessions/{target.session_id}/stream"
+    api_url = f"{base}/sessions/{target.session_id}"
 
     from archie_cli.tui.app import ArchieApp
 
-    app = ArchieApp(host="127.0.0.1", port=int(port))
+    app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=target.container_name)
     app.run()
 
 
@@ -416,43 +448,50 @@ def attach(session_id: str | None):
 def stop(session_id: str | None):
     """Stop a running agent session.
 
+    SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
+    Supports prefix matching. If omitted and only one session is running,
+    stops it automatically.
+
     The container is destroyed (--rm) but the session JSONL log is preserved
     on the host at ~/.nexus/sessions/{session_id}.jsonl.
-
-    Supports prefix matching on session ID.
     """
-    check_docker()
+    from archie_shared.schemas import get_profile, load_nexus_config
 
-    sessions = list_sessions()
+    config = load_nexus_config()
+
+    if session_id is not None:
+        profile, sid_prefix = _resolve_target(session_id, config)
+    else:
+        profile = get_profile(config.orchestrator)
+        sid_prefix = session_id
+
+    url = _profile_url(profile)
+    sessions = _fetch_sessions(url)
+
     if not sessions:
         raise click.ClickException("No running sessions.")
 
-    # Resolve target session
-    if session_id is None:
-        if len(sessions) == 1:
-            target = sessions[0]
-        else:
-            target = _pick_session(sessions)
-    else:
-        matches = [s for s in sessions if s.session_id.startswith(session_id)]
-        if len(matches) == 0:
-            raise click.ClickException(
-                f"No session matching '{session_id}'.\nRun 'archie ls' to see available sessions."
-            )
-        elif len(matches) == 1:
-            target = matches[0]
-        else:
-            click.echo(f"Multiple sessions match '{session_id}':")
-            target = _pick_session(matches)
+    target = _resolve_prefix(sessions, sid_prefix)
 
-    result = subprocess.run(
-        ["docker", "stop", target.container_name],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise click.ClickException(f"Failed to stop container:\n{result.stderr.strip()}")
+    # Stop via orchestrator
+    try:
+        stop_response = httpx.delete(
+            f"{url}/sessions/{target.session_id}", timeout=15.0
+        )
+    except httpx.HTTPError as exc:
+        raise click.ClickException(
+            f"Cannot reach the orchestrator at {url}: {exc}\n"
+            "Start it first with: archie serve"
+        ) from None
+
+    if stop_response.status_code == 404:
+        raise click.ClickException(
+            f"Session '{target.session_id}' is no longer running."
+        )
+    if stop_response.status_code != 200:
+        raise click.ClickException(
+            f"Failed to stop session: {_error_body(stop_response)}"
+        )
 
     click.echo(f"✓ Stopped session: {target.session_id}")
     click.echo(f"  Log retained at: ~/.nexus/sessions/{target.session_id}.jsonl")

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from archie_shared.config import ConfigError
-from archie_shared.schemas import NexusConfig, expand_project_root, load_nexus_config
+from archie_shared.schemas import NexusConfig, expand_workspace_root, load_nexus_config
 
 # --- Tests: load_nexus_config with defaults ---
 
@@ -14,7 +14,7 @@ def test_load_nexus_config_no_file_returns_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = load_nexus_config()
     assert config.global_.model == "bedrock-claude-sonnet-4-6"
-    assert config.global_.project_root == "~/dev"
+    assert config.global_.workspace_root == "~/dev"
     assert config.global_.region == "eu-west-1"
 
 
@@ -36,7 +36,7 @@ def test_load_nexus_config_full(tmp_path):
     cfg.write_text(
         "global:\n"
         "  model: bedrock-claude-opus-4-6\n"
-        "  project_root: ~/projects\n"
+        "  workspace_root: ~/projects\n"
         "  region: us-east-1\n"
         "cli: {}\n"
         "agent: {}\n"
@@ -44,7 +44,7 @@ def test_load_nexus_config_full(tmp_path):
     )
     config = load_nexus_config(path=cfg)
     assert config.global_.model == "bedrock-claude-opus-4-6"
-    assert config.global_.project_root == "~/projects"
+    assert config.global_.workspace_root == "~/projects"
     assert config.global_.region == "us-east-1"
 
 
@@ -105,20 +105,90 @@ def test_load_nexus_config_respects_archie_home_dir(monkeypatch, tmp_path):
     assert config.global_.region == "eu-central-1"
 
 
-# --- Tests: expand_project_root ---
+# --- Tests: OrchestratorConfig / OrchestratorProfile ---
 
 
-def test_expand_project_root_tilde():
-    """Tilde in project_root is expanded."""
+def test_orchestrator_config_defaults(monkeypatch, tmp_path):
+    """Config without orchestrator key → empty profiles dict."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = load_nexus_config()
+    assert config.orchestrator.profiles == {}
+
+
+def test_get_profile_default_fallback(monkeypatch, tmp_path):
+    """get_profile with empty profiles → OrchestratorProfile() defaults."""
+    from archie_shared.schemas import get_profile
+
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = load_nexus_config()
+    profile = get_profile(config.orchestrator)
+    assert profile.host == "127.0.0.1"
+    assert profile.port == 7600
+
+
+def test_get_profile_named(tmp_path):
+    """Named profile loaded from config is returned by get_profile."""
+    from archie_shared.schemas import get_profile
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "orchestrator:\n"
+        "  profiles:\n"
+        "    gpu-box:\n"
+        "      host: 192.168.1.50\n"
+        "      port: 7601\n"
+    )
+    config = load_nexus_config(path=cfg)
+    profile = get_profile(config.orchestrator, "gpu-box")
+    assert profile.host == "192.168.1.50"
+    assert profile.port == 7601
+
+
+def test_get_profile_unknown_explicit_name_raises(tmp_path):
+    """Requesting an unknown *explicit* profile name raises KeyError.
+
+    Silently returning localhost defaults for a typo'd name would be a footgun.
+    Only the implicit 'default' name falls back to defaults.
+    """
+    import pytest
+    from archie_shared.schemas import get_profile
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "orchestrator:\n"
+        "  profiles:\n"
+        "    other:\n"
+        "      host: 10.0.0.1\n"
+    )
+    config = load_nexus_config(path=cfg)
+    with pytest.raises(KeyError):
+        get_profile(config.orchestrator, "nonexistent")
+
+
+def test_orchestrator_config_unknown_key_rejected(tmp_path):
+    """Unknown key under orchestrator raises ConfigError."""
+    from archie_shared.config import ConfigError
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("orchestrator:\n  unknown_key: oops\n")
+    with pytest.raises(ConfigError, match="Validation error"):
+        load_nexus_config(path=cfg)
+
+
+# --- Tests: expand_workspace_root ---
+
+
+def test_expand_workspace_root_tilde():
+    """Tilde in workspace_root is expanded."""
     config = NexusConfig()
-    result = expand_project_root(config)
+    result = expand_workspace_root(config)
     assert result == Path.home() / "dev"
 
 
-def test_expand_project_root_absolute(tmp_path):
+def test_expand_workspace_root_absolute(tmp_path):
     """Absolute path is unchanged."""
     from archie_shared.schemas import GlobalConfig
 
-    config = NexusConfig(global_=GlobalConfig(project_root=str(tmp_path / "projects")))
-    result = expand_project_root(config)
+    config = NexusConfig(global_=GlobalConfig(workspace_root=str(tmp_path / "projects")))
+    result = expand_workspace_root(config)
     assert result == tmp_path / "projects"
