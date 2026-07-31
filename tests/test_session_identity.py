@@ -10,7 +10,7 @@ from archie_shared.session.identity import (
 
 
 def test_generate_session_id_format():
-    """ID is {project}-{10_char_ulid_lowercase}."""
+    """ID is {workspace}-{10_char_ulid_lowercase}."""
     sid = generate_session_id("my-project")
     parts = sid.rsplit("-", 1)
     assert parts[0] == "my-project"
@@ -64,14 +64,14 @@ def test_roundtrip_generate_container_parse():
 
 
 def test_split_id_simple():
-    """split_id separates project from ulid prefix."""
+    """split_id separates workspace from ulid prefix."""
     project, ulid_prefix = split_id("my-project-01j3abcdef")
     assert project == "my-project"
     assert ulid_prefix == "01j3abcdef"
 
 
 def test_split_id_hyphenated_project():
-    """Hyphenated project name splits correctly."""
+    """Hyphenated workspace name splits correctly."""
     project, ulid_prefix = split_id("my-cool-app-01j3abcdef")
     assert project == "my-cool-app"
     assert ulid_prefix == "01j3abcdef"

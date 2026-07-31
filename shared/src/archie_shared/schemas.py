@@ -18,12 +18,12 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     Attributes:
         model: Active model key from the catalog.
-        project_root: Base directory for project detection.
+        workspace_root: Base directory containing workspace projects.
         region: Session default AWS region (fallback for geo-inference models).
     """
 
     model: str = "bedrock-claude-sonnet-4-6"
-    project_root: str = "~/dev"
+    workspace_root: str = "~/dev"
     region: str = "eu-west-1"
 
 
@@ -39,10 +39,44 @@ class WebConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Web UI-specific settings (placeholder for future fields)."""
 
 
+class OrchestratorProfile(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """A single orchestrator target (host + port)."""
+
+    host: str = "127.0.0.1"
+    port: int = 7600
+
+
+class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Orchestrator configuration — profiles keyed by name.
+
+    Named profiles are resolved by the CLI for multi-host addressing.
+    The 'default' profile (or OrchestratorProfile() if absent) is used
+    for commands that don't specify a profile.
+    """
+
+    profiles: dict[str, OrchestratorProfile] = msgspec.field(default_factory=dict)
+
+
+def get_profile(config: OrchestratorConfig, name: str = "default") -> OrchestratorProfile:
+    """Get a named profile.
+
+    The implicit ``default`` profile falls back to hardcoded localhost defaults
+    when no ``default`` profile is configured. Any *explicitly requested* profile
+    name that does not exist raises KeyError — silently returning localhost for a
+    typo'd name would be a footgun.
+    """
+    profile = config.profiles.get(name)
+    if profile is not None:
+        return profile
+    if name == "default":
+        return OrchestratorProfile()
+    raise KeyError(name)
+
+
 class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Top-level application configuration.
 
-    Maps to config.yaml with sections: global, cli, agent, web.
+    Maps to config.yaml with sections: global, cli, agent, web, orchestrator.
     The `global` key is renamed to `global_` in Python (reserved keyword).
     """
 
@@ -50,6 +84,7 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     cli: CliConfig = msgspec.field(default_factory=CliConfig)
     agent: AgentConfig = msgspec.field(default_factory=AgentConfig)
     web: WebConfig = msgspec.field(default_factory=WebConfig)
+    orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
 
 
 def load_nexus_config(path: Path | None = None) -> NexusConfig:
@@ -76,6 +111,6 @@ def load_nexus_config(path: Path | None = None) -> NexusConfig:
     return load_config(default_path, NexusConfig)
 
 
-def expand_project_root(config: NexusConfig) -> Path:
-    """Expand the project_root path (tilde expansion)."""
-    return Path(config.global_.project_root).expanduser()
+def expand_workspace_root(config: NexusConfig) -> Path:
+    """Expand the workspace_root path (tilde expansion)."""
+    return Path(config.global_.workspace_root).expanduser()

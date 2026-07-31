@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Sessions — Archie{% endblock %}
+{% block head_meta %}<meta http-equiv="refresh" content="5">{% endblock %}
+{% block content %}
+{% if sessions %}
+<table>
+    <thead>
+        <tr>
+            <th>Session ID</th>
+            <th>Workspace</th>
+            <th>Status</th>
+            <th>Port</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in sessions %}
+        <tr>
+            <td>{{ s.session_id }}</td>
+            <td>{{ s.workspace }}</td>
+            <td>{{ s.raw_docker_status }}</td>
+            <td>{{ s.port or "—" }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">No running sessions.</p>
+{% endif %}
+{% endblock %}

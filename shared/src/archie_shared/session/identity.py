@@ -1,6 +1,6 @@
 """Session identity — single source of truth for ID format and container naming.
 
-ID format: {project}-{ulid_timestamp_10chars_lowercase}
+ID format: {workspace}-{ulid_timestamp_10chars_lowercase}
 Container name: archie-{session_id}
 
 The ULID timestamp prefix gives chronological sorting without randomness.
@@ -12,25 +12,25 @@ from ulid import ULID
 
 CONTAINER_PREFIX = "archie-"
 
-# Matches: archie-{project_with_hyphens}-{10_crockford_base32_chars}
-# Greedy on project (anchors on trailing 10-char ULID timestamp).
+# Matches: archie-{workspace_with_hyphens}-{10_crockford_base32_chars}
+# Greedy on workspace (anchors on trailing 10-char ULID timestamp).
 _CROCKFORD = r"[0-9a-hjkmnp-tv-z]"
 SESSION_PATTERN = re.compile(
     rf"^{re.escape(CONTAINER_PREFIX)}(.+)-({_CROCKFORD}{{10}})$", re.IGNORECASE
 )
 
 
-def generate_session_id(project: str) -> str:
-    """Generate a session ID: {project}-{ulid_timestamp}.
+def generate_session_id(workspace: str) -> str:
+    """Generate a session ID: {workspace}-{ulid_timestamp}.
 
     Uses the first 10 characters of a ULID (the timestamp component),
     giving millisecond-precision chronological sorting without randomness.
 
     Args:
-        project: Project name (e.g. from detect_project_dir().name on the host).
+        workspace: Workspace name (e.g. from detect_project_dir().name on the host).
     """
     ulid_str = str(ULID())[:10].lower()
-    return f"{project}-{ulid_str}"
+    return f"{workspace}-{ulid_str}"
 
 
 def container_name(session_id: str) -> str:
@@ -51,12 +51,12 @@ def parse_container_name(name: str) -> str | None:
 
 
 def split_id(session_id: str) -> tuple[str, str]:
-    """Split a session ID into (project, ulid_prefix).
+    """Split a session ID into (workspace, ulid_prefix).
 
-    The ULID prefix is the last 10 characters; everything before the final
-    hyphen is the project name (which may itself contain hyphens).
+    Splits on the final hyphen: the segment after it is the ULID suffix, and
+    everything before it is the workspace name (which may itself contain
+    hyphens). Returns (session_id, "") if there is no hyphen.
     """
-    # Last 10 chars after the final hyphen
     last_hyphen = session_id.rfind("-")
     if last_hyphen == -1:
         return session_id, ""
