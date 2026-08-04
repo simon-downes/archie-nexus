@@ -2,7 +2,8 @@
 
 Skills are discovered from two locations (in priority order):
 1. ~/.agents/skills/*/SKILL.md — user-level, cross-project (lower priority)
-2. ~/.archie/skills/*/SKILL.md — archie-specific user skills (higher priority)
+2. <persona_dir>/skills/*/SKILL.md — repo-tracked persona skills (higher priority),
+   where <persona_dir> is ARCHIE_PERSONA_DIR (default <repo_root>/persona)
 
 Each SKILL.md uses YAML frontmatter with required `name` and `description`
 fields. The body (everything after the second `---`) is loaded on-demand
@@ -10,7 +11,7 @@ via the skill tool.
 
 Design decisions:
 - One level deep only (no recursive scan)
-- Duplicate names: ~/.archie wins, ~/.agents skill silently shadowed
+- Duplicate names: <persona_dir>/skills wins, ~/.agents skill silently shadowed
 - Discovery returns a dict[str, SkillEntry] keyed by skill name
 - Malformed files are skipped with a warning logged
 """
@@ -20,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+
+from archie_shared.config import persona_dir
 
 from archie_agent.tools import ToolSpec
 
@@ -43,9 +46,10 @@ class SkillEntry:
 def discover_skills() -> dict[str, SkillEntry]:
     """Discover skills from user-level directories.
 
-    Scans ~/.agents/skills/ (lower priority) then ~/.archie/skills/ (higher
-    priority). Skills in the higher-priority directory overwrite same-name
-    skills from the lower-priority directory.
+    Scans ~/.agents/skills/ (lower priority) then <persona_dir>/skills/ (higher
+    priority), where <persona_dir> is ARCHIE_PERSONA_DIR (default
+    <repo_root>/persona). Skills in the higher-priority directory overwrite
+    same-name skills from the lower-priority directory.
 
     Returns:
         Dict of skill name → SkillEntry.
@@ -56,9 +60,12 @@ def discover_skills() -> dict[str, SkillEntry]:
     agents_skills_dir = Path.home() / ".agents" / "skills"
     _scan_directory(agents_skills_dir, catalog)
 
-    # Archie-specific user skills (higher priority — overwrites shared)
-    archie_skills_dir = Path.home() / ".archie" / "skills"
-    _scan_directory(archie_skills_dir, catalog)
+    # Repo-tracked persona skills (higher priority — overwrites shared).
+    # Uses persona_dir() (ARCHIE_PERSONA_DIR, default <repo_root>/persona) so it
+    # aligns with the persona mount; inside the container this resolves to the
+    # mounted /opt/archie/persona/skills.
+    persona_skills_dir = persona_dir() / "skills"
+    _scan_directory(persona_skills_dir, catalog)
 
     return catalog
 

@@ -3,8 +3,8 @@
 from pathlib import Path
 
 from archie_agent.prompt import (
-    _IDENTITY,
     _build_environment,
+    _build_identity,
     _build_loaded_skills,
     _build_project_context,
     _build_skills_catalog,
@@ -16,10 +16,11 @@ from archie_agent.skills import SkillEntry
 
 def test_identity_section_content():
     """Identity section contains key personality traits."""
-    assert "Archie" in _IDENTITY
-    assert "concise" in _IDENTITY
-    assert "tools proactively" in _IDENTITY
-    assert "Do not re-read to verify" in _IDENTITY
+    identity = _build_identity()
+    assert "Archie" in identity
+    assert "concise" in identity
+    assert "tools proactively" in identity
+    assert "Do not re-read to verify" in identity
 
 
 def test_build_environment_contains_model_and_workspace():

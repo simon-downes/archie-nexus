@@ -140,53 +140,58 @@ class TestScanDirectory:
 
 
 class TestDiscoverSkills:
-    """Tests for discover_skills — integration with home directory scanning."""
+    """Tests for discover_skills — integration with agents + persona scanning."""
 
     def test_discovers_from_agents_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
         agents_dir = tmp_path / ".agents" / "skills"
         _write_skill(agents_dir, "shared-skill", VALID_SKILL)
 
         catalog = discover_skills()
         assert "test-skill" in catalog
 
-    def test_discovers_from_archie_dir(self, tmp_path, monkeypatch):
+    def test_discovers_from_persona_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        archie_dir = tmp_path / ".archie" / "skills"
-        _write_skill(archie_dir, "archie-skill", VALID_SKILL)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
+        persona_skills_dir = tmp_path / "persona" / "skills"
+        _write_skill(persona_skills_dir, "persona-skill", VALID_SKILL)
 
         catalog = discover_skills()
         assert "test-skill" in catalog
 
-    def test_archie_overrides_agents(self, tmp_path, monkeypatch):
-        """~/.archie skills override ~/.agents skills with same name."""
+    def test_persona_overrides_agents(self, tmp_path, monkeypatch):
+        """persona skills override ~/.agents skills with same name."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
 
         agents_dir = tmp_path / ".agents" / "skills"
-        archie_dir = tmp_path / ".archie" / "skills"
+        persona_skills_dir = tmp_path / "persona" / "skills"
 
         # Both have a skill named "test-skill" but from different paths
         _write_skill(agents_dir, "shared", VALID_SKILL)
-        archie_path = _write_skill(archie_dir, "archie", VALID_SKILL)
+        persona_path = _write_skill(persona_skills_dir, "persona", VALID_SKILL)
 
         catalog = discover_skills()
         assert "test-skill" in catalog
-        # The archie one should win
-        assert catalog["test-skill"].path == archie_path
+        # The persona one should win
+        assert catalog["test-skill"].path == persona_path
 
     def test_empty_when_no_dirs(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
         catalog = discover_skills()
         assert catalog == {}
 
     def test_merges_unique_skills(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
 
         agents_dir = tmp_path / ".agents" / "skills"
-        archie_dir = tmp_path / ".archie" / "skills"
+        persona_skills_dir = tmp_path / "persona" / "skills"
 
         _write_skill(agents_dir, "shared", VALID_SKILL)
-        _write_skill(archie_dir, "specific", VALID_SKILL_2)
+        _write_skill(persona_skills_dir, "specific", VALID_SKILL_2)
 
         catalog = discover_skills()
         assert "test-skill" in catalog

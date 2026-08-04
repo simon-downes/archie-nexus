@@ -99,6 +99,8 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     # 6. Construct docker run command (mirrors cli.py start command)
     agent_dir = REPO_ROOT / "agent"
     shared_dir = REPO_ROOT / "shared"
+    persona_dir_host = REPO_ROOT / "persona"
+    container_persona = "/opt/archie/persona"
 
     docker_cmd = [
         "docker",
@@ -113,11 +115,15 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         "-e",
         f"ARCHIE_HOME_DIR={container_home}",
         "-e",
+        f"ARCHIE_PERSONA_DIR={container_persona}",
+        "-e",
         f"ARCHIE_SESSION_ID={session_id}",
         "-v",
         f"{agent_dir}:/opt/archie/agent:rw",
         "-v",
         f"{shared_dir}:/opt/archie/shared:ro",
+        "-v",
+        f"{persona_dir_host}:{container_persona}:rw",
         "-v",
         f"{resolved}:/workspace:rw",
         "-v",

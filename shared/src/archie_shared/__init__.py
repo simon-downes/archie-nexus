@@ -1,6 +1,6 @@
 """archie-shared — shared types, events, and config for archie-nexus."""
 
-from archie_shared.config import ConfigError, home_dir, load_config
+from archie_shared.config import ConfigError, home_dir, load_config, persona_dir
 from archie_shared.events import (
     PROTOCOL_VERSION,
     ClientCommand,
@@ -86,6 +86,7 @@ __all__ = [
     "load_config",
     "load_models",
     "load_nexus_config",
+    "persona_dir",
     "provider_name",
     "serialize_command",
     "serialize_event",
