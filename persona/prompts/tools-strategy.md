@@ -1,4 +1,4 @@
-## Tools
+## Available Tools
 
 You have native tools (`read`, `grep`, `glob`, `edit`, `write`, `shell`,
 `web_fetch`, `web_search`, `code`) for single operations, plus `exec` for

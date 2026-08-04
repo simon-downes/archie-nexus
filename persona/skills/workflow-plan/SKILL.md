@@ -1,12 +1,14 @@
 ---
 name: workflow-plan
 description: >
-  Guide complete planning workflow from vague intent to executable plans, at three
-  levels of scope: roadmap (a list of projects), project (one large initiative broken
-  into implementable slices), and spec (a single directly-implementable plan). Use when
-  the user says "let's plan", "plan this", "I want to build...", "how should we approach",
-  "make a plan", "roadmap", "break this down", or describes work — of any size — that needs
-  design before coding. The skill selects the appropriate planning level from the request.
+  Turn vague intent into an executable, self-contained plan. Use when the user says
+  "let's plan", "plan this", "I want to build...", "how should we approach", "make a
+  plan", "roadmap", "break this down", or describes work — of any size — that needs
+  design before coding. Not for executing an already-approved plan (use workflow-implement),
+  reviewing finished work (use workflow-review), or trivial changes that need no design.
+  Guides planning at three levels of scope — roadmap (a list of projects), project (one
+  large initiative broken into implementable slices), and spec (a single directly-implementable
+  plan) — and selects the appropriate level from the request.
 ---
 
 # Purpose
@@ -181,7 +183,7 @@ The full four-phase process below. This is where implementable plans are produce
    of work, and any referenced files — aimed at answering discoverable questions, not
    exhaustively mapping the repo. When a question can't be answered from code, add it to the
    decision tree rather than digging further. For unfamiliar repos, explore by progressive
-   disclosure (see `# Tools` → "Exploring a codebase") and delegate wide surveys to a research subagent.
+   disclosure (see `# Available Tools` → "Exploring a codebase") and delegate wide surveys to a research subagent.
    Also check project documentation (README, CONTRIBUTING, AGENTS.md) and determine
    the project configuration (refer to `# Available Tools`). If an issue tracker is
    configured (`issues.provider`), note it for use after plan approval. If no
@@ -378,6 +380,25 @@ Pending: cross-cutting design decisions
 
 For roadmap/project levels, mark the analogous step (e.g. `Level: project | Step: decompose
 into slices`).
+
+---
+
+# Example
+
+**User:** "I want to add rate limiting to the API"
+
+1. Select level: a single directly-implementable feature → **spec**.
+2. Phase 1 (Objective + Requirements): confirm goal and constraints; grill facts from the
+   codebase (existing middleware, Redis availability) before asking the user anything.
+3. Phase 2 (Technical Design): put load-bearing decisions to the user one at a time
+   (store, key strategy, limit response behaviour) with a recommendation each.
+4. Phase 3 (Decompose): break into dependency-ordered milestones, each with one testable
+   deliverable.
+5. Phase 4 (Review): audit the plan, then write `./plans/NNN-spec-rate-limiting.md`.
+
+For a larger request ("build a billing system"), select **project**, resolve only
+load-bearing decisions, and decompose into specs. For "what should we build next quarter",
+select **roadmap**.
 
 ---
 
