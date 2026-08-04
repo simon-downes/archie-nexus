@@ -151,8 +151,7 @@ When all milestones are done:
 1. Summarise deliverables to user
 2. Confirm every milestone in the progress ledger is marked `[x]`
 3. If the plan came from an issue tracker, update the issue status to "In Review"
-   (or nearest equivalent). Determine the project configuration and issue tracker
-   provider (refer to `# Available Tools`). If the update fails, warn and continue.
+   (or nearest equivalent) — same tracker-detection and fallback rules as Setup.
 4. If the plan is a local file, move it (and its `-progress.md` ledger) to a `done/`
    subdirectory alongside it (e.g. `plans/done/`)
 5. Run `workflow-review` in full mode across all changes (from branch base to HEAD)
@@ -196,10 +195,8 @@ See [references/PROBLEM-HANDLING.md](references/PROBLEM-HANDLING.md) for detaile
 - **Plan is the source of truth** — Approach gives direction, Tasks define the work,
   Verify confirms completion. Don't reinvent what the plan already provides.
 - **Autonomy within bounds** — the plan sets direction, but use judgment for
-  implementation-level details it doesn't specify.
-- **Work only the current milestone** — implement it fully before moving on.
-- **Test first for behaviour** — red before green; test at the seam the plan names.
-- **Stop when unclear** — don't guess or improvise beyond the plan.
+  implementation-level details it doesn't specify. When the plan is genuinely unclear or
+  appears flawed, stop and ask rather than guessing (see Handling Issues).
 
 ---
 
