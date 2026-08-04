@@ -102,6 +102,8 @@ def test_start_session_correct_docker_command(config, workspace, tmp_path):
     # Agent and shared mounts from REPO_ROOT
     assert f"{REPO_ROOT / 'agent'}:/opt/archie/agent:rw" in captured_cmd
     assert f"{REPO_ROOT / 'shared'}:/opt/archie/shared:ro" in captured_cmd
+    # Persona mount (repo-tracked skills + prompts), read-write
+    assert f"{REPO_ROOT / 'persona'}:/opt/archie/persona:rw" in captured_cmd
 
     # Return value
     assert descriptor.port == 32771
@@ -160,6 +162,7 @@ def test_start_session_env_vars_in_command(config, workspace, tmp_path):
 
     cmd_str = " ".join(captured_cmd)
     assert "ARCHIE_HOME_DIR=" in cmd_str
+    assert "ARCHIE_PERSONA_DIR=/opt/archie/persona" in cmd_str
     assert "ARCHIE_SESSION_ID=" in cmd_str
 
 
