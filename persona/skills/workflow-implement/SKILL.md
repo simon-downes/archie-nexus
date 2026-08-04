@@ -1,10 +1,12 @@
 ---
 name: workflow-implement
 description: >
-  Execute approved implementation plans through milestone-based workflow with progress
-  tracking. Use when implementing approved plans from local plan files or issue tracker,
-  or when the user says "implement this", "build it", "start coding", "execute the plan",
-  "let's implement", or references an approved plan file.
+  Execute an approved implementation plan, milestone by milestone. Use when implementing
+  approved plans from local plan files or an issue tracker, or when the user says
+  "implement this", "build it", "start coding", "execute the plan", "let's implement", or
+  references an approved plan file. Not for creating or designing a plan (use workflow-plan),
+  reviewing finished work (use workflow-review), or ad-hoc changes with no plan. Works
+  through milestones sequentially with progress tracking.
 ---
 
 # Purpose

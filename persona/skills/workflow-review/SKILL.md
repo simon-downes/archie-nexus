@@ -1,13 +1,14 @@
 ---
 name: workflow-review
 description: >
-  Review code changes for quality, standards compliance, and plan alignment. Supports
-  milestone reviews during implementation, full implementation reviews, and standalone
-  PR/ad-hoc reviews. Orchestrates qa-runner for mechanical checks and a code-reviewer
-  subagent for reasoning-level quality assessment. Use when reviewing code changes,
-  verifying implementations against plans, checking code quality before committing or
-  merging, reviewing pull requests, or when asked to "review this", "check the code",
-  or "is this ready to merge".
+  Review code changes for quality, standards compliance, and plan alignment. Use when
+  reviewing code changes, verifying an implementation against a plan, checking code quality
+  before committing or merging, reviewing pull requests, or when asked to "review this",
+  "check the code", or "is this ready to merge". Not for writing new code (use
+  workflow-implement) or designing a plan (use workflow-plan). Supports milestone reviews
+  during implementation, full implementation reviews, and standalone PR/ad-hoc reviews;
+  orchestrates qa-runner for mechanical checks and a code-reviewer subagent for
+  reasoning-level quality assessment.
 ---
 
 # Purpose
@@ -299,3 +300,20 @@ from changed files to check callers and consumers.
 
 **Constraint:** surfaces findings and questions. Does not suggest rewrites or
 alternative implementations.
+
+---
+
+# Example
+
+**User:** "Review this before I merge"
+
+1. Determine mode: a complete change set with no active milestone → **PR/ad-hoc review**.
+2. Resolve scope: files changed on the branch vs. its base.
+3. Run qa-runner for mechanical checks (build, lint, tests, type checks).
+4. Dispatch the code-reviewer subagent with the full changed files, relevant context
+   files, applicable coding-standards policy, and the selected review dimensions.
+5. Assemble findings by severity, keeping standards and spec/correctness axes distinct.
+6. Report a per-axis verdict (Standards / Spec) — do not collapse into one.
+
+During implementation this runs automatically at each milestone's verify step; the
+scope is the current milestone's changed files.

@@ -28,7 +28,7 @@ not make the decision for you.
 # When Not to Use
 
 - Simple factual questions ("what's the default timeout?") — just search and answer
-- Questions about the current codebase — read the code (see `# Tools` → "Exploring a
+- Questions about the current codebase — read the code (see `# Available Tools` → "Exploring a
   codebase")
 - **Judgment / decision questions** ("which should *we* pick?") — research the options,
   then route the decision to `council` or the user. Research gathers evidence; it does
