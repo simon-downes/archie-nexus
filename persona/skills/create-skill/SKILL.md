@@ -67,28 +67,21 @@ A skill is a directory under `<persona>/skills/<name>/`:
 ```
 
 - **`references/`** — Markdown detail only *some* paths through the skill reach (deep
-  procedures, tables, craft notes). Read on demand via the skill tool's `file` param.
+  procedures, tables, craft notes).
 - **`scripts/`** — deterministic helpers the skill runs. Reach for one when the work is
   mechanical; skills carry the judgment, scripts do the rote steps.
 - **`assets/`** — static files the skill reads or copies (templates, fixtures).
 
-*(`scripts/` and `assets/` aren't used in this repo yet — the concepts exist for when
-they fit.)* All supporting files must live inside the skill directory; the loader
-refuses paths outside it.
-
-**Frontmatter** — only `name` and `description` are read (both required):
+**Frontmatter**
 
 ```yaml
 ---
-name: <lowercase-hyphenated>          # matches the directory; no dates/session/incident IDs
+name: <lowercase-hyphenated>          # matches the directory
 description: >
   <one-sentence purpose>. Use when <OR-joined triggers, literal user phrases>.
   Not for <confusable adjacent situations>.
 ---
 ```
-
-Front-load the decisive triggers in the description's first ~60 characters — assume the
-tail gets truncated.
 
 **Body section order** (everything after the closing `---`):
 
