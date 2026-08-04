@@ -314,7 +314,7 @@ See [references/MILESTONES.md](references/MILESTONES.md) for detailed rules and 
 
 **Goal:** Verify the plan is complete and implementable before presenting to the user.
 
-1. **Run review** — invoke `action-review-plan` with the draft plan. The reviewer audits
+1. **Run review** — invoke `review-plan` with the draft plan. The reviewer audits
    against quality criteria in a clean context window.
 
 2. **Resolve findings** — for each finding:

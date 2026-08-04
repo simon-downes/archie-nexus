@@ -49,7 +49,7 @@ deliberately leave slice-local choices unresolved.
 
 ## Review (lighter than spec Phase 4)
 
-No `action-review-plan` pass. Instead, self-audit:
+No `review-plan` pass. Instead, self-audit:
 - **Vertical-cut quality** — is each slice genuinely end-to-end and independently
   shippable, or a disguised horizontal layer?
 - **Honest boundaries** — do the slice dependencies reflect real ordering, or wishful

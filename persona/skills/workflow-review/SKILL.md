@@ -26,7 +26,7 @@ and reasoning-level review (code-reviewer subagent) into a single workflow.
 
 # When Not to Use
 
-- Reviewing plans before implementation (use action-review-plan)
+- Reviewing plans before implementation (use review-plan)
 - Creating or modifying plans (use workflow-plan)
 - Running only mechanical checks without reasoning review (use qa-runner directly)
 
