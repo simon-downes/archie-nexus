@@ -220,12 +220,9 @@ See [references/REQUIREMENTS.md](references/REQUIREMENTS.md) for format rules an
 a dependency, decide where code lives, or establish a new pattern.
 
 1. **Identify Cross-Cutting Decisions** — review the requirements and determine what needs
-   resolving at the project/feature level:
-   - Technology choices (libraries, frameworks, tools)
-   - Structural decisions (where new code lives, module boundaries)
-   - Patterns and conventions (especially for greenfield work)
-   - Infrastructure and deployment considerations
-   - Non-functional concerns (security, observability, performance)
+   resolving at the project/feature level (technology choices, structural decisions, patterns
+   and conventions, infrastructure, non-functional concerns). See
+   [references/DESIGN.md](references/DESIGN.md) for the decision categories and examples.
 
 2. **Resolve from Codebase First** — for existing projects, many decisions are already made.
    Reference existing patterns rather than re-deciding. Call out where this work deviates
@@ -238,8 +235,6 @@ a dependency, decide where code lives, or establish a new pattern.
 4. **Review with User** — present design, iterate based on feedback
 
 **After approval, emit a phase marker, then automatically proceed to Phase 3.**
-
-See [references/DESIGN.md](references/DESIGN.md) for decision categories and examples.
 
 ---
 
@@ -258,58 +253,33 @@ later rather than inventing detail now.
 Each milestone has four required sections and two conditional sections:
 
 - **Approach** — technical context that shapes how the work is done: which libraries/patterns
-  to use, where in the codebase this fits, constraints, and ⚠️ gotchas. The "how and why."
-  Where the milestone changes behaviour, name the **test seam** — the boundary at which it
-  gets tested (public interface preferred over internals) so the implementor doesn't
-  improvise test architecture.
+  to use, where in the codebase this fits, constraints, ⚠️ gotchas, and the **test seam**
+  (the boundary at which behavioural changes get tested). The "how and why."
 - **Wiring** *(when milestone introduces shared state or cross-module coordination)* —
   data flow: what state is created, who mutates it, who reads it, what call sites look like.
 - **Edge Cases** *(when milestone handles external input or has failure modes)* —
   non-happy-path scenarios with decided behaviour. One line each: scenario → behaviour.
-- **Tasks** — concrete units of work to complete, in roughly the order they should happen.
-  The "what gets done."
+- **Tasks** — concrete units of work, in roughly execution order. The "what gets done."
 - **Deliverable** — single testable outcome. What's true when this milestone is complete.
-- **Verify** — how to confirm the deliverable. A command to run, a test to pass, a behaviour
-  to observe. Must include HOW to observe, not just WHAT to observe.
-
-**Format:**
-```
-1. [Milestone objective]
-   Approach:
-   - [technical context, guidance, constraints]
-   - Test seam: [boundary at which this is tested] (if behavioural)
-   - ⚠️ [gotchas or high-stakes items]
-   Wiring: (if shared state / cross-module)
-   - State: [what, type, where instantiated]
-   - Producers: [what mutates it]
-   - Consumers: [what reads it, when]
-   - Call site: [resulting function call]
-   Edge cases: (if external input / failure modes)
-   - [scenario]: [behaviour]
-   Tasks:
-   - [concrete unit of work]
-   - [concrete unit of work]
-   Deliverable: [single testable outcome]
-   Verify: [how to confirm]
-```
+- **Verify** — how to confirm the deliverable (a command, test, or observable behaviour) —
+  including HOW to observe, not just what.
 
 **Before presenting milestones, audit each one:**
-- Would the implementor need to choose a library or tool? → resolve in Approach
-- Would the implementor need to decide where new code lives? → resolve in Approach
-- Would the implementor need to establish a new pattern? → resolve in Approach
-- Is this a **vertical slice** (delivers end-to-end observable behaviour), or a horizontal
-  slice (one layer only, e.g. all types, or all config)? Restructure horizontal slices into
-  vertical ones. **Exception:** a **prefactor** milestone ("make the change easy, then make
-  the easy change") is a legitimate infrastructure-only slice that reduces the blast radius
-  of later slices — label it as such.
-- Does this milestone introduce shared state or cross-module data flow? → add Wiring
-- Does this milestone handle external input or have failure modes? → add Edge Cases
-- Are Tasks specific enough to track progress but not so detailed they prescribe code?
-- Does Verify give a concrete way to confirm the deliverable (including how to observe)?
+- Would the implementor need to choose a library/tool, decide where new code lives, or
+  establish a new pattern? → resolve it in Approach.
+- Is this a **vertical slice** (end-to-end observable behaviour) rather than a horizontal
+  one (a single layer)? Restructure horizontal slices into vertical ones. **Exception:** a
+  **prefactor** ("make the change easy, then make the easy change") is a legitimate
+  infrastructure-only slice — label it as such.
+- Shared state / cross-module data flow? → add Wiring. External input / failure modes? →
+  add Edge Cases.
+- Are Tasks specific enough to track but not so detailed they prescribe code? Does Verify
+  give a concrete way to confirm the deliverable, including how to observe?
 
 **After completing milestones, emit a phase marker, then automatically proceed to Phase 4.**
 
-See [references/MILESTONES.md](references/MILESTONES.md) for detailed rules and examples.
+See [references/MILESTONES.md](references/MILESTONES.md) for the milestone format template,
+full rules, and worked examples.
 
 ---
 
@@ -332,15 +302,12 @@ See [references/MILESTONES.md](references/MILESTONES.md) for detailed rules and 
 
 **Approval Gate:** "Here is the complete plan. Shall we move to Implementation Mode?"
 
-5. **Persist the plan:**
-   - **With tracker:** if an issue tracker was identified via the project configuration,
-     create or update the issue with the full plan as the issue description
-     (refer to `# Available Tools`). If an existing issue was referenced, update its
-     description. If no existing issue, create one with the plan title.
-     The issue identifier is the plan identifier — no local file is created.
-     If the issue operation fails, fall back to a local file.
-   - **Without tracker:** write the plan to a local file in `./plans/` (see Planning
-     Artifacts above).
+5. **Persist the plan** (see Planning Artifacts for location rules):
+   - **With tracker:** create or update the issue with the full plan as its description; the
+     issue identifier becomes the plan identifier (no local file). See
+     [references/ISSUE-FORMAT.md](references/ISSUE-FORMAT.md) for operations. On failure,
+     fall back to a local file.
+   - **Without tracker:** write the plan to a local file in `./plans/`.
    - If this spec was promoted from a project, update the project plan's Status table
      (slice → this spec's identifier → planned).
 
@@ -399,34 +366,3 @@ into slices`).
 For a larger request ("build a billing system"), select **project**, resolve only
 load-bearing decisions, and decompose into specs. For "what should we build next quarter",
 select **roadmap**.
-
----
-
-## Quick Reference
-
-### Levels
-
-| Level    | Decompose into | Depth                        | Artifact                     | Review        |
-|----------|----------------|------------------------------|------------------------------|---------------|
-| roadmap  | projects       | sequencing/priorities        | `roadmap.md` (living)        | none (living) |
-| project  | specs (slices) | load-bearing decisions       | `NNN-project-*.md`           | light audit   |
-| spec     | milestones     | all decisions                | `NNN-spec-*.md`              | Phase 4       |
-
-### Milestone Sections (spec level)
-
-| Section     | Purpose                                                  | When             |
-|-------------|----------------------------------------------------------|------------------|
-| Approach    | How and why — context, guidance, constraints             | Always           |
-| Wiring      | Data flow — state ownership, producers, consumers, call sites | Shared state / cross-module |
-| Edge Cases  | Decided behaviour for non-happy-path scenarios           | External input / failure modes |
-| Tasks       | What — concrete units of work                            | Always           |
-| Deliverable | Done when — single testable outcome                      | Always           |
-| Verify      | Proof — how to confirm (including observation mechanism) | Always           |
-
-### Milestone Rules
-
-- Exactly ONE deliverable per milestone
-- Deliverables must be testable
-- Prefer smaller over larger
-- Order by dependency
-- No unresolved decisions left for the implementor

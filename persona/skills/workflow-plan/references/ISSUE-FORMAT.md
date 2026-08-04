@@ -1,11 +1,8 @@
 # Issue Tracking Format
 
-## Plan Storage
-
-When an issue tracker is available, the plan lives in the issue description — no local
-plan files are created. The issue identifier (e.g. PLAT-123, #42) is the plan identifier.
-
-When no tracker is available, plans are stored as local files in `./plans/`.
+When an issue tracker is available, the plan lives in the issue description rather than a
+local file (see the skill's Planning Artifacts section for storage rules and when this
+applies). This file covers the tracker-specific format and operations.
 
 ## Issue Description as Plan
 

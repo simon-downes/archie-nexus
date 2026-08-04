@@ -69,11 +69,7 @@ and reasoning-level review (code-reviewer subagent) into a single workflow.
 **Plan alignment:** full — trace every MUST requirement to implemented code, verify
 design decisions were followed.
 
-**Scope resolution:**
-1. Feature branch → `git diff $(git merge-base main HEAD)`
-2. Plan exists → find milestone commits from git log, diff the range
-3. User specifies scope → use that
-4. None of the above → ask
+(Scope resolution for all modes is in Workflow §1 below.)
 
 ## Standalone Review
 
@@ -195,40 +191,26 @@ If issue operations fail, warn and continue.
 
 # Review Dimensions
 
-The code-reviewer subagent checks these dimensions. The orchestrator selects which are
-relevant based on what changed.
+The code-reviewer subagent checks these dimensions; the orchestrator selects which are
+relevant based on what changed and passes them in.
 
-**Always check:**
-- **Coding standards** — conventions, naming, structure, consistency with existing codebase
-- **Error handling** — specific exceptions, appropriate messages, resource cleanup
-- **Documentation** — docstrings on public interfaces, comments on non-obvious logic
+**Always check:** Coding standards · Error handling · Documentation
 
 **Check when relevant:**
-- **Architecture** — cross-cutting strategies, module boundaries, dependency flow.
-  Always relevant for full codebase reviews or changes spanning multiple modules.
-- **API contract** — output format consistency, consumer-appropriateness, token efficiency.
-  Always relevant for CLI tools or libraries with external consumers.
-- **Security** — input validation, secrets handling, auth, error message leakage.
-  Always relevant when changes touch: auth, user input, API endpoints, data access,
-  configuration, or external integrations.
-- **Performance** — algorithmic efficiency, unnecessary work, N+1 patterns.
-  Relevant when changes touch: data processing, database queries, loops over collections,
-  hot paths.
-- **Technical debt** — shortcuts taken, TODOs introduced, patterns that will cause
-  maintenance burden. Flag but don't block.
+- **Architecture** — multi-module changes or new cross-cutting patterns; always for full
+  codebase reviews.
+- **API contract** — CLI tools, libraries, or anything with external consumers.
+- **Security** — auth, user input, API endpoints, data access, configuration, external
+  integrations.
+- **Performance** — data processing, database queries, loops over collections, hot paths.
+- **Technical debt** — shortcuts, TODOs, maintenance-burden patterns. Flag, don't block.
+- **Test coverage** — whenever production code changes (or should have test changes).
 
-**Test code** is reviewed differently from production code:
-- Are new code paths covered by tests?
-- Do tests assert meaningful outcomes (not just exercise code)?
-- Are test names descriptive of the behaviour being verified?
-- Are mocks/fixtures realistic and not masking real behaviour?
+The code-reviewer also **traces outward** from changed interfaces to their callers and
+consumers, and applies different criteria to test code than production code.
 
-**Trace outward:** when reviewing changed functions or interfaces, check callers and
-consumers beyond the diff. A changed function signature with unchecked callers is a
-finding. A modified shared type with unconsidered consumers is a finding.
-
-See [references/REVIEW-DIMENSIONS.md](references/REVIEW-DIMENSIONS.md) for detailed
-criteria the code-reviewer subagent uses.
+See [references/REVIEW-DIMENSIONS.md](references/REVIEW-DIMENSIONS.md) for the detailed
+check/look-for criteria per dimension that the code-reviewer subagent uses.
 
 ---
 
