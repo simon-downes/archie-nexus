@@ -54,6 +54,59 @@ Prefer a lighter mechanism when one fits — a skill is the heaviest option:
 
 ---
 
+# Structure
+
+A skill is a directory under `<persona>/skills/<name>/`:
+
+```
+<name>/
+  SKILL.md          # required: frontmatter + body
+  references/       # optional: detail loaded on demand
+  scripts/          # optional: executable helpers the skill invokes
+  assets/           # optional: templates, fixtures, static files the skill uses
+```
+
+- **`references/`** — Markdown detail only *some* paths through the skill reach (deep
+  procedures, tables, craft notes). Read on demand via the skill tool's `file` param.
+- **`scripts/`** — deterministic helpers the skill runs. Reach for one when the work is
+  mechanical; skills carry the judgment, scripts do the rote steps.
+- **`assets/`** — static files the skill reads or copies (templates, fixtures).
+
+*(`scripts/` and `assets/` aren't used in this repo yet — the concepts exist for when
+they fit.)* All supporting files must live inside the skill directory; the loader
+refuses paths outside it.
+
+**Frontmatter** — only `name` and `description` are read (both required):
+
+```yaml
+---
+name: <lowercase-hyphenated>          # matches the directory; no dates/session/incident IDs
+description: >
+  <one-sentence purpose>. Use when <OR-joined triggers, literal user phrases>.
+  Not for <confusable adjacent situations>.
+---
+```
+
+Front-load the decisive triggers in the description's first ~60 characters — assume the
+tail gets truncated.
+
+**Body section order** (everything after the closing `---`):
+
+1. **# Purpose** — short paragraph: what the skill produces and why it earns its place.
+2. **# When to Use** — the situations that should activate it.
+3. **# When Not to Use** — the confusable neighbours, with the lighter mechanism to
+   prefer instead.
+4. **# Principles** — the ideas that shape every run. Omit if the workflow speaks for
+   itself.
+5. **# Workflow** — numbered steps; split into named sub-workflows for distinct modes.
+6. **# Example** — one concrete end-to-end walk-through.
+
+Optional sections (**# Modes**, **# Validation Checklist**) slot in where they help.
+Reference tools via `# Available Tools` rather than hardcoding names. Keep in the body
+what every use needs; move path-specific depth to `references/`.
+
+---
+
 # Creation Workflow
 
 ## 1. Confirm a skill is the right tool
@@ -76,24 +129,17 @@ Ambiguity here is what makes skills misfire.
 
 ## 4. Write the description
 
-The description is a `USE WHEN … NOT FOR …` grammar, front-loaded because it may be
-truncated:
+A one-sentence purpose, then `USE WHEN … NOT FOR …` (see **Structure** for the frontmatter
+shape):
 
-- **USE WHEN**: the situations that should activate it, OR-joined. Include the literal
-  phrases a user would say ("create a skill", "turn this into…").
+- **USE WHEN**: the activating situations, OR-joined. Include the literal phrases a user
+  would say ("create a skill", "turn this into…").
 - **NOT FOR**: the confusable adjacent situations it must stay out of.
-
-Keep the decisive triggers in the first ~60 characters — assume the tail gets cut.
 
 ## 5. Write the body
 
-Follow the house style defined in `references/STRUCTURE.md`: the section order, the
-supporting directories (`references/`, `scripts/`, `assets/`), and the conventions every
-skill obeys. Use imperative, token-efficient prose. Reference tools via
-`# Available Tools` rather than hardcoding names. Keep in the body what every use needs;
-move path-specific depth to `references/`.
-
-For the craft of writing a tight, well-scoped body, read `references/WRITING-SKILLS.md`.
+Follow the section order and conventions in **Structure**. For the craft of writing a
+tight, well-scoped body, read `references/WRITING-SKILLS.md`.
 
 ## 6. Add an example
 
@@ -107,9 +153,7 @@ Run the **Validation Checklist**. Fix every gap before proposing.
 ## 8. Get approval, then write
 
 Present the proposed skill (description + body outline) for approval. On approval, write
-to `<persona>/skills/<name>/SKILL.md` and any `references/` files. Name the directory in
-plain lowercase-hyphenated form (`create-skill`, `review-plan`) — no dates, session, or
-incident IDs.
+to `<persona>/skills/<name>/SKILL.md` and any supporting files.
 
 ---
 
@@ -158,7 +202,7 @@ description survives truncation; plain lowercase-hyphenated name.
    release + notes.
 4. **Description:** `USE WHEN asked to "cut a release", "ship a version", "publish"…
    NOT FOR ordinary commits or reviewing changes.`
-5. **Body:** follow `references/STRUCTURE.md` — Purpose, When (Not) to Use, numbered
+5. **Body:** follow the **Structure** section — Purpose, When (Not) to Use, numbered
    release steps, example; push the version-scheme rules to `references/VERSIONING.md`.
 6. **Example:** walk through cutting `v1.4.0`.
 7. **Validate** against the eight points; fix the vague "publish" trigger.
