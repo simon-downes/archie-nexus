@@ -1,12 +1,14 @@
 ---
 name: council
 description: >
-  Multi-perspective council debate for decision-making. Spawns 3-4 subagents with
-  different perspectives to deliberate on a question through structured rounds.
-  Produces a synthesis with convergence, disagreements, a dissent-strength calibration,
-  and a recommendation. Use when making architecture decisions, evaluating trade-offs,
-  choosing between approaches, assessing risk, or when asked to "council", "debate",
-  "get perspectives on", or "what do others think about".
+  Multi-perspective council debate for decision-making. Use when making architecture
+  decisions, evaluating trade-offs, choosing between approaches, assessing risk, or when
+  asked to "council", "debate", "get perspectives on", or "what do others think about".
+  Spawns 3-4 subagents with different perspectives to deliberate through structured
+  rounds, producing a synthesis with convergence, disagreements, a dissent-strength
+  calibration, and a recommendation. Not for questions with clear factual answers, code
+  or plan review (use workflow-review or review-plan), or decisions the user has already
+  made.
 ---
 
 # Purpose
@@ -203,7 +205,7 @@ name what would break the tie.
 
 ---
 
-# Invocation Examples
+# Example
 
 **Direct:**
 "Council: should we use ECS or Lambda for this service?"
