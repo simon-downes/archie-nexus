@@ -53,7 +53,12 @@ def build(no_cache: bool):
     if not dockerfile.exists():
         raise click.ClickException(f"Dockerfile not found at {dockerfile}")
 
-    username = os.environ.get("USER", "archie")
+    # Container username is fixed to "archie" (matches Dockerfile ARG default and
+    # orchestrator CONTAINER_USER) so mount targets under /home/archie always
+    # resolve. UID is matched to the host user for file ownership on Linux bind
+    # mounts. (git's "dubious ownership" guard is handled separately in
+    # entrypoint.sh via safe.directory, since macOS mounts present as root.)
+    username = "archie"
     uid = str(os.getuid())
 
     click.echo(f"Building image: {_IMAGE_TAG}")
