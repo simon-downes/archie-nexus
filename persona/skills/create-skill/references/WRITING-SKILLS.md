@@ -3,9 +3,6 @@
 The craft layer for `create-skill`: how to write a skill body that is tight, correctly
 scoped, and doesn't rot. Load this when authoring or restructuring a skill body.
 
-*Adapted from Matt Pocock's writing on skills (via the PAI project's
-`WritingGreatSkills.md`) and the vendor-neutral skills guidance in eos.*
-
 ---
 
 ## Two kinds of load
@@ -66,7 +63,8 @@ anything.
   source of truth; point instead of copy.
 - **Sediment** — stale lines accumulate over edits. Prune every time you touch a skill.
 - **Sprawl** — a skill that tries to do everything triggers on nothing cleanly. Split it.
-- **No-op** — a skill that only restates what a capable model already does. Delete it.
+- **No-op** — a skill that adds no project-specific substance beyond generic reasoning.
+  Delete it.
 - **Negation** — "don't do X" is weaker than stating the positive. Prefer "do Y".
 
 ---
