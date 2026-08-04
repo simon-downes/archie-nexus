@@ -92,6 +92,18 @@ Implement each task from the milestone's Tasks list:
 A task is complete when its observable effect exists in the codebase — a new file, a
 modified interface, a passing test. If the effect can't be observed, the task isn't done.
 
+**Test anti-patterns to avoid** (a test that can't fail is not a test):
+- **Tautological** — the assertion recomputes the expected value the way the code does, so
+  it passes by construction. Expected values come from an independent source: a known-good
+  literal, a worked example, the spec.
+- **Implementation-coupled** — mocks internal collaborators, tests private methods, or
+  verifies through a side channel (e.g. querying the database instead of the interface). The
+  tell: it breaks on refactor when behaviour hasn't changed. Test at the named seam.
+- **Horizontal-slicing** — writing all tests, then all implementation. Work one test → one
+  implementation → repeat, so tests track real behaviour rather than an imagined shape.
+- **Mock at boundaries only** — external APIs, databases, time/randomness. Never mock your
+  own classes or internal collaborators.
+
 If a task is too coarse to implement directly, break it into sub-steps and work
 through them.
 
