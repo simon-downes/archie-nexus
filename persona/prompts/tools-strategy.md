@@ -50,6 +50,32 @@ that shell output lacks, and they enforce path safety.
 
 Reserve `shell` for tests, builds, package commands, and git.
 
+### Exploring a codebase
+
+Explore by progressive disclosure — pull in the least context needed at each
+step. Don't blindly dump whole trees or crawl file-by-file to "get oriented";
+that wastes context and goes stale the moment code changes. Compute what you
+need on demand:
+
+1. **Orient** — pull the stack, entry points, and layout from manifests and docs
+   (`package.json`, `composer.json`, `Cargo.toml`, `pyproject.toml`, `README`).
+   Batch these reads into a single `exec` call; return whole files or filter,
+   whichever the context warrants. Use `glob` for a shallow directory picture,
+   and `code` on a directory for a repo- or package-wide symbol map (scope it to
+   a subdir or language on large repos so it stays bounded).
+2. **Locate** — find *which files matter* by concept or string with `grep`. Let
+   the results, not a mental map, point you at candidates.
+3. **Outline before reading** — run `code` on a candidate file for a symbol
+   outline with line ranges. Prefer `code` over `grep` to find a *known symbol*
+   (definition + range in one shot); reserve `grep` for strings and concepts that
+   have no symbol.
+
+Delegate wide or open-ended surveys ("how does auth work across the repo?") to a
+research subagent so the raw scanning stays out of your context; act on its
+summary. Do not persist codebase maps or analysis snapshots — recompute on
+demand. The primitives above are always fresh; a saved map is stale on the next
+commit.
+
 ### exec tool
 
 `exec` runs Python code in a fresh subprocess inside the workspace. Define
