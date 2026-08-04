@@ -83,7 +83,8 @@ description: >
 ---
 ```
 
-**Body section order** (everything after the closing `---`):
+**Body section order** — the recommended shape, not a straitjacket. Most skills fit it;
+extend it where a skill genuinely needs more.
 
 1. **# Purpose** — short paragraph: what the skill produces and why it earns its place.
 2. **# When to Use** — the situations that should activate it.
@@ -94,7 +95,11 @@ description: >
 5. **# Workflow** — numbered steps; split into named sub-workflows for distinct modes.
 6. **# Example** — one concrete end-to-end walk-through.
 
-Optional sections (**# Modes**, **# Validation Checklist**) slot in where they help.
+**Additional sections** are expected — add skill-specific ones (e.g. `# Modes`,
+`# Subagent contract`, a domain reference table) **after Principles or after Workflow**,
+whichever reads better. Keep the core sequence above recognisable; slot the extras
+around it rather than reordering the spine.
+
 Reference tools via `# Available Tools` rather than hardcoding names. Keep in the body
 what every use needs; move path-specific depth to `references/`.
 

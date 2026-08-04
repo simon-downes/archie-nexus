@@ -18,17 +18,22 @@ Write for both: the shortest text that reliably changes behaviour.
 
 ---
 
-## Progressive disclosure and the branching test
+## Progressive disclosure
 
 Organise a skill as a ladder: description → body → reference files. Each rung is loaded
 only when the previous one points to it.
 
-Decide what goes where with the **branching test**:
+Keep content **inline in the body by default**. Loading a reference costs an extra tool
+call, whereas a few more lines in an already-loaded body are cheap and benefit from
+prompt caching. Move content into a `references/` file when:
 
-- **Inline it** (in the body) if *every* path through the skill needs it.
-- **Make it a pointer** (a `references/` file) if only *some* paths reach it.
+- the body has grown large enough that the extra detail crowds out the core procedure, or
+- the content stands on its own as a document (a deep procedure, a big table, craft
+  notes) that only *some* paths through the skill need.
 
-This keeps the body small and the deep detail available without paying for it upfront.
+Don't split hair-thin: a handful of extra lines every path uses belongs inline, even if
+one mode skips them. Reach for a reference to tame size or to house a self-contained
+document — not to shave a few lines.
 
 ---
 

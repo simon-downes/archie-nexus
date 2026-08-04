@@ -2,12 +2,13 @@
 name: review-plan
 description: >
   Review a spec-level implementation plan for completeness, unresolved decisions, and
-  implementability before it reaches an implementor. Delegates the audit to a research
-  subagent with a clean context window and read-only codebase access, so claims like
-  "follows the pattern in auth.ts" are verified rather than trusted. Use when reviewing a
-  plan before implementation, checking a plan for gaps or unresolved decisions, validating a
-  plan is ready to hand off, or when asked to "review this plan", "check the plan", or "is
-  this plan ready".
+  implementability before it reaches an implementor. Use when reviewing a plan before
+  implementation, checking a plan for gaps or unresolved decisions, validating a plan is
+  ready to hand off, or when asked to "review this plan", "check the plan", or "is this
+  plan ready". Delegates the audit to a research subagent with a clean context window and
+  read-only codebase access, so claims like "follows the pattern in auth.ts" are verified
+  rather than trusted. Not for reviewing code or pull requests (use workflow-review),
+  creating or modifying plans (use workflow-plan), or reviewing a roadmap.
 ---
 
 # Purpose
@@ -56,15 +57,9 @@ Review). It is the automatic quality gate for Phase 4.
 
 ## 2. Spawn the review subagent
 
-Delegate to a **research subagent** (read-only: read, glob, grep, index, bash). A clean
-context window matters — the reviewer must judge the plan as an implementor in a fresh
-session would, not through the lens of the conversation that produced it.
-
-Inline into the subagent prompt:
-- The complete plan content (objective, requirements, design, milestones).
-- The review criteria from [references/REVIEW-CRITERIA.md](references/REVIEW-CRITERIA.md).
-- The project root path, so the subagent can verify codebase claims (referenced files,
-  directories, patterns, and dependencies actually exist).
+Delegate to a **research subagent** per the **Subagent contract** below. A clean context
+window matters — the reviewer must judge the plan as an implementor in a fresh session
+would, not through the lens of the conversation that produced it.
 
 Tell the subagent explicitly: **surface findings only — do not rewrite the plan or suggest
 fixes**, and return findings in the Output Format from the criteria doc.
@@ -96,7 +91,27 @@ The user should never see a plan with unresolved decisions that could have been 
 
 # Subagent contract
 
-- **Type:** research (read-only). Clean context window, separate from the planning conversation.
-- **Input:** complete plan content, the review criteria, and the project root path.
+- **Type:** research (read-only: read, glob, grep, index, bash). Clean context window,
+  separate from the planning conversation.
+- **Input** (inline into the prompt):
+  - the complete plan content (objective, requirements, design, milestones);
+  - the review criteria from [references/REVIEW-CRITERIA.md](references/REVIEW-CRITERIA.md);
+  - the project root path, so it can verify codebase claims (referenced files,
+    directories, patterns, and dependencies actually exist).
 - **Output:** structured findings per the Output Format in the criteria doc.
 - **Constraint:** the reviewer surfaces findings. It does not rewrite the plan or suggest fixes.
+
+---
+
+# Example
+
+**User:** "Review plans/031-rate-limiter.md before I hand it to implement."
+
+1. **Locate:** path given → use it.
+2. **Spawn** a research subagent per the Subagent contract: inline the full plan, the
+   review criteria, and the repo root; instruct it to surface findings only.
+3. Subagent verifies claims against the codebase and returns structured findings — e.g.
+   *"Milestone 2 references `middleware/throttle.ts`, which does not exist"* and *"the
+   Redis-vs-in-memory decision is left open in Design."*
+4. **Return** those findings to the user as-is. They decide what to resolve; this skill
+   does not propose the fixes.
