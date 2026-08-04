@@ -1,11 +1,11 @@
 ---
 name: create-skill
 description: >
-  Create a new skill or update an existing one: a reusable capability the agent
-  loads on demand. Use when asked to "create a skill", "make a skill", "add a skill",
-  "turn this into a skill", or to "update"/"fix"/"improve" an existing skill. Not for
-  one-off instructions (just say them), deterministic operations (write a script), or
-  knowledge a capable model already has (the model doesn't need a skill to reason).
+  Author or revise a skill: a reusable, on-demand capability package for the agent.
+  Use when asked to "create a skill", "make a skill", "add a skill", "turn this into
+  a skill", or to "update"/"fix"/"improve" an existing skill. Not for one-off
+  instructions (just say them), deterministic operations (write a script), or basic
+  reasoning any model already does without procedure.
 ---
 
 # Purpose
@@ -15,10 +15,6 @@ loads only when a specific situation arises. A good skill triggers reliably on t
 right situation, stays silent on adjacent ones, and gives just enough procedure to act
 without re-deriving it every time. This skill covers both **creating** new skills and
 **modifying** existing ones.
-
-Skills live in `<persona>/skills/<name>/SKILL.md`, with optional `references/` files
-loaded on demand. The loader reads only `name` and `description` from frontmatter, then
-the body when the skill is invoked.
 
 ---
 
@@ -35,9 +31,10 @@ Prefer a lighter mechanism when one fits — a skill is the heaviest option:
 
 - **A fact or preference** → put it in scoped instructions or the prompt, not a skill.
 - **A deterministic operation** → write a script or CLI command; skills are for judgment.
-- **Reasoning a capable model already does** → don't wrap the model's own competence in
-  procedure. Ask: *would a smarter model make this skill unnecessary?* If yes, skip it.
-  Build skills for knowledge or tools the model can't derive — not to narrate thinking.
+- **Basic reasoning any model already does** → don't wrap general competence in
+  procedure. Skills carry knowledge, tools, and *this project's* specific conventions —
+  not a narration of ordinary thinking. (This is about the task, not the model: a skill
+  worth having is one that adds project-specific substance even a strong model lacks.)
 - **A one-off** → just give the instruction directly.
 
 ---
@@ -49,7 +46,7 @@ Prefer a lighter mechanism when one fits — a skill is the heaviest option:
 - **Progressive disclosure.** SKILL.md body holds what every use needs. Push detail only
   some paths reach into `references/` files, loaded on demand.
 - **Earn the load.** Every skill and every line costs context. Include what changes the
-  agent's behaviour; cut what a capable model already knows.
+  agent's behaviour or carries project-specific substance; cut generic filler.
 - **Single source of truth.** Don't restate what another skill or the prompt owns.
   Point to it. Duplication rots as one copy drifts from the other.
 - **Evidence over invention.** Never fabricate flags, paths, or APIs. If the source
@@ -90,13 +87,13 @@ Keep the decisive triggers in the first ~60 characters — assume the tail gets 
 
 ## 5. Write the body
 
-Match the house structure of existing skills: Purpose → When to Use → When Not to Use →
-Principles → Workflow → Example. Use imperative, token-efficient prose. Reference tools
-via `# Available Tools` rather than hardcoding names. Keep in the body what every use
-needs; move path-specific depth to `references/`.
+Follow the house style defined in `references/STRUCTURE.md`: the section order, the
+supporting directories (`references/`, `scripts/`, `assets/`), and the conventions every
+skill obeys. Use imperative, token-efficient prose. Reference tools via
+`# Available Tools` rather than hardcoding names. Keep in the body what every use needs;
+move path-specific depth to `references/`.
 
-For the craft of writing a tight, well-scoped body, read
-`references/WRITING-SKILLS.md`.
+For the craft of writing a tight, well-scoped body, read `references/WRITING-SKILLS.md`.
 
 ## 6. Add an example
 
@@ -123,13 +120,11 @@ Updating an existing skill:
 1. **Read it whole** — SKILL.md and every `references/` file. Understand what it owns.
 2. **Locate the change** — is it the trigger (description), the procedure (body), or
    depth (references)? Change the smallest surface that fixes the problem.
-3. **Back up before restructuring** — for large rewrites, keep the original text to hand
-   so nothing is silently lost.
-4. **Re-validate** — run the full checklist; a change to one part often breaks another
+3. **Re-validate** — run the full checklist; a change to one part often breaks another
    (e.g. a new trigger phrase that now collides with a neighbour).
-5. **Prune** — delete what the change made redundant. Skills accumulate sediment;
+4. **Prune** — delete what the change made redundant. Skills accumulate sediment;
    editing is the time to remove it.
-6. **Get approval, then write.**
+5. **Get approval, then write.**
 
 ---
 
@@ -163,8 +158,8 @@ description survives truncation; plain lowercase-hyphenated name.
    release + notes.
 4. **Description:** `USE WHEN asked to "cut a release", "ship a version", "publish"…
    NOT FOR ordinary commits or reviewing changes.`
-5. **Body:** Purpose → When (Not) to Use → Principles → numbered release steps →
-   example; push the version-scheme rules to `references/VERSIONING.md`.
+5. **Body:** follow `references/STRUCTURE.md` — Purpose, When (Not) to Use, numbered
+   release steps, example; push the version-scheme rules to `references/VERSIONING.md`.
 6. **Example:** walk through cutting `v1.4.0`.
 7. **Validate** against the eight points; fix the vague "publish" trigger.
 8. On approval, write `<persona>/skills/release/SKILL.md`.
