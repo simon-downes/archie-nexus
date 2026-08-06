@@ -21,6 +21,7 @@ from archie_shared.events import (
     serialize_event,
 )
 from archie_shared.models import (
+    BedrockOpenAIProvider,
     BedrockProvider,
     CostConfig,
     ModelEntry,
@@ -47,6 +48,7 @@ from archie_shared.types import ContentBlock, TextBlock, ToolResultBlock, ToolUs
 
 __all__ = [
     "AgentConfig",
+    "BedrockOpenAIProvider",
     "BedrockProvider",
     "ClientCommand",
     "CliConfig",

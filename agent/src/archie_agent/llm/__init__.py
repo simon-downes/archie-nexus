@@ -10,10 +10,11 @@ broadcasting to clients.
 from collections.abc import Generator
 from typing import Protocol
 
-from archie_shared.models import BedrockProvider, ModelEntry, OllamaProvider
+from archie_shared.models import BedrockOpenAIProvider, BedrockProvider, ModelEntry, OllamaProvider
 
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.bedrock import BedrockClient
+from archie_agent.llm.bedrock_openai import BedrockOpenAIClient
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Turn
 
@@ -51,6 +52,13 @@ def create_llm_client(model: ModelEntry, default_region: str) -> LLMClient:
                 max_output_tokens=model.max_output_tokens,
                 can_cache=model.can_cache,
             )
+        case BedrockOpenAIProvider(model_id=model_id, region=region):
+            return BedrockOpenAIClient(
+                model_id=model_id,
+                region=region or default_region,
+                max_output_tokens=model.max_output_tokens,
+                can_cache=model.can_cache,
+            )
         case OllamaProvider(model_id=model_id, endpoint=endpoint):
             from archie_agent.llm.ollama import OllamaClient
 
@@ -65,6 +73,7 @@ def create_llm_client(model: ModelEntry, default_region: str) -> LLMClient:
 
 __all__ = [
     "BedrockClient",
+    "BedrockOpenAIClient",
     "Done",
     "FakeLLMClient",
     "LLMClient",
