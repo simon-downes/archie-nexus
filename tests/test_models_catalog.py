@@ -3,6 +3,7 @@
 import pytest
 from archie_shared.models import (
     DEFAULT_MODELS,
+    BedrockOpenAIProvider,
     BedrockProvider,
     CostConfig,
     OllamaProvider,
@@ -24,9 +25,9 @@ def test_default_models_all_have_required_fields():
     for key, model in DEFAULT_MODELS.items():
         assert model.name, f"{key} missing name"
         assert model.context > 0, f"{key} has invalid context"
-        assert isinstance(model.provider, (BedrockProvider, OllamaProvider)), (
-            f"{key} has unknown provider type"
-        )
+        assert isinstance(
+            model.provider, (BedrockProvider, BedrockOpenAIProvider, OllamaProvider)
+        ), f"{key} has unknown provider type"
         assert model.provider.model_id, f"{key} missing model_id"
 
 
@@ -36,6 +37,20 @@ def test_default_model_key_format():
         assert key.startswith("bedrock-") or key.startswith("ollama-"), (
             f"Key '{key}' doesn't follow provider-model format"
         )
+
+
+def test_gpt_56_luna_catalog_entry():
+    """GPT-5.6 Luna uses the Bedrock OpenAI Responses provider."""
+    model = DEFAULT_MODELS["bedrock-openai-gpt-5-6-luna"]
+    assert isinstance(model.provider, BedrockOpenAIProvider)
+    assert model.provider.model_id == "openai.gpt-5.6-luna"
+    assert model.provider.region == "us-east-1"
+    assert model.context == 1_000_000
+    assert model.can_cache
+    assert model.cost.input == pytest.approx(0.20)
+    assert model.cost.output == pytest.approx(1.20)
+    assert model.cost.cache_read == pytest.approx(0.02)
+    assert model.cost.cache_write == pytest.approx(0.25)
 
 
 # --- Tests: load_models ---

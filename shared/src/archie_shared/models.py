@@ -23,12 +23,19 @@ class CostConfig(msgspec.Struct):
 
 
 class BedrockProvider(msgspec.Struct, tag="bedrock"):
-    """Bedrock provider configuration.
+    """Bedrock Converse API provider configuration.
 
     Attributes:
         model_id: Bedrock inference profile ID (e.g. "eu.anthropic.claude-sonnet-4-6").
         region: Region override. None means use session default.
     """
+
+    model_id: str
+    region: str | None = None
+
+
+class BedrockOpenAIProvider(msgspec.Struct, tag="bedrock-openai"):
+    """Bedrock provider configuration for the OpenAI Responses API."""
 
     model_id: str
     region: str | None = None
@@ -47,7 +54,7 @@ class OllamaProvider(msgspec.Struct, tag="ollama"):
 
 
 # Type alias for provider config union (used in ModelEntry annotation)
-ProviderConfig = BedrockProvider | OllamaProvider
+ProviderConfig = BedrockProvider | BedrockOpenAIProvider | OllamaProvider
 
 
 def provider_name(provider: ProviderConfig) -> str:
@@ -114,6 +121,14 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-8"),
         can_cache=True,
         cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875),
+    ),
+    # --- OpenAI Responses API on Bedrock ---
+    "bedrock-openai-gpt-5-6-luna": ModelEntry(
+        name="GPT-5.6 Luna",
+        context=1_000_000,
+        provider=BedrockOpenAIProvider(model_id="openai.gpt-5.6-luna", region="us-east-1"),
+        can_cache=True,
+        cost=CostConfig(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25),
     ),
     # --- Non-Anthropic Bedrock models ---
     "bedrock-glm-5": ModelEntry(
