@@ -2,7 +2,7 @@
 # Contains system tools for development work. Agent and shared source are mounted at
 # runtime for fast iteration — only dependencies are baked into the image.
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Build args for matching host user identity (avoids file permission issues)
 ARG USERNAME=archie
@@ -188,5 +188,22 @@ WORKDIR /workspace
 EXPOSE 8080
 
 USER ${USERNAME}
+
+# Install kiro-cli (frequent updates)
+RUN case ${TARGETARCH} in \
+        amd64) KIRO_ARCH="x86_64" ;; \
+        arm64) KIRO_ARCH="aarch64" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl --proto '=https' --tlsv1.2 -sSf \
+        "https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-${KIRO_ARCH}-linux.zip" \
+        -o kirocli.zip && \
+    unzip kirocli.zip && \
+    ./kirocli/install.sh --force --no-confirm && \
+    rm -rf kirocli.zip kirocli
+
+# kiro-cli installs to ~/.local/bin; ensure it's on PATH for non-login exec
+# (e.g. `docker run archie:latest kiro-cli ...`), not just interactive shells.
+ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
 
 CMD ["/opt/archie/entrypoint.sh"]
