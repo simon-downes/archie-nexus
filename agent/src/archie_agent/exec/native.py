@@ -234,8 +234,24 @@ def _native_handler(fn: Callable) -> Callable:
     the wrapper already returns a string, str() is a no-op.
     """
 
+    sig = inspect.signature(fn)
+    accepts_kwargs = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    allowed = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
     @wraps(fn)
     async def wrapper(**kwargs) -> str:
+        # Drop kwargs the tool doesn't declare (e.g. a model-hallucinated
+        # `timeout=`) so an invalid arg becomes a no-op instead of a raw
+        # TypeError from the tool function.
+        if not accepts_kwargs:
+            kwargs = {k: v for k, v in kwargs.items() if k in allowed}
         result = await fn(**kwargs)
         # Defensive: all tools should return str, but handle None gracefully
         if result is None:

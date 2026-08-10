@@ -37,6 +37,50 @@ def _default(text: str) -> str:
     return f"[#676767 italic]{_esc(text)}[/]"
 
 
+def _condense_lines(text: str, head: int = 3, tail: int = 3, threshold: int = 10) -> list[str]:
+    """Return output lines, collapsing the middle when there are too many.
+
+    <= `threshold` lines: returned as-is. Otherwise the first `head` and last
+    `tail` lines are kept with a `… N lines hidden …` marker in between.
+    """
+    lines = text.rstrip("\n").split("\n")
+    if len(lines) <= threshold:
+        return lines
+    hidden = len(lines) - head - tail
+    return [*lines[:head], f"… {hidden} lines hidden …", *lines[-tail:]]
+
+
+def _format_output_block(text: str, colour: str = "dim") -> str:
+    """Render command/diff output as an indented, condensed multi-line block."""
+    rendered = []
+    for line in _condense_lines(text):
+        if line.startswith("… ") and line.endswith(" …"):
+            rendered.append(f"  [dim italic]{_esc(line)}[/]")
+        else:
+            rendered.append(f"  [{colour}]{_esc(line)}[/]")
+    return "\n".join(rendered)
+
+
+def _format_diff_block(diff: str) -> str:
+    """Render a unified diff with per-line +/- colouring, condensed if long."""
+    rendered = []
+    for line in _condense_lines(diff, head=6, tail=6, threshold=40):
+        if line.startswith("… ") and line.endswith(" …"):
+            rendered.append(f"  [dim italic]{_esc(line)}[/]")
+            continue
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("@@"):
+            rendered.append(f"  [cyan]{_esc(line)}[/]")
+        elif line.startswith("+"):
+            rendered.append(f"  [green]{_esc(line)}[/]")
+        elif line.startswith("-"):
+            rendered.append(f"  [red]{_esc(line)}[/]")
+        else:
+            rendered.append(f"  [dim]{_esc(line)}[/]")
+    return "\n".join(rendered)
+
+
 
 def format_tool_pending(name: str, input_dict: dict) -> str:
     """Produce the summary shown while the tool is running (Rich markup).
@@ -168,14 +212,13 @@ def format_tool_complete(
             # Count diff lines
             added = result.count("\n+") - result.count("\n+++")
             removed = result.count("\n-") - result.count("\n---")
-            if added or removed:
-                parts = []
-                if added:
-                    parts.append(f"+{added}")
-                if removed:
-                    parts.append(f"-{removed}")
-                return f"Edit {_hi(path)} {_dim('(' + ', '.join(parts) + ')')}"
-            return f"Edit {_hi(path)}"
+            header = (
+                f"Edit {_hi(path)} {_dim('(' + ', '.join([p for p in (f'+{added}' if added else '', f'-{removed}' if removed else '') if p]) + ')')}"
+                if (added or removed)
+                else f"Edit {_hi(path)}"
+            )
+            diff_body = _format_diff_block(result)
+            return f"{header}\n{diff_body}" if diff_body else header
 
         case "glob":
             pattern = input_dict.get("pattern", "")
@@ -220,7 +263,13 @@ def format_tool_complete(
                         pass
                     break
             if exit_code and exit_code != 0:
-                return f"Shell {_hi(command)} {_dim(f'(exit {exit_code})')}"
+                header = f"Shell {_hi(command)} {_dim(f'(exit {exit_code})')}"
+                # Strip the trailing "[exit: N]" marker line from displayed output
+                body_text = "\n".join(
+                    ln for ln in result.split("\n") if "[exit:" not in ln
+                ).strip("\n")
+                body = _format_output_block(body_text, colour="red") if body_text else ""
+                return f"{header}\n{body}" if body else header
             return f"Shell {_hi(command)}"
 
         case "code":

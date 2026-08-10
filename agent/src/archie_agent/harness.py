@@ -46,7 +46,7 @@ from archie_shared.events import (
 )
 from archie_shared.models import calculate_cost, provider_name
 from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
-from archie_shared.types import ToolResultBlock, ToolUseBlock
+from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from starlette.websockets import WebSocket
 from ulid import ULID
 
@@ -200,6 +200,36 @@ class AgentHarness:
         assistant_text = ""
         last_usage: Usage | None = None
 
+        # Per-iteration accumulators to reconstruct the tool-augmented transcript
+        # so intermediate context (tool calls + results) survives into the next
+        # user turn — even when the turn ends via error/max-iterations/interrupt.
+        iter_text = ""
+        iter_tool_uses: list[ToolUseBlock] = []
+        iter_tool_results: list[ToolResultBlock] = []
+
+        def _flush_iteration() -> None:
+            """Persist the current iteration's assistant(tool_use)+user(tool_result)
+            turns into the in-memory transcript. Text-only iterations are left to
+            the terminal-event handlers (which record the final assistant turn)."""
+            nonlocal iter_text, iter_tool_uses, iter_tool_results
+            if not iter_tool_uses:
+                iter_text = ""
+                return
+            assistant_blocks: list = []
+            if iter_text:
+                assistant_blocks.append(TextBlock(text=iter_text))
+            assistant_blocks.extend(iter_tool_uses)
+            self.session.add_turn(
+                role="assistant", content=assistant_blocks, turn_index=turn_index
+            )
+            if iter_tool_results:
+                self.session.add_turn(
+                    role="user", content=list(iter_tool_results), turn_index=turn_index
+                )
+            iter_text = ""
+            iter_tool_uses = []
+            iter_tool_results = []
+
         try:
             gen = run_loop(
                 messages=self.session.turns,
@@ -212,12 +242,17 @@ class AgentHarness:
 
             async for event in gen:
                 if isinstance(event, IterationStart):
+                    # A new iteration means the previous one's tool calls +
+                    # results are final — persist them to the transcript.
+                    if event.index > 0:
+                        _flush_iteration()
                     await self._broadcast(
                         WireIterationStart(turn_index=turn_index, index=event.index)
                     )
 
                 elif isinstance(event, TextDelta):
                     assistant_text += event.text
+                    iter_text += event.text
                     await self._broadcast(WireTextDelta(turn_index=turn_index, text=event.text))
 
                 elif isinstance(event, Usage):
@@ -240,6 +275,14 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, ToolCall):
+                    # Accumulate for transcript reconstruction
+                    iter_tool_uses.append(
+                        ToolUseBlock(
+                            tool_use_id=event.tool_use_id,
+                            name=event.name,
+                            input=event.input,
+                        )
+                    )
                     # Persist tool_call entry (JSON-serialised name+source)
                     self._persist_tool_call(event)
                     # Store input for format_tool_complete when result arrives
@@ -256,6 +299,14 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, ToolResult):
+                    # Accumulate for transcript reconstruction
+                    iter_tool_results.append(
+                        ToolResultBlock(
+                            tool_use_id=event.tool_use_id,
+                            content=event.content,
+                            is_error=event.is_error,
+                        )
+                    )
                     # Persist tool_result entry
                     self._persist_tool_result(event)
                     # Extract duration from content (format: "duration: NNNms")
@@ -282,13 +333,16 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, TurnComplete):
-                    # Add final assistant turn to transcript
-                    self.session.add_turn(
-                        role="assistant",
-                        content=assistant_text,
-                        turn_index=turn_index,
-                        output_tokens=last_usage.output_tokens if last_usage else 0,
-                    )
+                    # Final iteration is text-only (stop_reason=end_turn); any
+                    # earlier tool iterations were already flushed. Record only
+                    # the trailing text to avoid duplicating flushed turns.
+                    if iter_text or not self.session.turns or self.session.turns[-1].role != "user":
+                        self.session.add_turn(
+                            role="assistant",
+                            content=iter_text,
+                            turn_index=turn_index,
+                            output_tokens=last_usage.output_tokens if last_usage else 0,
+                        )
                     self._persist_assistant(
                         content=assistant_text,
                         usage=last_usage,
@@ -299,13 +353,17 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, TurnError):
-                    if assistant_text:
+                    # Flush the final (unterminated) iteration's tool calls +
+                    # results so their context survives into the next turn.
+                    _flush_iteration()
+                    if iter_text:
                         self.session.add_turn(
                             role="assistant",
-                            content=assistant_text,
+                            content=iter_text,
                             turn_index=turn_index,
                             interrupted=True,
                         )
+                    if assistant_text:
                         self._persist_assistant(
                             content=assistant_text,
                             usage=last_usage,
@@ -319,15 +377,19 @@ class AgentHarness:
                     await self._broadcast(WireTurnError(turn_index=turn_index, message=event.error))
 
                 elif isinstance(event, TurnInterrupted):
-                    # Only add to transcript if there's actual content
-                    if assistant_text:
+                    # Flush the final (unterminated) iteration. The loop already
+                    # appends "cancelled" repair results on interrupt, but those
+                    # live only inside run_loop; reconstruct here from events.
+                    _flush_iteration()
+                    if iter_text:
                         self.session.add_turn(
                             role="assistant",
-                            content=assistant_text,
+                            content=iter_text,
                             turn_index=turn_index,
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                             interrupted=True,
                         )
+                    if assistant_text:
                         self._persist_assistant(
                             content=assistant_text,
                             usage=last_usage,
