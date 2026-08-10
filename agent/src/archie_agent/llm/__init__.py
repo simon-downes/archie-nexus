@@ -1,11 +1,4 @@
-"""LLM client package.
-
-Defines the LLMClient protocol — the provider-agnostic interface that the agent loop
-types against. Stream event types are internal to the agent (not wire protocol events).
-
-The agent loop translates internal stream events → wire protocol events before
-broadcasting to clients.
-"""
+"""LLM client package and provider-neutral protocol."""
 
 from collections.abc import Generator
 from typing import Protocol
@@ -16,6 +9,7 @@ from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, 
 from archie_agent.llm.bedrock import BedrockClient
 from archie_agent.llm.bedrock_openai import BedrockOpenAIClient
 from archie_agent.llm.fake import FakeLLMClient
+from archie_agent.prompt import SystemPrompt
 from archie_agent.session import Turn
 
 
@@ -27,23 +21,26 @@ class LLMClient(Protocol):
     def stream(
         self,
         messages: list[Turn],
-        system: str,
+        system: SystemPrompt | str,
         tool_config: list[dict] | None = None,
+        history_boundary: str | None = None,
     ) -> Generator[StreamEvent]:
-        """Stream LLM response. Yields events as they arrive."""
+        """Stream an LLM response and optionally identify its advancing boundary."""
         ...
 
-    def invoke(self, messages: list[Turn], system: str) -> str:
-        """Simple blocking call for one-shot prompts without tools."""
+    def invoke(
+        self,
+        messages: list[Turn],
+        system: SystemPrompt | str,
+        tool_config: list[dict] | None = None,
+        history_boundary: str | None = None,
+    ) -> str:
+        """Make a blocking call for one-shot prompts."""
         ...
 
 
 def create_llm_client(model: ModelEntry, default_region: str) -> LLMClient:
-    """Create the appropriate LLM client based on the model's provider config.
-
-    Dispatches on provider type. OllamaClient is lazy-imported to avoid loading
-    the ollama package for bedrock-only sessions.
-    """
+    """Create the appropriate LLM client based on the model provider config."""
     match model.provider:
         case BedrockProvider(model_id=model_id, region=region):
             return BedrockClient(

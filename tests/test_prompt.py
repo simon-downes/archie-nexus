@@ -23,13 +23,11 @@ def test_identity_section_content():
     assert "Do not re-read to verify" in identity
 
 
-def test_build_environment_contains_model_and_workspace():
-    """Environment section includes model name and workspace dir."""
+def test_build_environment_contains_workspace_without_model():
+    """Environment section includes workspace but not the active model."""
     env = _build_environment("test-model-v1", "/workspace")
-    assert "test-model-v1" in env
+    assert "test-model-v1" not in env
     assert "/workspace" in env
-    assert "Docker" in env
-    assert "Exec interpreter" in env
 
 
 def test_build_environment_custom_workspace():
@@ -76,8 +74,9 @@ def test_build_system_prompt_assembles_all_sections():
     # Identity
     assert "Archie" in prompt
     # Environment
-    assert "claude-sonnet-4-20250514" in prompt
     assert "Docker" in prompt
+    # The active model is deliberately excluded from cacheable prompt text.
+    assert "claude-sonnet-4-20250514" not in prompt
     # Tools
     assert "async def main()" in prompt
     assert "### Guidelines" in prompt
@@ -90,10 +89,10 @@ def test_build_system_prompt_is_single_string():
     assert len(prompt) > 100
 
 
-def test_build_system_prompt_accepts_model_name():
-    """Model name parameter is passed through to environment."""
+def test_build_system_prompt_ignores_model_name():
+    """Model name remains accepted for compatibility but is not rendered."""
     prompt = build_system_prompt("my-custom-model-7b")
-    assert "my-custom-model-7b" in prompt
+    assert "my-custom-model-7b" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -127,13 +126,12 @@ def test_build_skills_catalog_lists_skills():
     assert "terraform: Terraform best practices" in section
 
 
-def test_build_skills_catalog_marks_loaded():
-    """Loaded skills are marked with [loaded] in the catalog."""
+def test_build_skills_catalog_is_stable_when_loaded():
+    """Loaded skills do not mutate the constant catalog text."""
     catalog = _make_catalog()
-    loaded = [("python-style", "body content")]
-    section = _build_skills_catalog(catalog, loaded)
-    assert "python-style: Python coding standards [loaded]" in section
-    assert "[loaded]" not in section.split("terraform")[1].split("\n")[0] or "terraform" in section
+    assert _build_skills_catalog(catalog, [("python-style", "body content")]) == (
+        _build_skills_catalog(catalog, [])
+    )
 
 
 def test_build_skills_catalog_no_loaded():
@@ -178,7 +176,7 @@ def test_build_system_prompt_with_loaded_skills():
     prompt = build_system_prompt("test-model", catalog=catalog, loaded_skills=loaded)
     assert '<skill name="python-style">' in prompt
     assert "Use type hints everywhere." in prompt
-    assert "[loaded]" in prompt  # Marked in catalog
+    assert "[loaded]" not in prompt
 
 
 def test_build_system_prompt_no_skills_section_without_catalog():
@@ -197,8 +195,9 @@ def test_build_system_prompt_backward_compatible():
     """build_system_prompt works without new params (backward compat)."""
     # Original call signature still works
     prompt = build_system_prompt("model-v1")
-    assert "model-v1" in prompt
-    assert "<skills>" not in prompt
+    assert isinstance(prompt, str)
+    assert len(prompt) > 100
+    assert "model-v1" not in prompt
 
 
 # ---------------------------------------------------------------------------

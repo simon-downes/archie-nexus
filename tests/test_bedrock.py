@@ -100,3 +100,38 @@ def test_stream_closes_on_early_exit():
 
     # Stream must still be closed
     mock_stream.close.assert_called_once()
+
+
+
+def test_stream_preserves_converse_cache_counts_separately_from_uncached_input():
+    """Converse inputTokens is uncached and may be smaller than cache-read input."""
+    mock_events = [
+        {
+            "metadata": {
+                "usage": {
+                    "inputTokens": 10,
+                    "outputTokens": 2,
+                    "cacheReadInputTokens": 20,
+                    "cacheWriteInputTokens": 5,
+                }
+            }
+        },
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+    mock_stream = _make_mock_stream(mock_events)
+
+    with patch("archie_agent.llm.bedrock.boto3") as mock_boto3:
+        mock_client = MagicMock()
+        mock_boto3.client.return_value = mock_client
+        mock_client.converse_stream.return_value = {
+            "ResponseMetadata": {},
+            "stream": mock_stream,
+        }
+
+        client = BedrockClient(model_id="test-model", region="us-east-1")
+        events = list(client.stream([], system="test"))
+
+    usage = next(event for event in events if isinstance(event, Usage))
+    assert usage.input_tokens == 10
+    assert usage.cache_read_tokens == 20
+    assert usage.cache_write_tokens == 5

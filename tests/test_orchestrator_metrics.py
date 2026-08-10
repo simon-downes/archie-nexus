@@ -462,3 +462,47 @@ def test_db_write_failure_logged_no_crash(tmp_path, caplog):
 
     assert any("Metrics DB row write failed" in r.message for r in caplog.records)
 
+
+
+
+def test_usage_pricing_uses_four_billable_categories(tmp_path):
+    """Raw context input is not charged at the normal rate twice."""
+    db = tmp_path / "metrics.db"
+    writer = MetricsWriter(db)
+    session_id = "billable-session"
+    batch = [
+        (
+            session_id,
+            _make_session_info(
+                rates={
+                    "input": 2.0,
+                    "output": 4.0,
+                    "cache_read": 0.5,
+                    "cache_write": 1.0,
+                }
+            ),
+        ),
+        (
+            session_id,
+            _make_usage(
+                input_tokens=100,
+                output_tokens=20,
+                cache_read_tokens=30,
+                cache_write_tokens=5,
+            ),
+        ),
+    ]
+
+    conn = sqlite3.connect(str(db))
+    try:
+        writer._ensure_schema(conn)
+        writer._process_batch(conn, batch)
+    finally:
+        conn.close()
+
+    row = _rows(db)[0]
+    assert row["input_tokens"] == 100
+    assert row["cache_read_tokens"] == 30
+    assert row["cache_write_tokens"] == 5
+    assert row["output_tokens"] == 20
+    assert row["cost"] == pytest.approx(0.0003)

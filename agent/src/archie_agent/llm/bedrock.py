@@ -1,16 +1,4 @@
-"""AWS Bedrock converse_stream wrapper.
-
-Handles all communication with AWS Bedrock. Wraps the low-level boto3 EventStream
-API into a simple generator that yields typed Python objects.
-
-Key design decisions:
-- Synchronous generator. The agent loop runs it in a background thread via
-  asyncio.to_thread, keeping the async event loop free.
-- EventStream is explicitly closed in a finally block. Unlike nextgen (short-lived
-  process), nexus is a long-lived server — abandoned streams leak HTTP connections.
-- Translates internal Turn objects to Bedrock's wire format. No Bedrock-specific
-  types leak out to the rest of the application.
-"""
+"""AWS Bedrock Converse API client."""
 
 import json
 import logging
@@ -23,17 +11,14 @@ from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from botocore.config import Config
 
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
+from archie_agent.prompt import SystemPrompt, flatten_system_prompt
 from archie_agent.session import Turn
 
 log = logging.getLogger(__name__)
 
 
 def _shape_tool_config_for_bedrock(neutral_config: list[dict]) -> list[dict]:
-    """Convert neutral tool configs to Bedrock's toolSpec format.
-
-    Neutral: [{"name": ..., "description": ..., "input_schema": {...}}]
-    Bedrock: [{"toolSpec": {"name": ..., "description": ..., "inputSchema": {"json": {...}}}}]
-    """
+    """Convert neutral tool configs to Bedrock's toolSpec format."""
     return [
         {
             "toolSpec": {
@@ -54,7 +39,6 @@ def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
         for block in turn.content:
             match block:
                 case TextBlock(text=text):
-                    # Bedrock rejects empty text blocks
                     if text:
                         content_blocks.append({"text": text})
                 case ToolUseBlock(tool_use_id=tid, name=name, input=inp):
@@ -71,22 +55,13 @@ def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
                             }
                         }
                     )
-        # Skip turns with no content blocks (e.g. interrupted empty assistant)
         if content_blocks:
             messages.append({"role": turn.role, "content": content_blocks})
     return messages
 
 
 class BedrockClient:
-    """Wrapper around Bedrock's converse_stream API.
-
-    Handles:
-    - Translating internal types to Bedrock wire format
-    - Parsing the EventStream into typed events
-    - Prompt cache point placement (system + history tail)
-    - Retrying on throttling (exponential backoff)
-    - Explicit stream close to prevent connection leaks
-    """
+    """Wrapper around Bedrock's converse_stream API."""
 
     def __init__(
         self, model_id: str, region: str, max_output_tokens: int = 32_768, can_cache: bool = False
@@ -98,11 +73,7 @@ class BedrockClient:
         self._cache_supported: bool = can_cache
 
     def _create_client(self, region: str):
-        """Create boto3 bedrock-runtime client, using archie credentials if available.
-
-        Reads from ~/.nexus/credentials.yaml via the typed credential store.
-        Falls back to default boto3 chain if no archie credentials are configured.
-        """
+        """Create a boto3 client using Archie credentials or the default chain."""
         from archie_shared.credentials import get_credential
 
         cred = get_credential("bedrock")
@@ -110,7 +81,6 @@ class BedrockClient:
             "region_name": region,
             "config": Config(read_timeout=300, retries={"max_attempts": 0}),
         }
-
         if cred and cred.aws_access_key_id and cred.aws_secret_access_key:
             kwargs["aws_access_key_id"] = cred.aws_access_key_id
             kwargs["aws_secret_access_key"] = cred.aws_secret_access_key
@@ -121,28 +91,21 @@ class BedrockClient:
                 "Bedrock credentials file is missing required keys "
                 "(aws_access_key_id, aws_secret_access_key) — falling back to default chain"
             )
-
         return boto3.client("bedrock-runtime", **kwargs)
 
     def stream(
         self,
         messages: list[Turn],
-        system: str,
+        system: SystemPrompt | str,
         tool_config: list[dict] | None = None,
+        history_boundary: str | None = None,
     ) -> Generator[StreamEvent]:
-        """Send a conversation to Bedrock and yield response events.
-
-        The EventStream is explicitly closed in a finally block to prevent
-        connection leaks in this long-lived server process.
-        """
+        """Send a conversation to Bedrock and yield response events."""
+        del history_boundary
         bedrock_messages = _turns_to_bedrock_messages(messages)
-
-        # System prompt cache point
-        system_blocks: list[dict[str, Any]] = [{"text": system}]
+        system_blocks: list[dict[str, Any]] = [{"text": flatten_system_prompt(system)}]
         if self._cache_supported:
             system_blocks.append({"cachePoint": {"type": "default"}})
-
-        # History tail cache point
         if self._cache_supported and bedrock_messages:
             bedrock_messages[-1]["content"].append({"cachePoint": {"type": "default"}})
 
@@ -152,7 +115,6 @@ class BedrockClient:
             "system": system_blocks,
             "inferenceConfig": {"maxTokens": self.max_output_tokens},
         }
-
         if tool_config:
             params["toolConfig"] = {"tools": _shape_tool_config_for_bedrock(tool_config)}
 
@@ -160,13 +122,12 @@ class BedrockClient:
         response = self._call_with_retry(params)
         request_id = response.get("ResponseMetadata", {}).get("RequestId", "")
         event_stream = response["stream"]
-
         current_block_type: str | None = None
-        current_tool_use_id: str = ""
-        current_tool_name: str = ""
-        current_tool_input_json: str = ""
+        current_tool_use_id = ""
+        current_tool_name = ""
+        current_tool_input_json = ""
         usage: Usage | None = None
-        stop_reason: str = "unknown"
+        stop_reason = "unknown"
 
         try:
             for event in event_stream:
@@ -183,23 +144,17 @@ class BedrockClient:
                             )
                     else:
                         current_block_type = "text"
-
                 elif "contentBlockDelta" in event:
                     delta = event["contentBlockDelta"]["delta"]
                     if "text" in delta:
                         yield TextDelta(text=delta["text"])
                     elif "toolUse" in delta:
                         current_tool_input_json += delta["toolUse"].get("input", "")
-
                 elif "contentBlockStop" in event:
                     if current_block_type == "tool_use":
                         input_truncated = False
                         try:
-                            parsed_input = (
-                                json.loads(current_tool_input_json)
-                                if current_tool_input_json
-                                else {}
-                            )
+                            parsed_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
                         except json.JSONDecodeError:
                             log.warning(
                                 "Failed to parse tool args JSON for %s (likely max_tokens): %s",
@@ -215,23 +170,22 @@ class BedrockClient:
                             input_truncated=input_truncated,
                         )
                     current_block_type = None
-
                 elif "metadata" in event:
                     raw = event["metadata"].get("usage", {})
+                    # Converse inputTokens is already the uncached portion. It
+                    # is valid for a cache-read prefix to exceed that suffix;
+                    # unlike Responses, there is no raw total to subtract from.
                     usage = Usage(
                         input_tokens=raw.get("inputTokens", 0),
                         output_tokens=raw.get("outputTokens", 0),
-                        cache_read_input_tokens=raw.get("cacheReadInputTokens", 0),
-                        cache_write_input_tokens=raw.get("cacheWriteInputTokens", 0),
+                        cache_read_tokens=raw.get("cacheReadInputTokens", 0),
+                        cache_write_tokens=raw.get("cacheWriteInputTokens", 0),
                     )
                     yield usage
-
                 elif "messageStop" in event:
                     stop_reason = event["messageStop"].get("stopReason", "end_turn")
                     yield Done(stop_reason=stop_reason)
         finally:
-            # Explicitly close the EventStream to release the HTTP connection.
-            # Critical in a long-lived server — GC alone is not reliable.
             try:
                 event_stream.close()
             except Exception:
@@ -245,18 +199,25 @@ class BedrockClient:
                 "stop_reason": stop_reason,
                 "input": usage.input_tokens if usage else 0,
                 "output": usage.output_tokens if usage else 0,
-                "cache_read": usage.cache_read_input_tokens if usage else 0,
-                "cache_write": usage.cache_write_input_tokens if usage else 0,
+                "cache_read": usage.cache_read_tokens if usage else 0,
+                "cache_write": usage.cache_write_tokens if usage else 0,
                 "aws_request_id": request_id,
             },
         )
 
-    def invoke(self, messages: list[Turn], system: str) -> str:
-        """Non-streaming call. Returns the response text."""
+    def invoke(
+        self,
+        messages: list[Turn],
+        system: SystemPrompt | str,
+        tool_config: list[dict] | None = None,
+        history_boundary: str | None = None,
+    ) -> str:
+        """Non-streaming Converse call."""
+        del tool_config, history_boundary
         params = {
             "modelId": self.model_id,
             "messages": _turns_to_bedrock_messages(messages),
-            "system": [{"text": system}],
+            "system": [{"text": flatten_system_prompt(system)}],
         }
         for attempt in range(3):
             try:
@@ -265,28 +226,19 @@ class BedrockClient:
             except self.client.exceptions.ThrottlingException:
                 if attempt == 2:
                     raise
-                delay = 2**attempt
-                log.warning("Throttled by Bedrock (invoke), retrying in %ds", delay)
-                time.sleep(delay)
-
+                time.sleep(2**attempt)
         output = response.get("output", {}).get("message", {}).get("content", [])
         return "".join(block.get("text", "") for block in output)
 
     def _call_with_retry(self, params: dict, max_retries: int = 3) -> dict:
-        """Call converse_stream with retry on throttling and credential refresh.
-
-        If cachePoint is rejected, retry without it and disable caching.
-        If credentials are expired, re-read from creds file and retry once.
-        """
+        """Call Converse with existing throttling, auth, and cache fallback behavior."""
         for attempt in range(max_retries):
             try:
                 return self.client.converse_stream(**params)
             except self.client.exceptions.ThrottlingException:
                 if attempt == max_retries - 1:
                     raise
-                delay = 2**attempt
-                log.warning("Throttled by Bedrock, retrying in %ds", delay)
-                time.sleep(delay)
+                time.sleep(2**attempt)
             except (
                 self.client.exceptions.ValidationException,
                 self.client.exceptions.AccessDeniedException,
@@ -297,47 +249,26 @@ class BedrockClient:
                 ):
                     log.warning("cachePoint not supported, disabling prompt caching")
                     self._cache_supported = False
-                    params["system"] = [
-                        b for b in params.get("system", []) if "cachePoint" not in b
-                    ]
+                    params["system"] = [b for b in params.get("system", []) if "cachePoint" not in b]
                     for msg in params.get("messages", []):
-                        msg["content"] = [
-                            b for b in msg.get("content", []) if "cachePoint" not in b
-                        ]
+                        msg["content"] = [b for b in msg.get("content", []) if "cachePoint" not in b]
                     return self.client.converse_stream(**params)
-                # Non-cachePoint access denied — likely expired credentials
                 if self._try_refresh_credentials():
-                    log.info("Credentials refreshed, retrying request")
                     return self.client.converse_stream(**params)
                 raise
             except Exception as e:
-                # Catch ExpiredTokenException and similar auth errors.
-                # These are botocore ClientError with the error code in the message.
-                err_str = str(e)
-                if "ExpiredToken" in err_str or "expired" in err_str.lower():
+                if "ExpiredToken" in str(e) or "expired" in str(e).lower():
                     if self._try_refresh_credentials():
-                        log.info("Credentials refreshed after token expiry, retrying")
                         return self.client.converse_stream(**params)
                 raise
         raise RuntimeError("Unreachable")
 
     def _try_refresh_credentials(self) -> bool:
-        """Re-read credentials from the creds file and recreate the boto3 client.
-
-        Returns True if credentials were successfully refreshed (file had new creds),
-        False if nothing changed or no creds available.
-        """
+        """Re-read credentials and recreate the boto3 client."""
         from archie_shared.credentials import get_credential
 
         cred = get_credential("bedrock")
         if not cred or not cred.aws_access_key_id:
-            log.warning(
-                "Credential refresh failed — no valid credentials in creds file. "
-                "Run 'archie auth bedrock' on the host to update."
-            )
             return False
-
-        # Recreate the client with fresh credentials
-        log.info("Re-reading credentials from creds file")
         self.client = self._create_client(self._region)
         return True
