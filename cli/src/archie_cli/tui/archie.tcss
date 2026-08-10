@@ -12,12 +12,19 @@
 /* --- Screen --- */
 Screen {
     background: $surface;
-    overflow: hidden;
+    /* The Conversation (VerticalScroll) owns scrolling — the Screen must not
+     * add its own scrollbar, otherwise a second (dead) scrollbar appears. */
+    overflow-x: hidden;
+    overflow-y: hidden;
+    scrollbar-size: 0 0;
 }
 
 /* --- Conversation area --- */
 Conversation {
     background: black;
+    /* Only a vertical scrollbar; horizontal content is wrapped/clipped. */
+    overflow-x: hidden;
+    overflow-y: auto;
 }
 
 /* --- Message borders --- */

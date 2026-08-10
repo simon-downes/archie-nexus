@@ -347,6 +347,9 @@ class ArchieApp(App):
             if self._streaming is not None:
                 self._finalise_streaming()
             self._iteration_block = None
+            # Agent is working towards the next response — show the thinking
+            # indicator again until the first TextDelta/ToolCall of this iteration.
+            self._show_throbber()
 
         elif isinstance(event, TextDelta):
             self._remove_throbber()
@@ -427,6 +430,8 @@ class ArchieApp(App):
                     event.summary,
                 )
                 conv.scroll_end(animate=False)
+            # Tool finished — agent is thinking about the next step again.
+            self._show_throbber()
 
     # --- Message flow ---
 
@@ -455,9 +460,7 @@ class ArchieApp(App):
         conv.add_user_message(content)
 
         # Show throbber while waiting
-        self._throbber = Throbber()
-        conv.mount(self._throbber)
-        self.call_after_refresh(conv.scroll_end, animate=False)
+        self._show_throbber()
 
         self.query_one("#input", MessageInput).disabled = True
         self._stream_text = ""
@@ -565,6 +568,20 @@ class ArchieApp(App):
             self._streaming.remove()
         self._streaming = None
         self._stream_text = ""
+
+    def _show_throbber(self) -> None:
+        """Mount the throbber at the end of the conversation if not already shown.
+
+        Idempotent: safe to call between iterations and after each tool result so
+        the "thinking" indicator reappears while the agent works towards the next
+        response. Removed again by _remove_throbber() on the next TextDelta/ToolCall.
+        """
+        if self._throbber is not None or not self._turn_active:
+            return
+        conv = self.query_one("#conversation", Conversation)
+        self._throbber = Throbber()
+        conv.mount(self._throbber)
+        self.call_after_refresh(conv.scroll_end, animate=False)
 
     def _remove_throbber(self) -> None:
         """Remove the throbber animation widget."""

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 _SENTINEL_DONE = object()
-_DEFAULT_MAX_ITERATIONS = 25
+_DEFAULT_MAX_ITERATIONS = 100
 
 
 @dataclass
