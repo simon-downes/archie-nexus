@@ -62,7 +62,7 @@ from archie_agent.events import (
 )
 from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.loop import run_loop
-from archie_agent.prompt import build_system_prompt
+from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session
 from archie_agent.skills import create_skill_tool, discover_skills
 from archie_agent.tool_formatters import format_tool_complete, format_tool_pending
@@ -126,6 +126,8 @@ class AgentHarness:
         # Skills: discover catalog and create mutable loaded list
         self._skill_catalog = discover_skills()
         self._loaded_skills: list[tuple[str, str]] = []
+        # Project rules are session-constant. Loaded skill bodies remain dynamic.
+        self._agents_context = read_agents_context()
 
         # Tool registry: exec + skill
         self._registry = create_registry()
@@ -139,12 +141,13 @@ class AgentHarness:
         # Pending tool calls: tool_use_id → (name, input) for format_tool_complete
         self._pending_tools: dict[str, tuple[str, dict]] = {}
 
-    def _build_prompt(self) -> str:
-        """Build the system prompt incorporating current skill state."""
-        return build_system_prompt(
+    def _build_prompt(self) -> SystemPrompt:
+        """Build one structured prompt snapshot for the current outer turn."""
+        return build_system_prompt_structured(
             self._model_name,
             catalog=self._skill_catalog if self._skill_catalog else None,
             loaded_skills=self._loaded_skills if self._loaded_skills else None,
+            agents_context=self._agents_context,
         )
 
     def switch_model(self, model_key: str, model: "ModelEntry", llm_client: "LLMClient") -> None:

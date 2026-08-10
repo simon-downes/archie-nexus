@@ -1,15 +1,4 @@
-"""Session state — in-memory conversation transcript and accumulators.
-
-A Session represents one conversation. It tracks:
-- The sequence of turns (for building LLM context)
-- Cumulative token usage and cost
-- Context window utilisation
-
-Persistence is handled externally by the harness (not this module).
-
-The turn_index is per-exchange: a user message and its assistant response share
-the same index. It's incremented once per user message.
-"""
+"""Session state — in-memory transcript and billable usage accumulators."""
 
 from dataclasses import dataclass, field
 
@@ -19,16 +8,7 @@ from archie_shared.types import ContentBlock, TextBlock
 
 @dataclass
 class Turn:
-    """A single conversational turn (in-memory, for LLM context building).
-
-    Attributes:
-        role: "user" or "assistant" — maps to the LLM's message roles.
-        content: List of content blocks.
-        turn_index: The exchange index this turn belongs to.
-        input_tokens: Tokens reported for this request's input.
-        output_tokens: Tokens the model generated.
-        interrupted: True if the user cancelled generation.
-    """
+    """A single conversational turn used to build provider input."""
 
     role: str
     content: list[ContentBlock]
@@ -39,7 +19,7 @@ class Turn:
 
     @property
     def text(self) -> str:
-        """Extract the text content from this turn (first TextBlock, or empty)."""
+        """Extract the first text block from this turn."""
         for block in self.content:
             if isinstance(block, TextBlock):
                 return block.text
@@ -48,24 +28,16 @@ class Turn:
 
 @dataclass
 class DisplayEntry:
-    """A non-LLM event for UI display and history replay.
+    """A non-LLM event for UI display and history replay."""
 
-    These are NOT sent to the model — they exist for the TUI to render
-    errors and interruptions when replaying history.
-    """
-
-    role: str  # "error" or "interrupted"
+    role: str
     content: str
     turn_index: int = 0
 
 
 @dataclass
 class Session:
-    """In-memory conversation state and token accounting.
-
-    The harness owns persistence; Session is purely in-memory transcript
-    plus cumulative accumulators for cost and context tracking.
-    """
+    """In-memory transcript, cost totals, and context-window tracking."""
 
     model_id: str
     model: ModelEntry
@@ -77,7 +49,6 @@ class Session:
     total_output_tokens: int = 0
     total_cache_read_tokens: int = 0
     total_cache_write_tokens: int = 0
-
     _last_input_tokens: int = field(default=0, repr=False)
 
     @property
@@ -93,14 +64,18 @@ class Session:
 
     @property
     def context_pct(self) -> float:
-        """Estimated context window usage for the NEXT request (0-100)."""
-        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
+        """Estimated next-request context usage, including cached input."""
+        estimated = self._last_input_tokens + (
+            self.turns[-1].output_tokens if self.turns else 0
+        )
         return (estimated / self.model.context) * 100
 
     @property
     def context_warning(self) -> bool:
-        """True if we're approaching the model's context limit."""
-        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
+        """Whether the next request approaches the model context limit."""
+        estimated = self._last_input_tokens + (
+            self.turns[-1].output_tokens if self.turns else 0
+        )
         return estimated > self.model.context * self.model.context_warning_threshold
 
     def next_turn_index(self) -> int:
@@ -115,16 +90,12 @@ class Session:
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
     ) -> None:
-        """Update all token accumulators and context tracking from a Usage event.
-
-        This is the single entry point for recording per-request token usage.
-        Keeps context-window logic encapsulated (where context_pct lives).
-        """
+        """Accumulate billable usage and derived total context input."""
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
         self.total_cache_read_tokens += cache_read_tokens
         self.total_cache_write_tokens += cache_write_tokens
-        self._last_input_tokens = input_tokens
+        self._last_input_tokens = input_tokens + cache_read_tokens + cache_write_tokens
 
     def add_turn(
         self,
@@ -134,12 +105,8 @@ class Session:
         output_tokens: int = 0,
         interrupted: bool = False,
     ) -> Turn:
-        """Record a turn in memory (for LLM context building). Does NOT write to disk."""
-        if isinstance(content, str):
-            blocks: list[ContentBlock] = [TextBlock(text=content)]
-        else:
-            blocks = content
-
+        """Record a turn in memory without writing to disk."""
+        blocks = [TextBlock(text=content)] if isinstance(content, str) else content
         turn = Turn(
             role=role,
             content=blocks,

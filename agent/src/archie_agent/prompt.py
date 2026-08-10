@@ -1,12 +1,13 @@
-"""Dynamic system prompt builder.
+"""Provider-neutral structured system prompt builder.
 
-Assembles the system prompt from discrete sections: identity, environment, tools.
-Each section is a pure function; the assembled prompt is a single string suitable
-for the Bedrock `system` field.
+The prompt has two logical sections: a static session prefix and a dynamic
+section containing loaded skill bodies. Providers can flatten the sections when
+their wire format does not support typed prompt blocks.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,17 +21,42 @@ if TYPE_CHECKING:
     from archie_agent.skills import SkillEntry
 
 
+@dataclass(frozen=True)
+class PromptSection:
+    """One logical prompt section rendered as text."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class SystemPrompt:
+    """Structured system prompt passed through the provider-neutral boundary."""
+
+    static_system: PromptSection
+    dynamic_system: PromptSection | None = None
+
+    def flatten(self) -> str:
+        """Render the structured prompt using the existing string format."""
+        sections = [self.static_system.text]
+        if self.dynamic_system is not None and self.dynamic_system.text:
+            sections.append(self.dynamic_system.text)
+        return "\n\n".join(section for section in sections if section)
+
+
+def flatten_system_prompt(system: SystemPrompt | str) -> str:
+    """Flatten a structured prompt or return a legacy string unchanged."""
+    if isinstance(system, SystemPrompt):
+        return system.flatten()
+    return system
+
+
 # ---------------------------------------------------------------------------
 # Prompt fragment loading
 # ---------------------------------------------------------------------------
 
 
 def _load_prompt(name: str) -> str:
-    """Load a static prompt fragment from ``persona/prompts/<name>``.
-
-    Fails fast: the persona dir is always mounted, so a missing fragment is a
-    deployment error, not a condition to paper over with a fallback.
-    """
+    """Load a static prompt fragment from ``persona/prompts/<name>``."""
     path = persona_dir() / "prompts" / name
     return path.read_text(encoding="utf-8").strip()
 
@@ -51,11 +77,12 @@ def _build_identity() -> str:
 
 
 def _build_environment(model_name: str, workspace_dir: str) -> str:
-    """Build the environment context section."""
+    """Build environment context without model-specific cacheable content."""
+    # ``model_name`` remains in the compatibility signature for callers that
+    # supplied it, but the active model must not affect cacheable prompt text.
     return f"""\
 ## Environment
 
-- Model: {model_name}
 - Workspace: {workspace_dir} (project root, mounted from host)
 - Exec interpreter: {PYTHON}
 - Container: isolated Docker (Debian), ephemeral — destroyed after session
@@ -87,19 +114,18 @@ def _build_tools() -> str:
 
 def _build_skills_catalog(
     catalog: dict[str, SkillEntry],
-    loaded_skills: list[tuple[str, str]],
+    loaded_skills: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Build the skills catalog section for the system prompt.
+    """Build the constant skills catalog section.
 
-    Lists all available skills with their descriptions. Skills that are
-    already loaded are marked with [loaded].
+    ``loaded_skills`` remains accepted for compatibility with older callers,
+    but intentionally does not change the catalog text. Loaded bodies belong in
+    the dynamic section.
     """
-    loaded_names = {name for name, _ in loaded_skills}
     lines = ["<skills>", "Available skills (use the `skill` tool to load):"]
     for name in sorted(catalog):
         entry = catalog[name]
-        marker = " [loaded]" if name in loaded_names else ""
-        lines.append(f"- {name}: {entry.description}{marker}")
+        lines.append(f"- {name}: {entry.description}")
     lines.append("</skills>")
     return "\n".join(lines)
 
@@ -117,26 +143,74 @@ def _build_loaded_skills(loaded_skills: list[tuple[str, str]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_project_context(workspace_dir: str) -> str:
-    """Build the project-context section from the workspace's AGENTS.md.
-
-    Reads ``{workspace_dir}/AGENTS.md`` at prompt-build time and wraps its
-    contents in an ``<agents.md>`` block. Returns an empty string if the file
-    is absent, empty, or unreadable.
-    """
+def read_agents_context(workspace_dir: str = str(WORKSPACE)) -> str:
+    """Read AGENTS.md once and return its normalized content without a wrapper."""
     try:
         agents_md = (Path(workspace_dir) / "AGENTS.md").read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
         return ""
-    agents_md = agents_md.strip()
-    if not agents_md:
+    return agents_md.strip()
+
+
+def _format_project_context(agents_context: str) -> str:
+    """Wrap a non-empty AGENTS.md snapshot for inclusion in the prompt."""
+    if not agents_context:
         return ""
-    return f"<agents.md>\n{agents_md}\n</agents.md>"
+    return f"<agents.md>\n{agents_context}\n</agents.md>"
+
+
+def _build_project_context(workspace_dir: str) -> str:
+    """Build project context by reading AGENTS.md at call time.
+
+    This compatibility helper remains dynamic; the harness uses
+    :func:`read_agents_context` during construction to create a session snapshot.
+    """
+    return _format_project_context(read_agents_context(workspace_dir))
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def build_system_prompt_structured(
+    model_name: str,
+    workspace_dir: str = str(WORKSPACE),
+    *,
+    catalog: dict[str, SkillEntry] | None = None,
+    loaded_skills: list[tuple[str, str]] | None = None,
+    agents_context: str | None = None,
+    dynamic_content: str | None = None,
+) -> SystemPrompt:
+    """Assemble the static and dynamic system prompt sections.
+
+    ``model_name`` is retained for source compatibility but deliberately does
+    not appear in either section. When ``agents_context`` is omitted, the
+    compatibility builder reads AGENTS.md for this call; the harness passes an
+    explicit session snapshot instead.
+    """
+    static_sections = [_build_identity(), _build_environment(model_name, workspace_dir), _build_tools()]
+
+    if catalog:
+        static_sections.append(_build_skills_catalog(catalog))
+
+    if agents_context is None:
+        project_context = _build_project_context(workspace_dir)
+    else:
+        project_context = _format_project_context(agents_context)
+    if project_context:
+        static_sections.append(project_context)
+
+    dynamic_sections: list[str] = []
+    if loaded_skills:
+        dynamic_sections.append(_build_loaded_skills(loaded_skills))
+    if dynamic_content:
+        dynamic_sections.append(dynamic_content)
+
+    return SystemPrompt(
+        static_system=PromptSection("\n\n".join(static_sections)),
+        dynamic_system=PromptSection("\n\n".join(dynamic_sections)) if dynamic_sections else None,
+    )
 
 
 def build_system_prompt(
@@ -145,35 +219,13 @@ def build_system_prompt(
     *,
     catalog: dict[str, SkillEntry] | None = None,
     loaded_skills: list[tuple[str, str]] | None = None,
+    agents_context: str | None = None,
 ) -> str:
-    """Assemble the full system prompt from sections.
-
-    Args:
-        model_name: Model identifier (e.g. "claude-sonnet-4-20250514").
-        workspace_dir: Project root path inside the container.
-        catalog: Optional skill catalog for rendering the skills section.
-        loaded_skills: Optional list of (name, body) tuples for loaded skills.
-
-    Reads ``{workspace_dir}/AGENTS.md`` at build time (if present) and includes
-    it as an ``<agents.md>`` block for project-specific context.
-    """
-    sections = [
-        _build_identity(),
-        _build_environment(model_name, workspace_dir),
-        _build_tools(),
-    ]
-
-    # Skills sections (only when catalog is non-empty)
-    if catalog:
-        sections.append(_build_skills_catalog(catalog, loaded_skills or []))
-
-    # Project context (AGENTS.md), between skills catalog and loaded skill bodies
-    project_context = _build_project_context(workspace_dir)
-    if project_context:
-        sections.append(project_context)
-
-    # Loaded skill bodies
-    if loaded_skills:
-        sections.append(_build_loaded_skills(loaded_skills))
-
-    return "\n\n".join(sections)
+    """Flatten the structured prompt for legacy string callers."""
+    return build_system_prompt_structured(
+        model_name,
+        workspace_dir,
+        catalog=catalog,
+        loaded_skills=loaded_skills,
+        agents_context=agents_context,
+    ).flatten()
