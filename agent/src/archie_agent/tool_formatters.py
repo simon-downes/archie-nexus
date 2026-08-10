@@ -61,25 +61,60 @@ def _format_output_block(text: str, colour: str = "dim") -> str:
     return "\n".join(rendered)
 
 
+_DIFF_LINE_CAP = 30
+
+
 def _format_diff_block(diff: str) -> str:
-    """Render a unified diff with per-line +/- colouring, condensed if long."""
-    rendered = []
-    for line in _condense_lines(diff, head=6, tail=6, threshold=40):
-        if line.startswith("… ") and line.endswith(" …"):
-            rendered.append(f"  [dim italic]{_esc(line)}[/]")
+    """Render a unified diff in the nextgen style: line-numbered, full-line
+    background colours, stripped prefix chars, capped with an overflow marker.
+
+    Line numbers are seeded from each `@@ -old +new @@` hunk header, so no
+    pre/post file content is needed — the diff string carries the offsets.
+    """
+    lines = diff.split("\n")
+    rendered: list[str] = []
+    line_num_old = 0
+    line_num_new = 0
+    shown = 0
+
+    for index, line in enumerate(lines):
+        if shown >= _DIFF_LINE_CAP:
+            remaining = sum(
+                1
+                for d in lines[index:]
+                if d[:1] in ("+", "-", " ") and not d.startswith(("+++", "---"))
+            )
+            if remaining:
+                rendered.append(f"  [dim italic]… {remaining} more changed lines[/]")
+            break
+
+        if line.startswith("@@"):
+            try:
+                parts = line.split()
+                line_num_old = int(parts[1].split(",")[0].lstrip("-")) - 1
+                line_num_new = int(parts[2].split(",")[0].lstrip("+")) - 1
+            except (IndexError, ValueError):
+                pass
             continue
         if line.startswith(("+++", "---")):
             continue
-        if line.startswith("@@"):
-            rendered.append(f"  [cyan]{_esc(line)}[/]")
-        elif line.startswith("+"):
-            rendered.append(f"  [green]{_esc(line)}[/]")
-        elif line.startswith("-"):
-            rendered.append(f"  [red]{_esc(line)}[/]")
-        else:
-            rendered.append(f"  [dim]{_esc(line)}[/]")
-    return "\n".join(rendered)
 
+        content = _esc(line[1:])
+        if line.startswith("-"):
+            line_num_old += 1
+            rendered.append(f"  [dim]{line_num_old:>4}[/][on red] {content} [/]")
+            shown += 1
+        elif line.startswith("+"):
+            line_num_new += 1
+            rendered.append(f"  [dim]{line_num_new:>4}[/][on green] {content} [/]")
+            shown += 1
+        elif line.startswith(" "):
+            line_num_old += 1
+            line_num_new += 1
+            rendered.append(f"  [dim]{line_num_new:>4}   {content}[/]")
+            shown += 1
+
+    return "\n".join(rendered)
 
 
 def format_tool_pending(name: str, input_dict: dict) -> str:
@@ -163,9 +198,7 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             return _esc(name)
 
 
-def format_tool_complete(
-    name: str, input_dict: dict, result: str, is_error: bool
-) -> str:
+def format_tool_complete(name: str, input_dict: dict, result: str, is_error: bool) -> str:
     """Produce the completed summary with result metadata (Rich markup).
 
     Args:
@@ -246,10 +279,11 @@ def format_tool_complete(
             # Count matches (lines with |) and files (lines ending with :)
             match_count = sum(1 for x in result.split("\n") if "|" in x[:8])
             file_count = sum(
-                1 for x in result.split("\n")
-                if x.rstrip().endswith(":") and not x.startswith(" ")
+                1 for x in result.split("\n") if x.rstrip().endswith(":") and not x.startswith(" ")
             )
-            return f"Grep {_hi(pattern)} in {target} {_dim(f'({match_count} in {file_count} files)')}"
+            return (
+                f"Grep {_hi(pattern)} in {target} {_dim(f'({match_count} in {file_count} files)')}"
+            )
 
         case "shell":
             command = input_dict.get("command", "")
@@ -265,9 +299,9 @@ def format_tool_complete(
             if exit_code and exit_code != 0:
                 header = f"Shell {_hi(command)} {_dim(f'(exit {exit_code})')}"
                 # Strip the trailing "[exit: N]" marker line from displayed output
-                body_text = "\n".join(
-                    ln for ln in result.split("\n") if "[exit:" not in ln
-                ).strip("\n")
+                body_text = "\n".join(ln for ln in result.split("\n") if "[exit:" not in ln).strip(
+                    "\n"
+                )
                 body = _format_output_block(body_text, colour="red") if body_text else ""
                 return f"{header}\n{body}" if body else header
             return f"Shell {_hi(command)}"
