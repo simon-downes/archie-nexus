@@ -2,17 +2,14 @@
 
 SessionDescriptor: typed representation of a running session (from docker ps).
 StatusPayload: typed /status HTTP response contract.
-HistoryTurn: typed /history HTTP response element contract.
 
-Note: StatusPayload and HistoryTurn define the response contracts for typed
+Note: StatusPayload defines the response contract for typed
 client consumption (TUI, web client). The agent endpoints currently return
 equivalent untyped dicts; these types will be wired in when a typed client
 SDK is introduced.
 """
 
 import msgspec
-
-from archie_shared.types import ContentBlock
 
 
 class SessionDescriptor(msgspec.Struct):
@@ -42,11 +39,3 @@ class StatusPayload(msgspec.Struct):
     session_id: str | None = None
     turn_count: int | None = None
     turn_active: bool | None = None
-
-
-class HistoryTurn(msgspec.Struct):
-    """One turn in the /history HTTP response."""
-
-    turn_index: int
-    role: str
-    content: list[ContentBlock]

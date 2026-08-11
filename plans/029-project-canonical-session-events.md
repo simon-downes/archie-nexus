@@ -742,6 +742,35 @@ Make the canonical event model ready for subagents without implementing the full
 - Make 028 explicitly depend on 029 M6 and prevent subagent implementation from starting until the canonical event contract is available.
 - Add a fake scoped event producer test representing a future subagent.
 
+**Subagent Scope Contract (delivered by M6)**
+
+This contract defines how subagent activity maps onto canonical session events. It is the
+stable interface that plan 028 must consume. The authoritative, code-level version lives in
+the module docstring of `shared/src/archie_shared/session/accounting.py`.
+
+- **Scope identity.** Every canonical event carries an optional `scope`. The root agent's
+  events have `scope=None`. A child (subagent) agent's events have `scope` set to the
+  `tool_use_id` of the launching `task` tool call. Nesting is expressed purely through
+  these launching IDs; there is no separate parent pointer on the event.
+- **Parent reconstruction.** `parent_of(S) = tool_call(tool_use_id=S).scope`. Walking this
+  chain from any scope reaches the root (`None`). Orphan scopes (no launching `ToolCall`
+  found) roll up to root.
+- **Request attribution.** A child emits exactly one `llm_request` per provider request.
+  Request identity is the tuple `(scope, turn_iteration, request_id)`, which keeps records
+  distinct even when two children reuse the same local `turn_iteration`.
+- **Cost aggregation.**
+  - *Direct* cost of a scope = sum of that scope's own `llm_request` costs
+    (`scope_direct_costs`).
+  - *Inclusive* cost of a scope = its direct cost plus the inclusive cost of all descendant
+    scopes (`scope_inclusive_costs`), computed by seeding each scope with its direct cost
+    and adding it to every ancestor along the parent chain, with a cycle guard so a scope's
+    direct cost is counted at most once per ancestor.
+- **Model independence.** Child model keys and per-model rates are independent of the
+  parent; costs are derived per `llm_request` from that request's own model/usage.
+- **Error attribution.** A child that fails before producing usage still emits an
+  `llm_request` (with `error` set) attributed to the child scope; its cost contribution is
+  zero but the request remains attributable.
+
 **Deferred to a discrete 028-revision step (not part of M6):** the actual rewrite of `plans/028-native-subagent-tool.md` to consume this contract. 028 is a fully-reviewed 12-milestone plan; revising it in place from within 029 risks drift. After M6 lands the contract, perform a deliberate 028 revision as its own reviewed change, covering: Context paragraphs (flat `turn_index`/`parent_tool_use_id` wire events \u2192 canonical `scope`/`turn_iteration`); resolved-decisions items 2 (nested wire-event design) and 5 (`Session.record_usage()`/transcript cost); Observability (attribution via one canonical `llm_request` per child request + persisted `cost_usd`); child-streaming identity (`(parent_tool_use_id, index)` \u2192 `(scope, turn_iteration, request_id)`); session-persistence (drop `MessageEntry.parent_tool_use_id`/`agent_id`/index; require canonical `tool_call`/`tool_result`/`assistant_message`/`llm_request` \u2014 note `text_delta` is live-only and not persisted); Design (frozen dataclasses/manual serializers/`_SERVER_EVENT_TYPES`/protocol-version bump \u2192 tagged `msgspec` union); `shared/session/log.py` (attributed `MessageEntry` + locking \u2192 canonical append/replay); Reuse (child `Session.record_usage()` \u2192 event-factory emission); Deviations (remove separate nested-wire-event and session-log-schema changes); and Milestones 8\u201312 (event names/fields/persistence assertions/replay/command correlation \u2192 canonical scope/request contract).
 
 **Edge Cases**

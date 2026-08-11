@@ -6,6 +6,7 @@ import logging
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
@@ -40,6 +41,22 @@ class _WorkerError:
     msg: str
 
 
+@dataclass(frozen=True)
+class RequestContext:
+    request_id: str
+    sent_at: str
+
+
+@dataclass
+class RequestFinished:
+    context: RequestContext
+    duration_ms: int
+    status: str
+    usage: Usage | None
+    stop_reason: str | None
+    error: str | None
+
+
 @dataclass
 class _RequestResult:
     text_blocks: list[TextBlock] = field(default_factory=list)
@@ -70,12 +87,19 @@ async def run_loop(
     tool_config: list[dict] | None = None,
     execute_tool: Callable[[ToolUseBlock], Awaitable[ToolResultBlock]] | None = None,
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
-) -> AsyncGenerator[AgentEvent]:
+    request_context_factory: Callable[[], RequestContext] | None = None,
+) -> AsyncGenerator[AgentEvent | RequestFinished]:
     """Yield AgentEvents by streaming from the LLM client in a tool loop."""
     working_messages: list[Turn] = list(messages)
     for iteration in range(max_iterations):
         yield IterationStart(index=iteration)
         result = _RequestResult()
+        request_context = (
+            request_context_factory()
+            if request_context_factory
+            else RequestContext(request_id="", sent_at=datetime.now(UTC).isoformat())
+        )
+        started = datetime.now(UTC)
         async for event in _stream_once(
             messages=working_messages,
             system=system,
@@ -86,6 +110,24 @@ async def run_loop(
             result=result,
         ):
             yield event
+        if request_context_factory is not None:
+            status = (
+                "interrupted"
+                if result.interrupted
+                else "error"
+                if result.failed
+                else "completed"
+                if result.usage is not None
+                else "no_usage"
+            )
+            yield RequestFinished(
+                context=request_context,
+                duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+                status=status,
+                usage=result.usage,
+                stop_reason=result.stop_reason,
+                error=result.error_msg,
+            )
         if result.failed:
             yield TurnError(error=result.error_msg or "unknown error")
             return

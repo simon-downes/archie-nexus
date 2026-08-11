@@ -80,18 +80,17 @@ def _make_ws_backend(messages: list[str]):
 
 
 def test_markers_match_actual_json_dumps_output():
-    """_METRICS_MARKERS strings match actual json.dumps wire format."""
-    usage_event = json.dumps({"type": "usage", "turn_index": 1, "data": {}})
-    session_info_event = json.dumps({"type": "session_info", "data": {}})
-    model_switched_event = json.dumps({"type": "model_switched", "data": {}})
+    """_METRICS_MARKERS strings match actual json.dumps / msgspec wire format."""
+    # json.dumps default (space after colon) and msgspec (no space) forms.
+    json_form = json.dumps({"type": "llm_request", "id": "e1"})
+    compact_form = json.dumps({"type": "llm_request", "id": "e1"}, separators=(",", ":"))
 
-    assert '"type": "usage"' in usage_event
-    assert '"type": "session_info"' in session_info_event
-    assert '"type": "model_switched"' in model_switched_event
+    assert '"type": "llm_request"' in json_form
+    assert '"type":"llm_request"' in compact_form
 
     for marker in _METRICS_MARKERS:
         assert any(
-            marker in e for e in [usage_event, session_info_event, model_switched_event]
+            marker in e for e in [json_form, compact_form]
         ), f"Marker {marker!r} not found in any expected event"
 
 
@@ -100,17 +99,32 @@ def test_markers_match_actual_json_dumps_output():
 # ---------------------------------------------------------------------------
 
 
-def test_usage_frame_enqueued(tmp_path):
-    """Usage frame flowing through proxy → enqueued with correct session_id."""
+def _llm_request_frame(turn_iteration: str = "1.1", **overrides) -> str:
+    """A canonical llm_request frame as it flows over the WebSocket."""
+    event = {
+        "type": "llm_request",
+        "id": overrides.get("id", "evt-1"),
+        "scope": None,
+        "turn_iteration": turn_iteration,
+        "model_key": "bedrock-anthropic.claude-sonnet-4-6",
+        "sent_at": "2026-07-01T10:00:00+00:00",
+        "duration_ms": 1234,
+        "status": "completed",
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "context_tokens": 12000,
+        "cost_usd": 0.001,
+    }
+    event.update({k: v for k, v in overrides.items() if k != "id"})
+    return json.dumps(event)
+
+
+def test_llm_request_frame_enqueued(tmp_path):
+    """llm_request frame flowing through proxy → enqueued with correct session_id."""
     session = _make_session()
-    usage_msg = json.dumps({
-        "type": "usage",
-        "turn_index": 1,
-        "data": {
-            "input_tokens": 100, "output_tokens": 50,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-        },
-    })
+    frame = _llm_request_frame()
 
     from archie_orchestrator.metrics import MetricsWriter
 
@@ -119,7 +133,7 @@ def test_usage_frame_enqueued(tmp_path):
 
     with (
         patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
-        patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([usage_msg])),
+        patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([frame])),
     ):
         client = TestClient(app, raise_server_exceptions=False)
         with client.websocket_connect(f"/sessions/{session.session_id}/stream"):
@@ -128,59 +142,7 @@ def test_usage_frame_enqueued(tmp_path):
     assert not writer.queue.empty()
     sid, msg = writer.queue.get_nowait()
     assert sid == session.session_id
-    assert '"type": "usage"' in msg
-
-
-def test_session_info_frame_enqueued(tmp_path):
-    """SessionInfo frame flowing through proxy → enqueued."""
-    session = _make_session()
-    session_info_msg = json.dumps({
-        "type": "session_info",
-        "data": {"model": "Test", "protocol_version": 1, "session_id": "x"},
-    })
-
-    from archie_orchestrator.metrics import MetricsWriter
-
-    writer = MetricsWriter(tmp_path / "metrics.db")
-    app.state.metrics_writer = writer
-
-    with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
-        patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([session_info_msg])),
-    ):
-        client = TestClient(app, raise_server_exceptions=False)
-        with client.websocket_connect(f"/sessions/{session.session_id}/stream"):
-            pass
-
-    assert not writer.queue.empty()
-    _, msg = writer.queue.get_nowait()
-    assert '"type": "session_info"' in msg
-
-
-def test_model_switched_frame_enqueued(tmp_path):
-    """ModelSwitched frame flowing through proxy → enqueued."""
-    session = _make_session()
-    ms_msg = json.dumps({
-        "type": "model_switched",
-        "data": {"model_key": "bedrock-x", "model_name": "Model X"},
-    })
-
-    from archie_orchestrator.metrics import MetricsWriter
-
-    writer = MetricsWriter(tmp_path / "metrics.db")
-    app.state.metrics_writer = writer
-
-    with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
-        patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([ms_msg])),
-    ):
-        client = TestClient(app, raise_server_exceptions=False)
-        with client.websocket_connect(f"/sessions/{session.session_id}/stream"):
-            pass
-
-    assert not writer.queue.empty()
-    _, msg = writer.queue.get_nowait()
-    assert '"type": "model_switched"' in msg
+    assert '"type": "llm_request"' in msg
 
 
 def test_text_delta_frame_not_enqueued(tmp_path):
@@ -188,8 +150,11 @@ def test_text_delta_frame_not_enqueued(tmp_path):
     session = _make_session()
     text_msg = json.dumps({
         "type": "text_delta",
-        "turn_index": 1,
-        "data": {"text": "Hello"},
+        "id": "t1",
+        "turn_iteration": "1.1",
+        "scope": None,
+        "request_id": "r1",
+        "text": "Hello",
     })
 
     from archie_orchestrator.metrics import MetricsWriter
@@ -211,12 +176,7 @@ def test_text_delta_frame_not_enqueued(tmp_path):
 def test_frame_forwarded_even_without_metrics_writer(tmp_path):
     """Frames are forwarded even when metrics_writer is not set on app state."""
     session = _make_session()
-    usage_msg = json.dumps({
-        "type": "usage",
-        "turn_index": 1,
-        "data": {"input_tokens": 100, "output_tokens": 50,
-                 "cache_read_tokens": 0, "cache_write_tokens": 0},
-    })
+    usage_msg = _llm_request_frame()
 
     # Remove metrics_writer from app state
     if hasattr(app.state, "metrics_writer"):
@@ -250,12 +210,8 @@ def test_multiple_sessions_correct_session_ids(tmp_path):
         session_id=sid_b, container_name=f"archie-{sid_b}", port=32772, raw_docker_status="Up"
     )
 
-    usage_a = json.dumps({"type": "usage", "turn_index": 1,
-                          "data": {"input_tokens": 1, "output_tokens": 1,
-                                   "cache_read_tokens": 0, "cache_write_tokens": 0}})
-    usage_b = json.dumps({"type": "usage", "turn_index": 2,
-                          "data": {"input_tokens": 2, "output_tokens": 2,
-                                   "cache_read_tokens": 0, "cache_write_tokens": 0}})
+    usage_a = _llm_request_frame(turn_iteration="1.1", id="a1")
+    usage_b = _llm_request_frame(turn_iteration="2.1", id="b1")
 
     from archie_orchestrator.metrics import MetricsWriter
 

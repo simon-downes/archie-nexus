@@ -3,8 +3,12 @@
 Shared between CLI, agent, and future web client.
 """
 
+from archie_shared.session.accounting import (
+    scope_costs,
+    scope_direct_costs,
+    scope_inclusive_costs,
+)
 from archie_shared.session.descriptor import (
-    HistoryTurn,
     SessionDescriptor,
     StatusPayload,
 )
@@ -24,7 +28,6 @@ from archie_shared.session.log import (
 
 __all__ = [
     "CONTAINER_PREFIX",
-    "HistoryTurn",
     "MessageEntry",
     "MessageMetadata",
     "SESSION_PATTERN",
@@ -33,6 +36,9 @@ __all__ = [
     "container_name",
     "generate_session_id",
     "parse_container_name",
+    "scope_costs",
+    "scope_direct_costs",
+    "scope_inclusive_costs",
     "split_id",
     "write_entry",
 ]

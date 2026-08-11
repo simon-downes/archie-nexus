@@ -58,12 +58,6 @@ class TestModelSwitched:
                 "model_key": "bedrock-claude-haiku-4-5",
                 "model_name": "Claude Haiku 4.5",
                 "supports_cache": True,
-                "cost": {
-                    "input": 0.0,
-                    "output": 0.0,
-                    "cache_read": 0.0,
-                    "cache_write": 0.0,
-                },
             },
         }
 

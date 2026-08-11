@@ -5,8 +5,8 @@ Two phases per tool call:
 - format_tool_pending: shown while tool is running (params only)
 - format_tool_complete: shown after tool finishes (params + result metadata)
 
-The harness computes these and sends them over the wire. The TUI renders
-the markup directly via Textual's Static widget.
+Shared so any presentation surface (TUI, web UI, session viewer) can derive
+summaries from canonical event data. The client renders the markup directly.
 """
 
 from __future__ import annotations

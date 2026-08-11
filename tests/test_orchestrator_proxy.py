@@ -1,4 +1,4 @@
-"""Tests for orchestrator HTTP proxy routes (/sessions/{id}/status, /history, /shell)."""
+"""Tests for orchestrator HTTP proxy routes (/sessions/{id}/status, /shell)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -65,9 +65,7 @@ async def test_proxy_status_success(http_client):
             response = await client.get("/sessions/proj-01abc12345/status")
 
     assert response.status_code == 200
-    mock_client.get.assert_called_once_with(
-        "http://127.0.0.1:32771/status", timeout=5.0
-    )
+    mock_client.get.assert_called_once_with("http://127.0.0.1:32771/status", timeout=5.0)
 
 
 async def test_proxy_status_session_not_found(http_client):
@@ -118,43 +116,6 @@ async def test_proxy_status_backend_timeout(http_client):
             response = await client.get("/sessions/proj-01abc12345/status")
 
     assert response.status_code == 504
-
-
-# ---------------------------------------------------------------------------
-# GET /sessions/{id}/history
-# ---------------------------------------------------------------------------
-
-
-async def test_proxy_history_success(http_client):
-    """GET /sessions/{id}/history forwards to session /history."""
-    session = _running_session()
-    backend_resp = _mock_backend_response(content=b"[]")
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=backend_resp)
-
-    with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
-        patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
-    ):
-        async with http_client as client:
-            response = await client.get("/sessions/proj-01abc12345/history")
-
-    assert response.status_code == 200
-    mock_client.get.assert_called_once_with(
-        "http://127.0.0.1:32771/history", timeout=5.0
-    )
-
-
-async def test_proxy_history_session_not_found(http_client):
-    """GET /sessions/{id}/history with unknown session → 404."""
-    with patch("archie_orchestrator.proxy.list_sessions", return_value=[]):
-        async with http_client as client:
-            response = await client.get("/sessions/unknown-01abc12345/history")
-
-    assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------

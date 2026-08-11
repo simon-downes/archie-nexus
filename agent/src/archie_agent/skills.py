@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-
 from archie_shared.config import persona_dir
 
 from archie_agent.tools import ToolSpec

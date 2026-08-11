@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Cheap string checks match actual json.dumps output (space after colon).
-_METRICS_MARKERS = ('"type": "usage"', '"type": "session_info"', '"type": "model_switched"')
+_METRICS_MARKERS = ('"type":"llm_request"', '"type": "llm_request"')
 
 # ---------------------------------------------------------------------------
 # Active WebSocket connection counter (used by app.py shutdown log)
@@ -131,8 +131,8 @@ async def proxy_status(request: Request) -> Response:
     return await forward_http(session, "/status")
 
 
-async def proxy_history(request: Request) -> Response:
-    """GET /sessions/{session_id}/history — proxy to session /history."""
+async def proxy_events(request: Request) -> Response:
+    """Proxy canonical event replay, forwarding the cursor unchanged."""
     session_id = request.path_params["session_id"]
     try:
         session = _resolve_session(session_id)
@@ -140,7 +140,9 @@ async def proxy_history(request: Request) -> Response:
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
-    return await forward_http(session, "/history")
+    after = request.query_params.get("after")
+    path = "/events" + (f"?after={after}" if after is not None else "")
+    return await forward_http(session, path)
 
 
 async def proxy_shell(request: Request) -> Response:
@@ -154,7 +156,9 @@ async def proxy_shell(request: Request) -> Response:
         return JSONResponse({"error": str(exc)}, status_code=503)
     body = await request.body()
     content_type = request.headers.get("content-type")
-    return await forward_http(session, "/shell", method="POST", body=body, content_type=content_type)
+    return await forward_http(
+        session, "/shell", method="POST", body=body, content_type=content_type
+    )
 
 
 # ---------------------------------------------------------------------------

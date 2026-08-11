@@ -64,16 +64,77 @@ def test_status_includes_session_metadata(client):
     assert data["turn_count"] == 0
 
 
-def test_history_empty_on_start(client):
-    """Verify /history returns empty list for new session."""
-    resp = client.get("/history")
+def test_events_on_start_has_only_session_started(client):
+    """GET /events on a fresh session returns just the session_started event."""
+    resp = client.get("/events")
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    lines = [json.loads(line) for line in resp.text.splitlines() if line]
+    assert len(lines) == 1
+    assert lines[0]["type"] == "session_started"
+
+
+def _run_turn(client):
+    """Drive one message turn to completion so the canonical log is populated."""
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()  # session_snapshot
+        ws.receive_text()  # session_info
+        ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
+        while True:
+            if json.loads(ws.receive_text())["type"] == "turn_complete":
+                break
+
+
+def _events_lines(client, after=None):
+    path = "/events" + (f"?after={after}" if after else "")
+    resp = client.get(path)
+    assert resp.status_code == 200
+    return [json.loads(line) for line in resp.text.splitlines() if line]
+
+
+def test_events_complete_log_after_turn(client):
+    """GET /events replays the full canonical log as ordered NDJSON."""
+    _run_turn(client)
+    events = _events_lines(client)
+    assert len(events) > 0
+    types = [e["type"] for e in events]
+    assert "user_message" in types
+    assert "assistant_message" in types
+    # text_delta is live-only and must NOT be persisted/replayed
+    assert "text_delta" not in types
+    # every persisted event carries an id
+    assert all(e.get("id") for e in events)
+
+
+def test_events_valid_cursor_slices_after(client):
+    """GET /events?after=<id> returns only events strictly after the cursor."""
+    _run_turn(client)
+    events = _events_lines(client)
+    assert len(events) >= 2
+    cursor = events[0]["id"]
+    tail = _events_lines(client, after=cursor)
+    assert [e["id"] for e in tail] == [e["id"] for e in events[1:]]
+
+
+def test_events_unknown_cursor_returns_409(client):
+    """GET /events?after=<unknown> returns 409 so the TUI falls back to full replay."""
+    _run_turn(client)
+    resp = client.get("/events?after=01J000000000000000000000ZZ")
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "cursor_not_found"
 
 
 def test_websocket_session_info_on_connect(client):
-    """Verify WS connect sends SessionInfo event."""
+    """Verify WS connect sends SessionSnapshot then SessionInfo events."""
     with client.websocket_connect("/stream") as ws:
+        snapshot = json.loads(ws.receive_text())
+        assert snapshot["type"] == "session_snapshot"
+        assert snapshot["data"]["protocol_version"] == 1
+        assert snapshot["data"]["model"] == "Claude Sonnet 4.6"
+        assert snapshot["data"]["session_id"] == "test-session"
+        assert isinstance(snapshot["data"]["latest_event_id"], str)
+        assert snapshot["data"]["accounting"]["total_cost"] == 0.0
+
         data = json.loads(ws.receive_text())
         assert data["type"] == "session_info"
         assert data["data"]["protocol_version"] == 1
@@ -84,7 +145,9 @@ def test_websocket_session_info_on_connect(client):
 def test_websocket_message_and_events(client):
     """Verify sending a message yields text_delta and turn_complete events."""
     with client.websocket_connect("/stream") as ws:
-        # Consume session_info
+        # Consume session_snapshot + session_info
+        session_snapshot = json.loads(ws.receive_text())
+        assert session_snapshot["type"] == "session_snapshot"
         session_info = json.loads(ws.receive_text())
         assert session_info["type"] == "session_info"
 
@@ -106,33 +169,12 @@ def test_websocket_message_and_events(client):
         assert "usage" in types
         assert types[-1] == "turn_complete"
 
-        # All events should have turn_index = 1
+        # Wire events carry turn_index. The `llm_request` frame is a raw canonical
+        # event broadcast for the metrics pipeline and has no wire turn_index.
         for e in events:
+            if e["type"] == "llm_request":
+                continue
             assert e["turn_index"] == 1
-
-
-def test_history_after_turn(client):
-    """Verify /history contains the turn after a message exchange."""
-    with client.websocket_connect("/stream") as ws:
-        # Consume session_info
-        ws.receive_text()
-
-        # Send message and wait for completion
-        ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
-        while True:
-            event = json.loads(ws.receive_text())
-            if event["type"] == "turn_complete":
-                break
-
-    # Check history
-    resp = client.get("/history")
-    assert resp.status_code == 200
-    history = resp.json()
-    assert len(history) == 2  # user + assistant
-    assert history[0]["role"] == "user"
-    assert history[0]["content"] == [{"type": "text", "text": "hello"}]
-    assert history[1]["role"] == "assistant"
-    assert history[1]["content"] == [{"type": "text", "text": "Hello there"}]
 
 
 # --- Tool turn integration test ---
@@ -187,7 +229,8 @@ def test_websocket_tool_turn(mock_env, tmp_path):
 
                 with TestClient(app) as client:
                     with client.websocket_connect("/stream") as ws:
-                        # Consume session_info
+                        # Consume session_snapshot + session_info
+                        ws.receive_text()
                         ws.receive_text()
 
                         # Send message

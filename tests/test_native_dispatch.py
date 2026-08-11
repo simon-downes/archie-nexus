@@ -13,6 +13,7 @@ from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, Usage
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Session
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
 
 # --- Fixtures ---
 
@@ -97,10 +98,13 @@ async def test_native_read_dispatch(tmp_path, monkeypatch):
     results = _get_tool_results(ws)
     assert len(results) == 1
     assert results[0]["is_error"] is False
-    # Summary is now Rich-formatted completion string
-    assert "hello.txt" in results[0]["summary"]
-    assert "2 lines" in results[0]["summary"]
     assert results[0]["result_bytes"] > 0
+    # Wire carries raw content; client reconstructs the completion summary.
+    summary = format_tool_complete(
+        "read", {"path": "hello.txt"}, results[0]["content"], results[0]["is_error"]
+    )
+    assert "hello.txt" in summary
+    assert "2 lines" in summary
 
 
 # --- Test: native write returns confirmation ---
@@ -469,7 +473,7 @@ async def test_both_native_and_exec_paths(tmp_path, monkeypatch):
 
 
 async def test_native_read_input_summary(tmp_path, monkeypatch):
-    """format_tool_pending returns Rich markup for native read."""
+    """Wire tool_call carries raw input; format_tool_pending renders it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "foo.py").write_text("x\n")
@@ -496,18 +500,17 @@ async def test_native_read_input_summary(tmp_path, monkeypatch):
     harness.clients.add(ws)
     await harness.handle_message("read foo.py")
 
-    # Find tool_call event and check input_summary is Rich-formatted
-    tool_calls = [
-        json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"
-    ]
+    # Wire tool_call carries raw input; client formats via shared formatter.
+    tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    summary = tool_calls[0]["data"]["input_summary"]
+    assert tool_calls[0]["data"]["input"] == {"path": "foo.py"}
+    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
     assert "Read" in summary
     assert "foo.py" in summary
 
 
 async def test_native_shell_input_summary(tmp_path, monkeypatch):
-    """format_tool_pending returns Rich markup for native shell."""
+    """Wire tool_call carries raw input; format_tool_pending renders it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr("archie_agent.exec.tools._subprocess.WORKSPACE", workspace)
@@ -533,17 +536,16 @@ async def test_native_shell_input_summary(tmp_path, monkeypatch):
     harness.clients.add(ws)
     await harness.handle_message("run a command")
 
-    tool_calls = [
-        json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"
-    ]
+    tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    summary = tool_calls[0]["data"]["input_summary"]
+    assert tool_calls[0]["data"]["input"] == {"command": "echo test"}
+    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
     assert "Shell" in summary
     assert "echo test" in summary
 
 
 async def test_native_grep_input_summary(tmp_path, monkeypatch):
-    """format_tool_pending returns Rich markup for native grep."""
+    """Wire tool_call carries raw input; format_tool_pending renders it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "x.py").write_text("hello\n")
@@ -570,10 +572,9 @@ async def test_native_grep_input_summary(tmp_path, monkeypatch):
     harness.clients.add(ws)
     await harness.handle_message("search for hello")
 
-    tool_calls = [
-        json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"
-    ]
+    tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    summary = tool_calls[0]["data"]["input_summary"]
+    assert tool_calls[0]["data"]["input"] == {"pattern": "hello"}
+    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
     assert "Grep" in summary
     assert "hello" in summary

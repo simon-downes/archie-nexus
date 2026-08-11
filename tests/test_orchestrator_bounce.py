@@ -53,9 +53,7 @@ async def test_shutdown_does_not_call_docker_stop(caplog):
             pass  # enter startup → yield → exit shutdown
 
     # Any subprocess.run calls during shutdown are unexpected (there should be none)
-    stop_calls = [
-        c for c in mock_run.call_args_list if "stop" in str(c)
-    ]
+    stop_calls = [c for c in mock_run.call_args_list if "stop" in str(c)]
     assert not stop_calls, f"docker stop was called during shutdown: {stop_calls}"
 
 
@@ -65,9 +63,7 @@ async def test_after_restart_sessions_rediscovered():
     sessions = [_make_session("proj-01abc12345"), _make_session("proj-02def67890")]
 
     with patch("archie_orchestrator.app.list_sessions", return_value=sessions):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             # Simulate a "restart" — the app is stateless, same docker ps result
             resp1 = await client.get("/sessions")
             resp2 = await client.get("/sessions")
@@ -91,9 +87,7 @@ async def test_shutdown_logs_active_connections(caplog):
         async with lifespan(app):
             pass
 
-    assert any(
-        "Orchestrator stopping" in r.message and "0" in r.message for r in caplog.records
-    )
+    assert any("Orchestrator stopping" in r.message and "0" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -170,36 +164,51 @@ async def test_tui_reconnect_4004_gives_up_immediately():
 
 @pytest.mark.asyncio
 async def test_tui_reconnect_deduplicates_history():
-    """After reconnect, _load_history_since(since) only renders new turns."""
+    """After reconnect, _replay_events renders only events past the cursor.
+
+    The client tracks the id of the last rendered canonical event and requests
+    /events?after=<id>; already-seen ids are deduplicated.
+    """
     from archie_cli.tui.app import ArchieApp
+    from archie_shared.canonical_events import (
+        AssistantMessage,
+        UserMessage,
+        encode_event,
+    )
 
     app_instance = ArchieApp(
         ws_url="ws://127.0.0.1:7600/sessions/proj-01abc/stream",
         api_url="http://127.0.0.1:7600/sessions/proj-01abc",
         container_name="archie-proj-01abc",
     )
-    # Pretend we already rendered turn 3
-    app_instance._last_displayed_turn = 3
+    # Pretend we already rendered up to event "e3".
+    app_instance._last_event_id = "e3"
+    app_instance._seen_event_ids = {"e1", "e2", "e3"}
 
-    turns = [
-        {"role": "user", "turn_index": 1, "content": [{"type": "text", "text": "hello"}]},
-        {"role": "assistant", "turn_index": 2, "content": [{"type": "text", "text": "hi"}]},
-        {"role": "user", "turn_index": 3, "content": [{"type": "text", "text": "again"}]},
-        {"role": "assistant", "turn_index": 4, "content": [{"type": "text", "text": "new"}]},
+    # /events?after=e3 returns the tail (e4) plus e3 again (dedup exercise).
+    events = [
+        UserMessage(id="e3", turn=3, scope=None, content="again"),
+        AssistantMessage(
+            id="e4", turn=4, scope=None, request_ids=["r4"], content="new", interrupted=False
+        ),
     ]
-
+    body = "".join(encode_event(e) + "\n" for e in events)
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = turns
+    mock_resp.text = body
 
     rendered = []
-
-    # Patch conv to capture what gets rendered
 
     mock_conv = MagicMock()
     mock_conv.add_user_message = lambda msg: rendered.append(("user", msg))
     mock_conv.add_assistant_message = lambda msg: rendered.append(("assistant", msg))
+
+    captured_url = {}
+
+    async def _get(url, **kwargs):
+        captured_url["url"] = url
+        return mock_resp
 
     with (
         patch("archie_cli.tui.app.httpx.AsyncClient") as mock_client_cls,
@@ -207,16 +216,17 @@ async def test_tui_reconnect_deduplicates_history():
         mock_http = AsyncMock()
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
-        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.get = _get
         mock_client_cls.return_value = mock_http
 
         with patch.object(app_instance, "query_one", return_value=mock_conv):
-            last = await app_instance._load_history_since(since=3)
+            await app_instance._replay_events()
 
-    # Only turn 4 should have been rendered (turns 1-3 skipped)
-    assert last == 4
-    assert len(rendered) == 1
-    assert rendered[0] == ("assistant", "new")
+    # Requested incremental replay from the cursor.
+    assert "after=e3" in captured_url["url"]
+    # Only the unseen event (e4) rendered; e3 deduplicated.
+    assert rendered == [("assistant", "new")]
+    assert app_instance._last_event_id == "e4"
 
 
 # ---------------------------------------------------------------------------

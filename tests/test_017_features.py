@@ -39,6 +39,7 @@ class TestIterationStartWireEvent:
         assert result.turn_index == 1
         assert result.index == 0
 
+
 class TestUsageWireEvent:
     """Wire Usage event carries per-request values (no cost field)."""
 
@@ -76,117 +77,55 @@ class TestUsageWireEvent:
 
 
 class TestSessionInfoCostRates:
-    """SessionInfo includes cost rates for client-side computation."""
+    """SessionInfo no longer carries client-side cost rates (029 M7).
 
-    def test_to_json_includes_cost(self):
+    Token/cost accounting is delivered via SessionSnapshot.accounting and
+    canonical llm_request ledger events, not derived client-side from rates.
+    """
+
+    def test_to_json_has_no_cost_block(self):
         info = SessionInfo(
             protocol_version=1,
             model="Claude Sonnet 4",
             session_id="test-abc",
-            cost_per_m_input=3.0,
-            cost_per_m_output=15.0,
-            cost_per_m_cache_read=0.3,
-            cost_per_m_cache_write=3.75,
         )
-        data = info.to_json()
-        cost = data["data"]["cost"]
-        assert cost["input"] == 3.0
-        assert cost["output"] == 15.0
-        assert cost["cache_read"] == 0.3
-        assert cost["cache_write"] == 3.75
+        assert "cost" not in info.to_json()["data"]
 
-    def test_from_json_with_cost(self):
+    def test_from_json_ignores_legacy_cost_block(self):
         info = SessionInfo.from_json(
             {
                 "protocol_version": 1,
                 "model": "Test",
                 "session_id": "x",
-                "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 0.5},
+                "cost": {"input": 1.0, "output": 2.0},
             }
         )
-        assert info.cost_per_m_input == 1.0
-        assert info.cost_per_m_output == 2.0
-
-    def test_from_json_without_cost_defaults_zero(self):
-        info = SessionInfo.from_json(
-            {"protocol_version": 1, "model": "Test", "session_id": "x"}
-        )
-        assert info.cost_per_m_input == 0.0
-        assert info.cost_per_m_output == 0.0
+        assert info.model == "Test"
+        assert not hasattr(info, "cost_per_m_input")
 
 
 class TestModelSwitchedCostRates:
-    """ModelSwitched includes cost rates for mid-session updates."""
+    """ModelSwitched no longer carries client-side cost rates (029 M7)."""
 
-    def test_to_json_includes_cost(self):
+    def test_to_json_has_no_cost_block(self):
         event = ModelSwitched(
             model_key="haiku",
             model_name="Haiku",
             supports_cache=True,
-            cost_per_m_input=1.0,
-            cost_per_m_output=5.0,
         )
-        cost = event.to_json()["data"]["cost"]
-        assert cost["input"] == 1.0
-        assert cost["output"] == 5.0
+        assert "cost" not in event.to_json()["data"]
 
-    def test_from_json_with_cost(self):
+    def test_from_json_ignores_legacy_cost_block(self):
         event = ModelSwitched.from_json(
             {
                 "model_key": "haiku",
                 "model_name": "Haiku",
                 "supports_cache": True,
-                "cost": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.0},
+                "cost": {"input": 1.0, "output": 5.0},
             }
         )
-        assert event.cost_per_m_input == 1.0
-        assert event.cost_per_m_cache_write == 1.0
-
-
-# --- Cost accumulation math ---
-
-
-class TestCostAccumulation:
-    """Cost accumulation using the real calculate_cost function from shared."""
-
-    def test_single_usage_delta(self):
-        """Cost delta matches calculate_cost applied to per-request values."""
-        from archie_shared.models import CostConfig, calculate_cost
-
-        config = CostConfig(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75)
-        cost = calculate_cost(config, input_tokens=1000, output_tokens=500,
-                              cache_read_tokens=200, cache_write_tokens=100)
-        # 1000*3/1M + 500*15/1M + 200*0.3/1M + 100*3.75/1M
-        # = 0.003 + 0.0075 + 0.00006 + 0.000375 = 0.010935
-        assert abs(cost - 0.010935) < 1e-10
-
-    def test_model_switch_uses_new_rates(self):
-        """After model switch, new Usage events use the new config's rates."""
-        from archie_shared.models import CostConfig, calculate_cost
-
-        # Simulate TUI accumulation across a model switch
-        cumulative_cost = 0.0
-
-        # First model (expensive)
-        config1 = CostConfig(input=3.0, output=15.0)
-        cumulative_cost += calculate_cost(config1, input_tokens=1000, output_tokens=500)
-        # = 0.003 + 0.0075 = 0.0105
-
-        # Switch to cheap model
-        config2 = CostConfig(input=0.8, output=4.0)
-        cumulative_cost += calculate_cost(config2, input_tokens=1000, output_tokens=500)
-        # += 0.0008 + 0.002 = 0.0028
-        # total = 0.0133
-
-        assert abs(cumulative_cost - 0.0133) < 1e-10
-
-    def test_zero_rates_zero_cost(self):
-        """Zero cost config (e.g. ollama) produces zero cost."""
-        from archie_shared.models import CostConfig, calculate_cost
-
-        config = CostConfig()  # all zeros
-        cost = calculate_cost(config, input_tokens=10000, output_tokens=5000)
-        assert cost == 0.0
+        assert event.model_key == "haiku"
+        assert not hasattr(event, "cost_per_m_input")
 
 
 # --- /shell endpoint tests ---

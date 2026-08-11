@@ -20,32 +20,30 @@ def _app_state():
     yield
 
 
+_SEED_TABLE = """CREATE TABLE IF NOT EXISTS requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL, turn_iteration TEXT NOT NULL, scope TEXT, model_key TEXT NOT NULL,
+    status TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL,
+    context_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, duration_ms INTEGER NOT NULL,
+    UNIQUE (session_id, event_id))"""
+
+_next_event_id = 0
+
+
 def _seed_db(db_path: Path, rows: list[dict]) -> None:
-    """Insert rows into the requests table for testing."""
+    """Insert schema-v2 canonical rows into the requests table for testing."""
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            turn_index INTEGER NOT NULL,
-            model TEXT NOT NULL,
-            backend TEXT,
-            input_tokens INTEGER NOT NULL,
-            output_tokens INTEGER NOT NULL,
-            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-            cost REAL NOT NULL,
-            context_pct REAL DEFAULT 0.0
-        )
-    """)
+    conn.execute(_SEED_TABLE)
+    conn.execute(f"PRAGMA user_version = 2")
     conn.executemany(
-        "INSERT INTO requests (session_id, timestamp, turn_index, model, backend, "
-        "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, context_pct) "
-        "VALUES (:session_id, :timestamp, :turn_index, :model, :backend, "
-        ":input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens, "
-        ":cost, :context_pct)",
+        "INSERT INTO requests (session_id, event_id, timestamp, turn_iteration, scope, "
+        "model_key, status, input_tokens, output_tokens, cache_read_tokens, "
+        "cache_write_tokens, context_tokens, cost_usd, duration_ms) "
+        "VALUES (:session_id, :event_id, :timestamp, :turn_iteration, :scope, "
+        ":model_key, :status, :input_tokens, :output_tokens, :cache_read_tokens, "
+        ":cache_write_tokens, :context_tokens, :cost_usd, :duration_ms)",
         rows,
     )
     conn.commit()
@@ -55,28 +53,35 @@ def _seed_db(db_path: Path, rows: list[dict]) -> None:
 def _row(
     session_id: str = "proj-01abc12345",
     timestamp: str = "2026-07-01T10:00:00+00:00",
-    turn_index: int = 1,
+    turn_iteration: str = "1.1",
+    scope: str | None = None,
     model: str = "Claude Sonnet 4.6",
-    backend: str | None = "bedrock",
+    status: str = "completed",
     input_tokens: int = 1000,
     output_tokens: int = 200,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    context_tokens: int = 12000,
     cost: float = 0.006,
-    context_pct: float = 10.0,
+    duration_ms: int = 1234,
 ) -> dict:
+    global _next_event_id
+    _next_event_id += 1
     return {
         "session_id": session_id,
+        "event_id": f"evt-{_next_event_id:06d}",
         "timestamp": timestamp,
-        "turn_index": turn_index,
-        "model": model,
-        "backend": backend,
+        "turn_iteration": turn_iteration,
+        "scope": scope,
+        "model_key": model,
+        "status": status,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
-        "cost": cost,
-        "context_pct": context_pct,
+        "context_tokens": context_tokens,
+        "cost_usd": cost,
+        "duration_ms": duration_ms,
     }
 
 

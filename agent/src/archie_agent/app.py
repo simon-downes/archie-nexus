@@ -2,7 +2,6 @@
 
 Endpoints:
 - GET /status — health check + session metadata
-- GET /history — conversation history for client catch-up
 - WS /stream — bidirectional event streaming
 """
 
@@ -21,6 +20,7 @@ from archie_shared.events import (
     MessageCommand,
     ModelSwitched,
     SessionInfo,
+    SessionSnapshot,
     SwitchModelCommand,
     TurnError,
     deserialize_command,
@@ -28,11 +28,15 @@ from archie_shared.events import (
 )
 from archie_shared.models import get_model, load_models
 from archie_shared.schemas import load_nexus_config
-from archie_shared.session.log import MessageEntry, write_entry
-from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
+from archie_shared.session.log import (
+    MessageEntry,
+    read_event_lines,
+    session_accounting,
+    write_entry,
+)
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
@@ -121,7 +125,11 @@ async def lifespan(app):
 
     log.info(
         "Agent started",
-        extra={"model": _config.global_.model, "region": _config.global_.region, "session": session_id},
+        extra={
+            "model": _config.global_.model,
+            "region": _config.global_.region,
+            "session": session_id,
+        },
     )
     yield
     log.info("Agent shutting down")
@@ -142,63 +150,23 @@ async def status(request: Request) -> JSONResponse:
     )
 
 
-async def history(request: Request) -> JSONResponse:
-    """Return conversation history for client catch-up.
-
-    Uses content-block array format, forward-compatible with tool blocks.
-    Each turn includes turn_index for client reconciliation.
-    Includes error/interrupted entries for TUI replay.
-    """
+async def events(request: Request):
+    """Replay canonical persisted events as ordered NDJSON."""
     if _agent is None:
-        return JSONResponse([], status_code=503)
-
-    turns = []
-    for turn in _agent.session.turns:
-        content_blocks = []
-        for block in turn.content:
-            match block:
-                case TextBlock(text=text):
-                    content_blocks.append({"type": "text", "text": text})
-                case ToolUseBlock(tool_use_id=tid, name=name, input=inp):
-                    content_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "tool_use_id": tid,
-                            "name": name,
-                            "input": inp,
-                        }
-                    )
-                case ToolResultBlock(tool_use_id=tid, content=content, is_error=is_error):
-                    content_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tid,
-                            "content": content,
-                            "is_error": is_error,
-                        }
-                    )
-        turns.append(
-            {
-                "turn_index": turn.turn_index,
-                "role": turn.role,
-                "content": content_blocks,
-            }
+        return JSONResponse({"error": "no session"}, status_code=503)
+    after = request.query_params.get("after")
+    try:
+        items = read_event_lines(_agent.log_path)
+        if after is not None and after and not any(item["id"] == after for item in items):
+            return JSONResponse({"error": "cursor_not_found", "cursor": after}, status_code=409)
+        start = (
+            next((i + 1 for i, item in enumerate(items) if item["id"] == after), 0) if after else 0
         )
-
-    # Append display entries (errors, interruptions) for TUI replay
-    for entry in _agent.session.display_entries:
-        turns.append(
-            {
-                "turn_index": entry.turn_index,
-                "role": entry.role,
-                "content": [{"type": "text", "text": entry.content}] if entry.content else [],
-            }
-        )
-
-    # Sort by turn_index so errors appear in correct position
-    turns.sort(key=lambda t: t["turn_index"])
-
-    return JSONResponse(turns)
+        body = "".join(item["line"] + "\n" for item in items[start:])
+        return Response(body, media_type="application/x-ndjson")
+    except Exception as exc:
+        log.warning("Failed to replay events", exc_info=True)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket) -> None:
@@ -247,10 +215,6 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
         model_key=command.model_key,
         model_name=new_model.name,
         supports_cache=new_model.can_cache,
-        cost_per_m_input=new_model.cost.input,
-        cost_per_m_output=new_model.cost.output,
-        cost_per_m_cache_read=new_model.cost.cache_read,
-        cost_per_m_cache_write=new_model.cost.cache_write,
     )
     await _agent._broadcast(event)
 
@@ -260,7 +224,7 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
 async def stream(websocket: WebSocket) -> None:
     """Bidirectional WebSocket endpoint for event streaming.
 
-    On connect: sends SessionInfo event, adds to broadcast set.
+    On connect: sends SessionSnapshot + SessionInfo events, adds to broadcast set.
     Receives: message and interrupt commands.
     On disconnect: removes from broadcast set.
     """
@@ -270,16 +234,29 @@ async def stream(websocket: WebSocket) -> None:
         await websocket.close(code=1013, reason="Agent not ready")
         return
 
+    # Send authoritative session snapshot on connect (replay cursor + accounting)
+    acct = session_accounting(_agent.log_path)
+    snapshot = SessionSnapshot(
+        protocol_version=PROTOCOL_VERSION,
+        model=_agent.session.model.name,
+        session_id=_agent.session.session_id,
+        latest_event_id=acct["latest_event_id"],
+        status="ready",
+        git_branch=_read_git_branch(),
+        total_cost=acct["total_cost"],
+        total_input_tokens=acct["total_input_tokens"],
+        total_output_tokens=acct["total_output_tokens"],
+        total_cache_read_tokens=acct["total_cache_read_tokens"],
+        total_cache_write_tokens=acct["total_cache_write_tokens"],
+    )
+    await websocket.send_text(serialize_event(snapshot))
+
     # Send session info on connect
     info = SessionInfo(
         protocol_version=PROTOCOL_VERSION,
         model=_agent.session.model.name,
         session_id=_agent.session.session_id,
         git_branch=_read_git_branch(),
-        cost_per_m_input=_agent.session.model.cost.input,
-        cost_per_m_output=_agent.session.model.cost.output,
-        cost_per_m_cache_read=_agent.session.model.cost.cache_read,
-        cost_per_m_cache_write=_agent.session.model.cost.cache_write,
     )
     await websocket.send_text(serialize_event(info))
 
@@ -347,7 +324,7 @@ async def shell_log(request: Request) -> JSONResponse:
 app = Starlette(
     routes=[
         Route("/status", status, methods=["GET"]),
-        Route("/history", history, methods=["GET"]),
+        Route("/events", events, methods=["GET"]),
         Route("/shell", shell_log, methods=["POST"]),
         WebSocketRoute("/stream", stream),
     ],

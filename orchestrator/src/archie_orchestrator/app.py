@@ -7,7 +7,6 @@ Routes:
   POST   /sessions                        — start a new session
   DELETE /sessions/{session_id}           — stop a running session
   GET    /sessions/{session_id}/status    — proxy to session /status
-  GET    /sessions/{session_id}/history   — proxy to session /history
   POST   /sessions/{session_id}/shell     — proxy to session /shell
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
   GET    /static/*                        — static files (CSS, etc.)
@@ -36,7 +35,7 @@ from archie_orchestrator.lifecycle import start_session, stop_session
 from archie_orchestrator.metrics import MetricsWriter
 from archie_orchestrator.proxy import (
     get_active_ws_connections,
-    proxy_history,
+    proxy_events,
     proxy_shell,
     proxy_status,
     proxy_stream,
@@ -220,7 +219,7 @@ def _query_metrics(
         # Aggregate totals
         row = conn.execute(
             f"SELECT "
-            f"  COALESCE(SUM(cost), 0.0) AS total_cost, "
+            f"  COALESCE(SUM(cost_usd), 0.0) AS total_cost, "
             f"  COUNT(*) AS total_requests, "
             f"  COALESCE(SUM(input_tokens), 0) AS input_tokens, "
             f"  COALESCE(SUM(output_tokens), 0) AS output_tokens, "
@@ -237,18 +236,15 @@ def _query_metrics(
 
         # by_model breakdown
         model_rows = conn.execute(
-            f"SELECT model, "
-            f"  COALESCE(SUM(cost), 0.0) AS cost, "
+            f"SELECT model_key AS model, "
+            f"  COALESCE(SUM(cost_usd), 0.0) AS cost, "
             f"  COUNT(*) AS requests "
             f"FROM requests {where} "
             f"GROUP BY model",
             params,
         ).fetchall()
 
-        by_model = {
-            r["model"]: {"cost": r["cost"], "requests": r["requests"]}
-            for r in model_rows
-        }
+        by_model = {r["model"]: {"cost": r["cost"], "requests": r["requests"]} for r in model_rows}
 
         return {
             "total_cost": row["total_cost"],
@@ -282,8 +278,10 @@ async def get_metrics(request: Request) -> Response:
             datetime.fromisoformat(since)
         except ValueError:
             return JSONResponse(
-                {"error": "Invalid 'since' — expected ISO 8601 (e.g. 2026-01-31 "
-                 "or 2026-01-31T12:00:00), interpreted as UTC."},
+                {
+                    "error": "Invalid 'since' — expected ISO 8601 (e.g. 2026-01-31 "
+                    "or 2026-01-31T12:00:00), interpreted as UTC."
+                },
                 status_code=400,
             )
     db_path = home_dir() / "metrics.db"
@@ -385,7 +383,7 @@ app = Starlette(
         Route("/sessions", sessions_post, methods=["POST"]),
         Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
         Route("/sessions/{session_id}/status", proxy_status, methods=["GET"]),
-        Route("/sessions/{session_id}/history", proxy_history, methods=["GET"]),
+        Route("/sessions/{session_id}/events", proxy_events, methods=["GET"]),
         Route("/sessions/{session_id}/shell", proxy_shell, methods=["POST"]),
         Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
         Route("/metrics", get_metrics, methods=["GET"]),
