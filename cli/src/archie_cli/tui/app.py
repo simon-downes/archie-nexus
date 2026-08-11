@@ -20,11 +20,15 @@ import tempfile
 import time
 
 import httpx
+from archie_shared import canonical_events as ce
+from archie_shared.canonical_events import decode_event
 from archie_shared.events import (
     PROTOCOL_VERSION,
     IterationStart,
+    LLMRequest,
     ModelSwitched,
     SessionInfo,
+    SessionSnapshot,
     StatusUpdated,
     SwitchModelCommand,
     TextDelta,
@@ -35,6 +39,7 @@ from archie_shared.events import (
     TurnInterrupted,
     Usage,
 )
+from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
@@ -80,8 +85,14 @@ class ArchieApp(App):
         self._shutting_down: bool = False
         # Warn-once guard for protocol-version mismatch (avoids refire on reconnect)
         self._protocol_warned: bool = False
-        # Highest turn_index already rendered — used for history dedup on reconnect
-        self._last_displayed_turn: int = 0
+        # Canonical replay cursor: id of the latest event already rendered.
+        # Used for incremental replay via /events?after= on connect/reconnect.
+        self._last_event_id: str | None = None
+        # Ids of canonical events already rendered — dedup across replay + live.
+        self._seen_event_ids: set[str] = set()
+        # Ids of llm_request ledger events already folded into accounting —
+        # prevents double-counting across replay + live broadcast.
+        self._seen_accounted_ids: set[str] = set()
 
         # UI state
         self._streaming: StreamingMessage | None = None
@@ -90,18 +101,17 @@ class ArchieApp(App):
         self._throbber: Throbber | None = None
         self._iteration_block: IterationBlock | None = None
         self._last_esc_time: float = 0.0
+        # tool_use_id -> (name, input) for client-side result formatting
+        self._pending_tool_inputs: dict[str, tuple[str, dict]] = {}
 
-        # Session state for local accumulation
+        # Session state for local accumulation. Seeded from SessionSnapshot.accounting
+        # on connect, then updated live from broadcast llm_request ledger events.
         self._session_id: str = ""
         self._cumulative_input: int = 0
         self._cumulative_output: int = 0
         self._cumulative_cache_read: int = 0
         self._cumulative_cache_write: int = 0
         self._cumulative_cost: float = 0.0
-        self._cost_per_m_input: float = 0.0
-        self._cost_per_m_output: float = 0.0
-        self._cost_per_m_cache_read: float = 0.0
-        self._cost_per_m_cache_write: float = 0.0
 
         # Live output estimation (chars/4, reconciled on Usage)
         self._estimated_output: int = 0
@@ -121,8 +131,9 @@ class ArchieApp(App):
     async def on_mount(self) -> None:
         """Connect to agent and start receiving events.
 
-        Ordering per plan: subscribe WS first → start receive loop (buffering) →
-        fetch /history → reconcile by turn_index → replay remainder.
+        Ordering: subscribe WS first → start receive loop (buffering) → the
+        SessionSnapshot frame provides the replay cursor → replay canonical
+        events via /events → reconcile buffered live events by event id.
         """
         self.query_one("#input", MessageInput).focus()
 
@@ -137,65 +148,137 @@ class ArchieApp(App):
         self._buffering = True
         self._receive_task = asyncio.create_task(self._receive_loop())
 
-        # Fetch history while receive loop buffers incoming events
-        last_turn_index = await self._load_history()
+        # Replay persisted canonical events while the receive loop buffers.
+        await self._replay_events()
 
-        # Reconcile: discard buffered events with turn_index ≤ last history turn
+        # Reconcile: dispatch buffered live events not already rendered.
         self._buffering = False
         for event in self._event_buffer:
-            turn_index = getattr(event, "turn_index", 0)
-            if turn_index > last_turn_index:
-                self._handle_event(event)
+            self._handle_event(event)
         self._event_buffer = []
 
-    async def _load_history(self) -> int:
-        """Fetch conversation history and populate the conversation.
+    async def _replay_events(self) -> None:
+        """Fetch and render persisted canonical events, advancing the cursor.
 
-        Returns the highest turn_index in the history (0 if empty).
+        Requests /events?after=<cursor> when a cursor is known (reconnect),
+        otherwise the full log. Each NDJSON line is a canonical event which is
+        rendered via the shared reducer and deduplicated by event id.
         """
-        return await self._load_history_since(0)
-
-    async def _load_history_since(self, since: int) -> int:
-        """Fetch history and render only turns with turn_index > since.
-
-        Returns the highest turn_index rendered (or since if none rendered).
-        """
-        conv = self.query_one("#conversation", Conversation)
-        last_turn_index = since
+        after = self._last_event_id
+        url = f"{self._api_url}/events"
+        if after:
+            url += f"?after={after}"
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self._api_url}/history", timeout=5.0)
+                resp = await client.get(url, timeout=5.0)
+                if resp.status_code == 409:
+                    # Cursor no longer in the log (rotated/archived) — full replay.
+                    self._last_event_id = None
+                    self._seen_event_ids.clear()
+                    resp = await client.get(f"{self._api_url}/events", timeout=5.0)
                 if resp.status_code != 200:
-                    return since
-                turns = resp.json()
+                    return
+                body = resp.text
         except Exception as e:
-            log.warning("Failed to load history: %s", e)
-            return since
+            log.warning("Failed to replay events: %s", e)
+            return
 
-        for turn in turns:
-            role = turn.get("role")
-            turn_index = turn.get("turn_index", 0)
-            last_turn_index = max(last_turn_index, turn_index)
-            if turn_index <= since:
-                continue  # already displayed — skip
-            content_blocks = turn.get("content", [])
-            # Extract text blocks only for display
-            text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
-            text = "\n".join(text_parts) if text_parts else ""
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = decode_event(line, persisted=True)
+            except Exception as e:  # noqa: BLE001 — skip malformed replay lines
+                log.warning("Skipping malformed replay event: %s", e)
+                continue
+            self._render_canonical(event)
 
-            if role == "user":
-                if text:
-                    conv.add_user_message(text)
-            elif role == "assistant":
-                if text:
-                    conv.add_assistant_message(text)
-            elif role == "error":
-                conv.add_error(text or "Unknown error")
-            elif role == "interrupted":
+    def _render_canonical(self, event) -> None:
+        """Render one persisted canonical event, deduplicated by id.
+
+        Replay path only: assistant text arrives as AssistantMessage (no
+        streaming deltas) and tool summaries are reconstructed client-side via
+        the shared formatters. Advances the replay cursor.
+        """
+        event_id = getattr(event, "id", None)
+        if event_id is not None:
+            if event_id in self._seen_event_ids:
+                return
+            self._seen_event_ids.add(event_id)
+            self._last_event_id = event_id
+
+        conv = self.query_one("#conversation", Conversation)
+
+        if isinstance(event, ce.UserMessage):
+            if event.content:
+                conv.add_user_message(event.content)
+        elif isinstance(event, ce.AssistantMessage):
+            if event.content:
+                conv.add_assistant_message(event.content)
+            if event.interrupted:
                 conv.add_error("[interrupted]")
+        elif isinstance(event, ce.IterationStart):
+            self._iteration_block = conv.begin_iteration()
+        elif isinstance(event, ce.ToolCall):
+            if self._iteration_block is None:
+                self._iteration_block = conv.begin_iteration()
+            input_summary = format_tool_pending(event.name, event.input)
+            self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
+            self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
+        elif isinstance(event, ce.ToolResult):
+            if self._iteration_block is not None:
+                pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
+                if pending is not None:
+                    name, tool_input = pending
+                    summary = format_tool_complete(name, tool_input, event.content, event.is_error)
+                else:
+                    summary = event.content[:200] if event.content else ""
+                self._iteration_block.complete_tool(
+                    event.tool_use_id,
+                    event.is_error,
+                    event.duration_ms,
+                    event.result_bytes,
+                    summary,
+                )
+        elif isinstance(event, ce.LLMRequest):
+            self._accumulate_ledger(event)
+        elif isinstance(event, ce.TurnError):
+            conv.add_error(event.message)
+            self._iteration_block = None
+        elif isinstance(event, ce.TurnInterrupted):
+            conv.add_error("[interrupted]")
+            self._iteration_block = None
+        elif isinstance(event, ce.TurnComplete):
+            self._iteration_block = None
+        elif isinstance(event, ce.ShellCommand):
+            conv.add_shell_output(event.command, event.output, exit_code=event.exit_code)
 
-        self._last_displayed_turn = last_turn_index
-        return last_turn_index
+    def _accumulate_ledger(self, event: LLMRequest) -> None:
+        """Fold an llm_request ledger event into cumulative accounting.
+
+        This is the authoritative live cost/token source (matches the persisted
+        ledger). Deduplicated by event id so replay + live can't double-count.
+        Updates the status bar.
+        """
+        if event.id in self._seen_accounted_ids:
+            return
+        self._seen_accounted_ids.add(event.id)
+        self._cumulative_input += event.input_tokens
+        self._cumulative_output += event.output_tokens
+        self._cumulative_cache_read += event.cache_read_tokens
+        self._cumulative_cache_write += event.cache_write_tokens
+        self._cumulative_cost += event.cost_usd
+        self._update_accounting_status()
+
+    def _update_accounting_status(self) -> None:
+        """Push cumulative accounting to the status bar."""
+        status = self.query_one("#status", StatusBar)
+        status.session_input = self._cumulative_input
+        status.session_output = self._cumulative_output
+        status.cache_read = self._cumulative_cache_read
+        status.cache_write = self._cumulative_cache_write
+        status.pricing_label = f"${self._cumulative_cost:.4f}"
 
     async def _receive_loop(self) -> None:
         """Consume events from the WebSocket and dispatch to widget updates.
@@ -210,7 +293,7 @@ class ArchieApp(App):
         """
         try:
             async for event in self._ws.receive():
-                if isinstance(event, (SessionInfo, ModelSwitched, StatusUpdated)):
+                if isinstance(event, (SessionSnapshot, SessionInfo, ModelSwitched, StatusUpdated)):
                     # Session-level events have no turn_index — always dispatch immediately
                     self._handle_event(event)
                 elif self._buffering:
@@ -240,14 +323,14 @@ class ArchieApp(App):
         asyncio.create_task(self._reconnect(close_code))
 
     async def _reconnect(self, close_code: int | None = None) -> None:
-        """Reconnect to the agent with backoff and resync via /history.
+        """Reconnect to the agent with backoff and resync via canonical replay.
 
         Close-code handling:
         - 4004 (session not found): give up immediately.
         - 4002 (backend unreachable) / 1006 (abnormal) / None: retry with backoff.
 
-        On success, restarts the receive loop and replays any missed turns
-        (deduplicated by turn_index).
+        On success, restarts the receive loop and replays any missed canonical
+        events via /events?after=<last event id> (deduplicated by event id).
 
         Total retry window is 30s before giving up.
         """
@@ -273,7 +356,8 @@ class ArchieApp(App):
                     log.warning("Reconnect attempt %d failed: %s", attempt, e)
                     continue
 
-                # Reconnected — buffer incoming events, resync history (deduped), replay.
+                # Reconnected — buffer incoming events, replay missed canonical
+                # events (deduped by id), then dispatch buffered live events.
                 self._event_buffer = []
                 self._buffering = True
                 # Cancel any stale receive loop before starting a fresh one.
@@ -284,20 +368,15 @@ class ArchieApp(App):
                     except asyncio.CancelledError:
                         pass
                 self._receive_task = asyncio.create_task(self._receive_loop())
-                since = self._last_displayed_turn
-                last_turn_index = await self._load_history_since(since)
+                await self._replay_events()
                 self._buffering = False
                 for event in self._event_buffer:
-                    if getattr(event, "turn_index", 0) > last_turn_index:
-                        self._handle_event(event)
+                    self._handle_event(event)
                 self._event_buffer = []
                 self.notify("Reconnected to agent")
                 return
 
-            self._show_client_error(
-                "Reconnect failed after 30s. "
-                "Relaunch the client to continue."
-            )
+            self._show_client_error("Reconnect failed after 30s. Relaunch the client to continue.")
         finally:
             self._reconnecting = False
 
@@ -305,17 +384,35 @@ class ArchieApp(App):
         """Dispatch one server event to the appropriate widget update."""
         conv = self.query_one("#conversation", Conversation)
 
-        if isinstance(event, SessionInfo):
+        if isinstance(event, SessionSnapshot):
+            # Authoritative session state at connect. Seed cumulative accounting
+            # and the replay cursor from the persisted ledger.
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
             status.model_name = event.model
             status.git_branch = event.git_branch
-            # Store cost rates for local cost computation
             self._session_id = event.session_id
-            self._cost_per_m_input = event.cost_per_m_input
-            self._cost_per_m_output = event.cost_per_m_output
-            self._cost_per_m_cache_read = event.cost_per_m_cache_read
-            self._cost_per_m_cache_write = event.cost_per_m_cache_write
+            self._last_event_id = event.latest_event_id
+            self._cumulative_input = event.total_input_tokens
+            self._cumulative_output = event.total_output_tokens
+            self._cumulative_cache_read = event.total_cache_read_tokens
+            self._cumulative_cache_write = event.total_cache_write_tokens
+            self._cumulative_cost = event.total_cost
+            self._update_accounting_status()
+            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
+                self._protocol_warned = True
+                self._show_client_error(
+                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
+                    f"this client supports v{PROTOCOL_VERSION}. "
+                    "Some features may not work — consider updating the CLI."
+                )
+
+        elif isinstance(event, SessionInfo):
+            status = self.query_one("#status", StatusBar)
+            status.session_id = event.session_id
+            status.model_name = event.model
+            status.git_branch = event.git_branch
+            self._session_id = event.session_id
             # Warn if the session's protocol version is newer than this client supports
             if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
                 self._protocol_warned = True
@@ -329,12 +426,11 @@ class ArchieApp(App):
             status = self.query_one("#status", StatusBar)
             status.model_name = event.model_name
             status.supports_cache = event.supports_cache
-            # Update cost rates for future Usage events
-            self._cost_per_m_input = event.cost_per_m_input
-            self._cost_per_m_output = event.cost_per_m_output
-            self._cost_per_m_cache_read = event.cost_per_m_cache_read
-            self._cost_per_m_cache_write = event.cost_per_m_cache_write
             self.notify(f"Switched to {event.model_name}")
+
+        elif isinstance(event, LLMRequest):
+            # Authoritative live cost/token source from the broadcast ledger.
+            self._accumulate_ledger(event)
 
         elif isinstance(event, StatusUpdated):
             status = self.query_one("#status", StatusBar)
@@ -365,36 +461,12 @@ class ArchieApp(App):
             conv.scroll_end(animate=False)
 
         elif isinstance(event, Usage):
-            # Accumulate per-request values locally
-            self._cumulative_input += event.input_tokens
-            self._cumulative_output += event.output_tokens
-            self._cumulative_cache_read += event.cache_read_tokens
-            self._cumulative_cache_write += event.cache_write_tokens
-            # Reset output estimation — reconcile with real value
+            # Tokens/cost come authoritatively from the llm_request ledger; the
+            # Usage event only carries the server-computed context percentage and
+            # lets us reconcile the live output estimate.
             self._estimated_output = 0
-            # Compute cost delta for this request using current rates
-            from archie_shared.models import CostConfig, calculate_cost
-
-            cost_config = CostConfig(
-                input=self._cost_per_m_input,
-                output=self._cost_per_m_output,
-                cache_read=self._cost_per_m_cache_read,
-                cache_write=self._cost_per_m_cache_write,
-            )
-            self._cumulative_cost += calculate_cost(
-                cost_config,
-                event.input_tokens,
-                event.output_tokens,
-                event.cache_read_tokens,
-                event.cache_write_tokens,
-            )
-            # Update status bar with real values
             status = self.query_one("#status", StatusBar)
-            status.session_input = self._cumulative_input
             status.session_output = self._cumulative_output
-            status.cache_read = self._cumulative_cache_read
-            status.cache_write = self._cumulative_cache_write
-            status.pricing_label = f"${self._cumulative_cost:.4f}"
             status.context_pct = event.context_pct
 
         elif isinstance(event, TurnComplete):
@@ -416,18 +488,26 @@ class ArchieApp(App):
             # Start a new iteration block if needed
             if self._iteration_block is None:
                 self._iteration_block = conv.begin_iteration()
-            # Add pending entry
-            self._iteration_block.add_pending(event.tool_use_id, event.name, event.input_summary)
+            # Add pending entry (format summary client-side from raw input)
+            input_summary = format_tool_pending(event.name, event.input)
+            self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
+            self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
             conv.scroll_end(animate=False)
 
         elif isinstance(event, ToolResult):
             if self._iteration_block is not None:
+                pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
+                if pending is not None:
+                    name, tool_input = pending
+                    summary = format_tool_complete(name, tool_input, event.content, event.is_error)
+                else:
+                    summary = event.content[:200] if event.content else ""
                 self._iteration_block.complete_tool(
                     event.tool_use_id,
                     event.is_error,
                     event.duration_ms,
                     event.result_bytes,
-                    event.summary,
+                    summary,
                 )
                 conv.scroll_end(animate=False)
             # Tool finished — agent is thinking about the next step again.
@@ -494,7 +574,14 @@ class ArchieApp(App):
         try:
             cname = self._container_name
             self._shell_proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", "-w", "/workspace", cname, "bash", "-c", command,
+                "docker",
+                "exec",
+                "-w",
+                "/workspace",
+                cname,
+                "bash",
+                "-c",
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

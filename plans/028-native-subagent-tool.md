@@ -11,6 +11,23 @@ detail view of a selected subagent. Multiple subagents may run concurrently unde
 semaphore, are individually addressable (the user can stop one or all), and their messages
 persist attributed in the session transcript.
 
+## Dependency: blocked on 029 M6
+
+**This plan is BLOCKED until plan 029 milestone M6 lands the Subagent Scope Contract.**
+Subagent implementation must not start until the canonical event contract is available.
+029 M6 defines how subagent activity maps onto canonical session events: child `scope` =
+launching `tool_use_id`, one `llm_request` per child provider request,
+`(scope, turn_iteration, request_id)` request identity, parent reconstruction via
+`parent_of(S) = tool_call(tool_use_id=S).scope`, and direct/inclusive cost aggregation by
+scope (`scope_direct_costs` / `scope_inclusive_costs` in
+`shared/src/archie_shared/session/accounting.py`). See the "Subagent Scope Contract" section
+in `plans/029-project-canonical-session-events.md` (M6).
+
+Note: this plan predates 029 and still describes flat wire fields (`turn_index`,
+`parent_tool_use_id`). Reconciling those with the canonical `scope`/`turn_iteration` model
+is a separate, reviewed 028-revision step (deferred by 029 M6); do not perform that rewrite
+inline.
+
 ## Context
 
 archie-nexus currently has no subagent/delegation primitive — the primary agent does all

@@ -1,0 +1,7 @@
+- [x] Milestone 1: Canonical shared event schema and event-log primitives
+- [x] Milestone 2: Agent canonical emission and authoritative request ledger
+- [x] Milestone 3: Model switching and context accounting
+- [x] Milestone 4: Canonical replay endpoint and TUI reconstruction
+- [x] Milestone 5: Orchestrator metrics from canonical request events
+- [x] Milestone 6: Subagent scope contract and downstream-plan alignment
+- [x] Milestone 7: Cleanup, documentation, and full validation

@@ -1,8 +1,7 @@
 """Tests for session descriptor and typed payloads."""
 
 import msgspec
-from archie_shared.session.descriptor import HistoryTurn, SessionDescriptor, StatusPayload
-from archie_shared.types import TextBlock, ToolUseBlock
+from archie_shared.session.descriptor import SessionDescriptor, StatusPayload
 
 
 def test_session_descriptor_construction():
@@ -50,23 +49,3 @@ def test_status_payload_starting():
     assert decoded.status == "starting"
     assert decoded.model is None
     assert decoded.turn_count is None
-
-
-def test_history_turn_with_text():
-    """HistoryTurn with text content block."""
-    turn = HistoryTurn(
-        turn_index=1,
-        role="assistant",
-        content=[TextBlock(text="Hello world")],
-    )
-    assert turn.content[0].text == "Hello world"
-
-
-def test_history_turn_with_tool_use():
-    """HistoryTurn with tool_use content block."""
-    turn = HistoryTurn(
-        turn_index=2,
-        role="assistant",
-        content=[ToolUseBlock(tool_use_id="t1", name="read_file", input={"path": "/etc/hosts"})],
-    )
-    assert turn.content[0].name == "read_file"

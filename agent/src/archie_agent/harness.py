@@ -9,13 +9,12 @@ The harness owns:
 """
 
 import asyncio
-import json
 import logging
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from archie_shared.canonical_events import ModelSwitch, SessionStarted, UserMessage
 from archie_shared.events import (
     IterationStart as WireIterationStart,
 )
@@ -44,12 +43,12 @@ from archie_shared.events import (
 from archie_shared.events import (
     Usage as WireUsage,
 )
-from archie_shared.models import calculate_cost, provider_name
-from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
+from archie_shared.session.log import append_event
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from starlette.websockets import WebSocket
 from ulid import ULID
 
+from archie_agent.event_log import EventFactory, now_utc
 from archie_agent.events import (
     IterationStart,
     TextDelta,
@@ -61,11 +60,10 @@ from archie_agent.events import (
     Usage,
 )
 from archie_agent.exec.tool import create_registry, format_result, run_exec
-from archie_agent.loop import run_loop
+from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session
 from archie_agent.skills import create_skill_tool, discover_skills
-from archie_agent.tool_formatters import format_tool_complete, format_tool_pending
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -138,8 +136,18 @@ class AgentHarness:
         # Active runner subprocess for cancellation
         self._active_proc: asyncio.subprocess.Process | None = None
 
-        # Pending tool calls: tool_use_id → (name, input) for format_tool_complete
-        self._pending_tools: dict[str, tuple[str, dict]] = {}
+        self._request_ids: list[str] = []
+        self._event_factory = EventFactory(self.log_path, self.session.model_id, self.session.model)
+        if not self.log_path.exists() or not self.log_path.read_text().strip():
+            append_event(
+                self.log_path,
+                SessionStarted(
+                    id=str(ULID()),
+                    schema_version=1,
+                    sent_at=now_utc(),
+                    model_key=self.session.model_id,
+                ),
+            )
 
     def _build_prompt(self) -> SystemPrompt:
         """Build one structured prompt snapshot for the current outer turn."""
@@ -165,6 +173,10 @@ class AgentHarness:
         self._model_name = model.name
         self.session.model_id = model_key
         self.session.model = model
+        self._event_factory = EventFactory(self.log_path, model_key, model)
+        append_event(
+            self.log_path, ModelSwitch(id=str(ULID()), model_key=model_key, sent_at=now_utc())
+        )
 
     @property
     def log_path(self) -> Path:
@@ -184,14 +196,27 @@ class AgentHarness:
 
         if self._turn_active:
             turn_index = self.session.turn_index or 1
-            await self._broadcast(WireTurnError(turn_index=turn_index, message="Turn already active"))
+            await self._broadcast(
+                WireTurnError(turn_index=turn_index, message="Turn already active")
+            )
             return
 
         self._turn_active = True
         turn_index = self.session.next_turn_index()
+        self._request_ids = []
+        current_request_id = ""
+        current_iteration = 0
 
-        # Persist user message (crash-safe: before streaming starts)
-        self._persist_message(role="user", content=content)
+        # Persist canonical user message before streaming starts.
+        append_event(
+            self.log_path,
+            UserMessage(
+                id=str(ULID()),
+                turn=turn_index,
+                scope=self._event_factory.scope,
+                content=content,
+            ),
+        )
 
         # Add user message to in-memory transcript
         self.session.add_turn(role="user", content=content, turn_index=turn_index)
@@ -219,9 +244,7 @@ class AgentHarness:
             if iter_text:
                 assistant_blocks.append(TextBlock(text=iter_text))
             assistant_blocks.extend(iter_tool_uses)
-            self.session.add_turn(
-                role="assistant", content=assistant_blocks, turn_index=turn_index
-            )
+            self.session.add_turn(role="assistant", content=assistant_blocks, turn_index=turn_index)
             if iter_tool_results:
                 self.session.add_turn(
                     role="user", content=list(iter_tool_results), turn_index=turn_index
@@ -238,6 +261,7 @@ class AgentHarness:
                 interrupt=self._interrupt,
                 tool_config=self._tool_config,
                 execute_tool=self._execute_tool,
+                request_context_factory=lambda: RequestContext(str(ULID()), now_utc()),
             )
 
             async for event in gen:
@@ -246,6 +270,11 @@ class AgentHarness:
                     # results are final — persist them to the transcript.
                     if event.index > 0:
                         _flush_iteration()
+                    current_iteration = event.index
+                    self._event_factory.iteration_start(
+                        turn_iteration=f"{turn_index}.{event.index}",
+                        index=event.index,
+                    )
                     await self._broadcast(
                         WireIterationStart(turn_index=turn_index, index=event.index)
                     )
@@ -254,6 +283,21 @@ class AgentHarness:
                     assistant_text += event.text
                     iter_text += event.text
                     await self._broadcast(WireTextDelta(turn_index=turn_index, text=event.text))
+
+                elif isinstance(event, RequestFinished):
+                    request, serialized = self._event_factory.request(
+                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        sent_at=event.context.sent_at,
+                        duration_ms=event.duration_ms,
+                        status=event.status,
+                        usage=event.usage,
+                        stop_reason=event.stop_reason,
+                        error=event.error,
+                        request_id=event.context.request_id,
+                    )
+                    self._request_ids.append(request.id)
+                    current_request_id = request.id
+                    await self._broadcast_raw(serialized)
 
                 elif isinstance(event, Usage):
                     last_usage = event
@@ -283,18 +327,21 @@ class AgentHarness:
                             input=event.input,
                         )
                     )
-                    # Persist tool_call entry (JSON-serialised name+source)
-                    self._persist_tool_call(event)
-                    # Store input for format_tool_complete when result arrives
-                    self._pending_tools[event.tool_use_id] = (event.name, event.input)
-                    # Broadcast wire event with Rich-formatted pending summary
-                    input_summary = format_tool_pending(event.name, event.input)
+                    # Persist canonical tool_call event.
+                    self._event_factory.tool_call(
+                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        request_id=current_request_id,
+                        tool_use_id=event.tool_use_id,
+                        name=event.name,
+                        input=event.input,
+                    )
+                    # Broadcast wire event with raw input; client formats.
                     await self._broadcast(
                         WireToolCall(
                             turn_index=turn_index,
                             tool_use_id=event.tool_use_id,
                             name=event.name,
-                            input_summary=input_summary,
+                            input=event.input,
                         )
                     )
 
@@ -307,28 +354,28 @@ class AgentHarness:
                             is_error=event.is_error,
                         )
                     )
-                    # Persist tool_result entry
-                    self._persist_tool_result(event)
                     # Extract duration from content (format: "duration: NNNms")
                     duration_ms = _extract_duration_ms(event.content)
-                    # Produce Rich-formatted completion summary
-                    pending = self._pending_tools.pop(event.tool_use_id, None)
-                    if pending:
-                        tool_name, tool_input = pending
-                        summary = format_tool_complete(
-                            tool_name, tool_input, event.content, event.is_error
-                        )
-                    else:
-                        summary = event.content[:200] if event.content else ""
-                    # Broadcast wire event
+                    result_bytes = len(event.content.encode("utf-8")) if event.content else 0
+                    # Persist canonical tool_result event.
+                    self._event_factory.tool_result(
+                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        request_id=current_request_id,
+                        tool_use_id=event.tool_use_id,
+                        content=event.content,
+                        is_error=event.is_error,
+                        duration_ms=duration_ms,
+                        result_bytes=result_bytes,
+                    )
+                    # Broadcast wire event with raw content; client formats.
                     await self._broadcast(
                         WireToolResult(
                             turn_index=turn_index,
                             tool_use_id=event.tool_use_id,
                             is_error=event.is_error,
-                            summary=summary,
+                            content=event.content,
                             duration_ms=duration_ms,
-                            result_bytes=len(event.content.encode("utf-8")) if event.content else 0,
+                            result_bytes=result_bytes,
                         )
                     )
 
@@ -343,10 +390,14 @@ class AgentHarness:
                             turn_index=turn_index,
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                         )
-                    self._persist_assistant(
+                    self._event_factory.assistant_message(
+                        turn=turn_index,
+                        request_ids=self._request_ids,
                         content=assistant_text,
-                        usage=last_usage,
                         interrupted=False,
+                    )
+                    self._event_factory.turn_complete(
+                        turn=turn_index, stop_reason=event.stop_reason
                     )
                     await self._broadcast(
                         WireTurnComplete(turn_index=turn_index, stop_reason=event.stop_reason)
@@ -364,13 +415,14 @@ class AgentHarness:
                             interrupted=True,
                         )
                     if assistant_text:
-                        self._persist_assistant(
+                        self._event_factory.assistant_message(
+                            turn=turn_index,
+                            request_ids=self._request_ids,
                             content=assistant_text,
-                            usage=last_usage,
                             interrupted=True,
                         )
                     # Persist and record the error for history replay
-                    self._persist_message(role="error", content=event.error)
+                    self._event_factory.turn_error(turn=turn_index, message=event.error)
                     self.session.display_entries.append(
                         DisplayEntry(role="error", content=event.error, turn_index=turn_index)
                     )
@@ -390,13 +442,14 @@ class AgentHarness:
                             interrupted=True,
                         )
                     if assistant_text:
-                        self._persist_assistant(
+                        self._event_factory.assistant_message(
+                            turn=turn_index,
+                            request_ids=self._request_ids,
                             content=assistant_text,
-                            usage=last_usage,
                             interrupted=True,
                         )
                     # Persist and record the interruption for history replay
-                    self._persist_message(role="interrupted", content="")
+                    self._event_factory.turn_interrupted(turn=turn_index)
                     self.session.display_entries.append(
                         DisplayEntry(role="interrupted", content="", turn_index=turn_index)
                     )
@@ -490,89 +543,15 @@ class AgentHarness:
             except ProcessLookupError:
                 pass
 
-    def _persist_message(self, role: str, content: str) -> None:
-        """Persist a message entry to the JSONL log (best-effort)."""
-        try:
-            entry = MessageEntry(
-                id=str(ULID()),
-                when=datetime.now(UTC).isoformat(),
-                role=role,
-                content=content,
-            )
-            write_entry(self.log_path, entry)
-        except Exception:
-            log.warning("Failed to persist %s message", role, exc_info=True)
-
-    def _persist_tool_call(self, event: ToolCall) -> None:
-        """Persist a tool_call entry (JSON content: {name, source})."""
-        try:
-            content = json.dumps({"name": event.name, **event.input}, ensure_ascii=False)
-            entry = MessageEntry(
-                id=str(ULID()),
-                when=datetime.now(UTC).isoformat(),
-                role="tool_call",
-                content=content,
-            )
-            write_entry(self.log_path, entry)
-        except Exception:
-            log.warning("Failed to persist tool_call", exc_info=True)
-
-    def _persist_tool_result(self, event: ToolResult) -> None:
-        """Persist a tool_result entry (content = model-facing result string)."""
-        try:
-            entry = MessageEntry(
-                id=str(ULID()),
-                when=datetime.now(UTC).isoformat(),
-                role="tool_result",
-                content=event.content,
-            )
-            write_entry(self.log_path, entry)
-        except Exception:
-            log.warning("Failed to persist tool_result", exc_info=True)
-
-    def _persist_assistant(
-        self,
-        content: str,
-        usage: Usage | None,
-        interrupted: bool,
-    ) -> None:
-        """Persist an assistant message with metadata (best-effort)."""
-        try:
-            if usage:
-                cost = calculate_cost(
-                    self.session.model.cost,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.cache_read_tokens,
-                    usage.cache_write_tokens,
-                )
-                metadata = MessageMetadata(
-                    model=self.session.model_id,
-                    backend=provider_name(self.session.model.provider),
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    cache_write_tokens=usage.cache_write_tokens,
-                    cost=round(cost, 6),
-                    interrupted=interrupted,
-                )
-            else:
-                metadata = MessageMetadata(
-                    model=self.session.model_id,
-                    backend=provider_name(self.session.model.provider),
-                    interrupted=interrupted,
-                )
-
-            entry = MessageEntry(
-                id=str(ULID()),
-                when=datetime.now(UTC).isoformat(),
-                role="assistant",
-                content=content,
-                metadata=metadata,
-            )
-            write_entry(self.log_path, entry)
-        except Exception:
-            log.warning("Failed to persist assistant message", exc_info=True)
+    async def _broadcast_raw(self, data: str) -> None:
+        """Broadcast an already-canonical serialized event."""
+        disconnected = set()
+        for ws in list(self.clients):
+            try:
+                await ws.send_text(data)
+            except Exception:
+                disconnected.add(ws)
+        self.clients -= disconnected
 
     async def _broadcast(self, event) -> None:
         """Serialize and send an event to all connected WebSocket clients."""

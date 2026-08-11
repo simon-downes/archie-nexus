@@ -1,4 +1,4 @@
-"""Metrics aggregation and SQLite persistence for usage wire events."""
+"""Idempotent SQLite persistence for canonical LLM request events."""
 
 from __future__ import annotations
 
@@ -6,62 +6,25 @@ import asyncio
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from archie_shared.models import CostConfig, calculate_cost, sanitize_billable_usage
-
 log = logging.getLogger(__name__)
 
-_CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    turn_index INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    backend TEXT,
-    input_tokens INTEGER NOT NULL,
-    output_tokens INTEGER NOT NULL,
-    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-    cost REAL NOT NULL,
-    context_pct REAL DEFAULT 0.0
-)
-"""
-_CREATE_IDX_SESSION = "CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id)"
-_CREATE_IDX_TIMESTAMP = "CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp)"
-_INSERT = "INSERT INTO requests (session_id, timestamp, turn_index, model, backend, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, context_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+_SCHEMA_VERSION = 2
+_CREATE_TABLE = """CREATE TABLE IF NOT EXISTS requests (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
+ timestamp TEXT NOT NULL, turn_iteration TEXT NOT NULL, scope TEXT, model_key TEXT NOT NULL,
+ status TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+ cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, context_tokens INTEGER NOT NULL,
+ cost_usd REAL NOT NULL, duration_ms INTEGER NOT NULL, UNIQUE (session_id, event_id))"""
 _QUEUE_MAXSIZE = 10_000
-_MAX_BATCH = 500
-
-
-@dataclass
-class SessionRates:
-    model: str = "unknown"
-    backend: str | None = None
-    input: float = 0.0
-    output: float = 0.0
-    cache_read: float = 0.0
-    cache_write: float = 0.0
-
-    def as_cost(self) -> CostConfig:
-        return CostConfig(
-            input=self.input,
-            output=self.output,
-            cache_read=self.cache_read,
-            cache_write=self.cache_write,
-        )
 
 
 class MetricsWriter:
-    """Background SQLite writer fed by the WebSocket proxy relay."""
-
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
-        self._rates: dict[str, SessionRates] = {}
 
     @property
     def queue(self) -> asyncio.Queue[tuple[str, str]]:
@@ -69,122 +32,59 @@ class MetricsWriter:
 
     async def run(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_if_needed()
         conn = sqlite3.connect(str(self._db_path))
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            self._ensure_schema(conn)
+            conn = self._ensure_schema(conn)
             while True:
-                item = await self._queue.get()
-                batch = [item]
-                while len(batch) < _MAX_BATCH and not self._queue.empty():
-                    batch.append(self._queue.get_nowait())
-                self._process_batch(conn, batch)
+                session_id, raw = await self._queue.get()
+                self._process_batch(conn, [(session_id, raw)])
         except asyncio.CancelledError:
-            remaining = []
-            while not self._queue.empty():
-                remaining.append(self._queue.get_nowait())
-            if remaining:
-                self._process_batch(conn, remaining)
             raise
         finally:
             conn.close()
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+    def _migrate_if_needed(self) -> None:
+        """Archive a stale-schema database before it is opened.
+
+        If the database file exists with a ``user_version`` other than the
+        current schema version, rename it to ``<path>.legacy.<UTC>`` so a fresh
+        version-2 database is created in its place. On a naming collision,
+        append ``-1``, ``-2``, ... until an unused destination is found. The
+        legacy data is preserved rather than dropped.
+        """
+        if not self._db_path.exists():
+            return
+        probe = sqlite3.connect(str(self._db_path))
+        try:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            probe.close()
+        if version == _SCHEMA_VERSION:
+            return
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        base = self._db_path.with_name(f"{self._db_path.name}.legacy.{stamp}")
+        dest = base
+        suffix = 0
+        while dest.exists():
+            suffix += 1
+            dest = base.with_name(f"{base.name}-{suffix}")
+        self._db_path.rename(dest)
+        log.info(
+            "Metrics database schema v%s != v%s; archived to %s",
+            version,
+            _SCHEMA_VERSION,
+            dest,
+        )
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> sqlite3.Connection:
         conn.execute(_CREATE_TABLE)
-        conn.execute(_CREATE_IDX_SESSION)
-        conn.execute(_CREATE_IDX_TIMESTAMP)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model_key)")
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         conn.commit()
-
-    def _process_batch(self, conn: sqlite3.Connection, batch: list[tuple[str, str]]) -> None:
-        rows: list[tuple] = []
-        for session_id, raw_msg in batch:
-            try:
-                event = json.loads(raw_msg)
-            except json.JSONDecodeError:
-                log.warning("Metrics: malformed event JSON — skipping")
-                continue
-            event_type = event.get("type")
-            if event_type == "session_info":
-                self._handle_session_info(session_id, event)
-            elif event_type == "model_switched":
-                self._handle_model_switched(session_id, event)
-            elif event_type == "usage":
-                row = self._build_usage_row(session_id, event)
-                if row is not None:
-                    rows.append(row)
-        written = 0
-        for row in rows:
-            try:
-                conn.execute(_INSERT, row)
-                written += 1
-            except sqlite3.Error as exc:
-                log.error("Metrics DB row write failed: %s", exc)
-        if written:
-            try:
-                conn.commit()
-            except sqlite3.Error as exc:
-                log.error("Metrics DB commit failed: %s", exc)
-
-    def _handle_session_info(self, session_id: str, event: dict) -> None:
-        data = event.get("data", {})
-        cost = data.get("cost", {})
-        model = data.get("model", "unknown")
-        self._rates[session_id] = SessionRates(
-            model=model,
-            backend=self._infer_backend(model),
-            input=cost.get("input", 0.0),
-            output=cost.get("output", 0.0),
-            cache_read=cost.get("cache_read", 0.0),
-            cache_write=cost.get("cache_write", 0.0),
-        )
-
-    def _handle_model_switched(self, session_id: str, event: dict) -> None:
-        data = event.get("data", {})
-        cost = data.get("cost", {})
-        self._rates[session_id] = SessionRates(
-            model=data.get("model_name", "unknown"),
-            backend=self._infer_backend(data.get("model_key", "")),
-            input=cost.get("input", 0.0),
-            output=cost.get("output", 0.0),
-            cache_read=cost.get("cache_read", 0.0),
-            cache_write=cost.get("cache_write", 0.0),
-        )
-
-    def _build_usage_row(self, session_id: str, event: dict) -> tuple | None:
-        rates = self._rates.get(session_id, SessionRates())
-        data = event.get("data", {})
-        try:
-            in_tok, out_tok, cr_tok, cw_tok = sanitize_billable_usage(
-                data["input_tokens"],
-                data["output_tokens"],
-                data["cache_read_tokens"],
-                data["cache_write_tokens"],
-            )
-        except (KeyError, TypeError, ValueError):
-            log.warning("Metrics: Usage event missing token fields — skipping")
-            return None
-        cost = calculate_cost(rates.as_cost(), in_tok, out_tok, cr_tok, cw_tok)
-        try:
-            turn_index = int(event.get("turn_index", 0))
-        except (TypeError, ValueError):
-            turn_index = 0
-        try:
-            context_pct = float(data.get("context_pct", 0.0))
-        except (TypeError, ValueError):
-            context_pct = 0.0
-        return (
-            session_id,
-            datetime.now(UTC).isoformat(),
-            turn_index,
-            rates.model,
-            rates.backend,
-            in_tok,
-            out_tok,
-            cr_tok,
-            cw_tok,
-            cost,
-            context_pct,
-        )
+        return conn
 
     @staticmethod
     def _infer_backend(model_key: str) -> str | None:
@@ -193,3 +93,65 @@ class MetricsWriter:
         if model_key.startswith("ollama-"):
             return "ollama"
         return None
+
+    _MATERIAL_COLUMNS = (
+        "timestamp",
+        "turn_iteration",
+        "scope",
+        "model_key",
+        "status",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "context_tokens",
+        "cost_usd",
+        "duration_ms",
+    )
+
+    def _process_batch(self, conn: sqlite3.Connection, batch: list[tuple[str, str]]) -> None:
+        for session_id, raw in batch:
+            try:
+                event = json.loads(raw)
+                if event.get("type") != "llm_request":
+                    continue
+                values = (
+                    event["sent_at"],
+                    event["turn_iteration"],
+                    event.get("scope"),
+                    event["model_key"],
+                    event["status"],
+                    event["input_tokens"],
+                    event["output_tokens"],
+                    event["cache_read_tokens"],
+                    event["cache_write_tokens"],
+                    event["context_tokens"],
+                    event["cost_usd"],
+                    event["duration_ms"],
+                )
+                existing = conn.execute(
+                    f"SELECT {','.join(self._MATERIAL_COLUMNS)} FROM requests "
+                    "WHERE session_id = ? AND event_id = ?",
+                    (session_id, event["id"]),
+                ).fetchone()
+                if existing is not None:
+                    # Identical duplicate → no-op; conflicting duplicate → error.
+                    if tuple(existing) != values:
+                        log.error(
+                            "Metrics conflicting duplicate for (%s, %s): stored=%s incoming=%s",
+                            session_id,
+                            event["id"],
+                            tuple(existing),
+                            values,
+                        )
+                    continue
+                conn.execute(
+                    """INSERT INTO requests
+                    (session_id,event_id,timestamp,turn_iteration,scope,model_key,status,input_tokens,
+                     output_tokens,cache_read_tokens,cache_write_tokens,context_tokens,cost_usd,duration_ms)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (session_id, event["id"], *values),
+                )
+            except (json.JSONDecodeError, KeyError, TypeError, sqlite3.Error) as exc:
+                log.warning("Metrics request skipped: %s", exc)
+        conn.commit()

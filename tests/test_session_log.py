@@ -35,10 +35,6 @@ def test_write_assistant_entry(tmp_path):
         metadata=MessageMetadata(
             model="bedrock-claude-sonnet-4-6",
             backend="bedrock",
-            input_tokens=50,
-            output_tokens=5,
-            cache_read_tokens=20,
-            cost=0.000123,
         ),
     )
     write_entry(path, entry)
@@ -50,8 +46,6 @@ def test_write_assistant_entry(tmp_path):
     assert decoded.metadata is not None
     assert decoded.metadata.model == "bedrock-claude-sonnet-4-6"
     assert decoded.metadata.backend == "bedrock"
-    assert decoded.metadata.input_tokens == 50
-    assert decoded.metadata.cost == 0.000123
 
 
 def test_roundtrip_encode_decode(tmp_path):
@@ -64,7 +58,6 @@ def test_roundtrip_encode_decode(tmp_path):
         content="hi",
         metadata=MessageMetadata(
             model="test-model",
-            cache_write_tokens=10,
             interrupted=True,
         ),
     )

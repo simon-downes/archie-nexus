@@ -50,32 +50,24 @@ class Session:
     total_cache_read_tokens: int = 0
     total_cache_write_tokens: int = 0
     _last_input_tokens: int = field(default=0, repr=False)
+    request_costs: list[float] = field(default_factory=list, repr=False)
+    request_context_tokens: list[int] = field(default_factory=list, repr=False)
 
     @property
     def total_cost(self) -> float:
         """Total USD spent in this session across all turns."""
-        return calculate_cost(
-            self.model.cost,
-            self.total_input_tokens,
-            self.total_output_tokens,
-            self.total_cache_read_tokens,
-            self.total_cache_write_tokens,
-        )
+        return round(sum(self.request_costs), 6)
 
     @property
     def context_pct(self) -> float:
         """Estimated next-request context usage, including cached input."""
-        estimated = self._last_input_tokens + (
-            self.turns[-1].output_tokens if self.turns else 0
-        )
+        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
         return (estimated / self.model.context) * 100
 
     @property
     def context_warning(self) -> bool:
         """Whether the next request approaches the model context limit."""
-        estimated = self._last_input_tokens + (
-            self.turns[-1].output_tokens if self.turns else 0
-        )
+        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
         return estimated > self.model.context * self.model.context_warning_threshold
 
     def next_turn_index(self) -> int:
@@ -95,7 +87,14 @@ class Session:
         self.total_output_tokens += output_tokens
         self.total_cache_read_tokens += cache_read_tokens
         self.total_cache_write_tokens += cache_write_tokens
-        self._last_input_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+        context_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+        self._last_input_tokens = context_tokens
+        self.request_context_tokens.append(context_tokens)
+        self.request_costs.append(
+            calculate_cost(
+                self.model.cost, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+            )
+        )
 
     def add_turn(
         self,

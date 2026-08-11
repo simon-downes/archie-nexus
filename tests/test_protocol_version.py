@@ -21,8 +21,6 @@ def _make_session_info(protocol_version: int) -> SessionInfo:
         model="Claude Sonnet 4.6",
         session_id="proj-01abc12345",
         git_branch="main",
-        cost_per_m_input=3.0,
-        cost_per_m_output=15.0,
     )
 
 

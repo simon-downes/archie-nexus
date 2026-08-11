@@ -2,14 +2,37 @@
 
 import json
 
-import msgspec
 import pytest
 from archie_agent.harness import AgentHarness
 from archie_agent.llm._types import Done, TextDelta, Usage
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Session
+from archie_shared.canonical_events import (
+    AssistantMessage,
+    LLMRequest,
+    ToolCall,
+    ToolResult,
+    TurnComplete,
+    TurnError,
+    TurnInterrupted,
+    UserMessage,
+    decode_event,
+)
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
-from archie_shared.session.log import MessageEntry
+
+
+def _read_events(log_path) -> list:
+    """Decode all persisted canonical events from a session JSONL log."""
+    return [
+        decode_event(line, persisted=True)
+        for line in log_path.read_bytes().splitlines()
+        if line.strip()
+    ]
+
+
+def _of(events, cls) -> list:
+    return [e for e in events if isinstance(e, cls)]
+
 
 # --- Fixtures ---
 
@@ -106,25 +129,31 @@ async def test_normal_flow(tmp_path):
     assert harness.session.total_output_tokens == 10
     assert len(harness.session.turns) == 2  # user + assistant
 
-    # Verify JSONL persistence
+    # Verify canonical event persistence
     log_path = tmp_path / "test-session-001.jsonl"
     assert log_path.exists()
-    lines = log_path.read_text().strip().splitlines()
-    assert len(lines) == 2  # user + assistant
+    events = _read_events(log_path)
 
-    user_entry = msgspec.json.decode(lines[0], type=MessageEntry)
-    assert user_entry.role == "user"
-    assert user_entry.content == "Hi there"
-    assert user_entry.metadata is None
+    # text_delta is live-only (not persisted); expect the canonical sequence.
+    user_msgs = _of(events, UserMessage)
+    assert len(user_msgs) == 1
+    assert user_msgs[0].content == "Hi there"
+    assert user_msgs[0].turn == 1
 
-    assistant_entry = msgspec.json.decode(lines[1], type=MessageEntry)
-    assert assistant_entry.role == "assistant"
-    assert assistant_entry.content == "Hello world"
-    assert assistant_entry.metadata is not None
-    assert assistant_entry.metadata.input_tokens == 100
-    assert assistant_entry.metadata.output_tokens == 10
-    assert assistant_entry.metadata.cost > 0
-    assert assistant_entry.metadata.interrupted is False
+    requests = _of(events, LLMRequest)
+    assert len(requests) == 1
+    assert requests[0].status == "completed"
+    assert requests[0].input_tokens == 100
+    assert requests[0].output_tokens == 10
+    assert requests[0].cost_usd > 0
+
+    assistant_msgs = _of(events, AssistantMessage)
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0].content == "Hello world"
+    assert assistant_msgs[0].interrupted is False
+    assert assistant_msgs[0].request_ids == [requests[0].id]
+
+    assert len(_of(events, TurnComplete)) == 1
 
 
 @pytest.mark.asyncio
@@ -165,17 +194,18 @@ async def test_interrupt_mid_stream(tmp_path):
     assert "turn_interrupted" in event_types
     assert "turn_complete" not in event_types
 
-    # Verify persistence: user + partial assistant + interrupted marker
+    # Verify persistence: user + partial assistant (interrupted) + turn_interrupted
     log_path = tmp_path / "test-session-001.jsonl"
-    lines = log_path.read_text().strip().splitlines()
-    assert len(lines) == 3
+    events = _read_events(log_path)
 
-    assistant_entry = msgspec.json.decode(lines[1], type=MessageEntry)
-    assert assistant_entry.role == "assistant"
-    assert assistant_entry.metadata.interrupted is True
+    assert len(_of(events, UserMessage)) == 1
 
-    interrupted_entry = msgspec.json.decode(lines[2], type=MessageEntry)
-    assert interrupted_entry.role == "interrupted"
+    assistant_msgs = _of(events, AssistantMessage)
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0].interrupted is True
+
+    assert len(_of(events, TurnInterrupted)) == 1
+    assert len(_of(events, TurnComplete)) == 0
 
 
 @pytest.mark.asyncio
@@ -295,20 +325,19 @@ async def test_per_message_cost_not_cumulative(tmp_path):
     await harness.handle_message("msg2")
 
     log_path = tmp_path / "test-session-001.jsonl"
-    lines = log_path.read_text().strip().splitlines()
-    # 4 lines: user1, assistant1, user2, assistant2
-    assert len(lines) == 4
+    events = _read_events(log_path)
 
-    a1 = msgspec.json.decode(lines[1], type=MessageEntry)
-    a2 = msgspec.json.decode(lines[3], type=MessageEntry)
+    requests = _of(events, LLMRequest)
+    assert len(requests) == 2
+    r1, r2 = requests
 
-    # Each should have its own per-message cost, not cumulative
-    assert a1.metadata.input_tokens == 100
-    assert a2.metadata.input_tokens == 200
+    # Each request carries its own per-message tokens/cost, not cumulative.
+    assert r1.input_tokens == 100
+    assert r2.input_tokens == 200
     # Second cost should be larger (more tokens)
-    assert a2.metadata.cost > a1.metadata.cost
+    assert r2.cost_usd > r1.cost_usd
     # Neither should equal session total_cost
-    assert a1.metadata.cost != harness.session.total_cost
+    assert r1.cost_usd != harness.session.total_cost
 
 
 @pytest.mark.asyncio
@@ -347,19 +376,18 @@ async def test_partial_text_before_error(tmp_path):
     assert "text_delta" in event_types
     assert "turn_error" in event_types
 
-    # Partial text should be persisted
+    # Partial text should be persisted as an interrupted assistant message
     log_path = tmp_path / "partial-err.jsonl"
-    lines = log_path.read_text().strip().splitlines()
-    # user + partial assistant + error
-    assert len(lines) == 3
+    events = _read_events(log_path)
 
-    assistant_entry = msgspec.json.decode(lines[1], type=MessageEntry)
-    assert assistant_entry.content == "partial response"
-    assert assistant_entry.metadata.interrupted is True
+    assistant_msgs = _of(events, AssistantMessage)
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0].content == "partial response"
+    assert assistant_msgs[0].interrupted is True
 
-    error_entry = msgspec.json.decode(lines[2], type=MessageEntry)
-    assert error_entry.role == "error"
-    assert "Connection reset" in error_entry.content
+    turn_errors = _of(events, TurnError)
+    assert len(turn_errors) == 1
+    assert "Connection reset" in turn_errors[0].message
 
     # Turn should be released
     assert harness.turn_active is False
@@ -405,24 +433,29 @@ async def test_tool_round_trip_persists_and_broadcasts(tmp_path):
 
     await harness.handle_message("run some code")
 
-    # Check JSONL log entries
+    # Check canonical event log
     log_path = harness.log_path
-    entries = [
-        msgspec.json.decode(line, type=MessageEntry) for line in log_path.read_bytes().splitlines()
-    ]
-    roles = [e.role for e in entries]
-    # Expected order: user → tool_call → tool_result → assistant
-    assert roles == ["user", "tool_call", "tool_result", "assistant"]
+    events = _read_events(log_path)
 
-    # Verify tool_call content is JSON {name, source}
-    tool_call_entry = entries[1]
-    tc_content = json.loads(tool_call_entry.content)
-    assert tc_content["name"] == "exec"
-    assert "async def main" in tc_content["source"]
+    # Expected sequence: user_message → ... → tool_call → tool_result → assistant_message
+    assert len(_of(events, UserMessage)) == 1
+    assert len(_of(events, ToolCall)) == 1
+    assert len(_of(events, ToolResult)) == 1
+    assert len(_of(events, AssistantMessage)) == 1
+    assert len(_of(events, TurnComplete)) == 1
+
+    # Verify tool_call captured name + input
+    tool_call = _of(events, ToolCall)[0]
+    assert tool_call.name == "exec"
+    assert "async def main" in tool_call.input["source"]
 
     # Verify tool_result content is the formatted result
-    tool_result_entry = entries[2]
-    assert "hello" in tool_result_entry.content
+    tool_result = _of(events, ToolResult)[0]
+    assert "hello" in tool_result.content
+
+    # tool_call/tool_result reference the tool-use request; assistant references both.
+    assert tool_call.tool_use_id == tool_result.tool_use_id
+    assert len(_of(events, LLMRequest)) == 2
 
     # Verify wire events include tool events
     messages = [json.loads(m) for m in ws.messages]

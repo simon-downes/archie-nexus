@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from archie_shared.canonical_events import LLMRequest, decode_event
+
 # --- Server → Client Events ---
 
 PROTOCOL_VERSION = 1
@@ -29,10 +31,6 @@ class SessionInfo:
     model: str
     session_id: str
     git_branch: str = "—"
-    cost_per_m_input: float = 0.0
-    cost_per_m_output: float = 0.0
-    cost_per_m_cache_read: float = 0.0
-    cost_per_m_cache_write: float = 0.0
 
     def to_json(self) -> dict:
         return {
@@ -42,27 +40,16 @@ class SessionInfo:
                 "model": self.model,
                 "session_id": self.session_id,
                 "git_branch": self.git_branch,
-                "cost": {
-                    "input": self.cost_per_m_input,
-                    "output": self.cost_per_m_output,
-                    "cache_read": self.cost_per_m_cache_read,
-                    "cache_write": self.cost_per_m_cache_write,
-                },
             },
         }
 
     @classmethod
     def from_json(cls, data: dict) -> SessionInfo:
-        cost = data.get("cost", {})
         return cls(
             protocol_version=data["protocol_version"],
             model=data["model"],
             session_id=data["session_id"],
             git_branch=data.get("git_branch", "—"),
-            cost_per_m_input=cost.get("input", 0.0),
-            cost_per_m_output=cost.get("output", 0.0),
-            cost_per_m_cache_read=cost.get("cache_read", 0.0),
-            cost_per_m_cache_write=cost.get("cache_write", 0.0),
         )
 
 
@@ -212,7 +199,7 @@ class ToolCall:
     turn_index: int
     tool_use_id: str
     name: str
-    input_summary: str
+    input: dict
 
     def to_json(self) -> dict:
         return {
@@ -221,7 +208,7 @@ class ToolCall:
             "data": {
                 "tool_use_id": self.tool_use_id,
                 "name": self.name,
-                "input_summary": self.input_summary,
+                "input": self.input,
             },
         }
 
@@ -231,7 +218,7 @@ class ToolCall:
             turn_index=turn_index,
             tool_use_id=data["tool_use_id"],
             name=data["name"],
-            input_summary=data["input_summary"],
+            input=data["input"],
         )
 
 
@@ -242,7 +229,7 @@ class ToolResult:
     turn_index: int
     tool_use_id: str
     is_error: bool
-    summary: str
+    content: str
     duration_ms: int = 0
     result_bytes: int = 0
 
@@ -253,7 +240,7 @@ class ToolResult:
             "data": {
                 "tool_use_id": self.tool_use_id,
                 "is_error": self.is_error,
-                "summary": self.summary,
+                "content": self.content,
                 "duration_ms": self.duration_ms,
                 "result_bytes": self.result_bytes,
             },
@@ -265,7 +252,7 @@ class ToolResult:
             turn_index=turn_index,
             tool_use_id=data["tool_use_id"],
             is_error=data["is_error"],
-            summary=data["summary"],
+            content=data["content"],
             duration_ms=data.get("duration_ms", 0),
             result_bytes=data.get("result_bytes", 0),
         )
@@ -278,10 +265,6 @@ class ModelSwitched:
     model_key: str
     model_name: str
     supports_cache: bool = False
-    cost_per_m_input: float = 0.0
-    cost_per_m_output: float = 0.0
-    cost_per_m_cache_read: float = 0.0
-    cost_per_m_cache_write: float = 0.0
 
     def to_json(self) -> dict:
         return {
@@ -290,26 +273,15 @@ class ModelSwitched:
                 "model_key": self.model_key,
                 "model_name": self.model_name,
                 "supports_cache": self.supports_cache,
-                "cost": {
-                    "input": self.cost_per_m_input,
-                    "output": self.cost_per_m_output,
-                    "cache_read": self.cost_per_m_cache_read,
-                    "cache_write": self.cost_per_m_cache_write,
-                },
             },
         }
 
     @classmethod
     def from_json(cls, data: dict) -> ModelSwitched:
-        cost = data.get("cost", {})
         return cls(
             model_key=data["model_key"],
             model_name=data["model_name"],
             supports_cache=data.get("supports_cache", False),
-            cost_per_m_input=cost.get("input", 0.0),
-            cost_per_m_output=cost.get("output", 0.0),
-            cost_per_m_cache_read=cost.get("cache_read", 0.0),
-            cost_per_m_cache_write=cost.get("cache_write", 0.0),
         )
 
 
@@ -330,6 +302,66 @@ class StatusUpdated:
         return cls(git_branch=data.get("git_branch", "—"))
 
 
+@dataclass(frozen=True)
+class SessionSnapshot:
+    """Sent on WebSocket connect: authoritative session state for replay.
+
+    Carries the id of the latest persisted canonical event so the client can
+    request incremental replay via `/events?after=<latest_event_id>`, plus
+    cumulative accounting derived from the persisted event log (authoritative
+    regardless of agent process lifetime). No turn_index (session-level).
+    """
+
+    protocol_version: int
+    model: str
+    session_id: str
+    latest_event_id: str | None = None
+    status: str = "ready"
+    git_branch: str = "—"
+    total_cost: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
+
+    def to_json(self) -> dict:
+        return {
+            "type": "session_snapshot",
+            "data": {
+                "protocol_version": self.protocol_version,
+                "model": self.model,
+                "session_id": self.session_id,
+                "latest_event_id": self.latest_event_id,
+                "status": self.status,
+                "git_branch": self.git_branch,
+                "accounting": {
+                    "total_cost": self.total_cost,
+                    "total_input_tokens": self.total_input_tokens,
+                    "total_output_tokens": self.total_output_tokens,
+                    "total_cache_read_tokens": self.total_cache_read_tokens,
+                    "total_cache_write_tokens": self.total_cache_write_tokens,
+                },
+            },
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> SessionSnapshot:
+        acct = data.get("accounting", {})
+        return cls(
+            protocol_version=data["protocol_version"],
+            model=data["model"],
+            session_id=data["session_id"],
+            latest_event_id=data.get("latest_event_id"),
+            status=data.get("status", "ready"),
+            git_branch=data.get("git_branch", "—"),
+            total_cost=acct.get("total_cost", 0.0),
+            total_input_tokens=acct.get("total_input_tokens", 0),
+            total_output_tokens=acct.get("total_output_tokens", 0),
+            total_cache_read_tokens=acct.get("total_cache_read_tokens", 0),
+            total_cache_write_tokens=acct.get("total_cache_write_tokens", 0),
+        )
+
+
 # Union of all server→client events
 type ServerEvent = (
     SessionInfo
@@ -343,6 +375,8 @@ type ServerEvent = (
     | ToolResult
     | ModelSwitched
     | StatusUpdated
+    | SessionSnapshot
+    | LLMRequest
 )
 
 
@@ -416,6 +450,8 @@ _SERVER_EVENT_TYPES: dict[str, type] = {
     "tool_result": ToolResult,
     "model_switched": ModelSwitched,
     "status_updated": StatusUpdated,
+    "session_snapshot": SessionSnapshot,
+    "llm_request": LLMRequest,
 }
 
 _CLIENT_COMMAND_TYPES: dict[str, type] = {
@@ -437,7 +473,11 @@ def deserialize_event(raw: str) -> ServerEvent:
     cls = _SERVER_EVENT_TYPES.get(event_type)
     if cls is None:
         raise ValueError(f"Unknown event type: {event_type}")
-    if cls in (SessionInfo, ModelSwitched, StatusUpdated):
+    if cls is LLMRequest:
+        # Broadcast raw as canonical JSON (no wire envelope) for the ledger/metrics
+        # pipeline; the TUI consumes it for authoritative live cost accounting.
+        return decode_event(raw)
+    if cls in (SessionInfo, ModelSwitched, StatusUpdated, SessionSnapshot):
         return cls.from_json(msg["data"])
     return cls.from_json(msg.get("turn_index", 0), msg["data"])
 
