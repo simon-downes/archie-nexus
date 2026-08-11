@@ -16,8 +16,10 @@ errors rather than falling back.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # The container's project mount. Tool subprocesses run here so file discovery,
 # git, and shell operations all act on the same tree.
@@ -84,26 +86,51 @@ async def run_exec(
     )
 
 
-async def run_shell(command: str, cwd: Path | str | None = None) -> CompletedProcess:
+async def run_shell(
+    command: str,
+    cwd: Path | str | None = None,
+    timeout: float | None = None,
+    on_start: Callable[[asyncio.subprocess.Process], Any] | None = None,
+) -> CompletedProcess:
     """Run a command through the shell (shell=True semantics).
 
-    Uses a loop executor around subprocess.run since we need shell interpretation.
-    """
-    import subprocess  # noqa: PLC0415
+    Uses create_subprocess_shell so the process can be killed on timeout
+    or via interrupt. A blocking subprocess.run() in an executor cannot be
+    cancelled, which would wedge the tool (and the whole agent turn) forever;
+    this avoids that.
 
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(  # noqa: S602
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=_resolve_cwd(cwd),
-        ),
+    Args:
+        command: Shell command line (interpreted by /bin/sh).
+        cwd: Working directory. Defaults to /workspace (see _resolve_cwd).
+        timeout: Optional seconds before the process is killed.
+        on_start: Optional callback invoked with the Process after spawn,
+            used by the harness to capture the handle for cancellation (ESC).
+
+    Returns:
+        CompletedProcess with decoded stdout/stderr.
+
+    Raises:
+        asyncio.TimeoutError: If the process exceeds the timeout.
+    """
+    proc = await asyncio.create_subprocess_shell(  # noqa: S604
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=_resolve_cwd(cwd),
     )
+    if on_start:
+        on_start(proc)
+    try:
+        if timeout is not None:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout)
+        else:
+            stdout_b, stderr_b = await proc.communicate()
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
     return CompletedProcess(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        returncode=proc.returncode,
+        stdout=stdout_b.decode("utf-8", errors="replace"),
+        stderr=stderr_b.decode("utf-8", errors="replace"),
     )

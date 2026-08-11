@@ -9,6 +9,7 @@ The harness owns:
 """
 
 import asyncio
+import inspect
 import logging
 import threading
 from pathlib import Path
@@ -476,6 +477,8 @@ class AgentHarness:
 
         Uses the tool registry to find the handler. For `exec`, calls run_exec
         directly with an on_start callback to capture the subprocess handle.
+        Generic tools that declare an `on_start` parameter (e.g. `shell`) also
+        receive the callback so their subprocess can be cancelled via interrupt.
         """
         spec = self._registry.get(block.name)
         if spec is None:
@@ -498,8 +501,13 @@ class AgentHarness:
                 content = format_result(envelope)
                 is_error = not envelope.ok
             else:
-                # Generic tool handler call
-                result = await spec.handler(**block.input)
+                # Generic tool handler call. Inject on_start for tools that
+                # declare it (e.g. shell) so the harness can capture the
+                # subprocess handle and cancel it on interrupt (ESC).
+                kwargs = dict(block.input)
+                if "on_start" in inspect.signature(spec.handler).parameters:
+                    kwargs["on_start"] = self._on_proc_start
+                result = await spec.handler(**kwargs)
                 content = str(result)
                 is_error = False
         except Exception as e:
