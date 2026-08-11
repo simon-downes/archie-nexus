@@ -361,6 +361,69 @@ async def test_shell_falls_back_when_workspace_absent(monkeypatch):
     assert "[exit: 0]" in result
 
 
+async def test_shell_timeout_kills_and_returns_error(workspace):
+    """A command exceeding its timeout is killed and returned as an error result.
+
+    Regression: a hung shell command with no timeout previously wedged the whole
+    agent turn (no tool_result was ever produced).
+    """
+    tools = get_all_tools()
+    result = await tools["shell"](command="sleep 10", timeout=0.2)
+    assert "timed out" in result
+    assert "error" in result
+
+
+async def test_shell_completes_within_timeout(workspace):
+    """A fast command with a generous timeout returns normally."""
+    tools = get_all_tools()
+    result = await tools["shell"](command="echo hi", timeout=10)
+    assert "hi" in result
+    assert "[exit: 0]" in result
+
+
+async def test_shell_on_start_receives_process_handle(workspace):
+    """shell invokes on_start with the live subprocess so the harness can cancel it.
+
+    This is the plumbing that makes a running shell command ESC-cancellable:
+    the harness captures the handle via on_start and kills it on interrupt.
+    """
+    import asyncio
+
+    captured: dict = {}
+    tools = get_all_tools()
+    result = await tools["shell"](
+        command="echo hi", on_start=lambda proc: captured.__setitem__("proc", proc)
+    )
+    assert "proc" in captured
+    assert isinstance(captured["proc"], asyncio.subprocess.Process)
+    assert "hi" in result
+
+
+async def test_shell_killed_via_on_start_handle_returns_error(workspace):
+    """Killing the captured process (as interrupt does) ends the shell call.
+
+    Mirrors the ESC path: on_start captures the handle, an external actor kills
+    it, and the tool returns rather than hanging forever.
+    """
+    import asyncio
+
+    async def run():
+        tools = get_all_tools()
+
+        def kill_soon(proc):
+            async def _k():
+                await asyncio.sleep(0.1)
+                proc.kill()
+
+            asyncio.ensure_future(_k())
+
+        return await tools["shell"](command="sleep 10", on_start=kill_soon)
+
+    result = await asyncio.wait_for(run(), timeout=5)
+    # A killed process returns a non-zero/negative exit code, not a hang.
+    assert "[exit:" in result
+
+
 # --- get_tool_guidelines ---
 
 

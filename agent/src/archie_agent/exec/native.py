@@ -58,6 +58,11 @@ def _schema_from_signature(fn: Callable) -> dict[str, Any]:
         annotation = hints.get(name, param.annotation)
         is_optional = False
 
+        # Skip harness-injected callables (e.g. `on_start`) — these are never
+        # model-supplied inputs and must not appear in the tool schema.
+        if _is_callable_annotation(annotation):
+            continue
+
         if annotation is inspect.Parameter.empty:
             log.warning("Parameter %s.%s has no type annotation — defaulting to string", fn.__name__, name)
             json_type = "string"
@@ -85,6 +90,31 @@ def _schema_from_signature(fn: Callable) -> dict[str, Any]:
         schema["required"] = required
 
     return schema
+
+
+def _is_callable_annotation(annotation) -> bool:
+    """True if the annotation is a Callable (harness-injected, not a model input).
+
+    Also matches ``Callable[...] | None`` unions so an optional harness-injected
+    callback (e.g. ``on_start``) never surfaces in the model-facing schema.
+    """
+    import collections.abc
+    import types
+
+    if annotation is inspect.Parameter.empty:
+        return False
+
+    origin = get_origin(annotation)
+
+    # Unwrap Optional/Union: treat as callable if any member is a Callable.
+    if origin is Union or origin is types.UnionType:
+        return any(_is_callable_annotation(arg) for arg in get_args(annotation))
+
+    return (
+        annotation is collections.abc.Callable
+        or origin is collections.abc.Callable
+        or annotation is callable
+    )
 
 
 def _resolve_type(annotation) -> tuple[str, bool]:
