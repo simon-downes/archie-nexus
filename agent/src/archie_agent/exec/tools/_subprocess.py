@@ -16,6 +16,8 @@ errors rather than falling back.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,33 @@ from typing import Any
 # The container's project mount. Tool subprocesses run here so file discovery,
 # git, and shell operations all act on the same tree.
 WORKSPACE = Path("/workspace")
+
+
+def kill_process_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> None:
+    """Send ``sig`` to the process group led by ``proc``.
+
+    Subprocesses are spawned with ``start_new_session=True`` so the process and
+    ALL its descendants share a new process group (== the child's PID). A hung
+    ``sh -c "uv run pytest"`` is really a tree (sh -> uv -> python -> pytest);
+    signalling only ``proc.pid`` leaves the descendants running and the turn
+    wedged. ``killpg`` reaches the whole tree in one call.
+
+    Falls back to signalling the single process if the group lookup fails
+    (e.g. the process already exited, or it was not started in a new session).
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        pgid = None
+    try:
+        if pgid is not None:
+            os.killpg(pgid, sig)
+        else:
+            proc.send_signal(sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 @dataclass(frozen=True)
@@ -68,6 +97,7 @@ async def run_exec(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=_resolve_cwd(cwd),
+        start_new_session=True,
     )
     try:
         if timeout is not None:
@@ -75,7 +105,7 @@ async def run_exec(
         else:
             stdout_b, stderr_b = await proc.communicate()
     except TimeoutError:
-        proc.kill()
+        kill_process_group(proc)
         await proc.wait()
         raise
 
@@ -113,10 +143,11 @@ async def run_shell(
         asyncio.TimeoutError: If the process exceeds the timeout.
     """
     proc = await asyncio.create_subprocess_shell(  # noqa: S604
-        command,
+        command,  # start_new_session below puts sh + descendants in one group
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=_resolve_cwd(cwd),
+        start_new_session=True,
     )
     if on_start:
         on_start(proc)
@@ -126,7 +157,7 @@ async def run_shell(
         else:
             stdout_b, stderr_b = await proc.communicate()
     except TimeoutError:
-        proc.kill()
+        kill_process_group(proc)
         await proc.wait()
         raise
     return CompletedProcess(

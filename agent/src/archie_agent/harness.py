@@ -11,6 +11,7 @@ The harness owns:
 import asyncio
 import inspect
 import logging
+import signal
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -61,6 +62,7 @@ from archie_agent.events import (
     Usage,
 )
 from archie_agent.exec.tool import create_registry, format_result, run_exec
+from archie_agent.exec.tools._subprocess import kill_process_group
 from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session
@@ -523,19 +525,26 @@ class AgentHarness:
         )
 
     def _on_proc_start(self, proc: asyncio.subprocess.Process) -> None:
-        """Callback from run_exec to capture the active subprocess handle."""
+        """Capture the active tool subprocess handle for cancellation.
+
+        Invoked by run_exec and by generic tools (e.g. shell) that spawn a
+        subprocess, so interrupt() can kill it (and its whole process group).
+        """
         self._active_proc = proc
 
     def _cancel_active_proc(self) -> None:
-        """Cancel the active runner subprocess if any (SIGTERM, then KILL)."""
+        """Terminate the active tool subprocess GROUP if any (SIGTERM, then KILL).
+
+        Tool subprocesses are spawned with start_new_session=True, so the child
+        and all its descendants (e.g. sh -> uv -> python -> pytest) share one
+        process group. Signalling only the direct child would leave the real
+        workload running and keep the turn wedged; we signal the whole group.
+        """
         proc = self._active_proc
         if proc is None or proc.returncode is not None:
             return
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            return
-        # Schedule a kill after grace period (non-blocking)
+        kill_process_group(proc, signal.SIGTERM)
+        # Schedule a group KILL after a grace period (non-blocking).
         try:
             loop = asyncio.get_running_loop()
             loop.call_later(2.0, self._kill_proc, proc)
@@ -544,12 +553,9 @@ class AgentHarness:
             pass
 
     def _kill_proc(self, proc: asyncio.subprocess.Process) -> None:
-        """Kill a subprocess if it hasn't exited after grace period."""
+        """SIGKILL the subprocess group if it hasn't exited after the grace period."""
         if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            kill_process_group(proc, signal.SIGKILL)
 
     async def _broadcast_raw(self, data: str) -> None:
         """Broadcast an already-canonical serialized event."""
