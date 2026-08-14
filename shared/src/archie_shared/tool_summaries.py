@@ -102,11 +102,11 @@ def _format_diff_block(diff: str) -> str:
         content = _esc(line[1:])
         if line.startswith("-"):
             line_num_old += 1
-            rendered.append(f"  [dim]{line_num_old:>4}[/][on red] {content} [/]")
+            rendered.append(f"  [on red][dim]{line_num_old:>4}[/] {content} [/]")
             shown += 1
         elif line.startswith("+"):
             line_num_new += 1
-            rendered.append(f"  [dim]{line_num_new:>4}[/][on green] {content} [/]")
+            rendered.append(f"  [on green][dim]{line_num_new:>4}[/] {content} [/]")
             shown += 1
         elif line.startswith(" "):
             line_num_old += 1
