@@ -424,6 +424,39 @@ async def test_shell_killed_via_on_start_handle_returns_error(workspace):
     assert "[exit:" in result
 
 
+async def test_kill_process_group_kills_grandchild(workspace, tmp_path):
+    """kill_process_group stops the whole tree, not just the direct shell child.
+
+    Regression: interrupting `sh -c "uv run pytest"` previously killed only the
+    `sh` process, leaving `uv`/`pytest` running and the turn wedged. The shell
+    is spawned with start_new_session=True so the child + all descendants share
+    a process group; killing the group must stop a grandchild too.
+
+    We spawn: sh -> sleep(background grandchild) that, if it survives, writes a
+    marker file. Killing the group before the sleep elapses means no marker.
+    """
+    import asyncio
+
+    from archie_agent.exec.tools._subprocess import kill_process_group, run_shell
+
+    marker = tmp_path / "grandchild_survived"
+    # sh backgrounds a subshell that sleeps then writes the marker, then waits.
+    command = f"(sleep 2; touch {marker}) & wait"
+
+    captured: dict = {}
+
+    async def run():
+        return await run_shell(command, on_start=lambda p: captured.__setitem__("proc", p))
+
+    task = asyncio.ensure_future(run())
+    await asyncio.sleep(0.3)  # let the tree spawn
+    assert "proc" in captured
+    kill_process_group(captured["proc"])  # SIGKILL the whole group
+    await asyncio.wait_for(task, timeout=5)
+    await asyncio.sleep(2.2)  # past when the grandchild would have written
+    assert not marker.exists(), "grandchild survived the group kill"
+
+
 # --- get_tool_guidelines ---
 
 
