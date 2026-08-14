@@ -139,6 +139,13 @@ class AgentHarness:
         # Active runner subprocess for cancellation
         self._active_proc: asyncio.subprocess.Process | None = None
 
+        # Event-driven interrupt bridge: the threading.Event is used by provider
+        # streaming; the asyncio.Event is set via call_soon_threadsafe so the
+        # tool batch can race against it without polling. Both are (re)created
+        # per turn in handle_message once the running loop is known.
+        self._interrupt_async: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
         self._request_ids: list[str] = []
         self._event_factory = EventFactory(self.log_path, self.session.model_id, self.session.model)
         if not self.log_path.exists() or not self.log_path.read_text().strip():
@@ -196,6 +203,10 @@ class AgentHarness:
         Clears the interrupt flag at entry to prevent stale flags leaking.
         """
         self._interrupt.clear()
+        # Capture the running loop and (re)create the async interrupt bound to
+        # it so interrupt() can wake the tool batch via call_soon_threadsafe.
+        self._loop = asyncio.get_running_loop()
+        self._interrupt_async = asyncio.Event()
 
         if self._turn_active:
             turn_index = self.session.turn_index or 1
@@ -262,6 +273,7 @@ class AgentHarness:
                 system=self._build_prompt(),
                 llm=self._llm,
                 interrupt=self._interrupt,
+                interrupt_async=self._interrupt_async,
                 tool_config=self._tool_config,
                 execute_tool=self._execute_tool,
                 request_context_factory=lambda: RequestContext(str(ULID()), now_utc()),
@@ -470,8 +482,18 @@ class AgentHarness:
             await self._broadcast(StatusUpdated(git_branch=_read_git_branch()))
 
     def interrupt(self) -> None:
-        """Signal the current turn to stop. Also cancels any active subprocess."""
+        """Signal the current turn to stop. Also cancels any active subprocess.
+
+        Sets the threading.Event (used by provider streaming) and schedules the
+        asyncio.Event on the running loop so the tool batch wakes immediately
+        without polling. Killing the active subprocess group is what makes an
+        in-flight tool actually return.
+        """
         self._interrupt.set()
+        loop = self._loop
+        async_interrupt = self._interrupt_async
+        if loop is not None and async_interrupt is not None:
+            loop.call_soon_threadsafe(async_interrupt.set)
         self._cancel_active_proc()
 
     async def _execute_tool(self, block: ToolUseBlock) -> ToolResultBlock:
