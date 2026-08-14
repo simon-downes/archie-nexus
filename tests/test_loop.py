@@ -1,5 +1,6 @@
 """Tests for the pure run_loop async generator."""
 
+import asyncio
 import threading
 
 import pytest
@@ -417,6 +418,222 @@ async def test_two_tools_batched():
 
 
 @pytest.mark.asyncio
+async def test_tools_run_concurrently_and_history_stays_ordered():
+    """Tool results are live in completion order but sent to the model in request order."""
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="slow", name="exec"),
+                ToolUseEvent(tool_use_id="slow", name="exec", input={}),
+                ToolUseStart(tool_use_id="fast", name="exec"),
+                ToolUseEvent(tool_use_id="fast", name="exec", input={}),
+                Done(stop_reason="tool_use"),
+            ],
+            [TextDelta(text="done"), Done(stop_reason="end_turn")],
+        ]
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def execute_tool(block):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if block.tool_use_id == "slow":
+            started.set()
+            await release.wait()
+        else:
+            await started.wait()
+        active -= 1
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content=block.tool_use_id)
+
+    async def release_after_start():
+        await started.wait()
+        await asyncio.sleep(0)
+        release.set()
+
+    releaser = asyncio.create_task(release_after_start())
+    events = await _collect(
+        run_loop(
+            messages=_make_messages(),
+            system="test",
+            llm=llm,
+            interrupt=threading.Event(),
+            execute_tool=execute_tool,
+        )
+    )
+    await releaser
+
+    assert max_active == 2
+    live = [event.tool_use_id for event in events if isinstance(event, ToolResult)]
+    assert live == ["fast", "slow"]
+    assert [block.tool_use_id for block in llm.calls[1]["messages"][-1].content] == ["slow", "fast"]
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_does_not_cancel_siblings():
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="bad", name="exec"),
+                ToolUseEvent(tool_use_id="bad", name="exec", input={}),
+                ToolUseStart(tool_use_id="good", name="exec"),
+                ToolUseEvent(tool_use_id="good", name="exec", input={}),
+                Done(stop_reason="tool_use"),
+            ],
+            [TextDelta(text="done"), Done(stop_reason="end_turn")],
+        ]
+    )
+
+    async def execute_tool(block):
+        if block.tool_use_id == "bad":
+            raise RuntimeError("boom")
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="ok")
+
+    events = await _collect(
+        run_loop(
+            messages=_make_messages(),
+            system="test",
+            llm=llm,
+            interrupt=threading.Event(),
+            execute_tool=execute_tool,
+        )
+    )
+    results = [event for event in events if isinstance(event, ToolResult)]
+    assert {event.tool_use_id for event in results} == {"bad", "good"}
+    assert any(event.is_error and "RuntimeError" in event.content for event in results)
+    assert events[-1] == TurnComplete(stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+async def test_interrupt_before_tool_batch_repairs_all_results():
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="one", name="exec"),
+                ToolUseEvent(tool_use_id="one", name="exec", input={}),
+                ToolUseStart(tool_use_id="two", name="exec"),
+                ToolUseEvent(tool_use_id="two", name="exec", input={}),
+                Done(stop_reason="tool_use"),
+            ]
+        ]
+    )
+    interrupt = threading.Event()
+    interrupt.set()
+    called = False
+
+    async def execute_tool(block):
+        nonlocal called
+        called = True
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="unexpected")
+
+    events = await _collect(
+        run_loop(
+            messages=_make_messages(),
+            system="test",
+            llm=llm,
+            interrupt=interrupt,
+            execute_tool=execute_tool,
+        )
+    )
+    assert not called
+    assert not [event for event in events if isinstance(event, ToolResult)]
+    assert isinstance(events[-1], TurnInterrupted)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_during_batch_cancels_and_repairs_via_async_bridge():
+    """Event-driven interrupt mid-batch cancels in-flight tools, repairs history,
+    yields TurnInterrupted, and leaks no tasks."""
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="a", name="exec"),
+                ToolUseEvent(tool_use_id="a", name="exec", input={}),
+                ToolUseStart(tool_use_id="b", name="exec"),
+                ToolUseEvent(tool_use_id="b", name="exec", input={}),
+                Done(stop_reason="tool_use"),
+            ]
+        ]
+    )
+    interrupt = threading.Event()
+    interrupt_async = asyncio.Event()
+    both_started = asyncio.Event()
+    started_count = 0
+
+    async def execute_tool(block):
+        nonlocal started_count
+        started_count += 1
+        if started_count == 2:
+            both_started.set()
+        # Block forever until cancelled; the fire task interrupts once both run.
+        await asyncio.sleep(3600)
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="never")
+
+    async def fire_interrupt():
+        await both_started.wait()
+        interrupt.set()
+        interrupt_async.set()
+
+    before = len(asyncio.all_tasks())
+    firer = asyncio.create_task(fire_interrupt())
+    events = await _collect(
+        run_loop(
+            messages=_make_messages(),
+            system="test",
+            llm=llm,
+            interrupt=interrupt,
+            interrupt_async=interrupt_async,
+            execute_tool=execute_tool,
+        )
+    )
+    await firer
+
+    assert started_count == 2
+    assert isinstance(events[-1], TurnInterrupted)
+    # History repaired: one user turn with a cancelled result per tool use.
+    user_turn = llm.calls[0]["messages"][-1]
+    assert [b.tool_use_id for b in user_turn.content] == ["a", "b"]
+    assert all(b.is_error for b in user_turn.content)
+    # No leaked worker/watcher tasks beyond the baseline.
+    await asyncio.sleep(0)
+    assert len(asyncio.all_tasks()) <= before + 1  # +1 tolerance for _collect frame
+
+
+@pytest.mark.asyncio
+async def test_mismatched_tool_result_id_is_an_error():
+    llm = FakeLLMClient(
+        responses=[
+            [
+                ToolUseStart(tool_use_id="requested", name="exec"),
+                ToolUseEvent(tool_use_id="requested", name="exec", input={}),
+                Done(stop_reason="tool_use"),
+            ],
+            [TextDelta(text="done"), Done(stop_reason="end_turn")],
+        ]
+    )
+
+    async def execute_tool(block):
+        return ToolResultBlock(tool_use_id="wrong", content="bad")
+
+    events = await _collect(
+        run_loop(
+            messages=_make_messages(),
+            system="test",
+            llm=llm,
+            interrupt=threading.Event(),
+            execute_tool=execute_tool,
+        )
+    )
+    result = next(event for event in events if isinstance(event, ToolResult))
+    assert result.tool_use_id == "requested"
+    assert result.is_error
+    assert "does not match" in result.content
+
+
+@pytest.mark.asyncio
 async def test_iteration_cap():
     """Exceeding max_iterations yields TurnFailed."""
     # LLM always requests tools
@@ -488,8 +705,8 @@ async def test_interrupt_mid_tool_history_repair():
     events = await _collect(gen)
 
     assert any(isinstance(e, TurnInterrupted) for e in events)
-    # Only the first tool should have been executed
-    assert call_count == 1
+    # The batch starts all independent tools concurrently.
+    assert call_count == 2
 
 
 @pytest.mark.asyncio

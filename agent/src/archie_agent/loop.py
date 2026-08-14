@@ -78,12 +78,106 @@ def _latest_history_boundary(messages: list["Turn"]) -> str | None:
     return None
 
 
+async def _execute_tool_batch(
+    blocks: list[ToolUseBlock],
+    execute_tool: Callable[[ToolUseBlock], Awaitable[ToolResultBlock]],
+    interrupt: threading.Event,
+    interrupt_async: asyncio.Event | None = None,
+) -> AsyncGenerator[tuple[int, ToolResultBlock]]:
+    """Execute one model tool batch concurrently and yield completed results.
+
+    Interruption is delivered event-driven via ``interrupt_async`` (set by the
+    harness through ``call_soon_threadsafe``); the batch races its workers
+    against that event with a single ``asyncio.wait``. The threading ``interrupt``
+    is only consulted for the pre-dispatch fast path. Callers that do not supply
+    ``interrupt_async`` get a local event that is never set, so a pre-set
+    threading event is honored solely by the pre-dispatch check below.
+    """
+
+    def cancelled(block: ToolUseBlock) -> ToolResultBlock:
+        return ToolResultBlock(tool_use_id=block.tool_use_id, content="cancelled", is_error=True)
+
+    if interrupt.is_set():
+        for position, block in enumerate(blocks):
+            yield position, cancelled(block)
+        return
+
+    if interrupt_async is None:
+        interrupt_async = asyncio.Event()
+
+    async def worker(position: int, block: ToolUseBlock) -> tuple[int, ToolResultBlock]:
+        try:
+            result = execute_tool(block)
+            if inspect.isawaitable(result):
+                result = await result
+            if result.tool_use_id != block.tool_use_id:
+                return position, ToolResultBlock(
+                    tool_use_id=block.tool_use_id,
+                    content=(
+                        f"ValueError: tool result ID {result.tool_use_id!r} does not match "
+                        f"requested ID {block.tool_use_id!r}"
+                    ),
+                    is_error=True,
+                )
+            return position, result
+        except asyncio.CancelledError:
+            return position, cancelled(block)
+        except Exception as error:
+            log.warning("execute_tool raised for %s: %s", block.name, error)
+            return position, ToolResultBlock(
+                tool_use_id=block.tool_use_id,
+                content=f"{type(error).__name__}: {error}",
+                is_error=True,
+            )
+
+    tasks = [asyncio.create_task(worker(position, block)) for position, block in enumerate(blocks)]
+    task_positions = {task: position for position, task in enumerate(tasks)}
+    pending: set[asyncio.Task[tuple[int, ToolResultBlock]]] = set(tasks)
+    emitted: set[int] = set()
+    interrupt_wait = asyncio.create_task(interrupt_async.wait())
+    try:
+        while pending:
+            done, _ = await asyncio.wait(
+                {*pending, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if interrupt_async.is_set() or interrupt.is_set():
+                for task in pending:
+                    task.cancel()
+                outcomes = await asyncio.gather(*pending, return_exceptions=True)
+                for task, outcome in zip(pending, outcomes, strict=True):
+                    if isinstance(outcome, tuple):
+                        position, result = outcome
+                    else:
+                        position = task_positions[task]
+                        result = cancelled(blocks[position])
+                    if position not in emitted:
+                        emitted.add(position)
+                        yield position, result
+                return
+
+            for task in done:
+                if task is interrupt_wait or task not in pending:
+                    continue
+                pending.remove(task)
+                position, result = task.result()
+                emitted.add(position)
+                yield position, result
+    finally:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        interrupt_wait.cancel()
+        await asyncio.gather(interrupt_wait, return_exceptions=True)
+
+
 async def run_loop(
     *,
     messages: "list[Turn]",
     system: SystemPrompt | str,
     llm: "LLMClient",
     interrupt: threading.Event,
+    interrupt_async: asyncio.Event | None = None,
     tool_config: list[dict] | None = None,
     execute_tool: Callable[[ToolUseBlock], Awaitable[ToolResultBlock]] | None = None,
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
@@ -141,6 +235,12 @@ async def run_loop(
                     )
                     for block in result.tool_use_blocks
                 ]
+                for repair_result in repair_results:
+                    yield ToolResult(
+                        tool_use_id=repair_result.tool_use_id,
+                        content=repair_result.content,
+                        is_error=repair_result.is_error,
+                    )
                 working_messages.append(
                     TurnType(role="assistant", content=result.text_blocks + result.tool_use_blocks)
                 )
@@ -158,40 +258,28 @@ async def run_loop(
             )
             for block in result.tool_use_blocks:
                 yield ToolCall(tool_use_id=block.tool_use_id, name=block.name, input=block.input)
-            tool_results: list[ToolResultBlock] = []
-            for block in result.tool_use_blocks:
-                if interrupt.is_set():
-                    tool_results.append(
-                        ToolResultBlock(
-                            tool_use_id=block.tool_use_id, content="cancelled", is_error=True
-                        )
-                    )
-                    remaining = result.tool_use_blocks[result.tool_use_blocks.index(block) + 1 :]
-                    tool_results.extend(
-                        ToolResultBlock(
-                            tool_use_id=item.tool_use_id, content="cancelled", is_error=True
-                        )
-                        for item in remaining
-                    )
-                    working_messages.append(TurnType(role="user", content=tool_results))
-                    yield TurnInterrupted()
-                    return
-                try:
-                    result_block = await execute_tool(block)
-                except Exception as error:
-                    log.warning("execute_tool raised for %s: %s", block.name, error)
-                    result_block = ToolResultBlock(
-                        tool_use_id=block.tool_use_id,
-                        content=f"{type(error).__name__}: {error}",
-                        is_error=True,
-                    )
-                tool_results.append(result_block)
+            tool_results: list[ToolResultBlock | None] = [None] * len(result.tool_use_blocks)
+            async for position, result_block in _execute_tool_batch(
+                result.tool_use_blocks, execute_tool, interrupt, interrupt_async
+            ):
+                tool_results[position] = result_block
                 yield ToolResult(
                     tool_use_id=result_block.tool_use_id,
                     content=result_block.content,
                     is_error=result_block.is_error,
                 )
-            working_messages.append(TurnType(role="user", content=tool_results))
+            ordered_results = [
+                block
+                if block is not None
+                else ToolResultBlock(
+                    tool_use_id=source.tool_use_id, content="cancelled", is_error=True
+                )
+                for source, block in zip(result.tool_use_blocks, tool_results, strict=True)
+            ]
+            working_messages.append(TurnType(role="user", content=ordered_results))
+            if interrupt.is_set():
+                yield TurnInterrupted()
+                return
             continue
         yield TurnComplete(stop_reason=result.stop_reason or "end_turn")
         return
