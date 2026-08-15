@@ -18,7 +18,7 @@ import os
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 from archie_shared import canonical_events as ce
@@ -51,7 +51,7 @@ from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingM
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.status import StatusBar
-from archie_cli.tui.subagents import SubagentActivity, SubagentScreen
+from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
 from archie_cli.tui.throbber import Throbber
 from archie_cli.ws_client import WSClient
 
@@ -59,20 +59,8 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
-class ChildActivity:
-    """Live scoped child state used by collapsed and detail views."""
-
-    scope: str
-    index: int
-    agent: str = "child"
-    status: str = "running"
-    cost: float = 0.0
-    lines: list[str] = field(default_factory=list)
-
-    def add_line(self, line: str, limit: int = 3) -> None:
-        if line:
-            self.lines.append(line)
-            del self.lines[:-limit]
+class ChildActivity(ChildActivityState):
+    """Compatibility alias for the shared child view state."""
 
 
 class ArchieApp(App):
@@ -88,6 +76,7 @@ class ArchieApp(App):
         Binding("ctrl+c", "copy_block", "Copy Block"),
         Binding("ctrl+g", "editor", "Editor", show=False),
         Binding("ctrl+s", "subagent_picker", "Subagents"),
+        Binding("ctrl+x", "stop_child", "Stop selected child"),
     ]
 
     def __init__(self, ws_url: str, api_url: str, container_name: str) -> None:
@@ -125,6 +114,10 @@ class ArchieApp(App):
         # tool_use_id -> (name, input) for client-side result formatting
         self._pending_tool_inputs: dict[str, tuple[str, dict]] = {}
         self._child_activity: dict[tuple[str, int], ChildActivity] = {}
+        self._child_pending_tools: dict[tuple[str, int, str], tuple[str, dict]] = {}
+        self._parent_task_inputs: dict[str, list[dict]] = {}
+        self._parent_task_entries: dict[str, object] = {}
+        self._child_widgets: dict[tuple[str, int], SubagentActivity] = {}
         self._active_child_key: tuple[str, int] | None = None
 
         # Session state for local accumulation. Seeded from SessionSnapshot.accounting
@@ -231,6 +224,10 @@ class ArchieApp(App):
             self._seen_event_ids.add(event_id)
             self._last_event_id = event_id
 
+        if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
+            self._handle_scoped_event(event)
+            return
+
         conv = self.query_one("#conversation", Conversation)
 
         if isinstance(event, ce.UserMessage):
@@ -248,7 +245,12 @@ class ArchieApp(App):
                 self._iteration_block = conv.begin_iteration()
             input_summary = format_tool_pending(event.name, event.input)
             self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
-            self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
+            entry = self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
+            if event.name == "task":
+                tasks = event.input.get("tasks", [])
+                if isinstance(tasks, list):
+                    self._parent_task_inputs[event.tool_use_id] = tasks
+                    self._parent_task_entries[event.tool_use_id] = entry
         elif isinstance(event, ce.ToolResult):
             if self._iteration_block is not None:
                 pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
@@ -454,20 +456,15 @@ class ArchieApp(App):
         elif isinstance(event, LLMRequest):
             # Authoritative live cost/token source from the broadcast ledger.
             self._accumulate_ledger(event)
-            if event.scope is not None and event.subagent_index is not None:
-                child = self._child(event.scope, event.subagent_index)
-                child.cost += event.cost_usd
-                child.add_line(f"request ${child.cost:.4f}")
+            if self._handle_scoped_event(event):
+                return
 
         elif isinstance(event, StatusUpdated):
             status = self.query_one("#status", StatusBar)
             status.git_branch = event.git_branch
 
         elif isinstance(event, IterationStart):
-            if event.scope is not None and event.subagent_index is not None:
-                self._child(event.scope, event.subagent_index).add_line(
-                    f"iteration {event.index}"
-                )
+            if self._handle_scoped_event(event):
                 return
             # Deterministic block boundary: finalise any in-progress streaming
             # and reset the iteration block so the next TextDelta/ToolCall opens
@@ -480,8 +477,7 @@ class ArchieApp(App):
             self._show_throbber()
 
         elif isinstance(event, TextDelta):
-            if event.scope is not None and event.subagent_index is not None:
-                self._child(event.scope, event.subagent_index).add_line(event.text.strip())
+            if self._handle_scoped_event(event):
                 return
             self._remove_throbber()
             if self._streaming is None:
@@ -505,32 +501,24 @@ class ArchieApp(App):
             status.context_pct = event.context_pct
 
         elif isinstance(event, TurnComplete):
-            if event.scope is not None and event.subagent_index is not None:
-                self._child(event.scope, event.subagent_index).status = "complete"
+            if self._handle_scoped_event(event):
                 return
             self._end_turn()
 
         elif isinstance(event, TurnInterrupted):
-            if event.scope is not None and event.subagent_index is not None:
-                self._child(event.scope, event.subagent_index).status = "interrupted"
+            if self._handle_scoped_event(event):
                 return
             conv.add_error("[interrupted]")
             self._end_turn()
 
         elif isinstance(event, TurnError):
-            if event.scope is not None and event.subagent_index is not None:
-                child = self._child(event.scope, event.subagent_index)
-                child.status = "error"
-                child.add_line(event.message)
+            if self._handle_scoped_event(event):
                 return
             self._show_error(event.message)
             self._end_turn()
 
         elif isinstance(event, ToolCall):
-            if event.scope is not None and event.subagent_index is not None:
-                self._child(event.scope, event.subagent_index).add_line(
-                    f"tool {event.name}"
-                )
+            if self._handle_scoped_event(event):
                 return
             self._remove_throbber()
             # Finalise any in-progress streaming text before showing tool activity
@@ -542,14 +530,16 @@ class ArchieApp(App):
             # Add pending entry (format summary client-side from raw input)
             input_summary = format_tool_pending(event.name, event.input)
             self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
-            self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
+            entry = self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
+            if event.name == "task":
+                tasks = event.input.get("tasks", [])
+                if isinstance(tasks, list):
+                    self._parent_task_inputs[event.tool_use_id] = tasks
+                    self._parent_task_entries[event.tool_use_id] = entry
             conv.scroll_end(animate=False)
 
         elif isinstance(event, ToolResult):
-            if event.scope is not None and event.subagent_index is not None:
-                self._child(event.scope, event.subagent_index).add_line(
-                    "tool error" if event.is_error else "tool complete"
-                )
+            if self._handle_scoped_event(event):
                 return
             if self._iteration_block is not None:
                 pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
@@ -569,25 +559,65 @@ class ArchieApp(App):
             # Tool finished — agent is thinking about the next step again.
             self._show_throbber()
 
+    def _handle_scoped_event(self, event) -> bool:
+        """Reduce one canonical/live child event into shared child state."""
+        scope = getattr(event, "scope", None)
+        index = getattr(event, "subagent_index", None)
+        if scope is None or index is None:
+            return False
+        child = self._child(scope, index)
+        if isinstance(event, LLMRequest):
+            child.cost += event.cost_usd
+            child.add_line(f"LLM request (${child.cost:.4f})")
+        elif isinstance(event, (IterationStart, ce.IterationStart)):
+            child.add_line(f"Iteration {event.index}")
+        elif isinstance(event, (TextDelta, ce.TextDelta)):
+            child.add_line(event.text)
+        elif isinstance(event, (ToolCall, ce.ToolCall)):
+            summary = format_tool_pending(event.name, event.input)
+            self._child_pending_tools[(scope, index, event.tool_use_id)] = (
+                event.name,
+                event.input,
+            )
+            child.add_line(summary)
+        elif isinstance(event, (ToolResult, ce.ToolResult)):
+            pending = self._child_pending_tools.pop((scope, index, event.tool_use_id), None)
+            name, tool_input = pending or ("tool", {})
+            child.add_line(format_tool_complete(name, tool_input, event.content, event.is_error))
+        elif isinstance(event, (TurnComplete, ce.TurnComplete)):
+            child.status = "complete"
+        elif isinstance(event, (TurnInterrupted, ce.TurnInterrupted)):
+            child.status = "interrupted"
+        elif isinstance(event, (TurnError, ce.TurnError)):
+            child.status = "error"
+            child.add_line(getattr(event, "message", "error"))
+        self._render_child(child)
+        self._update_child_modal(child)
+        return True
+
     def _render_child(self, child: ChildActivity) -> None:
         """Mount or update the collapsed child activity widget."""
         conv = self.query_one("#conversation", Conversation)
         widget_id = f"child-{child.scope}-{child.index}".replace(" ", "-")
         try:
             widget = conv.query_one(f"#{widget_id}", SubagentActivity)
-            widget.update_state(child.lines, child.status, child.cost)
+            widget.update_state()
         except Exception:
-            conv.mount(
-                SubagentActivity(
-                    child.agent,
-                    child.index,
-                    child.lines,
-                    child.status,
-                    child.cost,
-                    key=widget_id,
-                ),
-                before=None,
-            )
+            widget = SubagentActivity(child, key=widget_id)
+            parent = self._parent_task_entries.get(child.scope)
+            if parent is not None:
+                parent.add_child(widget)
+            else:
+                conv.mount(widget)
+        self._child_widgets[(child.scope, child.index)] = widget
+
+    def _update_child_modal(self, child: ChildActivity) -> None:
+        if self._active_child_key != (child.scope, child.index):
+            return
+        try:
+            self.screen.update_state()
+        except AttributeError:
+            pass
 
     def open_child_detail(self, key: tuple[str, int]) -> None:
         """Open a live detail modal for a known child."""
@@ -596,12 +626,7 @@ class ArchieApp(App):
             return
         self._active_child_key = key
         self.push_screen(
-            SubagentScreen(
-                f"Subagent {child.agent} #{child.index}",
-                child.lines,
-                child.status,
-                child.cost,
-            )
+            SubagentScreen(child)
         )
 
     async def action_subagent_picker(self) -> None:
@@ -621,6 +646,9 @@ class ArchieApp(App):
         child = self._child_activity.get(key)
         if child is None:
             child = ChildActivity(scope=scope, index=index)
+            tasks = self._parent_task_inputs.get(scope, [])
+            if index < len(tasks) and isinstance(tasks[index], dict):
+                child.agent = str(tasks[index].get("agent", "child"))
             self._child_activity[key] = child
         self._render_child(child)
         return child
