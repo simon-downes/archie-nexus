@@ -221,8 +221,9 @@ The implementation has no child-agent discovery, child prompt builder, `task` to
 
 For every child launched from root task tool-use ID `S`:
 
-- MUST use `scope=S` for all child canonical events.
+- MUST use `scope=S` for all child canonical events and include the child input index where sibling identity is required.
   - AC: child `iteration_start`, `llm_request`, `tool_call`, `tool_result`, `assistant_message`, and terminal turn events decode with `scope=S`.
+  - AC: child-capable canonical events carry optional `subagent_index`; root events leave it `None`, and sibling children under one task have distinct indexes.
 - MUST create one canonical `llm_request` for every child provider request.
   - AC: request ID, `turn_iteration`, model key, status, duration, billable tokens, and cost are present on exactly one record.
 - MUST use a child `EventFactory` initialized with the session log path, resolved child model key, resolved child `ModelEntry`, and `scope=S`.
@@ -332,7 +333,7 @@ A child runner resolves a model, creates a scoped prompt and registry, creates i
 
 **Canonical event path**
 
-The child runner uses `EventFactory(scope=S)`. Persisted events are appended to the same session log before `_broadcast_raw(serialized)`. Live-only text deltas are constructed with the same scope and broadcast without append. The TUI consumes the resulting canonical events; no separate subagent wire representation is introduced.
+The child runner uses `EventFactory(scope=S, subagent_index=index)`. Persisted events are appended to the same session log before `_broadcast_raw(serialized)`. Live-only text deltas are constructed with the same scope and sibling index and broadcast without append. The TUI consumes the resulting canonical events; no separate subagent wire representation is introduced.
 
 **TUI**
 

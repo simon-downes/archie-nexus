@@ -402,17 +402,26 @@ class MessageCommand:
 
 @dataclass(frozen=True)
 class InterruptCommand:
-    """Client requests turn cancellation."""
+    """Client requests turn or targeted child cancellation."""
+
+    target: tuple[str, int] | None = None
 
     def to_json(self) -> dict:
-        return {
-            "type": "interrupt",
-            "data": {},
-        }
+        data: dict = {}
+        if self.target is not None:
+            data["scope"] = self.target[0]
+            data["subagent_index"] = self.target[1]
+        return {"type": "interrupt", "data": data}
 
     @classmethod
     def from_json(cls, data: dict) -> InterruptCommand:
-        return cls()
+        scope = data.get("scope")
+        index = data.get("subagent_index")
+        if scope is None and index is None:
+            return cls()
+        if not isinstance(scope, str) or not isinstance(index, int) or isinstance(index, bool):
+            raise ValueError("interrupt target requires scope and integer subagent_index")
+        return cls(target=(scope, index))
 
 
 @dataclass(frozen=True)

@@ -21,6 +21,7 @@ class UserMessage(msgspec.Struct, tag="user_message", tag_field="type", forbid_u
     turn: int
     scope: str | None
     content: str
+    subagent_index: int | None = None
 
 
 class IterationStart(
@@ -30,6 +31,7 @@ class IterationStart(
     turn_iteration: str
     scope: str | None
     index: int
+    subagent_index: int | None = None
 
 
 class TextDelta(msgspec.Struct, tag="text_delta", tag_field="type", forbid_unknown_fields=True):
@@ -38,6 +40,7 @@ class TextDelta(msgspec.Struct, tag="text_delta", tag_field="type", forbid_unkno
     scope: str | None
     request_id: str
     text: str
+    subagent_index: int | None = None
 
 
 class LLMRequest(msgspec.Struct, tag="llm_request", tag_field="type", forbid_unknown_fields=True):
@@ -56,6 +59,7 @@ class LLMRequest(msgspec.Struct, tag="llm_request", tag_field="type", forbid_unk
     cost_usd: float
     stop_reason: str | None = None
     error: str | None = None
+    subagent_index: int | None = None
 
 
 class ToolCall(msgspec.Struct, tag="tool_call", tag_field="type", forbid_unknown_fields=True):
@@ -66,6 +70,7 @@ class ToolCall(msgspec.Struct, tag="tool_call", tag_field="type", forbid_unknown
     tool_use_id: str
     name: str
     input: dict[str, object]
+    subagent_index: int | None = None
 
 
 class ToolResult(msgspec.Struct, tag="tool_result", tag_field="type", forbid_unknown_fields=True):
@@ -78,6 +83,7 @@ class ToolResult(msgspec.Struct, tag="tool_result", tag_field="type", forbid_unk
     is_error: bool
     duration_ms: int
     result_bytes: int
+    subagent_index: int | None = None
 
 
 class AssistantMessage(
@@ -89,6 +95,7 @@ class AssistantMessage(
     request_ids: list[str]
     content: str
     interrupted: bool
+    subagent_index: int | None = None
 
 
 class TurnComplete(
@@ -98,6 +105,7 @@ class TurnComplete(
     turn: int
     scope: str | None
     stop_reason: str
+    subagent_index: int | None = None
 
 
 class TurnError(msgspec.Struct, tag="turn_error", tag_field="type", forbid_unknown_fields=True):
@@ -105,6 +113,7 @@ class TurnError(msgspec.Struct, tag="turn_error", tag_field="type", forbid_unkno
     turn: int
     scope: str | None
     message: str
+    subagent_index: int | None = None
 
 
 class TurnInterrupted(
@@ -113,6 +122,7 @@ class TurnInterrupted(
     id: str
     turn: int
     scope: str | None
+    subagent_index: int | None = None
 
 
 class ModelSwitch(msgspec.Struct, tag="model_switch", tag_field="type", forbid_unknown_fields=True):
