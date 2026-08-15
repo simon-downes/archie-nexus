@@ -327,6 +327,10 @@ class ToolEntry(Widget):
             rendered += f"\n[dim italic]▼ +{remaining} lines (click to expand)[/]"
         return rendered
 
+    def add_child(self, child: Widget) -> None:
+        """Mount nested activity beneath this tool entry."""
+        self.mount(child)
+
     def complete(
         self, is_error: bool, duration_ms: int, result_bytes: int, summary: str = ""
     ) -> None:
@@ -408,11 +412,16 @@ class IterationBlock(Widget):
         super().__init__()
         self._tool_entries: dict[str, ToolEntry] = {}
 
-    def add_pending(self, tool_use_id: str, name: str, source: str) -> None:
+    def add_pending(self, tool_use_id: str, name: str, source: str) -> ToolEntry:
         """Add a pending tool entry showing the source code."""
         entry = ToolEntry(tool_use_id, name, source)
         self._tool_entries[tool_use_id] = entry
         self.mount(entry)
+        return entry
+
+    def get_tool(self, tool_use_id: str) -> ToolEntry | None:
+        """Return a pending/completed tool entry by tool-use ID."""
+        return self._tool_entries.get(tool_use_id)
 
     def complete_tool(
         self,

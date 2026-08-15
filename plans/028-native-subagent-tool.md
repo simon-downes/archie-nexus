@@ -762,7 +762,7 @@ Approach:
 - Plan 031's `run_loop()` remains responsible for parallel tools inside each child. This milestone only schedules child runner coroutines and limits child count.
 - Keep one indexed result slot per input task. Child completion events may arrive in any order; combined parent result must remain input ordered.
 - Catch per-child exceptions and normalize them into labelled results. Do not use `list.index(block)`; child index is assigned at creation and remains stable.
-- Test seam: task handler's returned combined string plus an instrumented fake provider tracking active child count.
+- Test seam: task handler's returned combined string plus an instrumented fake provider tracking active child count. Cover validation, sibling failure isolation, skill filtering, ordering, and `max_concurrent=1` in `tests/test_task_tool.py`.
 - ⚠️ The semaphore must cover the full child execution lifetime, including provider requests and child tool loops, not just client construction.
 
 Wiring:
@@ -878,7 +878,7 @@ Approach:
 - Associate child scope with the root task tool call by its `tool_use_id`; child index identifies siblings under one task call.
 - Add a per-child rolling buffer of approximately three latest activity lines. Derive summaries from canonical raw tool input/result and text events using shared `tool_summaries.py`; do not require agent-generated summary fields.
 - Display agent name from `Subagent` start metadata only if needed. Prefer deriving known agent/index from the root task input and child scope. If the existing canonical event set cannot carry an agent name in live state, add the smallest justified live-only canonical event and document why it cannot be inferred.
-- Test seam: TUI reducer/widget state after a sequence of canonical scoped events.
+- Test seam: TUI reducer/widget state after a sequence of canonical scoped events. Cover this seam with `tests/test_tui_subagents.py` for shared summaries, sibling routing, replay, nesting, and live modal state.
 - ⚠️ Live scoped events share the parent turn but must not be dropped by root-turn buffering/dedup logic while the turn is active.
 
 Wiring:
