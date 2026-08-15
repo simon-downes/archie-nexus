@@ -2,671 +2,1012 @@
 
 ## Objective
 
-Add a native subagent capability so the primary agent can delegate a well-scoped task to
-a role-specialised child agent that runs to completion and returns its result as a tool
-result. Subagents are defined as Markdown files in `persona/agents/`, run as async tasks
-*inside the same session container*, may use a different provider/model than the parent,
-and surface progress in the TUI — both an inline read-only line and a full-screen live
-detail view of a selected subagent. Multiple subagents may run concurrently under a bounded
-semaphore, are individually addressable (the user can stop one or all), and their messages
-persist attributed in the session transcript.
+Add a native `task` tool so the primary agent can delegate one or more well-scoped tasks to role-specialised child agents. A child is a fresh `run_loop()` execution inside the same session container, with its own model client, prompt, skill scope, tool-dispatch state, interrupt state, canonical event scope, and final result. The parent receives the child output as a normal tool result.
 
-## Dependency: blocked on 029 M6
-
-**This plan is BLOCKED until plan 029 milestone M6 lands the Subagent Scope Contract.**
-Subagent implementation must not start until the canonical event contract is available.
-029 M6 defines how subagent activity maps onto canonical session events: child `scope` =
-launching `tool_use_id`, one `llm_request` per child provider request,
-`(scope, turn_iteration, request_id)` request identity, parent reconstruction via
-`parent_of(S) = tool_call(tool_use_id=S).scope`, and direct/inclusive cost aggregation by
-scope (`scope_direct_costs` / `scope_inclusive_costs` in
-`shared/src/archie_shared/session/accounting.py`). See the "Subagent Scope Contract" section
-in `plans/029-project-canonical-session-events.md` (M6).
-
-Note: this plan predates 029 and still describes flat wire fields (`turn_index`,
-`parent_tool_use_id`). Reconciling those with the canonical `scope`/`turn_iteration` model
-is a separate, reviewed 028-revision step (deferred by 029 M6); do not perform that rewrite
-inline.
+The feature must support bounded concurrent delegation, independent provider/model selection, canonical scoped persistence and accounting, live nested TUI progress, full-screen child inspection, and targeted or stop-all cancellation. V1 children are autonomous, fresh-context workers and cannot spawn further children.
 
 ## Context
 
-archie-nexus currently has no subagent/delegation primitive — the primary agent does all
-work in a single `run_loop()`. This plan adds the first one. It was designed after
-researching eight reference implementations in `../_research/` (opencode, amcp, codex,
-cline, aloop, maki, cli-agent-orchestrator, openclaw) and inspecting the Nexus codebase.
+This plan was originally written before the canonical session-event work and before generic parallel tool dispatch. It is now revised against the completed and implemented changes in plans 029, 030, and 031.
 
-Key facts that shaped the design (verified against the codebase):
+### Dependency status
 
-- **Architecture is single-container-per-session.** One `archie start` → one Docker
-  container (`archie-{session_id}`) → one `AgentHarness` → one agent loop → one
-  WebSocket. Subagents therefore run as **async tasks inside the parent's container**
-  (sharing filesystem, git checkout, credentials, event loop), NOT as separate
-  containers. A separate-container design was explicitly rejected as disproportionate
-  infrastructure for a solo-dev tool.
-- **`run_loop()` is fully injectable** (`agent/src/archie_agent/loop.py:80`): it takes
-  `messages`, `system`, `llm`, `interrupt`, `tool_config`, `execute_tool`,
-  `max_iterations`. A child agent is a direct reuse of `run_loop()` with a child system
-  prompt, child registry, and child llm client.
-- **The `skill` tool is the template** (`agent/src/archie_agent/skills.py:142`
-  `create_skill_tool`): a factory that closes over harness state and returns a
-  `ToolSpec`. The subagent tool follows the same shape.
-- **`_execute_tool` dispatches generically** (`agent/src/archie_agent/harness.py:356`, with
-  the generic branch at `:384`): `result = await spec.handler(**block.input)`. The subagent
-  tool needs no special-casing there (unlike `exec`).
-- **The harness does NOT currently hold the model catalog, region, or config.** `__init__`
-  (`harness.py:100-140`) receives only `session, llm_client, model_name, log_dir,
-  exec_python, exec_run_root`. The model-load chain and config live at module scope in
-  `app.py`'s `lifespan` (`app.py:91-95`, `115-120`) and are NOT passed to the harness. This
-  plan therefore MUST extend `AgentHarness.__init__` to receive what subagents need
-  (model catalog, region, subagent limits) — see Milestone 3.
-- **`exec` subprocess cancellation uses a SINGLE `self._active_proc` field**
-  (`harness.py:137`, `_on_proc_start:399`, `_cancel_active_proc:403`). Concurrent children
-  each running `exec` would clobber this single slot — the child dispatch MUST NOT reuse the
-  harness's `_active_proc`; each child needs its own active-proc tracking.
-- **`_build_tools()` is STATIC** (`prompt.py:70-80`): it emits the persona tools-strategy
-  file + aggregated guidelines and does NOT enumerate individual tools or mention `task`.
-  It is therefore safe to reuse verbatim in the child prompt (resolves the Milestone 2
-  open question).
-- **Tool execution in `run_loop` is strictly sequential** (`loop.py` per-tool loop).
-  Parallel subagents therefore need NEW fan-out code (`asyncio.gather` + semaphore) inside
-  the subagent tool handler — the loop itself stays sequential.
-- **Wire protocol is flat**, events keyed by `turn_index`, no parent/child concept
-  (`shared/src/archie_shared/events.py`, `PROTOCOL_VERSION = 1` at `events.py:21`). Nested
-  subagent progress requires new wire events tagged with a `parent_tool_use_id`, registered
-  in `_SERVER_EVENT_TYPES` (`events.py:407-419`) and dispatched in the TUI
-  (`cli/.../tui/app.py`, `_handle_event` at `:304`). Wire events are **frozen dataclasses**
-  with hand-written `to_json`/`from_json` (NOT msgspec — msgspec is only for config structs).
-  `deserialize_event` (`events.py:433-442`) special-cases session-level (no-`turn_index`)
-  classes in a hardcoded tuple `(SessionInfo, ModelSwitched, StatusUpdated)`; new subagent
-  events carry `turn_index` and MUST NOT be added to that tuple.
-- **`AgentConfig` is an empty placeholder** (`shared/src/archie_shared/schemas.py:30`) —
-  the natural home for subagent config.
-- **Cost/usage already exists**: `Session.record_usage(input_tokens, output_tokens,
-  cache_read_tokens=0, cache_write_tokens=0)` (`agent/src/archie_agent/session.py:111`) +
-  `calculate_cost()` (`models.py:199`).
-- **Child llm client construction pattern** (`agent/src/archie_agent/app.py:91-95`, at
-  module/lifespan scope): `load_models(home_dir()/"models.yaml")` → `get_model(catalog,
-  key)` → `create_llm_client(model, region)`. The default max iterations constant is
-  `_DEFAULT_MAX_ITERATIONS = 25` (`loop.py:54`, private — reference it explicitly).
+- **029 — Canonical Session Events and Usage Ledger:** complete. It replaced the old message-oriented session log and hand-written event stream with canonical `msgspec` events, append-before-broadcast persistence, canonical replay, request-backed costs, and scope-based subagent attribution.
+- **030 — GPT-5.6 Luna Prompt Caching and Billable Usage:** complete and archived at `plans/done/030-spec-gpt56-luna-prompt-caching.md`. It introduced structured prompts, `history_boundary`, billable token categories, cache-aware pricing, and model-specific request accounting.
+- **031 — Parallel Tool Calls:** implemented. `run_loop()` now dispatches tool calls from one provider response concurrently through an event-driven interrupt bridge. This plan must not duplicate that generic primitive.
 
-Design decisions (the seven open questions), resolved with the user before planning:
+### Current architecture
 
-1. **Providers** — child builds its own `create_llm_client` from its definition's
-   `provider`/`model`; falls back to `global.model`. Fully decoupled from parent.
-2. **UI** — read-only nested progress via new `parent_tool_use_id`-tagged wire events;
-   TUI shows an indented activity line + cumulative cost. No interjection in v1.
-3. **Questions** — subagents crack on; they cannot ask the user in v1. (Future: `can_ask`.)
-4. **Parallelism** — `asyncio.gather` + `asyncio.Semaphore(max_concurrent)`, default 3.
-5. **Cost/log** — reuse `Session.record_usage()`/`calculate_cost()`; usage tagged with the
-   subagent name; cumulative cost shown on the tool header.
-6. **Stop conditions** — per-subagent `max_iterations` (configurable, reuses loop cap);
-   depth guard: subagents CANNOT spawn subagents; optional session budget.
-7. **Prompt** — focused/role-scoped: child prompt = definition body + environment + its
-   own tools/skills catalog, EXCLUDING the primary identity/persona and tone slots.
+Nexus uses one container per session: `archie start` creates one container, one `AgentHarness`, one root agent loop, and one WebSocket-connected session. Children therefore run as async tasks inside the parent container and share the mounted workspace, checkout, credentials, event loop, and session log.
 
-Context model: **FRESH only** — each child starts with empty message history; the parent
-must pass all needed context in the task string. No history inheritance (fork) in v1.
+The root execution path is:
 
-Definition format (user-settled): `persona/agents/<name>.md`, YAML frontmatter with
-`name`, `description`, `provider`, `model`, `skills` (list); Markdown body = child system
-prompt. `persona/agents/` does not exist yet (greenfield).
+```text
+WebSocket MessageCommand
+  → AgentHarness.handle_message()
+  → run_loop()
+  → ToolRegistry / ToolSpec handler
+  → canonical event factory + append/broadcast
+```
 
----
+The relevant current files are:
+
+- `agent/src/archie_agent/loop.py` — pure tool loop; `run_loop()` and generic parallel batch dispatch
+- `agent/src/archie_agent/harness.py` — root session state, event consumption, tool dispatch, process cancellation, broadcast
+- `agent/src/archie_agent/app.py` — model/config loading, harness construction, WebSocket command routing
+- `agent/src/archie_agent/skills.py` — discovery and closure-based `skill` tool factory
+- `agent/src/archie_agent/tools.py` — `ToolSpec`, `ToolRegistry`, and provider-neutral tool configuration
+- `agent/src/archie_agent/prompt.py` — structured `SystemPrompt` and prompt fragment builders
+- `agent/src/archie_agent/event_log.py` — canonical `EventFactory` and persistence
+- `agent/src/archie_agent/session.py` — in-memory turns and live usage/context state
+- `shared/src/archie_shared/canonical_events.py` — canonical persisted/live event structs
+- `shared/src/archie_shared/session/log.py` — canonical append/replay and session accounting
+- `shared/src/archie_shared/session/accounting.py` — direct/inclusive scope cost aggregation
+- `shared/src/archie_shared/events.py` — legacy/live command and connection events; `InterruptCommand` lives here
+- `shared/src/archie_shared/schemas.py` — YAML configuration structs
+- `cli/src/archie_cli/tui/app.py` — canonical replay/live reducer and TUI state
+- `cli/src/archie_cli/tui/conversation.py` — conversation and iteration widgets
+- `cli/src/archie_cli/tui/models_provider.py` — command-palette provider pattern
+
+### Canonical scope contract from 029
+
+Canonical events use `scope: str | None` rather than separate parent-agent fields.
+
+- Root events have `scope=None`.
+- When a root `task` tool call has `tool_use_id=S`, every event produced by the child has `scope=S`.
+- Parentage is reconstructed from the launching tool call:
+
+```text
+parent_of(S) = tool_call(tool_use_id=S).scope
+```
+
+- A child request is uniquely identified by `(scope, turn_iteration, request_id)`.
+- Each child provider request emits exactly one canonical `llm_request` event.
+- `scope_direct_costs()` sums requests directly billed to each scope.
+- `scope_inclusive_costs()` rolls descendant scope costs through the launching tool-call chain.
+
+Do not reintroduce `parent_tool_use_id`, generic agent IDs, or a parallel flat `Subagent*` event protocol. The launching tool ID is represented by canonical `scope`.
+
+### Prompt and usage contracts from 030
+
+The prompt boundary is structured:
+
+```text
+SystemPrompt
+  static_system: identity/environment/tools/constant context
+  dynamic_system: loaded skills and other dynamic content
+```
+
+Child prompts must return the same `SystemPrompt` type and use the same provider interface as root prompts. `run_loop()` forwards `history_boundary` to providers that accept it. Cache metadata remains provider-owned and must not enter `Session.turns`, child task content, or canonical events.
+
+Usage fields are billable categories:
+
+- `input_tokens` — uncached input tokens
+- `cache_read_tokens` — cache-read input tokens
+- `cache_write_tokens` — cache-write input tokens
+- `output_tokens` — output tokens
+
+Total context input is derived as the sum of the three input categories. Child cost must be calculated with the child `ModelEntry.cost`, not the current parent session model. Cost is accounting data in the current agent and is not itself a termination condition.
+
+### Generic parallel dispatch from 031
+
+When one model response contains multiple tool calls, `run_loop()` already:
+
+- starts all handlers concurrently;
+- yields live `ToolResult` events as each completes;
+- preserves provider-facing result order by input position;
+- isolates handler exceptions into error results; and
+- uses the event-driven `interrupt_async` bridge and structured cleanup.
+
+The `task` handler has a separate responsibility: it bounds and tracks concurrent child `run_loop()` instances, provides child-specific scope and cancellation state, and combines child results. It must not add another generic batch executor to `loop.py` or modify plan 031's semantics.
+
+### Existing gaps
+
+The implementation has no child-agent discovery, child prompt builder, `task` tool, child model-client construction inside the harness, child event consumer, targeted interrupt protocol, child registry, or nested TUI state. The harness currently owns a single `_active_proc`; concurrent children must not reuse it. The harness constructor currently receives neither the model catalog nor subagent limits because those are loaded in `app.py`.
 
 ## Requirements
 
-### Agent definitions
-- MUST discover agent definitions from `persona/agents/*.md` at harness construction,
-  mirroring `discover_skills()`.
-  - AC: a well-formed `persona/agents/researcher.md` appears in the catalog; a malformed
-    file is skipped with a logged warning (not a crash).
-- Frontmatter fields: `name` and `description` MUST be required; `provider`, `model`,
-  `skills` MUST be optional.
-  - AC: a definition omitting `provider`/`model` resolves to the session's active model.
-  - AC: a definition listing `skills: [research]` makes only those skills available to the
-    child (see Skills scoping).
+### 1. Agent definition discovery
 
-### The `task` tool
-- MUST register a `task` tool on the harness registry alongside `exec` and `skill`.
-  - AC: `task` appears in `to_tool_config()` and the system prompt's tool list.
-- The tool MUST accept a list of one or more sub-tasks, each with `agent` (definition
-  name) and `prompt` (the task string), and run them, returning a combined result.
-  - AC: calling `task` with two sub-tasks runs both and returns both results labelled by
-    agent/index.
-  - AC: an unknown `agent` name returns an error result naming available agents (does not
-    crash the turn).
-- Each subagent MUST run `run_loop()` to completion (final assistant text) and that text
-  MUST become the sub-task's result content.
-  - AC: a subagent that produces final text `X` yields a tool result containing `X`.
+- MUST discover definitions from `persona/agents/*.md` at harness construction, following the discovery and warning conventions in `skills.py`.
+  - AC: a valid definition is present in the returned catalog keyed by its frontmatter `name`.
+  - AC: a missing `persona/agents/` directory returns an empty catalog without raising.
+- MUST require non-empty `name` and `description` frontmatter fields.
+  - AC: malformed YAML, missing delimiters, non-mapping frontmatter, or missing required fields causes a warning and skips only that file.
+- MUST accept optional `provider`, `model`, and `skills` fields.
+  - AC: omitted provider/model are represented as no override and omitted skills becomes an empty list.
+  - AC: `skills` is validated as a list of names; malformed values cause that definition to be skipped with a warning.
+- MUST resolve duplicate names deterministically.
+  - AC: duplicate names use sorted scan order with last-wins behavior and emit a warning naming both files.
+- MUST retain the Markdown body without YAML frontmatter for child prompt construction.
+  - AC: the body excludes both frontmatter delimiters and frontmatter text.
 
-### Provider/model independence
-- A subagent MUST use its definition's `provider`/`model` when present, else the session's
-  active model.
-  - AC: a definition specifying an Ollama model runs on Ollama while the parent is on
-    Bedrock (verified via the model_id on the child client).
+### 2. Root `task` tool contract
 
-### Focused prompt
-- The child system prompt MUST include the definition body, environment, and the child's
-  own tools/skills catalog, and MUST exclude the primary identity/persona and tone
-  sections.
-  - AC: the child prompt string contains the definition body and does NOT contain the
-    primary identity text.
+- MUST register a provider-neutral `task` `ToolSpec` in the root harness registry.
+  - AC: `task` appears in `ToolRegistry.to_tool_config()` with a documented input schema.
+  - AC: the root prompt's tool strategy remains compatible with the tool registry and no provider-specific schema is added.
+- MUST accept one or more task objects with required `agent` and `prompt` strings.
+  - AC: the public schema describes an array of `{agent, prompt}` objects and requires at least one item.
+  - AC: an empty list, missing task list, missing agent, non-string agent, or empty prompt returns a tool error without starting a child.
+- MUST return one combined, deterministic result labelled by input index and agent name.
+  - AC: output order follows input order even when children complete in another order.
+  - AC: each item identifies success, error, interruption, or truncation status and includes its result text.
+- MUST handle unknown agent names as per-task errors.
+  - AC: the error names the requested agent and lists available definitions; sibling tasks still execute.
+- MUST use the child final assistant text as the task result content.
+  - AC: a child that terminates with text `X` produces a parent tool result containing `X`.
+- MUST catch child exceptions and isolate them to the corresponding item.
+  - AC: one failing child does not cancel or remove successful sibling results.
+- MUST pass the launching root `tool_use_id` to the handler as internal execution context.
+  - AC: the public tool input schema does not require the model to provide a scope or tool-use ID, but child canonical events use the actual launching tool ID.
 
-### Skills scoping
-- A child MUST only be offered the skills named in its definition's `skills` list; an empty
-  or absent list means no skills.
-  - AC: the child's skills catalog section lists only declared skills.
+### 3. Fresh child execution
 
-### Parallelism & limits
-- Concurrent subagent execution MUST be bounded by a configurable `max_concurrent`
-  (default 3).
-  - AC: with `max_concurrent: 1`, two sub-tasks execute without exceeding one in-flight at
-    a time (observable via ordering/logging).
-- Each subagent MUST be bounded by a configurable `max_iterations` (default: the loop's
-  existing cap).
-  - AC: a runaway subagent stops at `max_iterations` and returns a truncation notice.
+- MUST run each child through the existing `run_loop()` with a fresh message list containing the task prompt as a user turn.
+  - AC: parent conversation history is not present in the child message list.
+  - AC: the child final response is collected from loop events rather than by calling a second provider API directly.
+- MUST provide a child tool registry containing `exec` and a scoped `skill` tool, but not `task`.
+  - AC: a child model receives no `task` tool definition.
+  - AC: a child can still run the existing exec tool and declared skills.
+- MUST prevent children from reaching user-input paths.
+  - AC: no child registry includes a tool or callback that prompts the TUI/user.
+  - AC: a child blocker is returned as assistant text or an error result.
 
-### Depth guard
-- A subagent MUST NOT be able to spawn further subagents.
-  - AC: the child registry does not contain the `task` tool.
+### 4. Model/provider selection
 
-### Observability
-- Each subagent's token usage MUST be recorded via `Session.record_usage()`.
-  - Child cost MUST be computed from the CHILD's `ModelEntry.cost` (a child may run on a
-    different provider/model than the parent), not the parent session model. `record_usage`
-    accumulates in-memory totals only and does NOT tag by agent; per-agent attribution lives
-    in the session transcript (see Session persistence) and in the tagged wire events, not
-    in `Session` totals.
-  - AC: session totals increase by the child's usage after a `task` call, priced by the
-    child's model.
-- The TUI MUST display read-only nested progress for running subagents, associated with the
-  spawning tool call, in the main conversation view. The default (collapsed) view shows, per
-  running child, a small rolling window (~3 lines) summarising current activity/status —
-  agent name, a live activity indicator, latest tool/text activity, and cumulative cost.
-  - AC: running a `task` shows an indented, multi-line (~3) activity block per child under
-    the tool call; each updates live and resolves when its subagent completes.
-- The TUI MUST offer a full-screen detail view of a single selected subagent showing its
-  LIVE output (streaming assistant text + its own tool calls/results as they happen).
-  - AC: with a `task` running, the user can open a picker, select a subagent, and watch its
-    text and tool activity stream in a full-screen view; closing it returns to the
-    conversation with inline progress intact.
-- Child streaming (text deltas + tool call/result) MUST be emitted on the wire tagged with
-  the spawning `parent_tool_use_id` and the subagent index, in addition to lifecycle/usage.
-  Streaming is ALWAYS emitted (not gated on a subscription and not behind a config flag);
-  clients decide what to render. The collapsed inline view consumes it as a rolling ~3-line
-  summary; the full-screen view renders it in full.
-  - AC: the wire carries per-child text/tool events distinguishable by
-    `(parent_tool_use_id, index)`, emitted regardless of whether any client has the
-    full-screen view open.
+- MUST construct a separate child LLM client.
+  - AC: child execution does not mutate the parent `_llm` client or active session model.
+- MUST use an explicit definition provider/model when both are supplied.
+  - AC: the resolved `ModelEntry` and client provider match the definition.
+- MUST use the current session `ModelEntry` when the definition omits provider/model.
+  - AC: a definition without overrides follows a parent model switch for children launched afterward.
+- MUST resolve models through the existing catalog and client construction path.
+  - AC: invalid provider/model configuration becomes a per-task error naming the unresolved model; it does not crash the parent turn.
+- MUST price all child requests from the resolved child `ModelEntry.cost`.
+  - AC: child requests using a different provider/model are priced with that model's normal/cache-read/cache-write/output rates.
+  - AC: a later parent model switch does not reprice persisted child `llm_request` events.
 
-### Interaction constraints
-- Subagents MUST NOT prompt the user; they complete autonomously or report a blocker in
-  their result.
-  - AC: no user-input path is reachable from a child loop.
+### 5. Focused structured prompt
 
-### Interrupt & cancellation
-- A user interrupt during a `task` call MUST be able to stop EITHER all in-flight subagents
-  OR one specific subagent (stopping the targeted loop(s) and any `exec` subprocesses they
-  started).
-  - AC (stop all): an untargeted interrupt mid-`task` stops every running child promptly;
-    the `task` result reports interruption; the session returns to idle.
-  - AC (stop specific): a targeted interrupt for one `(parent_tool_use_id, index)` stops
-    only that child; siblings continue and the batch still returns their results.
-- `InterruptCommand` MUST support an optional target `(parent_tool_use_id, subagent_index)`;
-  absent target means stop-all (today's behaviour, unchanged).
-  - AC: a targeted `InterruptCommand` sets only the matching child's interrupt event.
+- MUST add an explicit `build_subagent_prompt()` function in `agent/src/archie_agent/prompt.py`.
+  - AC: the function returns `SystemPrompt`, not a flattened string.
+  - AC: root `build_system_prompt_structured()` remains unchanged in shape.
+- MUST include the child definition body, environment, tool guidance, scoped skill catalog, session-snapshot project context, and dynamic loaded skill bodies.
+  - AC: static and dynamic content are placed in the correct `SystemPrompt` sections.
+  - AC: the child receives the `AGENTS.md` snapshot captured when the harness was constructed, not a fresh file read.
+- MUST exclude the primary identity/persona and tone sections.
+  - AC: the primary identity text is absent from the child static prompt.
+- MUST preserve 030 provider behavior.
+  - AC: child `run_loop()` passes `history_boundary` to providers whose `stream()` accepts it.
+  - AC: cache breakpoints, cache keys, and other provider metadata are not stored in child turns or canonical events.
 
-### Session persistence of subagent messages
-- Subagent messages MUST be persisted to the single session transcript, attributed to their
-  originating subagent, without corrupting concurrent writes.
-  - AC: `MessageEntry` carries `parent_tool_use_id` and `agent_id` (and index) for
-    child-originated lines; parent lines leave them null.
-  - AC: with two concurrent subagents writing, no line is torn/interleaved and every child
-    line is attributable by its fields. (On the single asyncio event loop `write_entry` is
-    synchronous with no internal `await`, so writes cannot interleave; no explicit lock is
-    required — see M10.)
+### 6. Skill scoping
 
-### Config
-- Subagent settings MUST live under the `agent` config section.
-  - AC: `agent.subagents.max_concurrent` and `agent.subagents.max_iterations` load from
-    `config.yaml`; absent config yields defaults.
+- MUST offer only skills declared by the child definition and present in the discovered catalog.
+  - AC: a definition with `skills: [research]` exposes only `research`.
+  - AC: an absent or empty list exposes no skills.
+- MUST create a fresh loaded-skills list for each child.
+  - AC: one child loading a skill does not change another child's prompt or the parent's loaded skills.
+- MUST warn and drop unknown skills at spawn time.
+  - AC: unknown names are absent from the child catalog and a warning includes the agent and skill name.
 
----
+### 7. Bounded child concurrency
 
-## Design
+- MUST bound in-flight child execution with `asyncio.Semaphore(max_concurrent)`.
+  - AC: `max_concurrent=1` never has two child provider requests active simultaneously.
+  - AC: the semaphore limits child jobs, not individual tool calls inside a child; child-local tool calls retain plan 031 behavior.
+- MUST preserve result ordering by task input index.
+  - AC: completion order may differ, but the combined result and model-facing tool result list are input ordered.
+- MUST configure the limit under `agent.subagents`.
+  - AC: absent configuration defaults to `max_concurrent=3`.
+  - AC: invalid non-positive values fail configuration validation rather than silently disabling the limit.
 
-### Where code lives
-- **`agent/src/archie_agent/agents.py`** (NEW) — agent definition discovery + the
-  `create_task_tool` factory. Mirrors `skills.py` structure (`AgentEntry` dataclass,
-  `discover_agents()`, `_parse_agent_file()`, `create_task_tool(...)`).
-- **`agent/src/archie_agent/prompt.py`** — add `build_subagent_prompt(...)` that omits the
-  identity/tone sections. Reuses `_build_environment`, `_build_tools` (static — safe as-is),
-  `_build_skills_catalog`, `_build_loaded_skills`, `_build_project_context`. Chosen over a
-  boolean flag on `build_system_prompt` to keep the two prompt shapes explicit.
-- **`agent/src/archie_agent/harness.py`** — (a) extend `__init__` to receive the model
-  catalog, region, and subagent limits; (b) extract a reusable child tool-dispatch helper;
-  (c) construct the agent catalog and register the `task` tool next to the skill tool
-  (~line 133).
-- **`agent/src/archie_agent/app.py`** — pass `_catalog`, `_config.global_.region`, and
-  `_config.agent.subagents` into `AgentHarness(...)` at `app.py:115`.
-- **`shared/src/archie_shared/events.py`** — new wire events (see Wiring): subagent
-  lifecycle (start/usage/end) AND per-child streaming (text delta + tool call/result), all
-  tagged with `parent_tool_use_id` + subagent index.
-- **`shared/src/archie_shared/commands.py`** (wherever `InterruptCommand` lives) — extend
-  `InterruptCommand` with an optional `target: (parent_tool_use_id, subagent_index)`.
-- **`shared/src/archie_shared/session/log.py`** — add `parent_tool_use_id` + `agent_id`
-  (+ index) to `MessageEntry`. `write_entry` (`log.py:53-63`) stays SYNCHRONOUS with no lock:
-  on the single event loop it has no internal `await`, so concurrent children cannot
-  interleave a write (see M10 / Session-persistence AC).
-- **`shared/src/archie_shared/schemas.py`** — `SubagentsConfig` struct + `subagents` field
-  on `AgentConfig`.
-- **`cli/src/archie_cli/tui/`** — dispatch new wire events in `app.py` `_handle_event`
-  (`:304`); render inline COLLAPSED per-child activity (~3 rolling lines) in the
-  conversation/iteration block widgets; add the FIRST `ModalScreen` (full-screen subagent
-  detail) + a `SubagentProvider` command-palette picker; wire targeted + stop-all interrupt
-  actions.
+### 8. Shared agent termination and protection policy
 
-### Reuse, don't re-decide
-- Child agent execution reuses `run_loop()` verbatim; only its inputs differ.
-- Child llm client uses the existing `load_models`/`get_model`/`create_llm_client` chain.
-- Child registry is `create_registry()` (exec) + a scoped `skill` tool, but NOT the `task`
-  tool (depth guard).
-- Child usage reuses `Session.record_usage()`, but cost is computed from the CHILD's
-  `ModelEntry.cost` (via `calculate_cost()`), not the parent session model — a child may run
-  on a different provider. `record_usage` totals are NOT agent-tagged; per-agent attribution
-  lives in the transcript + wire events.
-- Child streaming/lifecycle reaches the wire ONLY via the harness `_broadcast` callable
-  threaded into `create_task_tool`; the child loop is its own event consumer inside the tool
-  handler (see M4/M8). Streaming is emitted ALWAYS (not gated, no flag).
-- New wire events follow the existing frozen-dataclass + `to_json`/`from_json` +
-  `_SERVER_EVENT_TYPES` registration pattern exactly.
+- MUST run children with the same `run_loop()` termination policy as the root agent.
+  - AC: child calls use the existing loop default (`loop._DEFAULT_MAX_ITERATIONS`, currently `100`) by omitting a child-specific override or by passing the same shared agent value.
+  - AC: there is no `agent.subagents.max_iterations` setting and no child-specific iteration default.
+- MUST apply the same duration and subprocess timeout mechanisms to child work as to root work.
+  - AC: child provider calls use the existing provider client timeout behavior, and child `exec`/shell/web calls use their existing tool timeout behavior.
+  - AC: the task feature does not add a separate child duration timer or timeout policy.
+- MUST treat cost consistently between root and child execution.
+  - AC: child usage is recorded and priced per request using the resolved child model, while cost remains accounting data rather than an independent child termination condition.
+  - AC: any future agent-wide duration, iteration, or cost guard is implemented at the shared root/child execution boundary and applies to both uniformly.
+- MUST preserve normal `run_loop()` terminal event semantics.
+  - AC: a child reaching the existing loop iteration cap emits a canonical scoped terminal error event and cannot leave a live child task behind.
 
-### Deviations from established patterns
-- **Parallel fan-out is new**: the existing loop runs tools sequentially. The `task`
-  handler introduces `asyncio.gather` + `asyncio.Semaphore`. This is contained entirely
-  within the tool handler; the loop is untouched.
-- **Nested wire events are new**: the flat protocol gains events carrying
-  `parent_tool_use_id` + subagent index, including per-child STREAMING (text/tool), not just
-  lifecycle. `PROTOCOL_VERSION` MUST be bumped to 2 and both agent and cli updated in
-  lockstep (they ship together).
-- **Harness constructor grows**: `AgentHarness.__init__` gains the model catalog, region,
-  and subagent limits (previously module-scope in `app.py`). This is a deliberate,
-  contained widening of the constructor — all existing call sites (tests included) must be
-  updated with the new optional/required params.
-- **First TUI `ModalScreen`**: no screen/modal infrastructure exists today (flat
-  single-screen app). The full-screen subagent view introduces the first `ModalScreen` and
-  the first per-subagent view-state (the app's turn/tool state is currently flat
-  single-agent fields).
-- **`InterruptCommand` gains a target**: today interrupt is untargeted (stop everything).
-  A targeted variant routes to a single child's interrupt event; untargeted stays stop-all.
-- **Session log schema grows (no lock)**: `MessageEntry` gains attribution fields. Unlike an
-  earlier draft, `write_entry` does NOT gain a lock — the single-event-loop sync write can't
-  interleave. Existing single-agent writes are unaffected (new fields null).
-- **Child dispatch owns isolated state**: unlike the harness's single `_active_proc` /
-  shared `_pending_tools`, each concurrent child gets its OWN active-proc slot and pending-
-  tool map so children don't clobber each other (see M3).
+### 9. Canonical scoped events
 
----
+For every child launched from root task tool-use ID `S`:
+
+- MUST use `scope=S` for all child canonical events.
+  - AC: child `iteration_start`, `llm_request`, `tool_call`, `tool_result`, `assistant_message`, and terminal turn events decode with `scope=S`.
+- MUST create one canonical `llm_request` for every child provider request.
+  - AC: request ID, `turn_iteration`, model key, status, duration, billable tokens, and cost are present on exactly one record.
+- MUST use a child `EventFactory` initialized with the session log path, resolved child model key, resolved child `ModelEntry`, and `scope=S`.
+  - AC: the child model key and cost remain correct if the parent switches models later.
+- MUST use the parent turn number and child-local request iteration when constructing `turn_iteration`.
+  - AC: root and child may both have `2.1`; their scopes distinguish them.
+- MUST emit child `text_delta` as a live-only canonical event with child scope.
+  - AC: deltas are broadcast but never appended to the persisted event log.
+- MUST append every persisted child event before broadcasting its exact serialized JSON.
+  - AC: a client never receives a persisted child event that is absent from the log.
+- MUST retain the root `task` `tool_call` and `tool_result` in root scope.
+  - AC: the child scope is discoverable from the root tool call's `tool_use_id`.
+- MUST NOT add child attribution fields to `MessageEntry`.
+  - AC: canonical replay and scope accounting work without `agent_id`, `parent_tool_use_id`, or `subagent_index` fields on legacy message entries.
+
+### 10. Accounting and replay
+
+- MUST use canonical `llm_request` events as the authoritative child accounting source.
+  - AC: `session_accounting()` includes child costs in total session cost.
+  - AC: direct and inclusive scope helpers return expected child and root totals.
+- MUST preserve billable usage categories from 030.
+  - AC: cache-read/cache-write tokens are not added to normal input tokens before pricing.
+  - AC: context-token reporting uses the derived total context input.
+- MUST persist child canonical events to the same session log.
+  - AC: `/events` replay returns child events in append order after reconnect.
+- MUST tolerate concurrent child producers on the single event loop without torn records.
+  - AC: every persisted JSONL line decodes successfully and each event has a unique ULID.
+
+### 11. Live TUI observability
+
+- MUST emit child scoped events to all connected clients without a detail-view subscription.
+  - AC: child text/tool activity is available to both the collapsed view and detail view.
+- MUST render each active child beneath its launching root `task` call.
+  - AC: the collapsed block identifies agent name, running/completed/error state, latest text/tool activity, and direct cumulative cost.
+  - AC: two concurrent children have separate state and rolling activity windows.
+- MUST use canonical `LLMRequest` events for displayed costs.
+  - AC: the TUI does not recalculate child cost from the current parent model.
+- MUST provide a full-screen selected-child view.
+  - AC: a picker can select an active/known child scope; the modal shows live child text and tool calls/results; closing preserves inline state.
+- MUST use canonical replay for persisted child activity.
+  - AC: reconnect reconstructs persisted child assistant/tool/ledger state; live-only deltas are not required to be reconstructed.
+
+### 12. Targeted interruption
+
+- MUST extend `InterruptCommand` in `shared/src/archie_shared/events.py` with an optional target `(scope, subagent_index)`.
+  - AC: target commands serialize and deserialize without losing either field.
+  - AC: no target preserves existing stop-all turn semantics.
+- MUST maintain a live child registry keyed by `(scope, index)`.
+  - AC: an active entry contains its threading interrupt event, async interrupt bridge, and subprocess cancellation callback.
+- MUST stop only the selected child for a targeted command.
+  - AC: the target event and cancellation callback are invoked; siblings and the parent task continue.
+- MUST stop all children and the parent for an untargeted command.
+  - AC: every child event is set, every child subprocess callback is invoked, and no child task remains after the parent returns.
+- MUST perform registry lookup and cancellation without an intervening `await`.
+  - AC: a targeted action cannot race with deregistration between lookup and signal.
+- MUST treat stale targets as no-ops.
+  - AC: a finished child target logs at debug level or remains silent and does not affect siblings.
+
+### 13. Configuration and compatibility
+
+- MUST add `SubagentsConfig` under `AgentConfig` without introducing a dependency from `archie_shared` to `archie_agent`.
+  - AC: `agent.subagents.max_concurrent` loads from YAML with a shared-owned default of `3`.
+  - AC: there is no subagent-specific iteration, duration, or cost limit in the config schema.
+  - AC: absent `agent.subagents` is accepted and children inherit the same agent-wide protection behavior as root execution.
+- MUST preserve root single-agent behavior.
+  - AC: existing root tool dispatch, prompt caching, canonical replay, model switching, and session accounting tests remain green.
+- MUST ship shared, agent, and CLI command/event changes in lockstep.
+  - AC: targeted commands and scoped events are understood by the current agent and TUI clients.
+
+## Technical Design
+
+### Overview
+
+Implement the feature as a child-execution subsystem behind the root `task` `ToolSpec`. Agent discovery and child execution helpers live in a new `agents.py`; prompt construction stays in `prompt.py`; the harness owns session-wide dependencies, child lifecycle state, cancellation routing, and broadcast; `EventFactory` remains the canonical persistence boundary. The child loop is consumed inside the task handler because the handler must translate each child event into scoped canonical events while the parent tool call is still active.
+
+The root loop remains generic. It sees `task` exactly like any other `ToolSpec`; plan 031 handles concurrency among sibling root tool calls, while the task implementation controls how many child loops may run simultaneously.
+
+### Technical Stack
+
+- Reuse Python `asyncio`, `threading.Event`, `asyncio.Event`, and `asyncio.Semaphore`; no new runtime dependency.
+- Reuse `yaml` and the parser conventions in `skills.py` for agent definitions.
+- Reuse `ToolSpec` and `ToolRegistry` from `tools.py`.
+- Reuse `run_loop()` and the provider-neutral `LLMClient` interface.
+- Reuse `create_llm_client()`, `get_model()`, and the loaded model catalog from `app.py`.
+- Reuse `SystemPrompt` and structured prompt fragments from 030.
+- Reuse `EventFactory`, canonical `msgspec` events, `append_event()`, and scope accounting from 029.
+- Reuse existing pytest/pytest-asyncio tests and fake LLM client. No new test framework or serialization library.
+- Keep `archie-shared` standalone: it may define the configuration shape and nullable override, but it must not import agent loop constants or any package-specific implementation module.
+
+### Architecture
+
+**Root harness**
+
+Owns the active parent session, root model/client, model catalog, region, subagent limits, root registry, connected clients, parent interrupt state, and live child registry. It creates the `task` factory closure and supplies the broadcast and canonical-log callbacks.
+
+**Agent catalog**
+
+`agents.py` discovers immutable `AgentEntry` values at harness construction. The catalog is session-constant, like the skill catalog. Agent body text is immutable; child loaded-skill state is per invocation.
+
+**Task handler**
+
+`create_task_tool()` validates the public input, resolves the launching tool-use ID from internal execution context, creates one child coroutine per task, applies the semaphore, gathers ordered results, and cleans up registry entries. It does not know provider-specific request formats.
+
+**Child runner**
+
+A child runner resolves a model, creates a scoped prompt and registry, creates isolated cancellation state, runs `run_loop()`, consumes child events, persists/broadcasts canonical events, records live context usage, and returns a normalized result. Each runner has an isolated child dispatch object for tool execution and subprocess cancellation.
+
+**Canonical event path**
+
+The child runner uses `EventFactory(scope=S)`. Persisted events are appended to the same session log before `_broadcast_raw(serialized)`. Live-only text deltas are constructed with the same scope and broadcast without append. The TUI consumes the resulting canonical events; no separate subagent wire representation is introduced.
+
+**TUI**
+
+The TUI maintains child state keyed by `(scope, index)` for live presentation and links it to the root task by `scope`. Persisted canonical events remain keyed by scope and canonical IDs. The collapsed view retains only a rolling activity window; the detail view can retain the full live buffer for currently known children.
+
+### Components
+
+**`agent/src/archie_agent/agents.py` — new**
+
+- `AgentEntry`: name, description, provider override, model override, skills, body, path.
+- `discover_agents()`: scan `persona_dir() / "agents" / "*.md"` in deterministic order.
+- `_parse_agent_file()`: frontmatter/body extraction and validation.
+- `ChildDispatch`: isolated registry, pending state, active process, and cancellation callback.
+- `create_task_tool()`: root task `ToolSpec` factory and bounded child execution.
+- Child event-consumption helpers only where they are reusable and independent of harness state.
+
+**`agent/src/archie_agent/prompt.py` — modified**
+
+Add `build_subagent_prompt()` returning `SystemPrompt`. It reuses `_build_environment`, `_build_tools`, `_build_skills_catalog`, `_build_loaded_skills`, and project-context formatting, but intentionally omits `_build_identity()`.
+
+**`agent/src/archie_agent/harness.py` — modified**
+
+- Accept and store model catalog, region, and `SubagentsConfig`.
+- Discover agents and create the root task registry entry.
+- Expose the launching tool-use ID and parent turn context to the task handler without adding those fields to the public schema.
+- Own the live child registry and route targeted/untargeted interrupts.
+- Supply canonical log/broadcast callbacks.
+
+**`agent/src/archie_agent/app.py` — modified**
+
+Pass `_catalog`, `_config.global_.region`, and `_config.agent.subagents` into `AgentHarness`. Route `InterruptCommand.target` to targeted harness interruption while preserving no-target stop-all behavior.
+
+**`agent/src/archie_agent/event_log.py` — modified minimally**
+
+Reuse `EventFactory` as-is where possible. Add only child-loop construction helpers needed to emit scoped request, iteration, tool, assistant, and terminal events without duplicating cost calculation or serialization.
+
+**`shared/src/archie_shared/schemas.py` — modified**
+
+Add `SubagentsConfig` with defaults and `AgentConfig.subagents` using `msgspec.field(default_factory=...)`.
+
+**`shared/src/archie_shared/events.py` — modified**
+
+Extend `InterruptCommand`; retain canonical persisted event definitions in `canonical_events.py` as the source of child event schema. A new event type is allowed only if an actual lifecycle fact cannot be represented by existing scoped events, and must be explicitly classified persisted/live-only.
+
+**CLI/TUI — modified**
+
+Extend canonical live-event dispatch, child state, rolling activity rendering, picker, modal screen, and targeted interrupt command creation. Follow the command-palette `ModelProvider` pattern for child selection.
+
+### Data Model
+
+**`AgentEntry`** — in-memory, session lifetime
+
+- `name: str`, required and unique within catalog
+- `description: str`, required
+- `provider: str | None`, optional
+- `model: str | None`, optional
+- `skills: list[str]`, required in memory, defaults empty
+- `body: str`, required, frontmatter-free
+- `path: Path`, required source path
+
+**`SubagentsConfig`** — YAML/config lifetime
+
+- `max_concurrent: int = 3`, required after shared-schema defaulting, must be positive
+- No `max_iterations` field; children inherit the root `run_loop()` default and any future agent-wide protection policy
+
+**`ChildState`** — one active task invocation, ephemeral
+
+- `scope: str`, the launching root `tool_use_id`
+- `index: int`, input task index
+- `agent_name: str`
+- `interrupt: threading.Event`
+- `interrupt_async: asyncio.Event`
+- `cancel_process: Callable[[], None]`
+- child task reference and completion status
+
+The registry exists only while the child is running and is removed in a `finally` block. Canonical event records are the durable state; no separate child database or message log is created.
+
+**Canonical child events** — session-log lifetime
+
+Existing canonical types carry `scope` and are used without flat subagent fields: `IterationStart`, `TextDelta` live-only, `LLMRequest`, `ToolCall`, `ToolResult`, `AssistantMessage`, `TurnComplete`, `TurnError`, and `TurnInterrupted`.
+
+### Data Flow
+
+**Single child — success**
+
+1. Root provider requests `task`; root loop emits root `ToolCall` with `tool_use_id=S`.
+2. Harness dispatch invokes the task handler with internal launch context `S`.
+3. Handler resolves the definition/model, creates child state, scoped registry, structured prompt, and `EventFactory(scope=S)`.
+4. Child `run_loop()` begins with one fresh user turn containing the task prompt.
+5. For each child event, the child consumer broadcasts live text/tool events and persists canonical replayable events before broadcasting them.
+6. On child `Usage`/`RequestFinished`, the consumer records live usage and creates the child-model-priced `LLMRequest`.
+7. On child terminal completion, the consumer persists scoped assistant/turn events and returns final text.
+8. The task handler returns the labelled result to the root loop; root handling persists/broadcasts the root `ToolResult`.
+
+**Multiple children**
+
+1. Handler validates all inputs and creates one coroutine per valid task.
+2. Each coroutine waits on the task semaphore.
+3. Each child gets independent model, prompt, registry, interrupt, process, event factory, and result accumulator.
+4. Child events may arrive in completion order; canonical append order is the actual event-loop append order.
+5. `gather()` returns result slots in input order; the handler formats a deterministic combined result.
+
+**Targeted interruption**
+
+1. TUI sends `InterruptCommand(target=(scope, index))`.
+2. WebSocket command deserializes the target and calls harness targeted interruption.
+3. Harness performs an atomic synchronous registry lookup/action: set child threading event, set child async event on the owning loop, and invoke its process cancellation callback.
+4. Child loop repairs its tool history and emits scoped interruption/terminal events.
+5. Sibling child coroutines and the root task continue.
+
+**Stop-all interruption**
+
+1. TUI sends no-target `InterruptCommand`.
+2. Harness sets root interrupt and async bridge, then signals every live child and cancels every child process.
+3. Plan 031's root batch cleanup and each child runner await all pending tasks.
+4. Root `run_loop()` emits the existing interruption behavior; the task result contains interrupted child items; the harness returns idle with no live child registry entries.
+
+**Failure paths**
+
+- Unknown definition → labelled task error; no child state created.
+- Model resolution/client construction failure → labelled task error; siblings continue.
+- Child provider error → scoped canonical request error and labelled task error; siblings continue.
+- Canonical append failure → do not broadcast the failed persisted event; child becomes an error and the parent receives a labelled failure. Do not emit a noncanonical substitute.
+- Child subprocess failure → child tool returns its normal error content; child may continue if the loop does so; targeted cancellation kills its process group.
+- Client disconnect → child execution continues because canonical events are session-owned; later clients recover persisted events through replay.
+
+### Error Handling and Edge Cases
+
+- Missing agent directory → empty catalog; root task reports no available agents.
+- Malformed definition → warning and skip only the malformed file.
+- Duplicate definition name → deterministic last-wins catalog entry and warning.
+- Unknown skill → warning, drop that skill, continue spawning the child.
+- Empty task prompt → per-task validation error; do not call the provider.
+- Unknown agent → per-task error listing available names; siblings continue.
+- Explicit model not in catalog → per-task error; parent turn continues.
+- Child raises before first provider request → no partial child result; return labelled error and clean registry.
+- Child reaches the existing root loop iteration cap → emit scoped terminal error and return truncation notice.
+- Child returns malformed tool result ID → child dispatch normalizes it to the input tool-use ID and reports an error, following plan 031's correlation invariant.
+- Two children use equal-looking tool blocks or provider IDs → isolated dispatch state keeps them distinct by child and tool-use ID.
+- Two children append at the same event-loop point → synchronous append operations serialize complete JSONL writes; each event receives a unique ULID.
+- Target finishes before command arrives → no-op.
+- Targeted child interrupted while in `exec` → set loop interrupt and kill only that child's process group.
+- Parent stop-all while child is waiting on provider stream → set both interrupt mechanisms and await child cleanup.
+- Client reconnects during a child → persisted canonical events replay; already-emitted live-only text deltas are not required to replay.
+- Parent model switches after child launch → child event factory retains its resolved model key/cost; no historical repricing.
+- Provider supports no `history_boundary` parameter → `run_loop()`'s existing signature inspection omits that argument.
+
+### External Integrations
+
+**Model catalog/provider clients**
+
+- Purpose: construct independent child LLM clients.
+- Pattern: synchronous model lookup followed by provider client construction; child requests run through existing threaded provider streaming bridge.
+- Constraints: use the catalog and region already loaded by `app.py`; no child-specific credentials or container.
+- Failure: invalid model/provider is a per-task error; provider stream errors are scoped child errors; no retry policy is added beyond existing provider behavior.
+
+**Session canonical event log**
+
+- Purpose: durable child event persistence, replay, and accounting.
+- Pattern: synchronous append of canonical serialized JSONL on the agent event loop, append before broadcast.
+- Constraints: same session path, unique ULIDs, canonical decoding, no legacy `MessageEntry` records.
+- Failure: failed append prevents broadcasting that persisted event and terminates the affected child/turn according to 029's canonical error rules.
+
+**WebSocket clients**
+
+- Purpose: live canonical event delivery and interrupt commands.
+- Pattern: existing `_broadcast_raw()`/`_broadcast()` fan-out and `InterruptCommand` serialization.
+- Constraints: agent and CLI changes ship together; clients may ignore unrecognized future event types but current scoped types must be understood.
+- Failure: disconnected clients are removed from broadcast; child work continues and replay recovers persisted state.
+
+### Code Structure
+
+Use the following locations and existing patterns:
+
+- New `agent/src/archie_agent/agents.py`, following `skills.py`'s dataclass/discovery/factory structure.
+- New `persona/agents/` directory with a small example definition used by tests and manual verification.
+- Extend `agent/src/archie_agent/prompt.py`, following the separate public prompt-builder functions and `SystemPrompt` structure from 030.
+- Extend `agent/src/archie_agent/harness.py`, following the existing root `_execute_tool`, `_on_proc_start`, `_cancel_active_proc`, and `_broadcast` boundaries without sharing their mutable process slot.
+- Extend `agent/src/archie_agent/app.py` at lifespan harness construction and WebSocket interrupt routing.
+- Extend `shared/src/archie_shared/schemas.py` using existing `msgspec.Struct` config conventions.
+- Extend `shared/src/archie_shared/events.py` using its existing frozen dataclass command serialization conventions.
+- Extend `cli/src/archie_cli/tui/app.py` and `conversation.py`; use `models_provider.py` as the command-palette picker pattern and Textual `ModalScreen` for detail view.
+- Add tests under the established `tests/` directory: `test_agents.py`, `test_task_tool.py`, `test_subagent_events.py` or canonical event tests, `test_subagent_interrupt.py`, and focused TUI tests. Extend `test_harness.py`, `test_loop.py`, `test_config*.py`, and canonical accounting/replay tests where the behavior crosses existing seams.
+
+### Patterns and Conventions
+
+- Use `logging.getLogger(__name__)` and warnings matching `skills.py` for malformed definitions and unknown skills.
+- Use immutable dataclasses for in-memory definition/state values where mutation is not required; use explicit mutable per-child state only for interrupt/process/result accumulation.
+- Use provider-neutral `ToolSpec` schemas; do not put provider-specific payload shapes into the task tool.
+- Use canonical `EventFactory` and `append_event()` rather than hand-building JSON or adding a second persistence path.
+- Keep public schemas explicit; internal launch context may be carried by a closure or execution-context object, but must not be exposed as a model-required field.
+- Use `asyncio.create_task()`/`gather()` with `return_exceptions` or equivalent per-child normalization; ensure all tasks are awaited in `finally`.
+- Use `threading.Event` for provider stream cancellation and `asyncio.Event` for async batch wake-up, matching plan 031.
+- Keep child subprocess cancellation process-group based, matching the root `_cancel_active_proc()` behavior, but store it per child.
+- Unit-test public seams: discovery result, prompt object, task handler result, canonical event log, interrupt command, and TUI reducer state. Do not test private implementation details when an observable seam exists.
+
+### Infrastructure and Deployment
+
+- No new container, service, database, environment variable, secret, or runtime dependency.
+- The shared schema does not own agent termination defaults. Children call the same root loop policy; no sentinel or agent import is needed.
+- No database migration is needed.
+- No session-log migration is implemented; 029 canonical-session startup rules continue to apply.
+- Agent/shared/CLI packages ship together when command or canonical event interfaces change.
+- Configuration is read from the existing `<ARCHIE_HOME_DIR>/config.yaml` under `agent.subagents`.
+
+### Non-Functional Concerns
+
+- **Isolation:** child subprocesses and pending-tool maps must be independently cancellable and must not overwrite root or sibling state.
+- **Reliability:** all child tasks and provider worker threads must be awaited or terminated before task completion; no orphaned asyncio tasks or child subprocesses may remain.
+- **Accounting correctness:** every provider request emits one child-model-priced canonical request record; no current-model repricing is allowed.
+- **Observability:** warnings identify malformed definitions/skills; canonical scoped events expose child request, tool, terminal, and cost state; targeted cancellation is visible through child terminal events.
+- **Performance:** child concurrency is bounded by `max_concurrent`; no additional global semaphore or provider request limit is introduced beyond existing configuration. Child duration and iteration behavior remain the existing root/provider/tool behavior.
+- **Protection policy:** the feature introduces no divergent child duration, iteration, or cost guard. Existing controls and any future agent-wide controls apply uniformly to root and child loops.
+- **Data handling:** task prompts and child outputs are session data and follow existing session-log/provider handling. Cache metadata remains private to providers and is never persisted.
+
+### Key Decisions
+
+- Canonical scope over flat parent/index wire fields: 029 already defines scope as the stable relationship between a launching tool call and child requests, and it enables nested cost aggregation without another protocol hierarchy.
+- Existing canonical event types over new `Subagent*` types: child activity already maps to iteration, text, request, tool, assistant, and terminal events; adding parallel types would force the replay/TUI/metrics stack to maintain duplicate reducers.
+- Child `EventFactory` over `Session.record_usage()` as the source of truth: 029 persists immutable request model/cost data, while session totals are only live convenience state. The child uses the same termination policy as the root loop rather than introducing a second limit surface.
+- Structured child prompts over flattened strings: 030's provider boundary must remain usable for cache-aware Responses requests and ordinary Converse/Ollama requests.
+- Child-local semaphore over a loop-level limit: 031 intentionally leaves tool-specific concurrency to the tool implementation, and a child task is the unit that must be bounded.
+- Same-container async children over child containers: the current session architecture provides the required shared workspace and event loop without new orchestration infrastructure.
+- No child recursion in v1 despite canonical nested-scope support: it bounds lifecycle complexity while preserving a compatible scope model for a future version.
+- Provider/model overrides from the existing catalog over arbitrary dynamic provider construction: this reuses validated model definitions, credentials, region, cache capabilities, and cost configuration.
+
+### Risks and Open Questions
+
+**Risks**
+
+- Concurrent child event volume can increase synchronous session-log append latency. This is acceptable for v1 because 029 deliberately chose synchronous append ordering; buffering requires a separate plan.
+- A provider stream can remain blocked despite an interrupt. The existing daemon-thread behavior remains; subprocesses are explicitly killed, and the child cleanup path must not leak asyncio tasks.
+- Live-only child deltas are unavailable after reconnect. This is acceptable because persisted canonical assistant/tool/request events are authoritative for replay; the UI must show partial live state rather than inventing missing deltas.
+- A client older than the revised CLI may not render child scopes. Agent and CLI are shipped together for this feature; no compatibility negotiation is added.
+
+**Open questions resolved for implementation**
+
+- Scope identifier: launching root `task` tool-use ID.
+- Child persistence: canonical scoped events in the existing session log, not `MessageEntry`.
+- Cost source: resolved child `ModelEntry.cost` on canonical request creation.
+- Fan-out owner: task handler semaphore; generic root tool batching remains in `run_loop()`.
+- Child context: fresh task prompt only.
+- Child interaction: no user questions and no recursive task tool.
 
 ## Milestones
 
-### 1. Agent definition discovery
-Approach:
-- Create `agent/src/archie_agent/agents.py` modelled on `skills.py:32-134`. Define
-  `AgentEntry` (name, description, provider, model, skills, body, path) and
-  `discover_agents() -> dict[str, AgentEntry]` scanning `persona_dir()/agents/*.md`.
-- Parse YAML frontmatter with `yaml` (already a dep, used by skills). `name` +
-  `description` required; `provider`/`model`/`skills` optional. `skills` defaults to `[]`.
-- ⚠️ Malformed files MUST be skipped with a logged warning, matching `_parse_skill_file`
-  behaviour — never raise during discovery.
-Edge cases:
-- Missing `persona/agents/` dir: return empty catalog (no error).
-- Duplicate `name` across files: last-wins, log a warning.
-- `skills` referencing an unknown skill: keep it in the entry; resolution/filtering happens
-  at spawn time (Milestone 4), warn there.
-Tasks:
-- Add `AgentEntry` dataclass and discovery/parse functions.
-- Create `persona/agents/` with one example definition (e.g. `researcher.md`) for testing.
-- Unit tests: well-formed parse, malformed skip, missing dir, duplicate name.
-Deliverable: `discover_agents()` returns a catalog from `persona/agents/*.md`.
-Verify: `pytest tests/test_agents.py` (new) passes, covering the four cases above.
+### 1. Agent definition discovery and catalog
 
-### 2. Focused subagent system prompt
 Approach:
-- In `prompt.py`, add `build_subagent_prompt(model_name, body, workspace_dir=str(WORKSPACE),
-  *, catalog=None, loaded_skills=None)` assembling `[body, _build_environment(model_name,
-  workspace_dir), _build_tools()]` + scoped skills catalog (`_build_skills_catalog`) +
-  AGENTS.md context (`_build_project_context`) + loaded skill bodies. It omits
-  `_build_identity()`. Chosen as a separate function (not a flag) to keep the two prompt
-  shapes explicit.
-- `_build_tools()` is STATIC (verified `prompt.py:70-80`: strategy file + guidelines, no
-  per-tool enumeration, no `task` mention) — reuse verbatim, no change needed.
-Tasks:
-- Add `build_subagent_prompt`.
-- Unit test asserting the child prompt contains the body, INCLUDES the universal sections
-  (environment + tools + project-context), and excludes identity text.
-Deliverable: a function producing a focused child system prompt.
-Verify: `pytest` — new test asserts body present, project-context/environment/tools present,
-identity absent.
 
-### 3. Harness threading + reusable child tool-dispatch
+- Create `agent/src/archie_agent/agents.py` following the immutable `SkillEntry` and parser conventions in `agent/src/archie_agent/skills.py`.
+- Scan `persona_dir() / "agents"` for `*.md` files in sorted path order; do not recursively scan.
+- Parse YAML using the existing `yaml` dependency. Split on the first two `---` delimiters so the body can contain later horizontal rules.
+- Store `AgentEntry` values with frontmatter-free body text and source path.
+- Test seam: `discover_agents()` and `_parse_agent_file()` outputs/logging, not filesystem implementation details.
+- ⚠️ Discovery occurs at harness construction, so changes to agent files affect new sessions only.
+
+Edge Cases:
+
+- Missing directory → return empty catalog.
+- Unreadable file → warning and skip.
+- Malformed YAML/frontmatter/body → warning and skip.
+- Duplicate name → sorted last-wins entry and warning.
+- Empty body → valid definition; the role may rely on the task prompt.
+
+Tasks:
+
+- Add `AgentEntry` and parsing/discovery functions.
+- Add `persona/agents/researcher.md` example with valid frontmatter.
+- Add tests for valid parse, body extraction, missing directory, malformed files, duplicate names, optional fields, and warnings.
+
+Deliverable: `discover_agents()` returns a validated catalog of usable agent definitions from `persona/agents/*.md`.
+
+Verify: `uv run pytest tests/test_agents.py -q`; inspect a test-created catalog and assert malformed files are absent and warnings are recorded.
+
+### 2. Structured focused child prompt
+
 Approach:
-- Extend `AgentHarness.__init__` (`harness.py:100`) to receive `model_catalog: dict[str,
-  ModelEntry]`, `region: str`, and `subagents: SubagentsConfig` (or the two ints). Default
-  them to keep existing tests working, but update `app.py:115` to pass `_catalog`,
-  `_config.global_.region`, and `_config.agent.subagents`. Store on self for the task
-  factory closure.
-- Extract child tool-dispatch into a standalone helper (module function in `agents.py` or a
-  small class) that takes a registry + per-child exec config and returns an
-  `execute_tool(block) -> ToolResultBlock` coroutine. It mirrors `harness._execute_tool`
-  (`:356`) BUT owns its OWN state — it MUST NOT touch `harness._active_proc` (single field,
-  `:137`, would be clobbered by concurrent children) NOR the harness `_pending_tools` map
-  (`harness.py:243/261`, keyed by `tool_use_id` — concurrent children would collide). Each
-  child dispatch owns its own active-proc slot AND its own pending-tool map.
-- ⚠️ The child dispatch's `exec` branch needs its own `on_start`/`_active_proc`/cancel
-  wiring so each child can cancel its own subprocess independently. Model it on
-  `_on_proc_start:399` / `_cancel_active_proc:403` / `_kill_proc:420` but per-child.
-- Reuse the harness's exec runner config (`_exec_python`, `_exec_run_root`) so child `exec`
-  runs against the same runtime.
+
+- Add `build_subagent_prompt()` to `agent/src/archie_agent/prompt.py`; follow `build_system_prompt_structured()` and return `SystemPrompt` with static and optional dynamic sections.
+- Static content must be assembled from the definition body, `_build_environment()`, `_build_tools()`, filtered `_build_skills_catalog()`, and `_format_project_context(agents_context)`.
+- Dynamic content must use `_build_loaded_skills()` for the child's fresh loaded state.
+- Do not call `_build_identity()`. Do not add a boolean to the root builder because the root and child prompt shapes are intentionally distinct.
+- Test seam: returned `SystemPrompt` section text and a fake provider's received `system`/`history_boundary` arguments.
+- ⚠️ The harness's `AGENTS.md` snapshot is passed explicitly; the child builder must not reread the workspace.
+
+Edge Cases:
+
+- Empty catalog → omit the skills catalog or render no available skills according to existing prompt convention.
+- Empty loaded skills → `dynamic_system=None` or empty dynamic section, matching `SystemPrompt` semantics.
+- Empty agent body → prompt still contains environment/tools/project context.
+- Provider lacking `history_boundary` → loop signature inspection omits the argument.
+
+Tasks:
+
+- Implement `build_subagent_prompt()`.
+- Add focused prompt tests for body inclusion, identity exclusion, static/dynamic placement, project snapshot use, and scoped skill catalog.
+- Add a child fake-provider test proving structured prompt and optional `history_boundary` forwarding.
+
+Deliverable: a child can receive a focused `SystemPrompt` that preserves the 030 provider contract while excluding root identity.
+
+Verify: `uv run pytest tests/test_prompt.py tests/test_prompt_caching.py -q`; assert the fake provider sees `SystemPrompt` and the expected history-boundary behavior.
+
+### 3. Configuration, harness dependency threading, and child dispatch prefactor
+
+Approach:
+
+- This is an explicit **prefactor**: it establishes isolated child execution infrastructure before the user-visible task slice.
+- Add `SubagentsConfig` to `shared/src/archie_shared/schemas.py` with only `max_concurrent: int = 3`. `archie_shared` remains standalone and MUST NOT import `archie_agent`, `archie_cli`, or `archie_orchestrator`.
+- Do not add a child-specific `max_iterations`, duration, or cost override. Child runners call `run_loop()` through the same agent boundary and inherit `_DEFAULT_MAX_ITERATIONS` and the existing provider/tool timeout behavior automatically.
+- Extend `AgentHarness.__init__` with model catalog, region, and subagent configuration. Preserve test compatibility with explicit defaults only where existing direct harness tests require them; update all production/test call sites.
+- Create a `ChildDispatch` abstraction in `agents.py` or a narrowly scoped module. It owns a child `ToolRegistry`, independent pending tool state, independent `_active_proc`, `on_start` callback, and process-group cancellation methods.
+- Reuse root exec configuration (`_exec_python`, `_exec_run_root`) but never root `_active_proc` or root pending state.
+- Test seam: child dispatch public coroutine and cancellation callback.
+- ⚠️ A child dispatch must isolate equal `tool_use_id` values across children; keying only on the global ID is insufficient.
+
 Wiring:
-- State: `model_catalog`, `region`, `subagents` stored on harness; each child dispatch holds
-  its own `_active_proc` reference AND its own `_pending_tools` map.
-- Producers: `app.py` populates the new constructor args.
-- Consumers: the task factory (Milestone 4) reads catalog/region/limits from the harness.
-Tasks:
-- Widen `AgentHarness.__init__`; update `app.py` and ALL test call sites
-  (`tests/test_harness.py`, `test_native_dispatch.py`, `test_model_switch.py`).
-- Extract the child dispatch helper with independent active-proc tracking + a cancel hook.
-- Unit test the child dispatch: generic tool call returns a result; a child `exec` runs; a
-  cancel hook terminates the child's subprocess without touching the harness's slot; two
-  concurrent child dispatches with the same `tool_use_id` do not collide (isolated
-  pending-tool maps).
-Deliverable: harness exposes catalog/region/limits, and a reusable child dispatch exists
-with isolated subprocess cancellation.
-Verify: `pytest` — existing harness tests still pass with new args; new dispatch test
-asserts result + isolated cancel.
 
-### 4. `task` tool: single subagent, sequential
+- State: harness stores `model_catalog: dict[str, ModelEntry]`, `region: str`, and `subagents: SubagentsConfig`; each `ChildDispatch` stores its own process and pending state.
+- Producers: `app.py.lifespan()` loads catalog/config and passes them into `AgentHarness`; child runner creates one dispatch per child.
+- Consumers: task factory resolves model/limits from harness; child loop sends tool blocks to its dispatch.
+- Call site: `AgentHarness(..., model_catalog=_catalog, region=_config.global_.region, subagents=_config.agent.subagents)`.
+
+Edge Cases:
+
+- Missing config section → defaults.
+- Invalid non-positive limit → configuration validation error.
+- Existing test harness construction without new optional values → compatible defaults or updated fixture values, never module-global lookup.
+- Child process cancellation with no active process → no-op.
+- Child dispatch handler exception → normalized `ToolResultBlock` with the input tool-use ID.
+
+Tasks:
+
+- Add config structs and schema tests for `max_concurrent` and defaults.
+- Thread catalog/region/config through `app.py` and harness construction.
+- Verify child runners inherit the existing root loop default and do not accept a subagent-specific iteration/duration/cost override.
+- Implement isolated child dispatch and process cancellation.
+- Update all harness fixtures/call sites.
+- Test generic child tool, child exec, same tool-use ID isolation, and process cancellation without changing root process state.
+
+Deliverable: the harness can construct an independently cancellable child tool-dispatch context with configured model and concurrency dependencies.
+
+Verify: `uv run pytest tests/test_config*.py tests/test_harness.py tests/test_child_dispatch.py -q`; instrument two dispatches with equal tool IDs and confirm independent results/process slots.
+
+### 4. Single child task execution and scoped canonical events
+
 Approach:
-- In `agents.py`, add `create_task_tool(*, agent_catalog, skill_catalog, session,
-  model_catalog, region, exec_config, broadcast, max_iterations)` returning a `ToolSpec`
-  named `task`. The `broadcast` param is the harness `_broadcast` callable (`harness.py:512`)
-  threaded in explicitly — it is the ONLY channel by which child streaming/lifecycle events
-  reach the wire, because the child loop runs INSIDE this tool handler (`spec.handler(...)`,
-  `harness.py:384`), NOT inside `handle_message`'s consumer loop where the parent's
-  `_broadcast` calls normally live. A `spawn_child_llm(entry)` helper resolves the child
-  model: if entry has `provider`/`model`, build a `ModelEntry` / look it up in
-  `model_catalog`; else use the session's active model. Then `create_llm_client(model,
-  region)`. Keep a reference to the resolved child `ModelEntry` — its `cost` prices this
-  child's usage.
-- Handler, per sub-task: resolve agent entry; build child registry (`create_registry()` +
-  scoped `skill` tool, NO `task`); build child prompt via `build_subagent_prompt`; create a
-  per-child `threading.Event`; then run the child as its OWN consumer loop:
-  `async for child_event in run_loop(messages=[<task as user turn>], system=...,
-  llm=child_llm, interrupt=<child event>, tool_config=child_config,
-  execute_tool=<child dispatch>, max_iterations=max_iterations): ...`. Inside that loop the
-  handler is the per-child event consumer (mirroring `handle_message`, `harness.py:175-349`,
-  but for the child): it (a) `await broadcast(...)`s the matching tagged wire event for each
-  child `TextDelta`/`ToolCall`/`ToolResult`/lifecycle, and (b) on `Usage` records usage on
-  `session`, pricing the delta from the CHILD `ModelEntry.cost` (do NOT reuse the parent
-  session model — a child on a different provider would be mis-priced), and collects final
-  text. There is no other producer path; if `broadcast` is not called here, nothing reaches
-  the wire.
-- Register `task` in `harness.__init__` after the skill tool (~line 133); rebuild
-  `_tool_config`.
+
+- Implement `create_task_tool()` in `agents.py` for one task before adding fan-out.
+- Resolve the definition, model, client, scoped skill catalog, fresh loaded-skill list, child prompt, child interrupt state, child dispatch, and `EventFactory(scope=launching_tool_use_id)`.
+- Run `run_loop(messages=[Turn(role="user", content=prompt)], system=child_prompt, llm=child_llm, interrupt=child_interrupt, interrupt_async=child_interrupt_async, tool_config=child_config, execute_tool=child_dispatch)` without a subagent-specific `max_iterations`; this uses the same default as root execution. If a future agent-wide policy is added, it must enter through this shared execution boundary for both root and child loops.
+- Consume child events in the task handler because that is where child scope, index, parent turn, event factory, and broadcast callback are available.
+- Follow root harness ordering: `IterationStart`; request finish/usage; child text delta; child tool calls/results; terminal assistant/turn event. Persist canonical replayable events before broadcast. Child `TextDelta` is live-only.
+- Create `llm_request` with the child `ModelEntry`, including 030 billable usage categories and cache-aware cost.
+- Test seam: `create_task_tool()` handler with a fake provider and temporary canonical session log.
+- ⚠️ Do not emit old flat wire events or append `MessageEntry` child records.
+
 Wiring:
-- State: agent catalog (built in `__init__`, like `_skill_catalog`); child usage funnels
-  into the existing `Session` via `record_usage`.
-- Producers: the `task` handler is itself the child-loop consumer — it records child usage
-  (priced by the child `ModelEntry`) and broadcasts tagged wire events as child events arrive.
-- Consumers: `Session` totals; parent turn's final result string.
-- Call site: `run_loop` in `harness.handle_message` dispatches the model's `task` tool_use
-  through `_execute_tool` → `spec.handler(**input)` (no special-casing needed).
-Edge cases:
-- Unknown `agent` name: return error content listing available agents; not an exception.
-- Child loop raises: catch, return an error result for that sub-task.
-- Child hits `max_iterations`: return final text with a truncation notice.
-- Empty `prompt`: return an error result.
-Tasks:
-- Implement `create_task_tool` (single-item path first) using the Milestone 3 dispatch.
-- Register the tool; rebuild `_tool_config`.
-- Unit test with `FakeLLMClient`: a single sub-task returns the child's final text; unknown
-  agent errors cleanly; usage recorded on the session; a fake `broadcast` receives the
-  child's tagged lifecycle/streaming events (proves the producer path); child usage is
-  priced from the child model's cost, not the parent's.
-Deliverable: model can call `task` with one sub-task and receive the child's result.
-Verify: `pytest tests/test_task_tool.py` (new) with a fake llm; assert result text, error
-handling, and `session` usage delta.
 
-### 5. Skills scoping + depth guard
-Approach:
-- Child registry MUST omit `task` (depth guard). Child `skill` tool is created over a
-  catalog filtered to the definition's `skills` (subset of `discover_skills()`), with a
-  fresh `loaded_skills` list per child.
-- ⚠️ A `skills` entry naming an unknown skill: drop it and log a warning at spawn.
-Edge cases:
-- Definition with empty/absent `skills`: child gets no skill tool skills section.
-Tasks:
-- Filter the skill catalog per definition; build the scoped `skill` tool for the child.
-- Assert child registry has no `task` entry.
-- Tests: child registry excludes `task`; scoped catalog contains only declared skills;
-  unknown declared skill is dropped + warned.
-Deliverable: children are skill-scoped and cannot recurse.
-Verify: `pytest` — assert `child_registry.get("task") is None` and catalog contents.
+- State: handler captures agent catalog, skill catalog, session, model catalog, region, exec config, broadcast callback, parent turn, launch scope, and max iterations.
+- Producers: child loop produces semantic events; child consumer creates canonical events and appends/broadcasts them.
+- Consumers: canonical session log, live WebSocket clients, parent tool result, session live usage state.
+- Call site: root dispatch supplies internal context such as `execute_task(..., launch_scope=block.tool_use_id, parent_turn=turn_index)` while the model-facing schema remains only `{tasks}`.
 
-### 6. Parallel fan-out with bounded concurrency
+Edge Cases:
+
+- Unknown agent → error result with available names.
+- Model resolution failure → error result and no child provider call.
+- Provider failure → scoped error request/terminal events when appendable, labelled task error.
+- Child reaches cap → truncation result and scoped terminal error.
+- Canonical append failure → no broadcast for failed event; terminate affected child.
+- Empty final text → return a valid labelled empty/truncation result rather than hanging.
+
+Tasks:
+
+- Implement model resolution and child client construction.
+- Implement single child runner and event consumer.
+- Create scoped `EventFactory` and emit child canonical events.
+- Register root `task` and pass launch context from root dispatch.
+- Add fake provider tests for final text, model override/fallback, scope, request identity, canonical log contents, append-before-broadcast, child pricing, and depth guard.
+
+Deliverable: the root model can call `task` once and receive a final child result while the child request and terminal activity are represented by scoped canonical events.
+
+Verify: `uv run pytest tests/test_task_tool.py tests/test_canonical_session_events.py tests/test_subagent_accounting.py -q`; inspect the temporary JSONL log and broadcast capture to confirm identical persisted/broadcast canonical records and `scope=S`.
+
+### 5. Skills scoping and provider/model regression coverage
+
 Approach:
-- Extend the `task` handler to accept N sub-tasks and run them with `asyncio.gather` under
-  `asyncio.Semaphore(max_concurrent)`. Each child runs in its own coroutine; per-child
-  exceptions are caught and turned into per-child error results (do not fail the batch).
-- ⚠️ `run_loop` bridges the provider `stream()` via a daemon thread + `asyncio.Queue`
-  (`loop.py`). Running several concurrently is fine (each has its own generator/thread — note
-  thread count scales with `max_concurrent`), but each child MUST have its OWN
-  `threading.Event` interrupt — do NOT share the parent's (see the Interrupt & cancellation
-  requirement + M3's per-child dispatch). Each child is also its own event consumer that
-  broadcasts tagged events (see M4/M8 for the producer path — `broadcast` is threaded into
-  `create_task_tool`).
-- Maintain a per-`task` **child registry** keyed by `(parent_tool_use_id, index)` →
-  `(interrupt_event, cancel_fn)`, where `cancel_fn` cancels that child's `exec` subprocess
-  (the isolated cancel hook from M3). Storing only the `threading.Event` is NOT enough: a
-  targeted interrupt (M11) must both `.set()` the event AND call `cancel_fn`, mirroring
-  `harness.interrupt()` (`harness.py:351-354`) which does both. Register on spawn, deregister
-  on completion.
+
+- Complete child registry construction with only `exec` and the scoped `skill` tool.
+- Filter the session-discovered skill catalog by the definition's declared names; do not rediscover skills per child.
+- Keep loaded skills mutable only within that child invocation.
+- Verify child prompt construction and provider adapters using existing fake/provider test seams. Converse and Ollama continue to flatten structured prompts as before; Responses continues to own cache metadata.
+- Test seam: child tool configuration and provider fake's received prompt/usage arguments.
+
 Wiring:
-- State: `asyncio.Semaphore(max_concurrent)` + the child-event registry, created per `task`
-  call and reachable by the interrupt handler.
-- Producers/consumers: `gather` collects ordered results; combined into one labelled result
-  string (by agent + index).
-Edge cases:
-- One child fails, others succeed: batch returns mixed results, failures labelled.
-- `max_concurrent: 1`: effectively sequential; ordering preserved in output.
-Tasks:
-- Add the gather + semaphore logic + the keyed child-event registry; combine results
-  deterministically by input order.
-- Tests: two sub-tasks both complete; `max_concurrent=1` serialises; one failing child does
-  not sink the others; registry holds one `(event, cancel_fn)` per in-flight child.
-Deliverable: `task` runs multiple subagents concurrently under the limit, each addressable.
-Verify: `pytest` — assert both results present, order stable, semaphore bound respected
-(via an instrumented fake llm that records concurrent entries).
 
-### 7. Config wiring
-Approach:
-- In `schemas.py`, add `SubagentsConfig(msgspec.Struct, forbid_unknown_fields=True)` with
-  `max_concurrent: int = 3` and `max_iterations: int` defaulting to the loop's
-  `_DEFAULT_MAX_ITERATIONS` (`loop.py:54`, currently 25 \u2014 reference the constant, do not
-  hardcode a literal). Add
-  `subagents: SubagentsConfig = msgspec.field(default_factory=SubagentsConfig)` to
-  `AgentConfig`.
-- Thread the values from `NexusConfig` into the harness (via `app.py` construction) and into
-  `create_task_tool`.
-Edge cases:
-- Absent `agent.subagents`: defaults apply.
-- `forbid_unknown_fields` rejects typos — acceptable (matches existing structs).
-Tasks:
-- Add the struct + field; pass limits through `app.py` → harness → task tool.
-- Tests: config load with and without the section; values reach the tool.
-Deliverable: subagent limits are configurable via `config.yaml`.
-Verify: `pytest tests/test_config*.py` — assert defaults and overrides load.
+- State: root skill catalog is immutable session state; each child has `child_skill_catalog` and `loaded_skills=[]`.
+- Producers: child `skill` handler appends only to its list.
+- Consumers: child prompt builder reads that list on subsequent child requests.
+- Call site: `create_skill_tool(child_skill_catalog, child_loaded_skills)`.
 
-### 8. Subagent wire events: lifecycle + live streaming
+Edge Cases:
+
+- Empty skills → no usable skill names and no loaded-skill mutation.
+- Unknown declared skill → warning/drop, child remains usable.
+- Child loads same skill twice → existing skill-tool no-op behavior.
+- Child skill body changes on disk during execution → current parsed entry/body behavior remains session/child scoped; no live rediscovery.
+
+Tasks:
+
+- Add scoped skill catalog filtering and warning behavior.
+- Ensure child registry omits `task`.
+- Add tests for declared/unknown/empty skills, fresh loaded state across siblings, and recursion absence.
+- Add provider request-shape regression tests for structured child prompts and 030 usage categories.
+
+Deliverable: child agents can use exactly their declared known skills without recursion or cross-child loaded-state leakage.
+
+Verify: `uv run pytest tests/test_task_tool.py tests/test_skills.py tests/test_prompt.py tests/test_bedrock.py tests/test_ollama.py tests/test_bedrock_openai.py -q`; inspect child tool config and fake-provider prompt state.
+
+### 6. Bounded multi-child fan-out
+
 Approach:
-- In `events.py`, add subagent events carrying `parent_tool_use_id` + `index`:
-  - Lifecycle: `SubagentStart(turn_index, parent_tool_use_id, index, agent)`,
-    `SubagentUsage(..., input_tokens, output_tokens, cost_usd)`,
-    `SubagentEnd(..., is_error, summary)`.
-  - Streaming (for the full-screen view): `SubagentTextDelta(..., text)`,
-    `SubagentToolCall(..., tool_use_id, name, input_summary)`,
-    `SubagentToolResult(..., tool_use_id, is_error, summary)`.
-  Follow the existing frozen-dataclass + `to_json`/`from_json` pattern and register each in
-  `_SERVER_EVENT_TYPES`. All carry `turn_index` (do NOT add to the no-`turn_index` tuple in
-  `deserialize_event`).
-- ⚠️ Bump `PROTOCOL_VERSION` to 2. Agent and CLI ship together; update both. NOTE: this is
-  informational only — no handshake/version negotiation currently reads it (verified: no
-  version check exists). Bump it for documentation; do not expect it to gate anything unless
-  a check is added.
-- The child event consumer (M4) forwards each child `AgentEvent` as the matching tagged wire
-  event via the `broadcast` callable threaded into `create_task_tool`. Streaming events are
-  emitted ALWAYS (per locked decision), NOT gated on any client subscription and NOT behind a
-  config flag — clients decide what to render. `_broadcast` (`harness.py:512`) already fans
-  out to all connected clients.
+
+- Extend the single-child handler to accept N tasks using `asyncio.gather()` under one per-`task` `asyncio.Semaphore(max_concurrent)`.
+- Plan 031's `run_loop()` remains responsible for parallel tools inside each child. This milestone only schedules child runner coroutines and limits child count.
+- Keep one indexed result slot per input task. Child completion events may arrive in any order; combined parent result must remain input ordered.
+- Catch per-child exceptions and normalize them into labelled results. Do not use `list.index(block)`; child index is assigned at creation and remains stable.
+- Test seam: task handler's returned combined string plus an instrumented fake provider tracking active child count.
+- ⚠️ The semaphore must cover the full child execution lifetime, including provider requests and child tool loops, not just client construction.
+
 Wiring:
-- State: none persistent; events flow child-loop → `_broadcast` → WebSocket → TUI.
-- Producers: `task` handler / child event consumer.
-- Consumers: TUI inline progress (M9) + full-screen view (M12).
-Tasks:
-- Add the six events + registration + `PROTOCOL_VERSION` bump.
-- Broadcast them from the child event consumer at the right points.
-- Round-trip tests: `serialize_event`/`deserialize_event` for each new event.
-Deliverable: subagent lifecycle AND live text/tool activity are on the wire (always emitted),
-tagged by `(parent_tool_use_id, index)`.
-Verify: `pytest tests/test_events*.py` — serialize/deserialize round-trip for new events.
 
-### 9. TUI: inline read-only nested collapsed activity view
+- State: per-task `asyncio.Semaphore`, result list, child registry, and child index.
+- Producers: task handler creates runner coroutines; runners register/deregister child state.
+- Consumers: `gather()` collects result slots; root loop receives one combined `ToolResultBlock`.
+- Call site: root `task` handler receives `tasks=[...]`, `launch_scope=S`, `parent_turn=T`, and configured `max_concurrent`.
+
+Edge Cases:
+
+- `max_concurrent=1` → strictly one child at a time, input order preserved.
+- One child fails → siblings continue and result slot is an error.
+- One child returns early → semaphore releases and next queued child starts.
+- Empty task list → validation error without semaphore work.
+- Duplicate agent names or prompts → independent indexed children.
+- Child result arrives after sibling → result formatting still follows input order.
+
+Tasks:
+
+- Add semaphore and indexed gather logic.
+- Register/deregister child state around the complete runner lifetime.
+- Combine results deterministically with agent/index labels.
+- Add instrumented fake-provider tests for overlap, bound, order, failure isolation, and cleanup.
+
+Deliverable: one `task` call runs multiple children with bounded concurrency and deterministic combined results.
+
+Verify: `uv run pytest tests/test_task_tool.py -q`; assert observed maximum active children equals the configured limit, both results are present in input order, and the registry is empty after completion.
+
+### 7. Targeted and stop-all cancellation
+
 Approach:
-- In `cli/.../tui/app.py`, import and dispatch the new subagent events in `_handle_event`
-  (`app.py:304`) alongside existing tool events. Associate them with the spawning tool call
-  via `parent_tool_use_id` (the pending-tool tracking around the `ToolCall` branch,
-  `app.py:408`; `IterationBlock._tool_entries` keyed by `tool_use_id`, `conversation.py:409`).
-- Render, per child, an indented COLLAPSED activity block under the parent tool call: agent
-  name + live indicator on `SubagentStart`; a rolling window of the last ~3 activity lines
-  built from the streaming events (latest `SubagentToolCall`/`SubagentToolResult` summaries
-  and/or condensed `SubagentTextDelta`); cumulative cost on `SubagentUsage`; final
-  success/error + summary on `SubagentEnd`. This block consumes the SAME streaming events the
-  full-screen view (M12) uses — it just keeps only the last ~3 lines rather than full history.
-- ⚠️ Session-level dispatch at `app.py:213` only immediate-dispatches events without a
-  `turn_index`; the new events HAVE `turn_index`, so they route through normal turn
-  buffering. All child events share the PARENT's `turn_index`; the dedup rule
-  `turn_index > last_turn_index` (`app.py:147`) drops equal-turn events once the parent turn
-  is in history. This is acceptable because the inline block is LIVE-ONLY (best-effort): it
-  must render correctly for the ACTIVE turn; it is NOT reconstructed on reconnect (deltas are
-  not in `/history`). Verify active-turn child events survive buffering and render in the
-  correct turn block.
-Edge cases:
-- Subagent errors: the activity block shows an error state, not a crash.
-- Multiple concurrent subagents under one `task`: each gets its own ~3-line block.
-- Reconnect mid-`task`: inline blocks may be empty/partial for already-buffered turns —
-  acceptable (live-only).
-Tasks:
-- Dispatch the events; add per-child rolling ~3-line rendering to the iteration block widget.
-- Widget unit test for the rolling buffer (keeps last N lines, updates on new events).
-- Manual/observed verification of nesting + activity + cost.
-Deliverable: running a `task` shows indented, live, read-only ~3-line activity blocks per
-subagent with cost, for the active turn.
-Verify: run `archie`, invoke a `task` with two subagents; observe two indented activity
-blocks that update and resolve. (Rolling-buffer logic unit-tested; final check visual.)
 
-### 10. Session-log attribution (concurrent-write safety)
+- Extend `InterruptCommand` in `shared/src/archie_shared/events.py` with optional target data. Keep no-target JSON shape compatible with existing clients.
+- Add harness methods for targeted child interruption and stop-all propagation. The live registry is keyed by `(scope, index)` and stores both loop signals and process cancellation.
+- Follow plan 031's event-driven model: set child threading event for provider worker cancellation and schedule child async event on its owning loop. Do not poll from the event loop.
+- Targeted cancellation must not set the parent interrupt or sibling events. Stop-all must set parent and all children and invoke all process callbacks.
+- Test seam: command round-trip and harness interruption behavior with long-running fake children and cancellable exec.
+- ⚠️ Setting an interrupt event alone does not stop a child waiting on a subprocess; process-group cancellation is mandatory.
+
+Wiring:
+
+- State: `live_children: dict[tuple[str,int], ChildState]` owned by harness/task handler.
+- Producers: TUI sends target command; app routes it; harness mutates registry synchronously.
+- Consumers: child run loops, child dispatch process cancellation, root batch interrupt bridge.
+- Call site: `AgentHarness.interrupt(target: tuple[str, int] | None = None)`; `app.py` passes `command.target`.
+
+Edge Cases:
+
+- Target already finished → no-op.
+- Targeted child in provider stream → set both interrupt mechanisms; child returns interrupted result.
+- Targeted child in exec → set event and kill only its process group.
+- Stop-all during child fan-out → signal every child and await all before root idle.
+- Child deregisters concurrently with target lookup → synchronous lookup/action prevents an await race.
+- Sibling failure during targeted stop → sibling result is preserved.
+
+Tasks:
+
+- Extend command type, serializer/deserializer, union, exports, and `WSClient` helpers.
+- Implement child registry signal/cancel operations.
+- Route target through `app.py` and harness.
+- Add targeted/untargeted tests with fake long-running clients and process callbacks.
+- Add cleanup assertions for no pending child tasks and no active child process slots.
+
+Deliverable: users can stop one selected child or all active children without leaving orphaned work.
+
+Verify: `uv run pytest tests/test_subagent_interrupt.py tests/test_ws_integration.py -q`; assert only the targeted registry entry is signalled in targeted tests and all entries/process callbacks are signalled for stop-all.
+
+### 8. Canonical replay and accounting hardening
+
 Approach:
-- In `shared/src/archie_shared/session/log.py`, add optional `parent_tool_use_id: str | None`,
-  `agent_id: str | None`, `subagent_index: int | None` to `MessageEntry` (`log.py:35-50`).
-  Parent lines leave them null; back-compat on read (default null).
-- Concurrency: `write_entry` (`log.py:53-63`) is a SYNCHRONOUS `def` doing `open('a')+write()`
-  with no internal `await`. On the single asyncio event loop two children cannot interleave
-  mid-write, so NO lock is added (locked decision m-2). Keep it sync + append mode. Note this
-  invariant in a comment so a future move to thread-pool writes revisits it.
-- The harness `_persist_*` helpers (`harness.py:428-510`) assume PARENT turn context
-  (`self.session.model`, parent `turn_index`) and run in the parent consumer loop — children
-  run inside the `task` tool handler and can't reuse them. Add a child-specific persist path
-  that takes EXPLICIT attribution (`parent_tool_use_id`, `agent_id`, `index`) AND the child's
-  own model (for any model-derived fields), rather than reading `self.session.model`. It
-  writes attributed `MessageEntry`s to the same `{session_id}.jsonl`.
-Edge cases:
-- Single-agent (no subagents): fields null — behaviour unchanged.
-- Two children writing “simultaneously”: serialized by the single event loop; lines are
-  well-formed and each attributable.
-Tasks:
-- Add the fields; add the child persist path taking explicit attribution + child model.
-- Tests: round-trip `MessageEntry` with/without new fields; two children persisting produce
-  well-formed, attributed lines (grep by `agent_id`).
-Deliverable: subagent messages persist in the shared transcript, attributed.
-Verify: `pytest tests/test_session_log*.py` — schema round-trip + child-attribution test.
 
-### 11. Targeted interrupt (stop-specific + stop-all)
+- Validate the complete child event lifecycle against 029's canonical structs and append-before-broadcast rule.
+- Use `EventFactory` rather than direct JSON construction. Ensure request IDs, event IDs, scope, turn iteration, model key, status, usage, and cost are generated at the child boundary.
+- Exercise `scope_direct_costs()` and `scope_inclusive_costs()` with root, child, and nested fixture events. V1 does not spawn nested children, but the event/accounting contract must remain compatible with nested scopes.
+- Verify 030 billable pricing with child models that have distinct normal/cache-read/cache-write rates.
+- Test seam: persisted JSONL replay and accounting helpers, not in-memory session totals.
+- ⚠️ Canonical `TextDelta` is live-only; replay tests must use persisted `AssistantMessage`, tools, requests, and terminal events.
+
+Wiring:
+
+- State: one session canonical JSONL path; child event factory holds immutable child model/scope.
+- Producers: child consumer appends canonical events before broadcasting.
+- Consumers: `/events`, `session_accounting()`, TUI canonical reducer, orchestrator metrics.
+- Call site: `EventFactory(path, child_model_key, child_model, scope=S)` and `scope_*_costs(decoded_events)`.
+
+Edge Cases:
+
+- Child model differs from parent → child `LLMRequest.model_key` and price remain child-specific.
+- Parent switches model after child completion → existing events unchanged.
+- Duplicate event ID → canonical append rejects conflicting data.
+- Append failure → failed event is not broadcast and affected child reports an error.
+- Concurrent child appends → each complete line decodes and all IDs are unique.
+- Reconnect after live deltas → persisted child state replays without requiring deltas.
+
+Tasks:
+
+- Add/extend canonical child event fixtures and round-trip tests.
+- Add append-before-broadcast capture test.
+- Add child direct/inclusive accounting tests, including model-specific cache pricing.
+- Add replay test through `/events` after a completed child task.
+- Add orchestrator metrics regression coverage for scoped child request events where the existing API exposes them.
+
+Deliverable: child execution is durable, replayable, and accurately accounted through the canonical event stream.
+
+Verify: `uv run pytest tests/test_subagent_accounting.py tests/test_session_events.py tests/test_canonical_session_events.py tests/test_orchestrator_metrics.py -q`; decode every persisted line and compare persisted/broadcast serialized records.
+
+### 9. TUI collapsed scoped activity
+
 Approach:
-- Extend `InterruptCommand` (in `shared/.../commands.py`) with optional
-  `target: tuple[str, int] | None` = `(parent_tool_use_id, subagent_index)`. Absent =
-  stop-all (unchanged). Update `serialize_command`/`deserialize_command`.
-- Agent side: the interrupt handler consults the M6 child-event registry
-  (`(parent_tool_use_id, index)` → `(interrupt_event, cancel_fn)`). Untargeted → set the
-  parent interrupt + every child's `interrupt_event` AND call every `cancel_fn`. Targeted →
-  set only the matching child's `interrupt_event` AND call its `cancel_fn` (kills its `exec`
-  subprocess), mirroring `harness.interrupt()` (`harness.py:351-354`). Setting only the event
-  is insufficient — `run_loop` reads `interrupt.is_set()` (`loop.py:182`) but never kills a
-  running subprocess, so a child mid-`exec` would not stop without `cancel_fn`.
-- ⚠️ Invariant (m-3): the registry lookup + `.set()`/`cancel_fn()` MUST run with NO
-  intervening `await` (no other coroutine mutates the registry between lookup and action). A
-  missing key (child already finished/deregistered) is a no-op logged at debug.
-- A stopped-specific child returns an interrupted result; siblings and the parent turn
-  continue; the batch still returns.
-Edge cases:
-- Target no longer running (already finished): no-op, log at debug.
-- Untargeted during a `task`: stop-all, session returns to idle.
-Tasks:
-- Extend the command + (de)serialization; implement targeted vs all in the handler.
-- Tests: targeted interrupt stops only that child (fake llm/long-running child) — asserts
-  both its `interrupt_event` set AND its `cancel_fn` called; untargeted stops all; stale
-  target is a no-op.
-Deliverable: the user can stop one subagent or all of them.
-Verify: `pytest` — assert only the targeted child's event is set; untargeted sets all.
 
-### 12. TUI: full-screen subagent detail view + picker + stop-specific
+- Extend `cli/src/archie_cli/tui/app.py` canonical live dispatch and state reduction for scoped child events.
+- Associate child scope with the root task tool call by its `tool_use_id`; child index identifies siblings under one task call.
+- Add a per-child rolling buffer of approximately three latest activity lines. Derive summaries from canonical raw tool input/result and text events using shared `tool_summaries.py`; do not require agent-generated summary fields.
+- Display agent name from `Subagent` start metadata only if needed. Prefer deriving known agent/index from the root task input and child scope. If the existing canonical event set cannot carry an agent name in live state, add the smallest justified live-only canonical event and document why it cannot be inferred.
+- Test seam: TUI reducer/widget state after a sequence of canonical scoped events.
+- ⚠️ Live scoped events share the parent turn but must not be dropped by root-turn buffering/dedup logic while the turn is active.
+
+Wiring:
+
+- State: `child_views: dict[(scope,index), ChildViewState]` in `ArchieApp` or the conversation model; each state owns status, rolling lines, cost, and final summary.
+- Producers: `_handle_event()` consumes scoped canonical events.
+- Consumers: nested conversation widget renders child blocks under the parent task tool entry; status/cost reads canonical `LLMRequest`.
+- Call site: canonical event reducer receives the same event objects used by replay/live handling; no second wire reducer.
+
+Edge Cases:
+
+- Two children under one task → separate blocks keyed by index.
+- Child error/interruption → block resolves to error/interrupted state.
+- Child finishes while live → final state remains visible until parent tool result resolves.
+- Reconnect during active task → persisted state renders; missing deltas produce partial text, not fabricated text.
+- Scope with no known parent tool call → render as an unattached scoped activity or log/drop according to existing reducer policy; never attach to the wrong root.
+
+Tasks:
+
+- Add scoped child state and event routing.
+- Add rolling activity buffer and nested rendering.
+- Fold canonical request costs into child direct cost display.
+- Add reducer/widget tests for routing, rolling-window size, completion, error, and replay.
+- Manually verify two-child live nesting.
+
+Deliverable: the active conversation view shows independent collapsed live activity blocks for all running children.
+
+Verify: `uv run pytest tests/test_tui_canonical.py tests/test_tui_subagents.py -q`; run the CLI against a two-child fake session and observe each block updating and resolving beneath its root task.
+
+### 10. Full-screen child detail, picker, and targeted stop UI
+
 Approach:
-- Add the FIRST `ModalScreen` in the codebase: `SubagentScreen` showing one child's LIVE
-  output — streaming assistant text + its tool calls/results — driven by the
-  `SubagentTextDelta`/`SubagentToolCall`/`SubagentToolResult` events (M8) filtered to the
-  selected `(parent_tool_use_id, index)`.
-- Buffer per-child streaming in `ArchieApp` keyed by `(parent_tool_use_id, index)` (the app
-  currently has only flat single-agent state, `app.py:87-91`) so the modal renders
-  history-so-far-in-this-session on open and live thereafter. ⚠️ This buffer is LIVE-ONLY /
-  best-effort (M-3): child deltas are NOT in `/history`, and all child events share the
-  parent `turn_index` (dedup `turn_index > last_turn_index`, `app.py:147`). So the modal can
-  fully reconstruct only for the CURRENTLY ACTIVE turn; after reconnect or once the parent
-  turn is in history, an opened modal may show partial/empty history. Document this; do not
-  attempt full reconstruction.
-- Picker to choose a subagent: reuse the command-palette `Provider` pattern
-  (`models_provider.py:30-78`) — a `SubagentProvider` listing in-flight/known children for the
-  active `task` (there is NO list/table widget in the codebase, so commit to the palette
-  Provider, not an in-modal list). Bind a key (e.g. `ctrl+s`) to open the picker.
-- Stop-specific: from the modal (or picker), a key sends a targeted `InterruptCommand`
-  (M11) for the selected child via `ws.send_command(...)` (`ws_client.py:73-77`). A separate
-  binding sends untargeted stop-all (reuses existing `send_interrupt`).
-Edge cases:
-- Child finishes while modal open: view shows final state; picker drops it.
-- Modal open across turn boundaries / after reconnect: keyed buffers are live-only, so the
-  view may be partial for non-active turns — acceptable (see M-3 note above).
+
+- Add the first `ModalScreen` for child detail, following Textual's existing app/widget conventions and keeping modal state separate from conversation state.
+- Maintain live per-child detail buffers keyed by `(scope,index)`. The modal consumes the same scoped canonical events as the collapsed view.
+- Add a `SubagentProvider` using the command-palette `ModelProvider` pattern to list active/known children. Bind a documented key to open it; do not invent a separate table/list infrastructure.
+- From the picker/modal, send `InterruptCommand(target=(scope,index))` through `WSClient`. Preserve the existing no-target interrupt action for stop-all.
+- Test seam: child buffer routing and command creation; final visual behavior is manual because Textual layout is not fully captured by unit tests.
+- ⚠️ A modal opened after reconnect may contain only persisted canonical state and no old live-only deltas; this is acceptable and must be documented in the UI behavior.
+
+Wiring:
+
+- State: app owns selected child key and per-child detail buffers; modal reads a selected immutable snapshot plus live updates.
+- Producers: canonical event handler updates buffers; picker selects keys; key binding sends command.
+- Consumers: modal renders text/tool activity; WS client sends targeted command; inline view remains active underneath.
+- Call site: `self.push_screen(SubagentScreen(child_key=...))`; `ws.send_command(InterruptCommand(target=child_key))`.
+
+Edge Cases:
+
+- Child finishes while modal is open → show final state and retain output.
+- Selected child disappears from active registry → picker removes it, modal can still show final state.
+- Modal closes → inline buffers/state remain intact.
+- Targeted stop command fails to send → show existing client error path; do not mutate local state as if cancellation succeeded.
+- Reconnect while modal open → preserve selection where possible and render replayed state.
+
 Tasks:
-- Add `SubagentScreen(ModalScreen)` + push/pop wiring; per-child stream buffering + dispatch
-  in `_handle_event`; picker; targeted-stop + stop-all key bindings.
-- Widget unit tests for buffer routing; visual confirmation of live view + stop.
-Deliverable: user can open a full-screen live view of a chosen subagent and stop it (or all).
-Verify: run `archie`, start a `task` with two subagents, open one full-screen, watch it
-stream, stop just that one; confirm the sibling continues. (Final confirmation visual.)
 
----
+- Implement child detail `ModalScreen`.
+- Add per-child full/live buffer routing.
+- Implement picker and command binding.
+- Add targeted-stop and stop-all actions.
+- Add widget tests for routing/selection and manual visual validation.
 
-## Notes for the implementor
-- Ship agent + cli together (protocol bump). Run the full `pytest` suite after each
-  milestone; the loop/harness are well covered — keep them green.
-- Do not touch `run_loop`'s sequential tool execution; all concurrency lives in the `task`
-  handler.
-- Leave `CONTRIBUTING.md`/`README.md` untracked; stage only files relevant to each commit.
+Deliverable: a user can select one active child, watch its live detail view, close it, and stop that child without stopping siblings.
+
+Verify: run `archie`, invoke a task with two long-running children, open the picker, select one, observe text/tool activity, target-stop it, and confirm the sibling continues and inline activity remains.
+
+### 11. End-to-end validation and documentation
+
+Approach:
+
+- Run the full suite after all agent/shared/CLI changes.
+- Run changed-file lint/format and inspect canonical event protocol diffs.
+- Verify root regressions from plan 029/030/031: canonical replay, prompt caching, billable usage, generic parallel tool calls, root interruption, model switch, and metrics.
+- Document the v1 constraints and no-recursion/no-user-question behavior in the plan and any relevant feature documentation. Do not modify unrelated README/CONTRIBUTING files unless implementation requires it.
+- Test seam: complete fake-provider integration path plus one manual live TUI path.
+
+Edge Cases:
+
+- No agent definitions installed → root task returns available-agent error without crash.
+- Provider credentials unavailable → child error is labelled and parent remains usable.
+- Client disconnects → child completes/persists; reconnect replays canonical state.
+- Stop-all during multi-child execution → no pending child tasks/processes after turn returns.
+- Existing root-only session → all existing behavior and canonical logs remain unchanged.
+
+Tasks:
+
+- Add/update end-to-end tests covering discovery → task → child provider → scoped log → replay/TUI reducer.
+- Run full pytest suite.
+- Run Ruff and format checks.
+- Run `git diff --check`.
+- Update any implementation progress marker only after all milestones are complete.
+
+Deliverable: the native subagent feature is validated end-to-end without regressions to canonical events, prompt caching, billable usage, or generic parallel tool execution.
+
+Verify:
+
+```bash
+cd /workspace/archie-nexus
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+git diff --check
+```
+
+Then perform a manual two-child run: confirm separate models/skills where configured, nested live activity, canonical replay after reconnect, targeted stop of one child, and stop-all cleanup.
+
+## Acceptance summary
+
+The plan is complete when:
+
+1. A root model can call `task` with one or more definitions from `persona/agents/`.
+2. Each child runs fresh, autonomously, and with the configured focused `SystemPrompt`.
+3. Explicit child model/provider overrides work without mutating the parent client.
+4. Child skills are scoped and child registries cannot recurse into `task`.
+5. Child execution is bounded by `agent.subagents.max_concurrent` and inherits the root agent's iteration, duration, subprocess-timeout, and cost-accounting behavior.
+6. Results are deterministic and input ordered while live child events may arrive in completion order.
+7. Every child provider request creates one child-model-priced canonical `llm_request` with correct billable usage categories.
+8. Child tool, assistant, terminal, and live text events use canonical `scope` and replay/account correctly.
+9. The TUI renders collapsed scoped activity and a full-screen selected-child view.
+10. Targeted interruption stops only the selected child and subprocess; no-target interruption stops parent and all children.
+11. No child task, provider worker, or subprocess remains orphaned after completion/interruption.
+12. Existing 029 canonical replay/accounting, 030 prompt-cache/usage, and 031 generic parallel-tool behavior remain green.
+
+## Implementation notes
+
+- Never add `parent_tool_use_id`, `agent_id`, or `subagent_index` to `MessageEntry`.
+- Never create a second flat subagent event protocol merely for UI convenience.
+- Use `scope` for canonical relationship and `(scope,index)` only for ephemeral sibling UI/cancellation addressing.
+- Keep root task tool call/result in root scope; only child-produced events use child scope.
+- Keep provider cache metadata private to provider adapters.
+- Keep generic multi-tool execution in `run_loop()` under plan 031; task-specific fan-out belongs in `agents.py`.
+- Keep canonical append-before-broadcast ordering and child-model request pricing from 029/030.
