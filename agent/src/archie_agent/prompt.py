@@ -213,6 +213,38 @@ def build_system_prompt_structured(
     )
 
 
+def build_subagent_prompt(
+    model_name: str,
+    body: str,
+    workspace_dir: str = str(WORKSPACE),
+    *,
+    catalog: dict[str, SkillEntry] | None = None,
+    loaded_skills: list[tuple[str, str]] | None = None,
+    agents_context: str | None = None,
+) -> SystemPrompt:
+    """Build a focused child prompt without the primary identity section.
+
+    The returned structured prompt preserves the provider boundary introduced by
+    the prompt-caching work: static content remains separate from dynamic loaded
+    skill bodies. ``agents_context`` is expected to be the harness snapshot.
+    """
+    static_sections = [body.strip(), _build_environment(model_name, workspace_dir), _build_tools()]
+    if catalog:
+        static_sections.append(_build_skills_catalog(catalog))
+    if agents_context is None:
+        project_context = _build_project_context(workspace_dir)
+    else:
+        project_context = _format_project_context(agents_context)
+    if project_context:
+        static_sections.append(project_context)
+
+    dynamic_system = _build_loaded_skills(loaded_skills or [])
+    return SystemPrompt(
+        static_system=PromptSection("\n\n".join(section for section in static_sections if section)),
+        dynamic_system=PromptSection(dynamic_system) if dynamic_system else None,
+    )
+
+
 def build_system_prompt(
     model_name: str,
     workspace_dir: str = str(WORKSPACE),

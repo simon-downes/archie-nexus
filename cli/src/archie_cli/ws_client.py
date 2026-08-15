@@ -10,6 +10,7 @@ import logging
 from collections.abc import AsyncGenerator
 
 import websockets
+from archie_shared.canonical_events import decode_event
 from archie_shared.events import (
     ClientCommand,
     InterruptCommand,
@@ -89,7 +90,11 @@ class WSClient:
         try:
             async for raw in self._ws:
                 try:
-                    event = deserialize_event(raw)
+                    payload = raw if isinstance(raw, str) else raw.decode()
+                    if payload.lstrip().startswith('{"type":"') and '"data"' not in payload:
+                        event = decode_event(payload)
+                    else:
+                        event = deserialize_event(payload)
                     yield event
                 except (ValueError, KeyError) as e:
                     log.warning("Malformed event from server: %s", e)

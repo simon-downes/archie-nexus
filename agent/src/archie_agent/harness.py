@@ -45,11 +45,13 @@ from archie_shared.events import (
 from archie_shared.events import (
     Usage as WireUsage,
 )
+from archie_shared.schemas import SubagentsConfig
 from archie_shared.session.log import append_event
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from starlette.websockets import WebSocket
 from ulid import ULID
 
+from archie_agent.agents import AgentEntry, create_task_tool, discover_agents
 from archie_agent.event_log import EventFactory, now_utc
 from archie_agent.events import (
     IterationStart,
@@ -107,11 +109,19 @@ class AgentHarness:
         *,
         exec_python: str | None = None,
         exec_run_root: Path | None = None,
+        model_catalog: dict[str, "ModelEntry"] | None = None,
+        region: str = "eu-west-1",
+        subagents: SubagentsConfig | None = None,
     ) -> None:
         self.session = session
         self._llm = llm_client
         self._model_name = model_name
         self._log_dir = log_dir
+        self._model_catalog = model_catalog or {}
+        self._region = region
+        self._subagents = subagents or SubagentsConfig()
+        if self._subagents.max_concurrent <= 0:
+            raise ValueError("agent.subagents.max_concurrent must be positive")
 
         # exec runner overrides (for testing)
         self._exec_python = exec_python
@@ -124,7 +134,8 @@ class AgentHarness:
         self._turn_active = False
         self._interrupt = threading.Event()
 
-        # Skills: discover catalog and create mutable loaded list
+        # Agent and skill catalogs are session-constant.
+        self._agent_catalog: dict[str, AgentEntry] = discover_agents()
         self._skill_catalog = discover_skills()
         self._loaded_skills: list[tuple[str, str]] = []
         # Project rules are session-constant. Loaded skill bodies remain dynamic.
@@ -134,6 +145,25 @@ class AgentHarness:
         self._registry = create_registry()
         skill_spec = create_skill_tool(self._skill_catalog, self._loaded_skills)
         self._registry.register(skill_spec)
+        self._current_turn_index = 0
+        self._children: dict[tuple[str, int], tuple[threading.Event, asyncio.Event, callable]] = {}
+        self._registry.register(
+            create_task_tool(
+                agent_catalog=self._agent_catalog,
+                skill_catalog=self._skill_catalog,
+                session=self.session,
+                model_catalog=self._model_catalog,
+                active_model=lambda: self.session.model,
+                active_model_key=lambda: self.session.model_id,
+                region=self._region,
+                log_path=self.log_path,
+                broadcast=self._broadcast_raw,
+                exec_python=self._exec_python,
+                exec_run_root=self._exec_run_root,
+                max_concurrent=self._subagents.max_concurrent,
+                live_children=self._children,
+            )
+        )
         self._tool_config = self._registry.to_tool_config()
 
         # Active runner subprocess for cancellation
@@ -158,6 +188,30 @@ class AgentHarness:
                     model_key=self.session.model_id,
                 ),
             )
+
+    def _make_task_placeholder(self):
+        """Create the root task tool placeholder before task wiring is added."""
+        from archie_agent.tools import ToolSpec
+
+        async def handler(tasks=None, **kwargs):
+            return "Error: task tool is not yet wired"
+
+        return ToolSpec(
+            name="task",
+            description="Delegate one or more tasks to specialised child agents.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "object"},
+                    },
+                },
+                "required": ["tasks"],
+            },
+            handler=handler,
+        )
 
     def _build_prompt(self) -> SystemPrompt:
         """Build one structured prompt snapshot for the current outer turn."""
@@ -217,6 +271,7 @@ class AgentHarness:
 
         self._turn_active = True
         turn_index = self.session.next_turn_index()
+        self._current_turn_index = turn_index
         self._request_ids = []
         current_request_id = ""
         current_iteration = 0
@@ -481,14 +536,24 @@ class AgentHarness:
 
             await self._broadcast(StatusUpdated(git_branch=_read_git_branch()))
 
-    def interrupt(self) -> None:
-        """Signal the current turn to stop. Also cancels any active subprocess.
+    def interrupt(self, target: tuple[str, int] | None = None) -> None:
+        """Signal the current turn or one child to stop."""
+        if target is not None:
+            child = self._children.get(target)
+            if child is None:
+                log.debug("Ignoring stale child interrupt target %s", target)
+                return
+            interrupt, async_interrupt, cancel_process = child
+            interrupt.set()
+            async_interrupt.set()
+            cancel_process()
+            return
 
-        Sets the threading.Event (used by provider streaming) and schedules the
-        asyncio.Event on the running loop so the tool batch wakes immediately
-        without polling. Killing the active subprocess group is what makes an
-        in-flight tool actually return.
-        """
+        for interrupt, async_interrupt, cancel_process in list(self._children.values()):
+            interrupt.set()
+            async_interrupt.set()
+            cancel_process()
+
         self._interrupt.set()
         loop = self._loop
         async_interrupt = self._interrupt_async
@@ -513,7 +578,14 @@ class AgentHarness:
             )
 
         try:
-            if block.name == "exec":
+            if block.name == "task":
+                kwargs = dict(block.input)
+                kwargs["_launch_scope"] = block.tool_use_id
+                kwargs["_parent_turn"] = self._current_turn_index
+                result = await spec.handler(**kwargs)
+                content = str(result)
+                is_error = content.startswith("Error:")
+            elif block.name == "exec":
                 # exec tool: run via subprocess with on_start for cancellation
                 source = block.input.get("source", "")
                 kwargs: dict = {"on_start": self._on_proc_start}

@@ -1,0 +1,11 @@
+- [x] Milestone 1: Agent definition discovery and catalog
+- [x] Milestone 2: Structured focused child prompt
+- [x] Milestone 3: Configuration, harness dependency threading, and child dispatch prefactor
+- [x] Milestone 4: Single child task execution and scoped canonical events
+- [x] Milestone 5: Skills scoping and provider/model regression coverage
+- [x] Milestone 6: Bounded multi-child fan-out
+- [x] Milestone 7: Targeted and stop-all cancellation
+- [x] Milestone 8: Canonical replay and accounting hardening
+- [x] Milestone 9: TUI collapsed scoped activity
+- [x] Milestone 10: Full-screen child detail, picker, and targeted stop UI
+- [x] Milestone 11: End-to-end validation and documentation

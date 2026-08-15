@@ -27,8 +27,16 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
     region: str = "eu-west-1"
 
 
+class SubagentsConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Limits specific to concurrent child-agent delegation."""
+
+    max_concurrent: int = 3
+
+
 class AgentConfig(msgspec.Struct, forbid_unknown_fields=True):
-    """Agent-specific settings (placeholder for future fields)."""
+    """Agent-specific settings."""
+
+    subagents: SubagentsConfig = msgspec.field(default_factory=SubagentsConfig)
 
 
 class CliConfig(msgspec.Struct, forbid_unknown_fields=True):

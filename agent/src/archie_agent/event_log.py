@@ -28,11 +28,19 @@ from archie_agent.events import Usage
 class EventFactory:
     """Create canonical request events with immutable model/accounting data."""
 
-    def __init__(self, path: Path, model_key: str, model: ModelEntry, scope: str | None = None):
+    def __init__(
+        self,
+        path: Path,
+        model_key: str,
+        model: ModelEntry,
+        scope: str | None = None,
+        subagent_index: int | None = None,
+    ):
         self.path = path
         self.model_key = model_key
         self.model = model
         self.scope = scope
+        self.subagent_index = subagent_index
 
     def request(
         self,
@@ -63,6 +71,7 @@ class EventFactory:
         event = LLMRequest(
             id=request_id or str(ULID()),
             scope=self.scope,
+            subagent_index=self.subagent_index,
             turn_iteration=turn_iteration,
             model_key=self.model_key,
             sent_at=sent_at,
@@ -86,6 +95,7 @@ class EventFactory:
             id=str(ULID()),
             turn_iteration=turn_iteration,
             scope=self.scope,
+            subagent_index=self.subagent_index,
             index=index,
         )
         serialized = encode_event(event)
@@ -100,6 +110,7 @@ class EventFactory:
             id=str(ULID()),
             turn_iteration=turn_iteration,
             scope=self.scope,
+            subagent_index=self.subagent_index,
             request_id=request_id,
             text=text,
         )
@@ -118,6 +129,7 @@ class EventFactory:
             id=str(ULID()),
             turn_iteration=turn_iteration,
             scope=self.scope,
+            subagent_index=self.subagent_index,
             request_id=request_id,
             tool_use_id=tool_use_id,
             name=name,
@@ -142,6 +154,7 @@ class EventFactory:
             id=str(ULID()),
             turn_iteration=turn_iteration,
             scope=self.scope,
+            subagent_index=self.subagent_index,
             request_id=request_id,
             tool_use_id=tool_use_id,
             content=content,
@@ -165,6 +178,7 @@ class EventFactory:
             id=str(ULID()),
             turn=turn,
             scope=self.scope,
+            subagent_index=self.subagent_index,
             request_ids=list(request_ids),
             content=content,
             interrupted=interrupted,
@@ -174,19 +188,19 @@ class EventFactory:
         return event, serialized
 
     def turn_complete(self, *, turn: int, stop_reason: str) -> tuple[TurnComplete, str]:
-        event = TurnComplete(id=str(ULID()), turn=turn, scope=self.scope, stop_reason=stop_reason)
+        event = TurnComplete(id=str(ULID()), turn=turn, scope=self.scope, subagent_index=self.subagent_index, stop_reason=stop_reason)
         serialized = encode_event(event)
         append_event(self.path, event, serialized)
         return event, serialized
 
     def turn_error(self, *, turn: int, message: str) -> tuple[TurnError, str]:
-        event = TurnError(id=str(ULID()), turn=turn, scope=self.scope, message=message)
+        event = TurnError(id=str(ULID()), turn=turn, scope=self.scope, subagent_index=self.subagent_index, message=message)
         serialized = encode_event(event)
         append_event(self.path, event, serialized)
         return event, serialized
 
     def turn_interrupted(self, *, turn: int) -> tuple[TurnInterrupted, str]:
-        event = TurnInterrupted(id=str(ULID()), turn=turn, scope=self.scope)
+        event = TurnInterrupted(id=str(ULID()), turn=turn, scope=self.scope, subagent_index=self.subagent_index)
         serialized = encode_event(event)
         append_event(self.path, event, serialized)
         return event, serialized

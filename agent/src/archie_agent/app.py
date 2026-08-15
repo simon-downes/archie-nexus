@@ -121,6 +121,9 @@ async def lifespan(app):
         llm_client=llm_client,
         model_name=model.name,
         log_dir=sessions_dir,
+        model_catalog=_catalog,
+        region=_config.global_.region,
+        subagents=_config.agent.subagents,
     )
 
     log.info(
@@ -279,7 +282,7 @@ async def stream(websocket: WebSocket) -> None:
                 task.add_done_callback(lambda t: _active_tasks.discard(t))
                 _active_tasks.add(task)
             elif isinstance(command, InterruptCommand):
-                _agent.interrupt()
+                _agent.interrupt(command.target)
             elif isinstance(command, SwitchModelCommand):
                 await _handle_model_switch(command, websocket)
 
