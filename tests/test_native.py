@@ -247,7 +247,7 @@ class TestMakeNativeSpecs:
     def test_produces_specs_for_all_native_tools(self):
         specs = make_native_specs()
         names = {s.name for s in specs}
-        # All 9 tools should be native
+        # All native tools should be present
         assert "read" in names
         assert "grep" in names
         assert "glob" in names
@@ -257,6 +257,10 @@ class TestMakeNativeSpecs:
         assert "web_fetch" in names
         assert "web_search" in names
         assert "code" in names
+        assert "brain_search" in names
+        brain = next(spec for spec in specs if spec.name == "brain_search")
+        assert set(brain.schema["properties"]) == {"query", "limit"}
+        assert "regular filesystem" in brain.description
 
     def test_spec_has_required_fields(self):
         specs = make_native_specs()

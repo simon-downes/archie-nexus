@@ -152,8 +152,8 @@ def test_create_registry():
     assert spec.name == "exec"
     assert "source" in spec.schema["properties"]
     config = reg.to_tool_config()
-    # exec + 9 native tools = 10 total
-    assert len(config) == 10
+    # exec + 10 native tools = 11 total
+    assert len(config) == 11
     names = {c["name"] for c in config}
     assert "exec" in names
     assert "read" in names

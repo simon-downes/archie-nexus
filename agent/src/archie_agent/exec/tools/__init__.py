@@ -90,7 +90,7 @@ def get_all_tools() -> dict:
     into the model code's namespace.
     """
     # Import submodules to trigger @tool registration
-    from archie_agent.exec.tools import code, fs, shell, web  # noqa: F401
+    from archie_agent.exec.tools import brain, code, fs, shell, web  # noqa: F401
 
     return dict(_TOOLS)
 

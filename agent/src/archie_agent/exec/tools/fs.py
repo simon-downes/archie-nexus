@@ -10,6 +10,8 @@ import difflib
 import json
 from pathlib import Path
 
+from archie_shared.brain import BrainError, brain_root, edit_mutate, mutate
+
 from archie_agent.exec.tools import (
     BinaryFileError,
     EditError,
@@ -63,24 +65,8 @@ def _resolve_path(path: str) -> Path:
     p = Path(path)
 
     if p.is_absolute():
-        if not (str(p) == str(WORKSPACE) or str(p).startswith(str(WORKSPACE) + "/")):
-            raise PathValidationError(
-                f"Absolute path '{path}' is not under /workspace/. "
-                "Use relative paths or /workspace/ prefix."
-            )
-        resolved = p.resolve()
-    else:
-        resolved = (WORKSPACE / p).resolve()
-
-    # After resolution, verify still under /workspace/
-    try:
-        resolved.relative_to(WORKSPACE.resolve())
-    except ValueError:
-        raise PathValidationError(
-            f"Path '{path}' resolves outside /workspace/ (traversal detected)."
-        ) from None
-
-    return resolved
+        return p.resolve()
+    return (WORKSPACE / p).resolve()
 
 
 @tool(guidelines=("Use `read` to examine file contents.",))
@@ -90,7 +76,7 @@ async def read(
     """Read a file from the workspace.
 
     Args:
-        path: File path (relative to /workspace/ or absolute under /workspace/).
+        path: File path (relative to /workspace/ or any visible absolute path).
         offset: Start line, 1-indexed (default: 1).
         limit: Maximum lines to return (default: all).
         raw: If True, return plain content without line numbers.
@@ -99,7 +85,7 @@ async def read(
         File content with line numbers (e.g. "    1| content") unless raw=True.
 
     Raises:
-        PathValidationError: Path is outside /workspace/.
+        PathValidationError: Path is empty or otherwise invalid.
         FileNotFoundError: File does not exist.
         BinaryFileError: File is binary.
     """
@@ -173,7 +159,7 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
         Each file group shows matching lines with line numbers.
 
     Raises:
-        PathValidationError: Search path is outside /workspace/.
+        PathValidationError: Search path is empty, missing, or not a directory.
     """
     if not pattern:
         raise PathValidationError("Pattern must not be empty")
@@ -208,9 +194,7 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
     if result.returncode == 1:
         return "No matches found."
     if result.returncode not in (0, 1) and result.returncode is not None:
-        raise RuntimeError(
-            f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}")
 
     # Parse JSON output into per-file groups
     file_matches: dict[str, list[tuple[int, str]]] = {}
@@ -297,7 +281,7 @@ async def glob(pattern: str, path: str | None = None) -> str:
         with a header showing count.
 
     Raises:
-        PathValidationError: Search path is outside /workspace/.
+        PathValidationError: Search path is empty, missing, or not a directory.
         RuntimeError: ripgrep failed.
     """
     if not pattern:
@@ -334,9 +318,7 @@ async def glob(pattern: str, path: str | None = None) -> str:
 
     # rg exit codes: 0 = matches, 1 = no matches, 2+ = error
     if result.returncode not in (0, 1) and result.returncode is not None:
-        raise RuntimeError(
-            f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}")
 
     # Collect matching files with mtime (rg cannot sort by mtime). rg emits
     # paths relative to search_dir (with a leading ./); resolve to absolute,
@@ -347,11 +329,14 @@ async def glob(pattern: str, path: str | None = None) -> str:
             continue
         abs_path = (search_dir / line).resolve()
         try:
-            rel = str(abs_path.relative_to(WORKSPACE))
+            display_path = str(abs_path.relative_to(WORKSPACE))
+        except ValueError:
+            display_path = str(abs_path)
+        try:
             mtime = abs_path.stat().st_mtime
-            files_with_mtime.append((rel, mtime))
-        except (ValueError, OSError):
-            pass
+        except OSError:
+            continue
+        files_with_mtime.append((display_path, mtime))
 
     if not files_with_mtime:
         return "No files found."
@@ -381,18 +366,23 @@ async def write(path: str, content: str) -> str:
     """Write content to a file, creating parent directories as needed.
 
     Args:
-        path: File path (relative to /workspace/ or absolute under /workspace/).
+        path: File path (relative to /workspace/ or any visible absolute path).
         content: Content to write to the file.
 
     Returns:
         Confirmation string with path and line count.
 
     Raises:
-        PathValidationError: Path is outside /workspace/.
+        PathValidationError: Path is empty or otherwise invalid.
     """
     resolved = _resolve_path(path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text(content, encoding="utf-8")
+    try:
+        content = mutate(resolved, content)
+    except BrainError as e:
+        raise EditError(str(e)) from e
+    if not (brain_root() in resolved.parents or resolved == brain_root()):
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8")
     line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
     return f"Written: {path} ({line_count} lines)"
 
@@ -406,7 +396,7 @@ async def edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
     """Apply a string replacement edit to a file.
 
     Args:
-        path: File path (relative to /workspace/ or absolute under /workspace/).
+        path: File path (relative to /workspace/ or any visible absolute path).
         old: Exact text to find in the file.
         new: Replacement text.
         replace_all: If True, replace all occurrences. If False (default),
@@ -416,7 +406,7 @@ async def edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
         A unified diff string showing what changed.
 
     Raises:
-        PathValidationError: Path is outside /workspace/.
+        PathValidationError: Path is empty or otherwise invalid.
         FileNotFoundError: File does not exist.
         EditError: old text not found, or ambiguous match.
     """
@@ -428,34 +418,17 @@ async def edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
     if not resolved.is_file():
         raise FileNotFoundError(f"Path is a directory, not a file: {path}")
 
-    try:
-        original = resolved.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        raise FileNotFoundError(f"Cannot read file: {e}") from e
-
     if not old:
         raise EditError("'old' text cannot be empty.")
 
-    count = original.count(old)
-
-    if count == 0:
-        raise EditError(
-            "Text not found in file. Ensure the 'old' text "
-            "matches exactly (including whitespace and indentation)."
-        )
-
-    if count > 1 and not replace_all:
-        raise EditError(
-            f"Found {count} matches. Include more surrounding "
-            "context to disambiguate, or set replace_all=True to replace all."
-        )
-
-    if replace_all:
-        modified = original.replace(old, new)
-    else:
-        modified = original.replace(old, new, 1)
-
-    resolved.write_text(modified, encoding="utf-8")
+    try:
+        original, modified = edit_mutate(resolved, old, new, replace_all)
+    except BrainError as e:
+        raise EditError(str(e)) from e
+    except OSError as e:
+        raise FileNotFoundError(f"Cannot read file: {e}") from e
+    if not (brain_root() in resolved.parents or resolved == brain_root()):
+        resolved.write_text(modified, encoding="utf-8")
 
     # Generate unified diff
     original_lines = original.splitlines(keepends=True)

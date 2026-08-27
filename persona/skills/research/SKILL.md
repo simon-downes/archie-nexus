@@ -146,21 +146,10 @@ The main agent synthesises the findings (never a subagent):
 
 - **Quick mode:** report in-context. Persist an artifact only if asked or clearly
   worth keeping.
-- **Deep mode (and quick when persisting):** write a cited Markdown artifact to the
-  brain's `_inbox/` staging area by default, using the brain write tool (refer to
-  `# Available Tools`). Give it a slug from the topic. Frontmatter:
-
-```markdown
----
-name: <title>
-summary: <one-line summary>
-tags: [research, <topic-tags>]
----
-
-# <Title>
-
-<synthesised, cited content>
-```
+- **Deep mode (and quick when persisting):** write a cited Markdown artifact as a brain
+  entry under the top-level `research/` directory. Use subdirectories under `research/`
+  when they help organise the material, and give the entry a descriptive slug. Follow
+  the brain's normal entry format and guidance.
 
 Then report: topic, number of primary sources consulted, and where the artifact
 landed. The user reads it and decides whether to promote it into the brain proper.

@@ -6,6 +6,7 @@ when invoking from an async context.
 """
 
 import logging
+import os
 from pathlib import Path
 
 from archie_shared.config import home_dir
@@ -56,17 +57,13 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     # Reject names with path separators or traversal sequences to prevent
     # a user-supplied value from escaping workspace_root.
     if "/" in workspace or "\\" in workspace or workspace in (".", ".."):
-        raise ValueError(
-            f"Invalid workspace name '{workspace}': must be a single directory name."
-        )
+        raise ValueError(f"Invalid workspace name '{workspace}': must be a single directory name.")
     workspace_path = expand_workspace_root(config) / workspace
     # Resolve and confirm the result is still under workspace_root
     resolved = workspace_path.resolve()
     workspace_root_resolved = expand_workspace_root(config).resolve()
     if not str(resolved).startswith(str(workspace_root_resolved) + "/"):
-        raise ValueError(
-            f"Invalid workspace name '{workspace}': resolves outside workspace_root."
-        )
+        raise ValueError(f"Invalid workspace name '{workspace}': resolves outside workspace_root.")
     if not resolved.is_dir():
         raise ValueError(
             f"Workspace '{workspace}' not found under {expand_workspace_root(config)}.\n"
@@ -75,10 +72,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
 
     # 2. Check image exists
     if not check_image(IMAGE_TAG):
-        raise RuntimeError(
-            f"Image '{IMAGE_TAG}' not found locally.\n"
-            "Build it with: archie build"
-        )
+        raise RuntimeError(f"Image '{IMAGE_TAG}' not found locally.\nBuild it with: archie build")
 
     # 3. Generate session ID
     session_id = generate_session_id(workspace=workspace)
@@ -101,6 +95,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     shared_dir = REPO_ROOT / "shared"
     persona_dir_host = REPO_ROOT / "persona"
     container_persona = "/opt/archie/persona"
+    configured_brain = os.environ.get("ARCHIE_BRAIN_DIR")
 
     docker_cmd = [
         "docker",
@@ -118,6 +113,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         f"ARCHIE_PERSONA_DIR={container_persona}",
         "-e",
         f"ARCHIE_SESSION_ID={session_id}",
+        *(["-e", f"ARCHIE_BRAIN_DIR={configured_brain}"] if configured_brain else []),
         "-v",
         f"{agent_dir}:/opt/archie/agent:rw",
         "-v",
