@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from archie_agent.exec.envelope import Envelope
+from archie_agent.exec.tools._subprocess import kill_process_group
 from archie_agent.tools import ToolRegistry, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ async def run_exec(
         # Ensure proc is waited on even if we're cancelled
         if proc.returncode is None:
             try:
-                proc.kill()
+                kill_process_group(proc)
                 await proc.wait()
             except ProcessLookupError:
                 pass

@@ -7,15 +7,19 @@ their wire format does not support typed prompt blocks.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from archie_shared.brain import brain_root
 from archie_shared.config import persona_dir
 
 from archie_agent.exec.tool import PYTHON
 from archie_agent.exec.tools import get_tool_guidelines
 from archie_agent.exec.tools.fs import WORKSPACE
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from archie_agent.skills import SkillEntry
@@ -92,6 +96,19 @@ def _build_environment(model_name: str, workspace_dir: str) -> str:
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
+
+def _build_brain_guidance() -> str:
+    parts = [_load_prompt("brain.md")]
+    try:
+        user = (brain_root() / "BRAIN.md").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as e:
+        if not isinstance(e, FileNotFoundError):
+            log.warning("Unable to load brain guidance: %s", e)
+        user = ""
+    if user:
+        parts.append(user)
+    return "\n\n".join(parts)
 
 
 def _build_tools() -> str:
@@ -189,7 +206,12 @@ def build_system_prompt_structured(
     compatibility builder reads AGENTS.md for this call; the harness passes an
     explicit session snapshot instead.
     """
-    static_sections = [_build_identity(), _build_environment(model_name, workspace_dir), _build_tools()]
+    static_sections = [
+        _build_identity(),
+        _build_environment(model_name, workspace_dir),
+        _build_tools(),
+        _build_brain_guidance(),
+    ]
 
     if catalog:
         static_sections.append(_build_skills_catalog(catalog))
@@ -228,7 +250,12 @@ def build_subagent_prompt(
     the prompt-caching work: static content remains separate from dynamic loaded
     skill bodies. ``agents_context`` is expected to be the harness snapshot.
     """
-    static_sections = [body.strip(), _build_environment(model_name, workspace_dir), _build_tools()]
+    static_sections = [
+        body.strip(),
+        _build_environment(model_name, workspace_dir),
+        _build_tools(),
+        _build_brain_guidance(),
+    ]
     if catalog:
         static_sections.append(_build_skills_catalog(catalog))
     if agents_context is None:

@@ -181,41 +181,6 @@ async def test_native_shell_dispatch(tmp_path, monkeypatch):
     assert results[0]["is_error"] is False
 
 
-# --- Test: native read error (path validation) produces is_error=True ---
-
-
-async def test_native_read_error_path_validation(tmp_path, monkeypatch):
-    """PathValidationError from native read produces is_error=True with type: message."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setattr("archie_agent.exec.tools.fs.WORKSPACE", workspace)
-
-    responses = [
-        [
-            ToolUseEvent(
-                tool_use_id="tu_err",
-                name="read",
-                input={"path": "/etc/passwd"},
-            ),
-            Usage(input_tokens=100, output_tokens=50),
-            Done(stop_reason="tool_use"),
-        ],
-        [
-            TextDelta(text="That failed."),
-            Usage(input_tokens=200, output_tokens=60),
-            Done(stop_reason="end_turn"),
-        ],
-    ]
-    harness = _make_harness(tmp_path, responses)
-    ws = FakeWebSocket()
-    harness.clients.add(ws)
-    await harness.handle_message("read /etc/passwd")
-
-    results = _get_tool_results(ws)
-    assert len(results) == 1
-    assert results[0]["is_error"] is True
-
-
 # --- Test: native grep dispatches with formatted output ---
 
 

@@ -1,8 +1,8 @@
 ## Available Tools
 
 You have native tools (`read`, `grep`, `glob`, `edit`, `write`, `shell`,
-`web_fetch`, `web_search`, `code`) for single operations, plus `exec` for
-multi-step Python code.
+`web_fetch`, `web_search`, `code`, `brain_search`) for single operations, plus
+`exec` for multi-step Python code.
 
 ### When to use which
 
@@ -16,6 +16,7 @@ multi-step Python code.
 - Fetching a URL → `web_fetch`
 - Searching the web → `web_search`
 - Exploring code structure → `code`
+- Searching curated brain knowledge → `brain_search`
 
 **`exec`** — use when you need to:
 - Chain multiple steps with data flowing between them

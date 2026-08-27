@@ -223,6 +223,20 @@ def test_build_project_context_empty_file_returns_empty(tmp_path):
     assert _build_project_context(str(tmp_path)) == ""
 
 
+def test_brain_guidance_precedes_user_guidance_and_refreshes(monkeypatch, tmp_path):
+    from archie_agent.prompt import build_system_prompt
+
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    (tmp_path / "BRAIN.md").write_text("User brain rules v1")
+    first = build_system_prompt("test-model")
+    (tmp_path / "BRAIN.md").write_text("User brain rules v2")
+    second = build_system_prompt("test-model")
+    persona_pos = first.index("The brain is a curated")
+    user_pos = first.index("User brain rules v1")
+    assert persona_pos < user_pos
+    assert "User brain rules v2" in second
+
+
 def test_build_system_prompt_includes_agents_md(tmp_path):
     """Prompt includes AGENTS.md content when present in the workspace."""
     (tmp_path / "AGENTS.md").write_text("Always run ruff.", encoding="utf-8")
@@ -242,9 +256,7 @@ def test_agents_md_after_skills_before_loaded_skills(tmp_path):
     (tmp_path / "AGENTS.md").write_text("Project context here.", encoding="utf-8")
     catalog = _make_catalog()
     loaded = [("python-style", "Use type hints.")]
-    prompt = build_system_prompt(
-        "test-model", str(tmp_path), catalog=catalog, loaded_skills=loaded
-    )
+    prompt = build_system_prompt("test-model", str(tmp_path), catalog=catalog, loaded_skills=loaded)
     skills_pos = prompt.index("<skills>")
     agents_pos = prompt.index("<agents.md>")
     loaded_pos = prompt.index('<skill name="python-style">')

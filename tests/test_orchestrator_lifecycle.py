@@ -127,7 +127,7 @@ def test_start_session_wait_for_ready_called(config, workspace, tmp_path):
     mock_wait.assert_called_once()
     args = mock_wait.call_args[0]
     assert args[0].startswith("archie-")  # container name
-    assert args[1][0] == "docker"         # docker run cmd
+    assert args[1][0] == "docker"  # docker run cmd
 
 
 def test_start_session_container_crash_propagates(config, workspace, tmp_path):
@@ -147,6 +147,24 @@ def test_start_session_container_crash_propagates(config, workspace, tmp_path):
             start_session(ws_name, config)
 
 
+def test_start_session_forwards_brain_env_without_mount(config, workspace, tmp_path, monkeypatch):
+    ws_name, _ = workspace
+    captured_cmd = []
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", "/custom/brain")
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch(
+            "archie_orchestrator.lifecycle.run_container",
+            side_effect=lambda c: captured_cmd.extend(c),
+        ),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        start_session(ws_name, config)
+    assert "ARCHIE_BRAIN_DIR=/custom/brain" in captured_cmd
+    assert not any("/custom/brain:/custom/brain" in item for item in captured_cmd)
+
+
 def test_start_session_env_vars_in_command(config, workspace, tmp_path):
     """docker run command includes ARCHIE_HOME_DIR and ARCHIE_SESSION_ID env vars."""
     ws_name, _ = workspace
@@ -154,7 +172,10 @@ def test_start_session_env_vars_in_command(config, workspace, tmp_path):
 
     with (
         patch("archie_orchestrator.lifecycle.check_image", return_value=True),
-        patch("archie_orchestrator.lifecycle.run_container", side_effect=lambda c: captured_cmd.extend(c)),
+        patch(
+            "archie_orchestrator.lifecycle.run_container",
+            side_effect=lambda c: captured_cmd.extend(c),
+        ),
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
         patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
     ):

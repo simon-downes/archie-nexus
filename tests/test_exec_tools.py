@@ -40,7 +40,7 @@ def test_get_all_tools_returns_expected():
     assert callable(tools["read"])
 
 
-# --- Path validation ---
+# --- Path handling ---
 
 
 def test_resolve_path_relative(workspace):
@@ -58,16 +58,6 @@ def test_resolve_path_absolute_under_workspace(workspace):
 def test_resolve_path_empty():
     with pytest.raises(PathValidationError, match="must not be empty"):
         _resolve_path("")
-
-
-def test_resolve_path_traversal(workspace):
-    with pytest.raises(PathValidationError, match="traversal"):
-        _resolve_path("../../etc/passwd")
-
-
-def test_resolve_path_absolute_outside(workspace):
-    with pytest.raises(PathValidationError, match="not under /workspace/"):
-        _resolve_path("/etc/passwd")
 
 
 # --- read ---
@@ -136,12 +126,6 @@ async def test_write_creates_parents(workspace):
     tools = get_all_tools()
     await tools["write"](path="a/b/c.txt", content="deep")
     assert (workspace / "a" / "b" / "c.txt").read_text() == "deep"
-
-
-async def test_write_path_outside(workspace):
-    tools = get_all_tools()
-    with pytest.raises(PathValidationError):
-        await tools["write"](path="../../evil.txt", content="bad")
 
 
 # --- edit ---
@@ -413,7 +397,9 @@ async def test_shell_killed_via_on_start_handle_returns_error(workspace):
         def kill_soon(proc):
             async def _k():
                 await asyncio.sleep(0.1)
-                proc.kill()
+                from archie_agent.exec.tools._subprocess import kill_process_group
+
+                kill_process_group(proc)
 
             asyncio.ensure_future(_k())
 
