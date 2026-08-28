@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from archie_agent.agents import _parse_agent_file, discover_agents
+from archie_agent.agents import DEFAULT_AGENT, _parse_agent_file, discover_agents
 
 
 def test_parse_agent_file_extracts_optional_fields_and_body(tmp_path: Path):
@@ -38,6 +38,8 @@ def test_discover_agents_missing_directory(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("archie_agent.agents.persona_dir", lambda: tmp_path)
 
     assert discover_agents() == {}
+    assert DEFAULT_AGENT.name == "default"
+    assert DEFAULT_AGENT.model is None
 
 
 def test_discover_agents_skips_malformed_file(monkeypatch, tmp_path: Path, caplog):

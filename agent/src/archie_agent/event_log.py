@@ -170,6 +170,7 @@ class EventFactory:
         self,
         *,
         turn: int,
+        turn_iteration: str,
         request_ids: list[str],
         content: str,
         interrupted: bool,
@@ -177,6 +178,7 @@ class EventFactory:
         event = AssistantMessage(
             id=str(ULID()),
             turn=turn,
+            turn_iteration=turn_iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
             request_ids=list(request_ids),

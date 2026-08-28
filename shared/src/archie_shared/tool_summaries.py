@@ -9,7 +9,8 @@ Shared so any presentation surface (TUI, web UI, session viewer) can derive
 summaries from canonical event data. The client renders the markup directly.
 """
 
-from __future__ import annotations
+ERROR = "#ff6d67"
+SUCCESS = "#67c26d"
 
 
 def _esc(text: str) -> str:
@@ -65,8 +66,8 @@ _DIFF_LINE_CAP = 30
 
 
 def _format_diff_block(diff: str) -> str:
-    """Render a unified diff in the nextgen style: line-numbered, full-line
-    background colours, stripped prefix chars, capped with an overflow marker.
+    """Render a unified diff in the nextgen style: line-numbered, coloured
+    additions and deletions, stripped prefix chars, capped with an overflow marker.
 
     Line numbers are seeded from each `@@ -old +new @@` hunk header, so no
     pre/post file content is needed — the diff string carries the offsets.
@@ -102,11 +103,11 @@ def _format_diff_block(diff: str) -> str:
         content = _esc(line[1:])
         if line.startswith("-"):
             line_num_old += 1
-            rendered.append(f"  [on red][dim]{line_num_old:>4}[/] {content} [/]")
+            rendered.append(f"  [{ERROR}]{line_num_old:>4}- {content}[/]")
             shown += 1
         elif line.startswith("+"):
             line_num_new += 1
-            rendered.append(f"  [on green][dim]{line_num_new:>4}[/] {content} [/]")
+            rendered.append(f"  [{SUCCESS}]{line_num_new:>4}+ {content}[/]")
             shown += 1
         elif line.startswith(" "):
             line_num_old += 1
@@ -187,6 +188,11 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             # so the pending summary IS the source (not a Rich one-liner).
             return input_dict.get("source", "")
 
+        case "task":
+            tasks = input_dict.get("tasks", [])
+            count = len(tasks) if isinstance(tasks, list) else 0
+            return f"Task · {count} agent{'s' if count != 1 else ''}"
+
         case "skill":
             skill_name = input_dict.get("name", "")
             file = input_dict.get("file")
@@ -196,6 +202,15 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
 
         case _:
             return _esc(name)
+
+
+def format_tool_activity(name: str, input_dict: dict) -> str:
+    """Produce a compact one-line activity label for any tool."""
+    if name == "exec":
+        source = input_dict.get("source", "")
+        line_count = len(source.splitlines())
+        return f"Exec ({line_count} lines)"
+    return format_tool_pending(name, input_dict)
 
 
 def format_tool_complete(name: str, input_dict: dict, result: str, is_error: bool) -> str:
@@ -213,7 +228,7 @@ def format_tool_complete(name: str, input_dict: dict, result: str, is_error: boo
     if is_error:
         error_msg = result.split("\n")[0][:80]
         base = format_tool_pending(name, input_dict)
-        return f"{base} — [red]{_esc(error_msg)}[/]"
+        return f"{base} — [{ERROR}]{_esc(error_msg)}[/]"
 
     match name:
         case "read":
@@ -344,6 +359,11 @@ def format_tool_complete(name: str, input_dict: dict, result: str, is_error: boo
         case "exec":
             # Exec completion is handled by ToolEntry's own complete() method
             return "Exec"
+
+        case "task":
+            tasks = input_dict.get("tasks", [])
+            count = len(tasks) if isinstance(tasks, list) else 0
+            return f"Task · {count} agent{'s' if count != 1 else ''}"
 
         case "skill":
             skill_name = input_dict.get("name", "")

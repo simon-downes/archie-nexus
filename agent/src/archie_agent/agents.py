@@ -56,6 +56,20 @@ class AgentEntry:
     path: Path
 
 
+DEFAULT_AGENT = AgentEntry(
+    name="default",
+    description="General-purpose child agent for delegated tasks.",
+    provider=None,
+    model=None,
+    skills=[],
+    body=(
+        "You are a general-purpose delegated agent. Complete the assigned task "
+        "carefully, inspect the relevant files, and report concrete findings."
+    ),
+    path=Path("<built-in default agent>"),
+)
+
+
 def discover_agents() -> dict[str, AgentEntry]:
     """Discover agent definitions from the session persona directory."""
     catalog: dict[str, AgentEntry] = {}
@@ -277,9 +291,15 @@ def create_task_tool(
             if not isinstance(agent_name, str) or not isinstance(prompt, str) or not prompt.strip():
                 return f"[{index}] Error: task requires non-empty string agent and prompt"
             entry = agent_catalog.get(agent_name)
+            warning = ""
             if entry is None:
                 available = ", ".join(sorted(agent_catalog)) or "(none)"
-                return f"[{index}] Error: unknown agent '{agent_name}'. Available: {available}"
+                warning = (
+                    f"Warning: unknown agent '{agent_name}' (available: {available}); "
+                    "using default agent. "
+                )
+                log.warning("%s", warning.rstrip())
+                entry = DEFAULT_AGENT
 
             try:
                 current_model = active_model() if callable(active_model) else active_model
@@ -322,6 +342,8 @@ def create_task_tool(
                 from archie_shared.types import TextBlock
 
                 text_parts: list[str] = []
+                iter_text = ""
+                assistant_event_logged = False
                 request_ids: list[str] = []
                 current_iteration = 0
                 current_request_id = ""
@@ -338,6 +360,8 @@ def create_task_tool(
                     ),
                 ):
                     if isinstance(event, IterationStart):
+                        iter_text = ""
+                        assistant_event_logged = False
                         current_iteration = event.index
                         _, serialized = factory.iteration_start(
                             turn_iteration=f"{parent_turn}.{current_iteration}",
@@ -346,6 +370,7 @@ def create_task_tool(
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, TextDelta):
                         text_parts.append(event.text)
+                        iter_text += event.text
                         delta, serialized = factory.text_delta(
                             turn_iteration=f"{parent_turn}.{current_iteration}",
                             request_id=current_request_id,
@@ -367,6 +392,16 @@ def create_task_tool(
                         current_request_id = request.id
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, ToolCall):
+                        if iter_text and not assistant_event_logged:
+                            _, serialized = factory.assistant_message(
+                                turn=parent_turn,
+                                turn_iteration=f"{parent_turn}.{current_iteration}",
+                                request_ids=request_ids.copy(),
+                                content=iter_text,
+                                interrupted=False,
+                            )
+                            await broadcast_raw(broadcast, serialized)
+                            assistant_event_logged = True
                         _, serialized = factory.tool_call(
                             turn_iteration=f"{parent_turn}.{current_iteration}",
                             request_id=current_request_id,
@@ -387,13 +422,15 @@ def create_task_tool(
                         )
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, TurnComplete):
-                        _, serialized = factory.assistant_message(
-                            turn=parent_turn,
-                            request_ids=request_ids,
-                            content="".join(text_parts),
-                            interrupted=False,
-                        )
-                        await broadcast_raw(broadcast, serialized)
+                        if iter_text and not assistant_event_logged:
+                            _, serialized = factory.assistant_message(
+                                turn=parent_turn,
+                                turn_iteration=f"{parent_turn}.{current_iteration}",
+                                request_ids=request_ids.copy(),
+                                content=iter_text,
+                                interrupted=False,
+                            )
+                            await broadcast_raw(broadcast, serialized)
                         _, serialized = factory.turn_complete(
                             turn=parent_turn, stop_reason=event.stop_reason
                         )
@@ -401,15 +438,16 @@ def create_task_tool(
                     elif isinstance(event, TurnError):
                         _, serialized = factory.turn_error(turn=parent_turn, message=event.error)
                         await broadcast_raw(broadcast, serialized)
-                        return f"[{index}] {agent_name}: Error: {event.error}"
+                        return f"[{index}] {agent_name}: {warning}Error: {event.error}"
                     elif isinstance(event, TurnInterrupted):
                         _, serialized = factory.turn_interrupted(turn=parent_turn)
                         await broadcast_raw(broadcast, serialized)
-                        return f"[{index}] {agent_name}: interrupted"
-                return f"[{index}] {agent_name}: {''.join(text_parts)}"
+                        return f"[{index}] {agent_name}: {warning}interrupted"
+                result = "".join(text_parts)
+                return f"[{index}] {agent_name}: {warning}{result}"
             except Exception as error:  # noqa: BLE001 - per-child isolation
                 log.exception("Child agent %s failed", agent_name)
-                return f"[{index}] {agent_name}: {type(error).__name__}: {error}"
+                return f"[{index}] {agent_name}: {warning}{type(error).__name__}: {error}"
             finally:
                 if live_children is not None:
                     live_children.pop((launch_scope, index), None)

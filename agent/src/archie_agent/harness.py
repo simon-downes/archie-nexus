@@ -291,7 +291,6 @@ class AgentHarness:
         self.session.add_turn(role="user", content=content, turn_index=turn_index)
 
         # Run the pure loop and consume events
-        assistant_text = ""
         last_usage: Usage | None = None
 
         # Per-iteration accumulators to reconstruct the tool-augmented transcript
@@ -300,6 +299,7 @@ class AgentHarness:
         iter_text = ""
         iter_tool_uses: list[ToolUseBlock] = []
         iter_tool_results: list[ToolResultBlock] = []
+        assistant_event_logged = False
 
         def _flush_iteration() -> None:
             """Persist the current iteration's assistant(tool_use)+user(tool_result)
@@ -340,6 +340,8 @@ class AgentHarness:
                     # results are final — persist them to the transcript.
                     if event.index > 0:
                         _flush_iteration()
+                    iter_text = ""
+                    assistant_event_logged = False
                     current_iteration = event.index
                     self._event_factory.iteration_start(
                         turn_iteration=f"{turn_index}.{event.index}",
@@ -350,7 +352,6 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, TextDelta):
-                    assistant_text += event.text
                     iter_text += event.text
                     await self._broadcast(WireTextDelta(turn_index=turn_index, text=event.text))
 
@@ -389,6 +390,15 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, ToolCall):
+                    if iter_text and not assistant_event_logged:
+                        self._event_factory.assistant_message(
+                            turn=turn_index,
+                            turn_iteration=f"{turn_index}.{current_iteration}",
+                            request_ids=self._request_ids.copy(),
+                            content=iter_text,
+                            interrupted=False,
+                        )
+                        assistant_event_logged = True
                     # Accumulate for transcript reconstruction
                     iter_tool_uses.append(
                         ToolUseBlock(
@@ -460,12 +470,14 @@ class AgentHarness:
                             turn_index=turn_index,
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                         )
-                    self._event_factory.assistant_message(
-                        turn=turn_index,
-                        request_ids=self._request_ids,
-                        content=assistant_text,
-                        interrupted=False,
-                    )
+                    if iter_text and not assistant_event_logged:
+                        self._event_factory.assistant_message(
+                            turn=turn_index,
+                            turn_iteration=f"{turn_index}.{current_iteration}",
+                            request_ids=self._request_ids.copy(),
+                            content=iter_text,
+                            interrupted=False,
+                        )
                     self._event_factory.turn_complete(
                         turn=turn_index, stop_reason=event.stop_reason
                     )
@@ -474,21 +486,22 @@ class AgentHarness:
                     )
 
                 elif isinstance(event, TurnError):
-                    # Flush the final (unterminated) iteration's tool calls +
-                    # results so their context survives into the next turn.
+                    # Persist any final assistant text before flushing the
+                    # iteration's tool context.
+                    if iter_text and not assistant_event_logged:
+                        self._event_factory.assistant_message(
+                            turn=turn_index,
+                            turn_iteration=f"{turn_index}.{current_iteration}",
+                            request_ids=self._request_ids.copy(),
+                            content=iter_text,
+                            interrupted=True,
+                        )
                     _flush_iteration()
                     if iter_text:
                         self.session.add_turn(
                             role="assistant",
                             content=iter_text,
                             turn_index=turn_index,
-                            interrupted=True,
-                        )
-                    if assistant_text:
-                        self._event_factory.assistant_message(
-                            turn=turn_index,
-                            request_ids=self._request_ids,
-                            content=assistant_text,
                             interrupted=True,
                         )
                     # Persist and record the error for history replay
@@ -499,6 +512,16 @@ class AgentHarness:
                     await self._broadcast(WireTurnError(turn_index=turn_index, message=event.error))
 
                 elif isinstance(event, TurnInterrupted):
+                    # Persist any final assistant text before flushing the
+                    # iteration's tool context.
+                    if iter_text and not assistant_event_logged:
+                        self._event_factory.assistant_message(
+                            turn=turn_index,
+                            turn_iteration=f"{turn_index}.{current_iteration}",
+                            request_ids=self._request_ids.copy(),
+                            content=iter_text,
+                            interrupted=True,
+                        )
                     # Flush the final (unterminated) iteration. The loop already
                     # appends "cancelled" repair results on interrupt, but those
                     # live only inside run_loop; reconstruct here from events.
@@ -509,13 +532,6 @@ class AgentHarness:
                             content=iter_text,
                             turn_index=turn_index,
                             output_tokens=last_usage.output_tokens if last_usage else 0,
-                            interrupted=True,
-                        )
-                    if assistant_text:
-                        self._event_factory.assistant_message(
-                            turn=turn_index,
-                            request_ids=self._request_ids,
-                            content=assistant_text,
                             interrupted=True,
                         )
                     # Persist and record the interruption for history replay

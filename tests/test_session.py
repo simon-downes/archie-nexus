@@ -27,7 +27,7 @@ def test_context_pct_uses_total_context_input_not_billable_input():
     )
 
     assert session._last_input_tokens == 135
-    assert session.context_pct == pytest.approx(15.5)
+    assert session.context_pct == pytest.approx(13.5)
     assert session.total_input_tokens == 100
     assert session.total_cache_read_tokens == 30
     assert session.total_cache_write_tokens == 5

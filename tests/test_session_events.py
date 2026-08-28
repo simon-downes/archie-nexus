@@ -55,11 +55,25 @@ def test_scoped_events_roundtrip_with_none_scope():
             result_bytes=2,
         ),
         AssistantMessage(
-            id="a1", turn=1, scope=None, request_ids=["r1"], content="done", interrupted=False
+            id="a1", turn=1, turn_iteration="1.1", scope=None, request_ids=["r1"], content="done", interrupted=False
         ),
     ]
     for ev in events:
         assert _roundtrip(ev).scope is None
+
+
+def test_legacy_assistant_message_without_iteration_roundtrips():
+    """Pre-iteration assistant events remain decodable for replay."""
+    raw = (
+        '{"type":"assistant_message","id":"a1","turn":1,"scope":null,'
+        '"request_ids":["r1"],"content":"legacy response","interrupted":false}'
+    )
+
+    event = decode_event(raw)
+
+    assert isinstance(event, AssistantMessage)
+    assert event.content == "legacy response"
+    assert event.turn_iteration is None
 
 
 def test_scoped_events_roundtrip_with_child_scope():

@@ -189,7 +189,7 @@ async def test_tui_reconnect_deduplicates_history():
     events = [
         UserMessage(id="e3", turn=3, scope=None, content="again"),
         AssistantMessage(
-            id="e4", turn=4, scope=None, request_ids=["r4"], content="new", interrupted=False
+            id="e4", turn=4, turn_iteration="4.0", scope=None, request_ids=["r4"], content="new", interrupted=False
         ),
     ]
     body = "".join(encode_event(e) + "\n" for e in events)

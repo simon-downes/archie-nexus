@@ -50,10 +50,14 @@ StreamingMessage > .header {
     text-style: bold;
 }
 
+CancelledMessage {
+    border-left: thick $error-darken-3;
+    color: $error;
+}
+
 ErrorMessage {
     border-left: thick $error-darken-3;
-    background: $error-darken-3;
-    color: white;
+    color: $error;
 }
 
 ShellOutput {
@@ -64,6 +68,7 @@ ShellOutput {
 UserMessage:focus { border-left: thick $primary; }
 AssistantMessage:focus { border-left: thick $primary; }
 StreamingMessage:focus { border-left: thick $primary; }
+CancelledMessage:focus { border-left: thick $primary; }
 ErrorMessage:focus { border-left: thick $primary; }
 IterationBlock:focus { border-left: thick $primary; }
 ShellOutput:focus { border-left: thick $primary; }

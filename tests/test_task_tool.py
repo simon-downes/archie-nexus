@@ -79,9 +79,12 @@ async def test_validation_errors_do_not_start_children(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unknown_agent_does_not_sink_valid_sibling(tmp_path, monkeypatch):
-    client = FakeLLMClient([[TextDelta(text="valid"), Done("end_turn")]])
-    spec, _ = await _make_tool(tmp_path, monkeypatch, [client])
+async def test_unknown_agent_falls_back_without_sinking_valid_sibling(tmp_path, monkeypatch):
+    clients = [
+        FakeLLMClient([[TextDelta(text="fallback"), Done("end_turn")]]),
+        FakeLLMClient([[TextDelta(text="valid"), Done("end_turn")]]),
+    ]
+    spec, _ = await _make_tool(tmp_path, monkeypatch, clients)
 
     result = await spec.handler(
         tasks=[
@@ -91,9 +94,12 @@ async def test_unknown_agent_does_not_sink_valid_sibling(tmp_path, monkeypatch):
         _launch_scope="s",
     )
 
-    assert "unknown agent" in result
+    assert "unknown agent 'missing'" in result
+    assert "using default agent" in result
+    assert "fallback" in result
     assert "valid" in result
-    assert len(client.calls) == 1
+    assert len(clients[0].calls) == 1
+    assert "task" not in [tool["name"] for tool in clients[0].calls[0]["tool_config"]]
 
 
 @pytest.mark.asyncio

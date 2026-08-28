@@ -96,6 +96,9 @@ class AssistantMessage(
     content: str
     interrupted: bool
     subagent_index: int | None = None
+    # Optional for backwards compatibility with events written before
+    # per-iteration assistant messages were introduced.
+    turn_iteration: str | None = None
 
 
 class TurnComplete(

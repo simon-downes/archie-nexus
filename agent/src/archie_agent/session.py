@@ -60,15 +60,13 @@ class Session:
 
     @property
     def context_pct(self) -> float:
-        """Estimated next-request context usage, including cached input."""
-        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
-        return (estimated / self.model.context) * 100
+        """Last-request context usage, including cached input."""
+        return (self._last_input_tokens / self.model.context) * 100
 
     @property
     def context_warning(self) -> bool:
-        """Whether the next request approaches the model context limit."""
-        estimated = self._last_input_tokens + (self.turns[-1].output_tokens if self.turns else 0)
-        return estimated > self.model.context * self.model.context_warning_threshold
+        """Whether the last request approached the model context limit."""
+        return self._last_input_tokens > self.model.context * self.model.context_warning_threshold
 
     def next_turn_index(self) -> int:
         """Increment and return the next turn index."""

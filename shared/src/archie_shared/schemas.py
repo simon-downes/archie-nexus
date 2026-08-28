@@ -22,7 +22,7 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
         region: Session default AWS region (fallback for geo-inference models).
     """
 
-    model: str = "bedrock-claude-sonnet-4-6"
+    model: str = "bedrock-openai-gpt-5-6-luna"
     workspace_root: str = "~/dev"
     region: str = "eu-west-1"
 
