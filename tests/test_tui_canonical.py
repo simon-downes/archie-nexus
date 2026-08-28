@@ -57,6 +57,34 @@ def test_accumulate_ledger_folds_cost_and_tokens():
     assert app._cumulative_output == 15
 
 
+def test_child_ledger_does_not_overwrite_root_context():
+    app = _make_app()
+    root = _llm_request("root", 0.01, input_tokens=1000, output_tokens=10)
+    child = LLMRequest(
+        id="child",
+        scope="task-1",
+        subagent_index=0,
+        turn_iteration="1.0",
+        model_key="m",
+        sent_at="2025-01-01T00:00:00+00:00",
+        duration_ms=12,
+        status="completed",
+        input_tokens=9000,
+        output_tokens=10,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        context_tokens=9000,
+        cost_usd=0.02,
+    )
+    with patch.object(app, "_update_accounting_status"):
+        app._accumulate_ledger(root)
+        app._accumulate_ledger(child)
+
+    assert app._latest_context_tokens == 1010
+    assert app._cumulative_input == 10000
+    assert app._cumulative_cost == pytest.approx(0.03)
+
+
 def test_accumulate_ledger_deduplicates_by_id():
     """Replay + live broadcast of the same llm_request must not double-count."""
     app = _make_app()
@@ -75,6 +103,16 @@ def test_render_canonical_deduplicates_by_id():
     with patch.object(app, "query_one", return_value=conv):
         app._render_canonical(UserMessage(id="u1", turn=1, scope=None, content="hi"))
     conv.add_user_message.assert_not_called()
+
+
+def test_render_canonical_does_not_create_empty_iteration_block():
+    """Text-only replay iterations do not leave an empty visual block."""
+    app = _make_app()
+    conv = MagicMock()
+    with patch.object(app, "query_one", return_value=conv):
+        app._render_canonical(IterationStart(id="i1", turn_iteration="1.1", scope=None, index=1))
+
+    conv.begin_iteration.assert_not_called()
 
 
 def test_render_canonical_reconstructs_tool_summary_client_side():
@@ -135,7 +173,7 @@ async def test_replay_events_seeds_cost_from_ledger():
         UserMessage(id="u1", turn=1, scope=None, content="hi"),
         _llm_request("l1", 0.25, input_tokens=200, output_tokens=20),
         AssistantMessage(
-            id="a1", turn=1, scope=None, request_ids=["l1"], content="ok", interrupted=False
+            id="a1", turn=1, turn_iteration="1.0", scope=None, request_ids=["l1"], content="ok", interrupted=False
         ),
     ]
     body = "".join(encode_event(e) + "\n" for e in events)

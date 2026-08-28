@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
+
+from archie_cli.tui import theme
 
 
 @dataclass
@@ -19,13 +22,27 @@ class ChildActivityState:
     agent: str = "child"
     status: str = "running"
     cost: float = 0.0
+    context_tokens: int = 0
+    activity: str = "Thinking..."
+    error: str = ""
     lines: list[str] = field(default_factory=list)
 
     def add_line(self, line: str, limit: int = 3) -> None:
-        line = line.strip()
+        line = "; ".join(part.strip() for part in line.splitlines() if part.strip())
         if line:
-            self.lines.append(line)
+            self.lines.append(line[:512])
             del self.lines[:-limit]
+
+    def set_activity(self, activity: str) -> None:
+        """Set compact single-line activity and retain it for detail views."""
+        activity = "; ".join(part.strip() for part in activity.splitlines() if part.strip())
+        self.activity = activity[:512].strip() or "Thinking..."
+        self.add_line(self.activity)
+
+    @property
+    def icon(self) -> str:
+        """Return the root-tool-style status glyph."""
+        return "●" if self.status in {"complete", "error", "interrupted"} else "○"
 
 
 class SubagentActivity(Static):
@@ -38,16 +55,58 @@ class SubagentActivity(Static):
     def compose(self) -> ComposeResult:
         yield Static(self.render_text())
 
-    def render_text(self) -> str:
+    def render_text(self) -> Text:
         state = self.state
-        body = "\n".join(state.lines[-3:]) or "starting"
-        return f"  [{state.status}] {state.agent} #{state.index} ${state.cost:.4f}\n    {body}"
+        activity = state.error if state.status == "error" else (
+            "Completed" if state.status == "complete" else state.activity
+        )
+        agent = _fmt_column(f"{state.agent} #{state.index}", _AGENT_COLUMN)
+        context = _fmt_column(_fmt_tokens(state.context_tokens), _CONTEXT_COLUMN, align=">")
+        cost = _fmt_column(f"${state.cost:.4f}", _COST_COLUMN, align=">")
+        prefix = f"  {state.icon} {agent} {context} {cost} - "
+        try:
+            activity_text = Text.from_markup(activity)
+        except Exception:
+            activity_text = Text(activity)
+        width = max(1, self.size.width or 120)
+        available = max(1, width - len(prefix))
+        activity_text.truncate(available, overflow="ellipsis")
+
+        icon_colour = (
+            theme.SUCCESS
+            if state.status == "complete"
+            else theme.ERROR
+            if state.status in {"error", "interrupted"}
+            else theme.PRIMARY
+        )
+        return Text.assemble(
+            ("  ", ""),
+            (state.icon, f"bold {icon_colour}"),
+            (f" {agent} {context} {cost} - ", ""),
+            activity_text,
+        )
 
     def update_state(self) -> None:
         try:
             self.query_one(Static).update(self.render_text())
         except Exception:
             pass
+
+
+_AGENT_COLUMN = 20
+_CONTEXT_COLUMN = 8
+_COST_COLUMN = 9
+
+
+def _fmt_tokens(tokens: int) -> str:
+    return f"{tokens / 1000:.1f}k" if tokens >= 1000 else str(tokens)
+
+
+def _fmt_column(value: str, width: int, *, align: str = "<") -> str:
+    """Fit a value into a fixed-width display column."""
+    if len(value) > width:
+        value = value[: max(1, width - 1)] + "…"
+    return f"{value:{align}{width}}"
 
 
 class SubagentScreen(ModalScreen[None]):

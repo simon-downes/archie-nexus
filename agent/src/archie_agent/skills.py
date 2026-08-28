@@ -215,7 +215,8 @@ def _handle_load(
     skill_dir = entry.path.parent
     files = _list_reference_files(skill_dir)
 
-    parts = [f"Loaded skill '{name}' into system prompt."]
+    line_count = len(body.splitlines())
+    parts = [f"Loaded skill '{name}' into system prompt ({line_count} lines)."]
     if files:
         parts.append("")
         parts.append("Reference files available (use file param to read):")

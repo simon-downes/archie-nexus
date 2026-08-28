@@ -17,6 +17,7 @@ from time import monotonic
 
 from rich.segment import Segment
 from rich.style import Style as RichStyle
+from textual.app import ComposeResult
 from textual.color import Color, Gradient
 from textual.css.styles import RulesMap
 from textual.strip import Strip
@@ -80,6 +81,22 @@ def _make_segments(gradient: Gradient, character: str, style: Style, width: int)
     ]
 
 
+class ThrobberContainer(Widget):
+    """Fixed one-line slot for the thinking indicator."""
+
+    DEFAULT_CSS = """
+    ThrobberContainer {
+        height: 1;
+        margin: 0;
+        padding: 0;
+        background: black;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Throbber(id="throbber")
+
+
 class Throbber(Widget):
     """Single-line animated gradient bar — the "thinking" indicator."""
 
@@ -87,7 +104,9 @@ class Throbber(Widget):
     Throbber {
         height: 1;
         margin: 0;
-        padding: 0;
+        padding: 0 2;
+        background: black;
+        display: none;
     }
     """
 

@@ -122,7 +122,7 @@ def start(detach: bool, workspace: str | None):
     config_file = nexus_home / "config.yaml"
     if not config_file.exists():
         config_file.write_text(
-            'global:\n  model: "bedrock-claude-sonnet-4-6"\n'
+            'global:\n  model: "bedrock-openai-gpt-5-6-luna"\n'
             '  region: "eu-west-1"\n'
             '  workspace_root: "~/dev"\n'
         )

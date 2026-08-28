@@ -4,16 +4,15 @@ The conversation is a vertical scroll container that holds individual
 message widgets. Each message type has its own styling:
 - UserMessage: highlighted background so your messages stand out
 - AssistantMessage: rendered Markdown for rich formatting
-- StreamingMessage: plain text that updates live during generation
+- StreamingMessage: Markdown that updates live during generation
 - ErrorMessage: red styling for agent/server errors (recorded in the session)
 - ClientErrorMessage: warning styling for client/transport errors (local only,
   NOT recorded in the session log)
 
-The streaming → finalised flow:
+The streaming flow:
 1. When the model starts generating, we mount a StreamingMessage
-2. Text chunks are appended to it as they arrive (plain text, fast updates)
-3. When generation completes, we REPLACE it with an AssistantMessage
-   which renders the full response as proper Markdown (slower but prettier)
+2. Text chunks are appended and the Markdown content re-renders live
+3. When generation completes, we remove the streaming indicator
 """
 
 from rich.style import Style
@@ -21,6 +20,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
 
@@ -75,6 +75,9 @@ class AssistantMessage(Widget):
         padding: 0;
         height: auto;
     }
+    AssistantMessage > Markdown > MarkdownFence {
+        background: #252535;
+    }
     """
 
     def __init__(self, content: str = "") -> None:
@@ -106,8 +109,8 @@ class AssistantMessage(Widget):
 class StreamingMessage(Widget):
     """A message that's actively being streamed from the model.
 
-    Uses a reactive `text` property — when text changes, the content
-    Static widget automatically updates via watch_text().
+    The Markdown widget is updated in place as text arrives. This keeps the
+    message mounted throughout streaming while still showing rich formatting.
     """
 
     DEFAULT_CSS = """
@@ -119,33 +122,86 @@ class StreamingMessage(Widget):
     StreamingMessage > .header {
         height: auto;
     }
-    StreamingMessage > .content {
+    StreamingMessage > Markdown {
         margin: 0;
         padding: 0;
         height: auto;
+    }
+    StreamingMessage > Markdown > MarkdownFence {
+        background: #252535;
     }
     """
 
     text: reactive[str] = reactive("")
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._markdown_timer: Timer | None = None
+        self._markdown_dirty = False
+
     def compose(self) -> ComposeResult:
-        """Build the streaming message widget with spinner."""
+        """Build the streaming message widget with spinner and Markdown."""
         yield Static(
             Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)), (" ⟳")),
             classes="header",
         )
-        yield Static("", classes="content")
+        yield Markdown("", classes="content")
 
     def watch_text(self, value: str) -> None:
-        """Called automatically when self.text changes. Updates the display."""
+        """Schedule a throttled Markdown refresh when streamed text changes."""
+        self._markdown_dirty = True
+        if self._markdown_timer is None:
+            self._markdown_timer = self.set_timer(0.1, self._refresh_markdown)
+
+    def _refresh_markdown(self) -> None:
+        """Render the latest text, at most once per throttle interval."""
+        self._markdown_timer = None
+        if not self._markdown_dirty:
+            return
+        self._markdown_dirty = False
         try:
-            self.query_one(".content", Static).update(value)
+            self.query_one(Markdown).update(self.text)
         except Exception:  # noqa: BLE001 — widget may not be mounted yet
             pass
 
     def append(self, chunk: str) -> None:
-        """Append a text chunk. Triggers reactive update."""
+        """Append a text chunk and schedule a throttled Markdown update."""
         self.text += chunk
+
+    def finish(self) -> None:
+        """Flush Markdown and remove the streaming indicator."""
+        if self._markdown_timer is not None:
+            self._markdown_timer.stop()
+            self._markdown_timer = None
+        self._markdown_dirty = False
+        try:
+            self.query_one(Markdown).update(self.text.rstrip("\n"))
+            self.query_one(".header", Static).update(
+                Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)))
+            )
+        except Exception:  # noqa: BLE001 — widget may not be mounted yet
+            pass
+
+
+class CancelledMessage(Static):
+    """A compact cancellation status message."""
+
+    DEFAULT_CSS = """
+    CancelledMessage {
+        padding: 1 2;
+        margin: 0 0 1 0;
+        color: $error;
+    }
+    """
+
+    can_focus = True
+
+    def __init__(self) -> None:
+        super().__init__("Cancelled")
+
+    def get_copy_text(self) -> str:
+        """Return the cancellation text for clipboard copy."""
+        return "Cancelled"
 
 
 class ErrorMessage(Static):
@@ -164,7 +220,7 @@ class ErrorMessage(Static):
     can_focus = True
 
     def __init__(self, content: str) -> None:
-        super().__init__(f"[bold red]✗ Error[/]\n{content}")
+        super().__init__(f"[bold {theme.ERROR}]✗ Error[/]\n{content}")
         self._content = content
 
     def get_copy_text(self) -> str:
@@ -454,31 +510,49 @@ class Conversation(VerticalScroll):
     }
     """
 
+    _autoscroll = True
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Keep Textual scroll behavior and track the viewport position."""
+        super().watch_scroll_y(old_value, new_value)
+        self._autoscroll = new_value >= self.max_scroll_y
+
+    def scroll_if_at_bottom(self) -> None:
+        """Scroll to the end while autoscroll is enabled."""
+        if self._autoscroll:
+            self.scroll_end(animate=False)
+
     def add_user_message(self, content: str) -> None:
         """Add a user message and scroll to show it."""
+        self._autoscroll = True
         self.mount(UserMessage(content))
         self.scroll_end(animate=False)
 
     def add_error(self, content: str) -> None:
         """Add an agent/server error message and scroll to show it."""
         self.mount(ErrorMessage(content))
-        self.scroll_end(animate=False)
+        self.scroll_if_at_bottom()
+
+    def add_cancelled(self) -> None:
+        """Add a cancellation status message and scroll to show it."""
+        self.mount(CancelledMessage())
+        self.scroll_if_at_bottom()
 
     def add_client_error(self, content: str) -> None:
         """Add a client/transport error, marked as local (not in session log)."""
         self.mount(ClientErrorMessage(content))
-        self.scroll_end(animate=False)
+        self.scroll_if_at_bottom()
 
     def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> None:
         """Add direct shell command output (! prefix, no LLM involvement)."""
         self.mount(ShellOutput(command, output, exit_code))
-        self.scroll_end(animate=False)
+        self.scroll_if_at_bottom()
 
     def begin_iteration(self) -> IterationBlock:
         """Start a new iteration block for tool calls."""
         block = IterationBlock()
         self.mount(block)
-        self.scroll_end(animate=False)
+        self.scroll_if_at_bottom()
         return block
 
     def end_iteration(self) -> None:
@@ -487,18 +561,16 @@ class Conversation(VerticalScroll):
     def add_assistant_message(self, content: str) -> None:
         """Add a complete assistant message (used for history replay)."""
         self.mount(AssistantMessage(content.rstrip("\n")))
-        self.scroll_end(animate=False)
+        self.scroll_if_at_bottom()
 
     def begin_streaming(self) -> StreamingMessage:
         """Start a streaming response. Returns the widget to append chunks to."""
         msg = StreamingMessage()
         self.mount(msg)
-        self.scroll_end(animate=False)
+        self.scroll_if_at_bottom()
         return msg
 
     def finalise_streaming(self, streaming: StreamingMessage) -> None:
-        """Replace a streaming widget with a finalised Markdown version."""
-        final = AssistantMessage(streaming.text.rstrip("\n"))
-        self.mount(final, before=streaming)
-        streaming.remove()
-        self.scroll_end(animate=False)
+        """Mark the in-place Markdown message as complete."""
+        streaming.finish()
+        self.scroll_if_at_bottom()

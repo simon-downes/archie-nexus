@@ -42,6 +42,7 @@ class StatusBar(Widget):
     session_output: reactive[int] = reactive(0)
     cache_read: reactive[int] = reactive(0)
     cache_write: reactive[int] = reactive(0)
+    context_tokens: reactive[int] = reactive(0)
     context_pct: reactive[float] = reactive(0.0)
 
     # Right section
@@ -77,6 +78,9 @@ class StatusBar(Widget):
     def watch_cache_write(self) -> None:
         self._refresh_display()
 
+    def watch_context_tokens(self) -> None:
+        self._refresh_display()
+
     def watch_context_pct(self) -> None:
         self._refresh_display()
 
@@ -105,13 +109,14 @@ class StatusBar(Widget):
         else:
             in_val = f"{_fmt(self.session_input)}"
 
-        # Context percentage with color progression
+        # Context usage with color progression on the percentage.
         if self.context_pct > 85:
-            ctx_val = f"[bold {theme.ERROR}]{self.context_pct:.0f}%[/]"
+            pct_val = f"[bold {theme.ERROR}]{self.context_pct:.0f}%[/]"
         elif self.context_pct >= 60:
-            ctx_val = f"[bold {theme.WARNING}]{self.context_pct:.0f}%[/]"
+            pct_val = f"[bold {theme.WARNING}]{self.context_pct:.0f}%[/]"
         else:
-            ctx_val = f"[{theme.BRIGHT}]{self.context_pct:.0f}%[/]"
+            pct_val = f"[{theme.BRIGHT}]{self.context_pct:.0f}%[/]"
+        ctx_val = f"{_fmt_context(self.context_tokens)} ({pct_val})"
 
         left.update(
             Text.from_markup(
@@ -130,4 +135,11 @@ def _fmt(n: int) -> str:
     """Format token count with K suffix. e.g. 1500 → "1.5K", 800 → "800"."""
     if n >= 1000:
         return f"{n / 1000:.1f}K"
+    return str(n)
+
+
+def _fmt_context(n: int) -> str:
+    """Format context tokens with the compact lowercase-k display style."""
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
     return str(n)

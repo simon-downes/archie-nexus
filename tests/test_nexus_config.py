@@ -13,7 +13,7 @@ def test_load_nexus_config_no_file_returns_defaults(monkeypatch, tmp_path):
     """No config file at default path → NexusConfig with all defaults."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = load_nexus_config()
-    assert config.global_.model == "bedrock-claude-sonnet-4-6"
+    assert config.global_.model == "bedrock-openai-gpt-5-6-luna"
     assert config.global_.workspace_root == "~/dev"
     assert config.global_.region == "eu-west-1"
 
@@ -23,7 +23,7 @@ def test_load_nexus_config_empty_file(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     (tmp_path / "config.yaml").write_text("")
     config = load_nexus_config()
-    assert config.global_.model == "bedrock-claude-sonnet-4-6"
+    assert config.global_.model == "bedrock-openai-gpt-5-6-luna"
     assert config.global_.region == "eu-west-1"
 
 
@@ -62,7 +62,7 @@ def test_load_nexus_config_partial_global_fields(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("global:\n  region: ap-southeast-1\n")
     config = load_nexus_config(path=cfg)
-    assert config.global_.model == "bedrock-claude-sonnet-4-6"  # default
+    assert config.global_.model == "bedrock-openai-gpt-5-6-luna"  # default
     assert config.global_.region == "ap-southeast-1"
 
 

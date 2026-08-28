@@ -281,6 +281,7 @@ class TestSkillTool:
 
         result = await spec.handler(name="test-skill")
         assert "Loaded skill 'test-skill'" in result
+        assert "(3 lines)" in result
         assert len(loaded) == 1
         assert loaded[0][0] == "test-skill"
         assert "This is the body of the test skill." in loaded[0][1]

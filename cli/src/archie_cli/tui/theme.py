@@ -14,14 +14,14 @@ PRIMARY = "#6871ff"  # accent — focus, model name, assistant header
 SECONDARY = "#ff76ff"  # user messages
 WARNING = "#fefb67"  # context 60-85%
 ERROR = "#ff6d67"  # context >85%, errors
-SUCCESS = "#00c200"  # success indicators
+SUCCESS = "#67c26d"  # success indicators
 SURFACE = "#1e1e1e"  # chrome background
 
 # --- Custom colours (available as $variables in TCSS) ---
 
 MUTED = "#676767"  # de-emphasised text (captions, separators)
 BRIGHT = "#feffff"  # emphasised values (context %)
-POSITIVE = "#00c200"  # positive values (input tokens)
+POSITIVE = "#67c26d"  # positive values (input tokens)
 POSITIVE_BRIGHT = "#5ff967"  # bright positive (output tokens)
 COST = "#c7c400"  # monetary values
 

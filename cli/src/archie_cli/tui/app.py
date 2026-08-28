@@ -41,7 +41,12 @@ from archie_shared.events import (
     TurnInterrupted,
     Usage,
 )
-from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
+from archie_shared.models import load_models
+from archie_shared.tool_summaries import (
+    format_tool_activity,
+    format_tool_complete,
+    format_tool_pending,
+)
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
@@ -52,7 +57,7 @@ from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
-from archie_cli.tui.throbber import Throbber
+from archie_cli.tui.throbber import Throbber, ThrobberContainer
 from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
@@ -127,6 +132,8 @@ class ArchieApp(App):
         self._cumulative_output: int = 0
         self._cumulative_cache_read: int = 0
         self._cumulative_cache_write: int = 0
+        self._latest_context_tokens: int = 0
+        self._latest_context_pct: float = 0.0
         self._cumulative_cost: float = 0.0
 
         # Live output estimation (chars/4, reconciled on Usage)
@@ -140,6 +147,7 @@ class ArchieApp(App):
     def compose(self) -> ComposeResult:
         """Build the main UI layout."""
         yield Conversation(id="conversation")
+        yield ThrobberContainer(id="throbber-container")
         yield StatusBar(id="status")
         yield MessageInput(id="input")
         yield Footer()
@@ -225,6 +233,8 @@ class ArchieApp(App):
             self._last_event_id = event_id
 
         if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
+            if isinstance(event, LLMRequest):
+                self._accumulate_ledger(event)
             self._handle_scoped_event(event)
             return
 
@@ -237,9 +247,11 @@ class ArchieApp(App):
             if event.content:
                 conv.add_assistant_message(event.content)
             if event.interrupted:
-                conv.add_error("[interrupted]")
+                conv.add_cancelled()
         elif isinstance(event, ce.IterationStart):
-            self._iteration_block = conv.begin_iteration()
+            # Create a visual block lazily when this iteration contains tools.
+            # Text-only iterations should not leave empty blocks in replay.
+            self._iteration_block = None
         elif isinstance(event, ce.ToolCall):
             if self._iteration_block is None:
                 self._iteration_block = conv.begin_iteration()
@@ -272,7 +284,7 @@ class ArchieApp(App):
             conv.add_error(event.message)
             self._iteration_block = None
         elif isinstance(event, ce.TurnInterrupted):
-            conv.add_error("[interrupted]")
+            conv.add_cancelled()
             self._iteration_block = None
         elif isinstance(event, ce.TurnComplete):
             self._iteration_block = None
@@ -293,8 +305,18 @@ class ArchieApp(App):
         self._cumulative_output += event.output_tokens
         self._cumulative_cache_read += event.cache_read_tokens
         self._cumulative_cache_write += event.cache_write_tokens
+        if event.scope is None and event.subagent_index is None:
+            self._latest_context_tokens = event.context_tokens
+            self._latest_context_pct = self._estimate_context_pct(event.context_tokens, event.model_key)
         self._cumulative_cost += event.cost_usd
         self._update_accounting_status()
+
+    def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
+        """Calculate context usage from a persisted request."""
+        model = load_models().get(model_key)
+        if model is None or model.context <= 0:
+            return 0.0
+        return (context_tokens / model.context) * 100
 
     def _update_accounting_status(self) -> None:
         """Push cumulative accounting to the status bar."""
@@ -303,6 +325,8 @@ class ArchieApp(App):
         status.session_output = self._cumulative_output
         status.cache_read = self._cumulative_cache_read
         status.cache_write = self._cumulative_cache_write
+        status.context_tokens = self._latest_context_tokens
+        status.context_pct = self._latest_context_pct
         status.pricing_label = f"${self._cumulative_cost:.4f}"
 
     async def _receive_loop(self) -> None:
@@ -409,6 +433,14 @@ class ArchieApp(App):
         """Dispatch one server event to the appropriate widget update."""
         conv = self.query_one("#conversation", Conversation)
 
+        # Child activity is broadcast as canonical events rather than wrapped
+        # wire events. Route scoped canonical events before the root reducers.
+        if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
+            if isinstance(event, LLMRequest):
+                self._accumulate_ledger(event)
+            if self._handle_scoped_event(event):
+                return
+
         if isinstance(event, SessionSnapshot):
             # Authoritative session state at connect. Seed cumulative accounting
             # and the replay cursor from the persisted ledger.
@@ -489,15 +521,19 @@ class ArchieApp(App):
             self._estimated_output += len(event.text) // 4
             status = self.query_one("#status", StatusBar)
             status.session_output = self._cumulative_output + self._estimated_output
-            conv.scroll_end(animate=False)
+            conv.scroll_if_at_bottom()
 
         elif isinstance(event, Usage):
             # Tokens/cost come authoritatively from the llm_request ledger; the
-            # Usage event only carries the server-computed context percentage and
-            # lets us reconcile the live output estimate.
+            # Usage event carries the latest request's context-token components
+            # and the server-computed context percentage.
             self._estimated_output = 0
+            self._latest_context_tokens = (
+                event.input_tokens + event.cache_read_tokens + event.cache_write_tokens
+            )
             status = self.query_one("#status", StatusBar)
             status.session_output = self._cumulative_output
+            status.context_tokens = self._latest_context_tokens
             status.context_pct = event.context_pct
 
         elif isinstance(event, TurnComplete):
@@ -508,7 +544,7 @@ class ArchieApp(App):
         elif isinstance(event, TurnInterrupted):
             if self._handle_scoped_event(event):
                 return
-            conv.add_error("[interrupted]")
+            conv.add_cancelled()
             self._end_turn()
 
         elif isinstance(event, TurnError):
@@ -536,7 +572,7 @@ class ArchieApp(App):
                 if isinstance(tasks, list):
                     self._parent_task_inputs[event.tool_use_id] = tasks
                     self._parent_task_entries[event.tool_use_id] = entry
-            conv.scroll_end(animate=False)
+            conv.scroll_if_at_bottom()
 
         elif isinstance(event, ToolResult):
             if self._handle_scoped_event(event):
@@ -555,7 +591,7 @@ class ArchieApp(App):
                     event.result_bytes,
                     summary,
                 )
-                conv.scroll_end(animate=False)
+                conv.scroll_if_at_bottom()
             # Tool finished — agent is thinking about the next step again.
             self._show_throbber()
 
@@ -568,29 +604,39 @@ class ArchieApp(App):
         child = self._child(scope, index)
         if isinstance(event, LLMRequest):
             child.cost += event.cost_usd
-            child.add_line(f"LLM request (${child.cost:.4f})")
+            child.context_tokens = event.context_tokens
+            child.set_activity("Thinking...")
         elif isinstance(event, (IterationStart, ce.IterationStart)):
-            child.add_line(f"Iteration {event.index}")
+            child.set_activity("Thinking...")
         elif isinstance(event, (TextDelta, ce.TextDelta)):
             child.add_line(event.text)
+            child.activity = "Responding..."
         elif isinstance(event, (ToolCall, ce.ToolCall)):
-            summary = format_tool_pending(event.name, event.input)
+            summary = format_tool_activity(event.name, event.input)
             self._child_pending_tools[(scope, index, event.tool_use_id)] = (
                 event.name,
                 event.input,
             )
-            child.add_line(summary)
+            child.set_activity(summary)
         elif isinstance(event, (ToolResult, ce.ToolResult)):
             pending = self._child_pending_tools.pop((scope, index, event.tool_use_id), None)
             name, tool_input = pending or ("tool", {})
-            child.add_line(format_tool_complete(name, tool_input, event.content, event.is_error))
+            result_summary = format_tool_complete(name, tool_input, event.content, event.is_error)
+            child.add_line(result_summary)
+            if event.is_error:
+                child.activity = result_summary
+            else:
+                child.activity = "Thinking..."
         elif isinstance(event, (TurnComplete, ce.TurnComplete)):
             child.status = "complete"
+            child.activity = "Completed"
         elif isinstance(event, (TurnInterrupted, ce.TurnInterrupted)):
             child.status = "interrupted"
+            child.activity = "interrupted"
         elif isinstance(event, (TurnError, ce.TurnError)):
             child.status = "error"
-            child.add_line(getattr(event, "message", "error"))
+            child.error = getattr(event, "message", "error")
+            child.activity = child.error
         self._render_child(child)
         self._update_child_modal(child)
         return True
@@ -797,24 +843,19 @@ class ArchieApp(App):
         self._stream_text = ""
 
     def _show_throbber(self) -> None:
-        """Mount the throbber at the end of the conversation if not already shown.
-
-        Idempotent: safe to call between iterations and after each tool result so
-        the "thinking" indicator reappears while the agent works towards the next
-        response. Removed again by _remove_throbber() on the next TextDelta/ToolCall.
-        """
+        """Show the fixed throbber while the agent is thinking."""
         if self._throbber is not None or not self._turn_active:
             return
-        conv = self.query_one("#conversation", Conversation)
-        self._throbber = Throbber()
-        conv.mount(self._throbber)
-        self.call_after_refresh(conv.scroll_end, animate=False)
+        self._throbber = self.query_one("#throbber", Throbber)
+        self._throbber.display = True
 
     def _remove_throbber(self) -> None:
-        """Remove the throbber animation widget."""
+        """Hide the throbber animation widget."""
         if self._throbber is not None:
-            self._throbber.remove()
+            self._throbber.display = False
             self._throbber = None
+        else:
+            self.query_one("#throbber", Throbber).display = False
 
     def _show_error(self, message: str) -> None:
         """Display an agent/server error message in the conversation."""

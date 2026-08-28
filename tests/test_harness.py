@@ -296,9 +296,9 @@ async def test_usage_updates_context_pct(tmp_path):
 
     await harness.handle_message("test")
 
-    # context_pct should be based on the input_tokens + last turn's output_tokens
-    # (50000 + 100 output) / 200000 context * 100 = 25.05%
-    assert harness.session.context_pct == pytest.approx(25.05)
+    # context_pct should be based on the last request's context input.
+    # 50000 / 200000 context * 100 = 25%
+    assert harness.session.context_pct == pytest.approx(25.0)
     assert harness.session._last_input_tokens == 50000
 
 
