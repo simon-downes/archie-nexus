@@ -181,7 +181,10 @@ RUN mkdir /workspace
 # --- Hand ownership to the runtime user ---
 # The venv and entrypoint were created as root; the container runs as $USERNAME.
 # entrypoint.sh runs uv sync which may update the venv, so it needs write access.
-RUN chown -R ${USERNAME}:${USERNAME} /opt/archie /workspace
+# Pre-create Kiro's state directory so a file bind mount of data.sqlite3 does
+# not cause Docker to create the parent directory as root at container start.
+RUN mkdir -p /home/${USERNAME}/.local/share/kiro-cli \
+    && chown -R ${USERNAME}:${USERNAME} /opt/archie /workspace /home/${USERNAME}/.local
 
 WORKDIR /workspace
 
@@ -189,18 +192,34 @@ EXPOSE 8080
 
 USER ${USERNAME}
 
-# Install kiro-cli (frequent updates)
-RUN case ${TARGETARCH} in \
+# Install the latest stable Kiro CLI non-interactively.
+# This mirrors the Linux path from https://cli.kiro.dev/install: select the
+# architecture archive for Debian's glibc environment, verify it against the
+# release manifest, extract it, and run its setup with setup prompts disabled.
+RUN set -eux; \
+    mkdir -p "/home/${USERNAME}/.kiro"; \
+    case "${TARGETARCH}" in \
         amd64) KIRO_ARCH="x86_64" ;; \
         arm64) KIRO_ARCH="aarch64" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    curl --proto '=https' --tlsv1.2 -sSf \
-        "https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-${KIRO_ARCH}-linux.zip" \
-        -o kirocli.zip && \
-    unzip kirocli.zip && \
-    ./kirocli/install.sh --force --no-confirm && \
-    rm -rf kirocli.zip kirocli
+        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    KIRO_FILENAME="kirocli-${KIRO_ARCH}-linux.zip"; \
+    KIRO_BASE_URL="https://prod.download.cli.kiro.dev/stable/latest"; \
+    KIRO_MANIFEST=$(curl --proto '=https' --tlsv1.2 -fsSL "${KIRO_BASE_URL}/manifest.json"); \
+    KIRO_SHA256=$(echo "${KIRO_MANIFEST}" | jq -r --arg filename "${KIRO_FILENAME}" \
+        '.packages[] | select(.download | endswith($filename)) | .sha256' | head -1); \
+    test -n "${KIRO_SHA256}" && test "${#KIRO_SHA256}" -eq 64; \
+    KIRO_TMP=$(mktemp -d); \
+    trap 'rm -rf "${KIRO_TMP}"' EXIT; \
+    curl --proto '=https' --tlsv1.2 -fsSL "${KIRO_BASE_URL}/${KIRO_FILENAME}" \
+        -o "${KIRO_TMP}/${KIRO_FILENAME}"; \
+    echo "${KIRO_SHA256}  ${KIRO_TMP}/${KIRO_FILENAME}" | sha256sum -c -; \
+    unzip -q "${KIRO_TMP}/${KIRO_FILENAME}" -d "${KIRO_TMP}/extract"; \
+    chmod +x "${KIRO_TMP}/extract/kirocli/install.sh"; \
+    rm -f "/home/${USERNAME}/.local/bin/kiro-cli" "/home/${USERNAME}/.local/bin/kiro-cli-chat"; \
+    KIRO_CLI_SKIP_SETUP=1 "${KIRO_TMP}/extract/kirocli/install.sh"; \
+    chmod +x "/home/${USERNAME}/.local/bin/kiro-cli" "/home/${USERNAME}/.local/bin/kiro-cli-chat"; \
+    chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.kiro" "/home/${USERNAME}/.local"
 
 # kiro-cli installs to ~/.local/bin; ensure it's on PATH for non-login exec
 # (e.g. `docker run archie:latest kiro-cli ...`), not just interactive shells.
