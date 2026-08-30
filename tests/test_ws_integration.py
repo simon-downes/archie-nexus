@@ -222,7 +222,7 @@ def test_websocket_tool_turn(mock_env, tmp_path):
             from archie_agent.app import app
             from archie_agent.exec.envelope import Envelope
 
-            fake_envelope = Envelope(ok=True, return_value=42, duration_ms=10)
+            fake_envelope = Envelope(ok=True, return_value=42)
 
             with patch("archie_agent.harness.run_exec", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = fake_envelope

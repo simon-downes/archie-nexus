@@ -48,7 +48,6 @@ class Envelope:
     error: ErrorInfo | None = None
     calls: list[CallRecord] = field(default_factory=list)
     truncated: bool = False
-    duration_ms: int = 0
 
     def to_json(self) -> str:
         """Serialize to JSON string for file IPC."""
@@ -93,7 +92,6 @@ class Envelope:
         stdout: str = "",
         stderr: str = "",
         calls: list[CallRecord] | None = None,
-        duration_ms: int = 0,
     ) -> Envelope:
         """Convenience constructor for error envelopes."""
         return cls(
@@ -102,5 +100,4 @@ class Envelope:
             stdout=stdout,
             stderr=stderr,
             calls=calls or [],
-            duration_ms=duration_ms,
         )

@@ -304,7 +304,7 @@ async def test_grep_empty_pattern(workspace):
 async def test_shell_basic(workspace):
     tools = get_all_tools()
     result = await tools["shell"](command="echo hello")
-    assert "$ echo hello" in result
+    assert "$ echo hello" not in result
     assert "[exit: 0]" in result
     assert "hello" in result
 

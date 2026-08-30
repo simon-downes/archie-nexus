@@ -1,12 +1,16 @@
 [project]
 name = "archie-shared"
-version = "0.1.0"
+dynamic = ["version"]
+
 description = "Shared types, events, and config for archie-nexus"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "msgspec>=0.19",
     "pyyaml>=6,<7",
 ]
+
+[tool.hatch.version]
+path = "src/archie_shared/version.py"
 
 [build-system]
 requires = ["hatchling"]

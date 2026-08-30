@@ -99,12 +99,11 @@ def test_format_result_ok():
         ok=True,
         return_value={"answer": 42},
         stdout="some output\n",
-        duration_ms=150,
     )
     result = format_result(env)
     assert '{"answer": 42}' in result
     assert "some output" in result
-    assert "150ms" in result
+    assert "duration:" not in result
 
 
 def test_format_result_error():

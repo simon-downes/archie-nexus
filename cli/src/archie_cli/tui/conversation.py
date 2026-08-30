@@ -27,6 +27,41 @@ from textual.widgets import Markdown, Static
 from archie_cli.tui import theme
 
 
+class TurnStatus(Static):
+    """Muted client-only summary of one completed turn."""
+
+    DEFAULT_CSS = """
+    TurnStatus {
+        margin: 0 0 1 0;
+        padding: 0 2;
+        height: auto;
+    }
+    """
+
+    def __init__(self, duration_s: float, input_tokens: int, cache_read: int, cache_write: int, output_tokens: int, cost: float) -> None:
+        super().__init__()
+        self._duration_s = duration_s
+        self._input_tokens = input_tokens
+        self._cache_read = cache_read
+        self._cache_write = cache_write
+        self._output_tokens = output_tokens
+        self._cost = cost
+
+    def compose(self) -> ComposeResult:
+        duration = f"{self._duration_s:.0f}s"
+        input_tokens = " / ".join(_fmt_tokens(n) for n in (self._input_tokens, self._cache_read, self._cache_write))
+        output_tokens = _fmt_tokens(self._output_tokens)
+        yield Static(
+            Text.from_markup(
+                f"[{theme.MUTED}]▸ Time: {duration} | In: {input_tokens}  Out: {output_tokens} │ ${self._cost:.4f}[/]"
+            )
+        )
+
+
+def _fmt_tokens(value: int) -> str:
+    return f"{value / 1000:.1f}K" if value >= 1000 else str(value)
+
+
 class UserMessage(Static):
     """A user message block with highlighted background."""
 
@@ -388,7 +423,7 @@ class ToolEntry(Widget):
         self.mount(child)
 
     def complete(
-        self, is_error: bool, duration_ms: int, result_bytes: int, summary: str = ""
+        self, is_error: bool, duration_ms: int, result_lines: int, result_bytes: int, summary: str = ""
     ) -> None:
         """Mark this tool entry as complete with metrics.
 
@@ -409,9 +444,9 @@ class ToolEntry(Widget):
                         parts.append(f"{duration_ms}ms")
                     else:
                         parts.append(f"{duration_ms / 1000:.1f}s")
+                if result_lines:
+                    parts.append(f"{result_lines} lines")
                 if result_bytes:
-                    result_lines = max(1, result_bytes // 40)
-                    parts.append(f"~{result_lines} lines")
                     parts.append(f"{result_bytes:,} bytes")
                 metrics = " · ".join(parts) if parts else "done"
                 header = f"[bold {colour}]●[/] [bold]Exec[/] [dim]{metrics}[/]"
@@ -484,13 +519,14 @@ class IterationBlock(Widget):
         tool_use_id: str,
         is_error: bool,
         duration_ms: int,
+        result_lines: int,
         result_bytes: int,
         summary: str = "",
     ) -> None:
         """Mark a tool entry as complete with metrics."""
         entry = self._tool_entries.get(tool_use_id)
         if entry:
-            entry.complete(is_error, duration_ms, result_bytes, summary)
+            entry.complete(is_error, duration_ms, result_lines, result_bytes, summary)
 
     def get_copy_text(self) -> str:
         """Return all source code for clipboard."""
@@ -527,6 +563,14 @@ class Conversation(VerticalScroll):
         self._autoscroll = True
         self.mount(UserMessage(content))
         self.scroll_end(animate=False)
+
+    def add_turn_status(
+        self, duration_s: float, input_tokens: int, cache_read: int, cache_write: int,
+        output_tokens: int, cost: float
+    ) -> None:
+        """Add a client-only summary for a completed turn."""
+        self.mount(TurnStatus(duration_s, input_tokens, cache_read, cache_write, output_tokens, cost))
+        self.scroll_if_at_bottom()
 
     def add_error(self, content: str) -> None:
         """Add an agent/server error message and scroll to show it."""

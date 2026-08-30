@@ -81,8 +81,9 @@ class ToolResult(msgspec.Struct, tag="tool_result", tag_field="type", forbid_unk
     tool_use_id: str
     content: str
     is_error: bool
-    duration_ms: int
-    result_bytes: int
+    duration_ms: int = 0
+    result_bytes: int = 0
+    result_lines: int = 0
     subagent_index: int | None = None
 
 

@@ -1,6 +1,7 @@
 [project]
 name = "archie-orchestrator"
-version = "0.1.0"
+dynamic = ["version"]
+
 description = "Archie orchestrator — host-side control plane"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -11,6 +12,9 @@ dependencies = [
     "uvicorn>=0.30",
     "websockets>=13",
 ]
+
+[tool.hatch.version]
+path = "../shared/src/archie_shared/version.py"
 
 [build-system]
 requires = ["hatchling"]

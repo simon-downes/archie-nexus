@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import logging
 import signal
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +185,7 @@ class ChildDispatch:
                 is_error=True,
             )
 
+        started = time.perf_counter()
         try:
             if block.name == "exec":
                 kwargs: dict[str, Any] = {"on_start": self.on_process_start}
@@ -206,10 +208,14 @@ class ChildDispatch:
         finally:
             self.active_proc = None
 
+        duration_ms = round((time.perf_counter() - started) * 1000)
         return ToolResultBlock(
             tool_use_id=block.tool_use_id,
             content=content,
             is_error=is_error,
+            duration_ms=duration_ms,
+            result_lines=len(content.splitlines()),
+            result_bytes=len(content.encode("utf-8")),
         )
 
     def on_process_start(self, proc: asyncio.subprocess.Process) -> None:
@@ -417,8 +423,9 @@ def create_task_tool(
                             tool_use_id=event.tool_use_id,
                             content=event.content,
                             is_error=event.is_error,
-                            duration_ms=0,
-                            result_bytes=len(event.content.encode()),
+                            duration_ms=event.duration_ms,
+                            result_bytes=event.result_bytes,
+                            result_lines=event.result_lines,
                         )
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, TurnComplete):

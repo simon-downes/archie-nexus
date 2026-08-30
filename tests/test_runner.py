@@ -203,9 +203,8 @@ def test_tool_error_surfaces(run_dir):
     assert "FileNotFoundError" in env.error.type
 
 
-def test_duration_recorded(run_dir):
+def test_duration_not_in_envelope(run_dir):
     _write_source(run_dir, "async def main():\n    return 1\n")
     run(run_dir)
     env = _read_envelope(run_dir)
-    assert isinstance(env.duration_ms, int)
-    assert env.duration_ms >= 0
+    assert not hasattr(env, "duration_ms")

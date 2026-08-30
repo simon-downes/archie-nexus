@@ -149,6 +149,7 @@ class EventFactory:
         is_error: bool,
         duration_ms: int,
         result_bytes: int,
+        result_lines: int = 0,
     ) -> tuple[ToolResult, str]:
         event = ToolResult(
             id=str(ULID()),
@@ -161,6 +162,7 @@ class EventFactory:
             is_error=is_error,
             duration_ms=duration_ms,
             result_bytes=result_bytes,
+            result_lines=result_lines,
         )
         serialized = encode_event(event)
         append_event(self.path, event, serialized)

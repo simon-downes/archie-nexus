@@ -204,8 +204,6 @@ def run(run_dir: Path) -> None:
             traceback=traceback.format_exc(),
         )
 
-    duration_ms = int((time.time() - t0) * 1000)
-
     # Serialise return value
     if return_value is not None and error_info is None:
         try:
@@ -223,7 +221,6 @@ def run(run_dir: Path) -> None:
         stderr=_cap(stderr_buf.getvalue()),
         error=error_info,
         calls=calls,
-        duration_ms=duration_ms,
     )
     envelope.write(run_dir)
 
@@ -262,16 +259,11 @@ def _sigterm_handler(signum, frame):
     if _partial_state.get("stderr_buf"):
         stderr = _partial_state["stderr_buf"].getvalue()
 
-    duration_ms = 0
-    if _partial_state.get("t0"):
-        duration_ms = int((time.time() - _partial_state["t0"]) * 1000)
-
     Envelope.error_envelope(
         "Cancelled",
         "Execution cancelled by user",
         stdout=stdout,
         stderr=stderr,
-        duration_ms=duration_ms,
     ).write(Path(run_dir))
     sys.exit(1)
 
