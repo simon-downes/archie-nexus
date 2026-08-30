@@ -1,63 +1,54 @@
-# Contributing
+# Contributing to archie-nexus
 
-archie-nexus is a uv workspace with four members: `cli`, `agent`, `shared`, and
-`orchestrator`. Python 3.13.
+See [README.md](README.md) for setup and the repository map. See [docs/architecture.md](docs/architecture.md) for the system contracts behind the guidance below.
 
-## Setup
+## Development setup
+
+archie-nexus is a `uv` workspace containing `cli`, `agent`, `shared`, and `orchestrator`. It requires Python 3.13.
 
 ```bash
 uv sync
 ```
 
-## Development commands
+The CLI package installs the `archie` command. The agent package installs `archie-agent`; the orchestrator is normally started through `archie serve`.
+
+## Checks
+
+These are the authoritative completion checks:
 
 ```bash
-uv run pytest              # run the full test suite (tests/)
-uv run ruff check .        # lint
-uv run ruff format .       # format
+uv run pytest
+uv run ruff check .
+uv run ruff format .
 ```
 
-Ruff is configured in `pyproject.toml` (line length 100, rules `E W F I B C4 N UP`,
-`E501` ignored). Prefer scoping `ruff format`/`check` to the files you touched to avoid
-sweeping unrelated churn into a change.
+Prefer scoping Ruff commands to files you touched to avoid unrelated churn. Ruff is configured in `pyproject.toml` with line length 100 and rules `E W F I B C4 N UP` (`E501` is ignored).
 
-## Session events and accounting
+## Change guidance
 
-Sessions use a flat, tagged `msgspec` canonical event stream defined in
-`archie_shared.canonical_events`. See `docs/architecture.md` for the model.
+- Put behavior tests in `tests/` and update tests with behavior changes.
+- Treat `shared/` changes as cross-package contract changes. Check both agent and CLI/orchestrator consumers.
+- Keep host-only concerns in `cli`/`orchestrator`; keep container-side execution in `agent`.
+- Keep reusable schemas, serialization, configuration, and accounting in `shared` rather than duplicating them in a presentation layer.
+- Update [docs/architecture.md](docs/architecture.md) when changing component boundaries, Docker mounts, routes, wire events, canonical events, persistence, metrics, or accounting.
 
-Key rules when working on session/accounting code:
+## Session and accounting invariants
 
-- Body events are **persisted** (JSONL, ULID-ordered) but **not broadcast** on the wire.
-  The live display consumes wire events; `/events` replay reads the persisted log.
-- `llm_request` is the one canonical event that is both persisted and broadcast — it is
-  the single source of truth for token/cost accounting. Historical requests are never
-  repriced after a model switch.
-- `text_delta`, connection snapshots, and status refreshes are live-only.
-- There is no client-side cost derivation from per-model rates. Do not reintroduce
-  `cost_per_m_*` fields onto wire events or `MessageMetadata`.
+The authoritative detailed contract is in [docs/architecture.md](docs/architecture.md), `shared/src/archie_shared/canonical_events.py`, and `shared/src/archie_shared/session/accounting.py`.
 
-## Subagent scope contract
+- The persisted session stream is canonical JSONL in append order. Event machinery normally generates ULID-like IDs; persistence requires non-empty IDs, rejects conflicting duplicate IDs, and treats identical retries as idempotent.
+- Persisted events and wire events are different layers. Do not assume every live frame is persisted or every persisted event is broadcast.
+- `llm_request` is the source of truth for token and cost totals. Historical requests retain their recorded immutable cost; do not reprice them after a model switch.
+- A child agent’s `scope` is the launching task tool call’s `tool_use_id`; root events use `scope=None`.
+- Request identity is `(scope, turn_iteration, request_id)`. Keep child direct/inclusive aggregation cycle-safe.
+- `MessageMetadata` may contain compatibility/display token and cost fields, but must not become an authoritative or recomputed accounting source. Do not add client-side rate calculations or cost-per-token fields to wire events.
 
-Subagent attribution maps onto canonical events via `scope`:
+## Review checklist
 
-- Child `scope` = the launching `task` tool call's `tool_use_id`; the root agent's
-  events have `scope=None`.
-- Parent reconstruction: `parent_of(S) = tool_call(tool_use_id=S).scope`.
-- Request identity is `(scope, turn_iteration, request_id)`; one `llm_request` per child
-  provider request.
-- Cost aggregation lives in `archie_shared.session.accounting`:
-  `scope_direct_costs` (a scope's own requests) and `scope_inclusive_costs` (direct plus
-  all descendants, with a cycle guard).
+Before submitting a change:
 
-The authoritative version of this contract is the module docstring of
-`shared/src/archie_shared/session/accounting.py` and the "Subagent Scope Contract"
-section of `plans/029-project-canonical-session-events.md`.
-
-## Conventions
-
-- Match existing code style and patterns; do not add comments unless they clarify
-  non-obvious intent.
-- Keep tests alongside behaviour changes. Canonical event stream helpers live in
-  `tests/conftest.py`.
-- Do not commit secrets.
+- tests cover the changed behavior and relevant failure paths;
+- schema/protocol compatibility has been considered;
+- docs and examples match the current code;
+- secrets and generated artifacts are absent;
+- `uv run pytest` and `uv run ruff check .` pass (or failures are explained).
