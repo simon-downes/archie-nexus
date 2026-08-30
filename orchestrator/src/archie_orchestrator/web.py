@@ -7,10 +7,9 @@ Localhost-only, no auth, no session control actions.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+from archie_shared import __version__
 from archie_shared.session import split_id
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
@@ -33,11 +32,8 @@ def _uptime(start_time: datetime) -> str:
 
 
 def _get_version() -> str:
-    """Return the archie-orchestrator package version, or 'dev' if not installed."""
-    try:
-        return pkg_version("archie-orchestrator")
-    except PackageNotFoundError:
-        return "dev"
+    """Return the shared Archie product version."""
+    return __version__
 
 
 async def sessions_page(request: Request) -> HTMLResponse:

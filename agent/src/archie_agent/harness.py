@@ -13,6 +13,7 @@ import inspect
 import logging
 import signal
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -78,15 +79,17 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _extract_duration_ms(content: str) -> int:
-    """Extract duration in ms from formatted result content."""
-    for line in content.split("\n"):
-        if line.startswith("duration:") and line.endswith("ms"):
-            try:
-                return int(line.removeprefix("duration:").removesuffix("ms").strip())
-            except ValueError:
-                pass
-    return 0
+def _shell_result_is_error(content: str) -> bool:
+    """Return whether the shell result's first line reports failure."""
+    first_line = content.splitlines()[0] if content.splitlines() else ""
+    if first_line.startswith("[error:"):
+        return True
+    if not first_line.startswith("[exit:"):
+        return False
+    try:
+        return int(first_line.removeprefix("[exit:").removesuffix("]").strip()) != 0
+    except ValueError:
+        return False
 
 
 class AgentHarness:
@@ -434,9 +437,9 @@ class AgentHarness:
                             is_error=event.is_error,
                         )
                     )
-                    # Extract duration from content (format: "duration: NNNms")
-                    duration_ms = _extract_duration_ms(event.content)
-                    result_bytes = len(event.content.encode("utf-8")) if event.content else 0
+                    duration_ms = event.duration_ms
+                    result_lines = event.result_lines
+                    result_bytes = event.result_bytes if event.content else 0
                     # Persist canonical tool_result event.
                     self._event_factory.tool_result(
                         turn_iteration=f"{turn_index}.{current_iteration}",
@@ -446,6 +449,7 @@ class AgentHarness:
                         is_error=event.is_error,
                         duration_ms=duration_ms,
                         result_bytes=result_bytes,
+                        result_lines=result_lines,
                     )
                     # Broadcast wire event with raw content; client formats.
                     await self._broadcast(
@@ -456,6 +460,7 @@ class AgentHarness:
                             content=event.content,
                             duration_ms=duration_ms,
                             result_bytes=result_bytes,
+                            result_lines=result_lines,
                         )
                     )
 
@@ -593,6 +598,7 @@ class AgentHarness:
                 is_error=True,
             )
 
+        started = time.perf_counter()
         try:
             if block.name == "task":
                 kwargs = dict(block.input)
@@ -621,17 +627,21 @@ class AgentHarness:
                     kwargs["on_start"] = self._on_proc_start
                 result = await spec.handler(**kwargs)
                 content = str(result)
-                is_error = False
+                is_error = block.name == "shell" and _shell_result_is_error(content)
         except Exception as e:
             content = f"{type(e).__name__}: {e}"
             is_error = True
         finally:
             self._active_proc = None
 
+        duration_ms = round((time.perf_counter() - started) * 1000)
         return ToolResultBlock(
             tool_use_id=block.tool_use_id,
             content=content,
             is_error=is_error,
+            duration_ms=duration_ms,
+            result_lines=len(content.splitlines()),
+            result_bytes=len(content.encode("utf-8")),
         )
 
     def _on_proc_start(self, proc: asyncio.subprocess.Process) -> None:

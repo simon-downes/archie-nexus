@@ -232,6 +232,7 @@ class ToolResult:
     content: str
     duration_ms: int = 0
     result_bytes: int = 0
+    result_lines: int = 0
 
     def to_json(self) -> dict:
         return {
@@ -243,6 +244,7 @@ class ToolResult:
                 "content": self.content,
                 "duration_ms": self.duration_ms,
                 "result_bytes": self.result_bytes,
+                "result_lines": self.result_lines,
             },
         }
 
@@ -255,6 +257,7 @@ class ToolResult:
             content=data["content"],
             duration_ms=data.get("duration_ms", 0),
             result_bytes=data.get("result_bytes", 0),
+            result_lines=data.get("result_lines", 0),
         )
 
 

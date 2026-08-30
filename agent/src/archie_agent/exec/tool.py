@@ -131,9 +131,6 @@ def format_result(envelope: Envelope) -> str:
     if envelope.stderr:
         parts.append(f"stderr:\n{envelope.stderr}")
 
-    if envelope.duration_ms:
-        parts.append(f"duration: {envelope.duration_ms}ms")
-
     result = "\n\n".join(parts)
 
     if len(result) > _MAX_RESULT_CHARS:

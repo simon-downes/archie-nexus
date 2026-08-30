@@ -1,6 +1,7 @@
 [project]
 name = "archie-cli"
-version = "0.1.0"
+dynamic = ["version"]
+
 description = "Archie CLI client"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -17,6 +18,9 @@ dependencies = [
 
 [project.scripts]
 archie = "archie_cli.cli:main"
+
+[tool.hatch.version]
+path = "../shared/src/archie_shared/version.py"
 
 [build-system]
 requires = ["hatchling"]

@@ -41,7 +41,7 @@ async def shell(
             could hang (e.g. test runners, servers).
 
     Returns:
-        Formatted string: "$ {command}\\n[exit: {code}]\\n{output}".
+        Formatted string: "[exit: {code}]\\n{output}".
         Non-zero exit is returned as data, not raised as an exception.
         A timeout is returned as an error string, not raised.
     """
@@ -58,7 +58,7 @@ async def shell(
         parts.append(result.stderr.rstrip("\n"))
     output = "\n".join(parts)
 
-    header = f"$ {command}\n[exit: {result.returncode}]"
+    header = f"[exit: {result.returncode}]"
     if output:
         return f"{header}\n{output}"
     return header

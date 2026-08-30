@@ -6,9 +6,20 @@ requires-python = "==3.13.*"
 members = [
     "archie-agent",
     "archie-cli",
-    "archie-nexus",
     "archie-orchestrator",
     "archie-shared",
+]
+
+[manifest.dependency-groups]
+dev = [
+    { name = "archie-agent", editable = "agent" },
+    { name = "archie-cli", editable = "cli" },
+    { name = "archie-orchestrator", editable = "orchestrator" },
+    { name = "archie-shared", editable = "shared" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", specifier = ">=9" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.15" },
 ]
 
 [[package]]
@@ -34,7 +45,6 @@ wheels = [
 
 [[package]]
 name = "archie-agent"
-version = "0.1.0"
 source = { editable = "agent" }
 dependencies = [
     { name = "archie-shared" },
@@ -89,7 +99,6 @@ requires-dist = [
 
 [[package]]
 name = "archie-cli"
-version = "0.1.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "archie-orchestrator" },
@@ -117,39 +126,7 @@ requires-dist = [
 ]
 
 [[package]]
-name = "archie-nexus"
-version = "0.1.0"
-source = { virtual = "." }
-
-[package.dev-dependencies]
-dev = [
-    { name = "archie-agent" },
-    { name = "archie-cli" },
-    { name = "archie-orchestrator" },
-    { name = "archie-shared" },
-    { name = "httpx" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "archie-agent", editable = "agent" },
-    { name = "archie-cli", editable = "cli" },
-    { name = "archie-orchestrator", editable = "orchestrator" },
-    { name = "archie-shared", editable = "shared" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "pytest", specifier = ">=9" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "ruff", specifier = ">=0.15" },
-]
-
-[[package]]
 name = "archie-orchestrator"
-version = "0.1.0"
 source = { editable = "orchestrator" }
 dependencies = [
     { name = "archie-shared" },
@@ -172,7 +149,6 @@ requires-dist = [
 
 [[package]]
 name = "archie-shared"
-version = "0.1.0"
 source = { editable = "shared" }
 dependencies = [
     { name = "msgspec" },

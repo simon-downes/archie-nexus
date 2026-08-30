@@ -215,17 +215,12 @@ async def test_page_contains_version():
 
 
 @pytest.mark.asyncio
-async def test_page_version_fallback_when_not_installed():
-    """_get_version() returns 'dev' when package is not installed."""
-    from importlib.metadata import PackageNotFoundError
-    from unittest.mock import patch as _patch
-
+async def test_get_version_uses_shared_product_version():
+    """_get_version() returns the shared Archie product version."""
     from archie_orchestrator.web import _get_version
+    from archie_shared import __version__
 
-    with _patch("archie_orchestrator.web.pkg_version", side_effect=PackageNotFoundError):
-        result = _get_version()
-
-    assert result == "dev"
+    assert _get_version() == __version__
 
 
 # ---------------------------------------------------------------------------

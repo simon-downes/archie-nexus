@@ -179,9 +179,33 @@ async def test_native_shell_dispatch(tmp_path, monkeypatch):
     results = _get_tool_results(ws)
     assert len(results) == 1
     assert results[0]["is_error"] is False
+    assert "$ echo hi" not in results[0]["content"]
 
 
 # --- Test: native grep dispatches with formatted output ---
+
+
+async def test_native_shell_nonzero_exit_is_error(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr("archie_agent.exec.tools._subprocess.WORKSPACE", workspace)
+
+    responses = [
+        [
+            ToolUseEvent(tool_use_id="tu_sh_fail", name="shell", input={"command": "exit 1"}),
+            Usage(input_tokens=100, output_tokens=50),
+            Done(stop_reason="tool_use"),
+        ],
+        [TextDelta(text="Handled."), Usage(input_tokens=200, output_tokens=60), Done(stop_reason="end_turn")],
+    ]
+    harness = _make_harness(tmp_path, responses)
+    ws = FakeWebSocket()
+    harness.clients.add(ws)
+    await harness.handle_message("run failing command")
+
+    results = _get_tool_results(ws)
+    assert len(results) == 1
+    assert results[0]["is_error"] is True
 
 
 async def test_native_grep_dispatch(tmp_path, monkeypatch):

@@ -1,7 +1,13 @@
 import sqlite3
 
 from archie_orchestrator.metrics import MetricsWriter
-from archie_shared.canonical_events import LLMRequest, SessionStarted, decode_event, encode_event
+from archie_shared.canonical_events import (
+    LLMRequest,
+    SessionStarted,
+    ToolResult,
+    decode_event,
+    encode_event,
+)
 from archie_shared.session.log import append_event, read_events
 
 
@@ -36,6 +42,19 @@ def test_canonical_round_trip_and_order(tmp_path):
     assert path.read_text().splitlines()[-1] == line
     assert read_events(path)[1] == event
     assert decode_event(line, persisted=True) == event
+
+
+def test_old_tool_result_without_metadata_decodes_with_defaults():
+    raw = (
+        '{"type":"tool_result","id":"01J00000000000000000000002",'
+        '"turn_iteration":"1.1","scope":null,"request_id":"req",'
+        '"tool_use_id":"tool","content":"old result","is_error":false}'
+    )
+    event = decode_event(raw, persisted=True)
+    assert isinstance(event, ToolResult)
+    assert event.duration_ms == 0
+    assert event.result_bytes == 0
+    assert event.result_lines == 0
 
 
 def test_duplicate_events_are_idempotent_and_conflicts_rejected(tmp_path):

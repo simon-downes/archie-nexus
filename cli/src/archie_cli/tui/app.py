@@ -135,6 +135,13 @@ class ArchieApp(App):
         self._latest_context_tokens: int = 0
         self._latest_context_pct: float = 0.0
         self._cumulative_cost: float = 0.0
+        self._turn_started_at: float | None = None
+        self._turn_input = 0
+        self._turn_cache_read = 0
+        self._turn_cache_write = 0
+        self._turn_output = 0
+        self._turn_cost = 0.0
+        self._turn_duration_s = 0.0
 
         # Live output estimation (chars/4, reconciled on Usage)
         self._estimated_output: int = 0
@@ -241,6 +248,7 @@ class ArchieApp(App):
         conv = self.query_one("#conversation", Conversation)
 
         if isinstance(event, ce.UserMessage):
+            self._reset_turn_metrics()
             if event.content:
                 conv.add_user_message(event.content)
         elif isinstance(event, ce.AssistantMessage):
@@ -268,18 +276,26 @@ class ArchieApp(App):
                 pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
                 if pending is not None:
                     name, tool_input = pending
-                    summary = format_tool_complete(name, tool_input, event.content, event.is_error)
+                    summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
                 else:
                     summary = event.content[:200] if event.content else ""
                 self._iteration_block.complete_tool(
                     event.tool_use_id,
                     event.is_error,
                     event.duration_ms,
+                    event.result_lines,
                     event.result_bytes,
                     summary,
                 )
         elif isinstance(event, ce.LLMRequest):
             self._accumulate_ledger(event)
+            if event.scope is None and event.subagent_index is None:
+                self._turn_input += event.input_tokens
+                self._turn_cache_read += event.cache_read_tokens
+                self._turn_cache_write += event.cache_write_tokens
+                self._turn_output += event.output_tokens
+                self._turn_cost += event.cost_usd
+                self._turn_duration_s += event.duration_ms / 1000
         elif isinstance(event, ce.TurnError):
             conv.add_error(event.message)
             self._iteration_block = None
@@ -287,6 +303,7 @@ class ArchieApp(App):
             conv.add_cancelled()
             self._iteration_block = None
         elif isinstance(event, ce.TurnComplete):
+            self._show_turn_status()
             self._iteration_block = None
         elif isinstance(event, ce.ShellCommand):
             conv.add_shell_output(event.command, event.output, exit_code=event.exit_code)
@@ -488,6 +505,13 @@ class ArchieApp(App):
         elif isinstance(event, LLMRequest):
             # Authoritative live cost/token source from the broadcast ledger.
             self._accumulate_ledger(event)
+            if event.scope is None and event.subagent_index is None:
+                self._turn_input += event.input_tokens
+                self._turn_cache_read += event.cache_read_tokens
+                self._turn_cache_write += event.cache_write_tokens
+                self._turn_output += event.output_tokens
+                self._turn_cost += event.cost_usd
+                self._turn_duration_s += event.duration_ms / 1000
             if self._handle_scoped_event(event):
                 return
 
@@ -539,6 +563,7 @@ class ArchieApp(App):
         elif isinstance(event, TurnComplete):
             if self._handle_scoped_event(event):
                 return
+            self._show_turn_status()
             self._end_turn()
 
         elif isinstance(event, TurnInterrupted):
@@ -581,13 +606,14 @@ class ArchieApp(App):
                 pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
                 if pending is not None:
                     name, tool_input = pending
-                    summary = format_tool_complete(name, tool_input, event.content, event.is_error)
+                    summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
                 else:
                     summary = event.content[:200] if event.content else ""
                 self._iteration_block.complete_tool(
                     event.tool_use_id,
                     event.is_error,
                     event.duration_ms,
+                    event.result_lines,
                     event.result_bytes,
                     summary,
                 )
@@ -621,7 +647,7 @@ class ArchieApp(App):
         elif isinstance(event, (ToolResult, ce.ToolResult)):
             pending = self._child_pending_tools.pop((scope, index, event.tool_use_id), None)
             name, tool_input = pending or ("tool", {})
-            result_summary = format_tool_complete(name, tool_input, event.content, event.is_error)
+            result_summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
             child.add_line(result_summary)
             if event.is_error:
                 child.activity = result_summary
@@ -722,6 +748,13 @@ class ArchieApp(App):
 
         content = event.content
         self._turn_active = True
+        self._turn_started_at = time.monotonic()
+        self._turn_input = 0
+        self._turn_cache_read = 0
+        self._turn_cache_write = 0
+        self._turn_output = 0
+        self._turn_cost = 0.0
+        self._turn_duration_s = 0.0
         conv = self.query_one("#conversation", Conversation)
         conv.add_user_message(content)
 
@@ -817,6 +850,38 @@ class ArchieApp(App):
             pass  # Best-effort
 
     # --- UI helpers ---
+
+    def _reset_turn_metrics(self) -> None:
+        """Reset client-only accounting for the next root turn."""
+        self._turn_started_at = None
+        self._turn_input = 0
+        self._turn_cache_read = 0
+        self._turn_cache_write = 0
+        self._turn_output = 0
+        self._turn_cost = 0.0
+        self._turn_duration_s = 0.0
+
+    def _show_turn_status(self) -> None:
+        """Render client-only metrics for the completed root turn."""
+        if self._turn_started_at is None and not any(
+            (self._turn_input, self._turn_cache_read, self._turn_cache_write, self._turn_output, self._turn_cost)
+        ):
+            return
+        duration_s = (
+            time.monotonic() - self._turn_started_at
+            if self._turn_started_at is not None
+            else self._turn_duration_s
+        )
+        conv = self.query_one("#conversation", Conversation)
+        conv.add_turn_status(
+            duration_s,
+            self._turn_input,
+            self._turn_cache_read,
+            self._turn_cache_write,
+            self._turn_output,
+            self._turn_cost,
+        )
+        self._turn_started_at = None
 
     def _end_turn(self) -> None:
         """Single teardown path for every turn outcome."""

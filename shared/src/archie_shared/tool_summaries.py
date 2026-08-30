@@ -213,7 +213,7 @@ def format_tool_activity(name: str, input_dict: dict) -> str:
     return format_tool_pending(name, input_dict)
 
 
-def format_tool_complete(name: str, input_dict: dict, result: str, is_error: bool) -> str:
+def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bool) -> str:
     """Produce the completed summary with result metadata (Rich markup).
 
     Args:
@@ -226,7 +226,27 @@ def format_tool_complete(name: str, input_dict: dict, result: str, is_error: boo
         Rich markup string for the completed state.
     """
     if is_error:
-        error_msg = result.split("\n")[0][:80]
+        first_line = result.splitlines()[0] if result.splitlines() else ""
+        if name == "shell":
+            command = input_dict.get("command", "")
+            line_count = len(result.splitlines())
+            status = first_line
+            if first_line.startswith("[exit:"):
+                try:
+                    exit_code = int(first_line.removeprefix("[exit:").removesuffix("]").strip())
+                    status = f"\\[exit: {exit_code}]"
+                except ValueError:
+                    status = _esc(first_line[:80])
+            else:
+                status = _esc(first_line[:80])
+            header = (
+                f"Shell {_hi(command)} — [{ERROR}]{status}[/] "
+                f"{_dim(f'({line_count} lines)')}"
+            )
+            body_text = "\n".join(result.splitlines()[1:]).strip("\n")
+            body = _format_output_block(body_text, colour="red") if body_text else ""
+            return f"{header}\n{body}" if body else header
+        error_msg = first_line[:80]
         base = format_tool_pending(name, input_dict)
         return f"{base} — [{ERROR}]{_esc(error_msg)}[/]"
 
@@ -304,22 +324,20 @@ def format_tool_complete(name: str, input_dict: dict, result: str, is_error: boo
             command = input_dict.get("command", "")
             # Parse exit code from "[exit: N]"
             exit_code = None
-            for line in result.split("\n"):
-                if "[exit:" in line:
-                    try:
-                        exit_code = int(line.split("[exit:")[1].split("]")[0].strip())
-                    except (IndexError, ValueError):
-                        pass
-                    break
-            if exit_code and exit_code != 0:
+            first_line = result.splitlines()[0] if result.splitlines() else ""
+            if first_line.startswith("[exit:"):
+                try:
+                    exit_code = int(first_line.removeprefix("[exit:").removesuffix("]").strip())
+                except ValueError:
+                    pass
+            if exit_code is not None and exit_code != 0:
                 header = f"Shell {_hi(command)} {_dim(f'(exit {exit_code})')}"
-                # Strip the trailing "[exit: N]" marker line from displayed output
-                body_text = "\n".join(ln for ln in result.split("\n") if "[exit:" not in ln).strip(
-                    "\n"
-                )
+                body_text = "\n".join(
+                    ln for ln in result.split("\n") if not ln.startswith("[exit:")
+                ).strip("\n")
                 body = _format_output_block(body_text, colour="red") if body_text else ""
                 return f"{header}\n{body}" if body else header
-            return f"Shell {_hi(command)}"
+            return f"Shell {_hi(command)} {_dim(f'({len(result.splitlines())} lines)')}"
 
         case "code":
             path = input_dict.get("path")
@@ -372,8 +390,34 @@ def format_tool_complete(name: str, input_dict: dict, result: str, is_error: boo
                 return f"Skill {_hi(skill_name + '/' + file)}"
             if "already loaded" in result:
                 return f"Skill {_hi(skill_name)} {_dim('(already loaded)')}"
-            return f"Skill {_hi(skill_name)} {_dim('(loaded)')}"
+            for line in result.splitlines()[:2]:
+                if "(" in line and " lines)" in line:
+                    try:
+                        line_count = line.split("(", 1)[1].split(" lines)", 1)[0]
+                        int(line_count)
+                        return f"Skill {_hi(skill_name)} {_dim(f'({line_count} lines)')}"
+                    except (IndexError, ValueError):
+                        pass
+            return f"Skill {_hi(skill_name)}"
 
         case _:
             size = len(result)
             return f"{_esc(name)} {_dim(f'({size} chars)')}"
+
+
+def format_tool_complete(name: str, input_dict: dict, result: str, is_error: bool, duration_ms: int = 0) -> str:
+    """Format a completed tool summary and append measured execution duration."""
+    summary = _format_tool_complete(name, input_dict, result, is_error)
+    if duration_ms <= 0 or not summary:
+        return summary
+    elapsed = f"{duration_ms / 1000:.1f}s" if duration_ms >= 1000 else f"{duration_ms}ms"
+    lines = summary.split("\n", 1)
+    first = lines[0]
+    close = first.rfind(")")
+    open_ = first.rfind("(", 0, close)
+    if open_ >= 0 and close > open_:
+        first = f"{first[:close]}, {elapsed}{first[close:]}"
+    else:
+        first += f" {_dim(f'({elapsed})')}"
+    lines[0] = first
+    return "\n".join(lines)

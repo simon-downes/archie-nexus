@@ -45,6 +45,7 @@ from archie_shared.schemas import (
     load_nexus_config,
 )
 from archie_shared.types import ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock
+from archie_shared.version import __version__
 
 __all__ = [
     "AgentConfig",
@@ -78,6 +79,7 @@ __all__ = [
     "TurnInterrupted",
     "Usage",
     "WebConfig",
+    "__version__",
     "calculate_cost",
     "deserialize_command",
     "deserialize_event",

@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from archie_agent.harness import AgentHarness
+from archie_agent.harness import AgentHarness, _shell_result_is_error
 from archie_agent.llm._types import Done, TextDelta, Usage
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Session
@@ -19,6 +19,13 @@ from archie_shared.canonical_events import (
     decode_event,
 )
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+
+
+def test_shell_result_error_uses_only_first_line():
+    assert _shell_result_is_error("[exit: 0]\noutput mentions [exit: 123] and error: text") is False
+    assert _shell_result_is_error("[exit: 123]\noutput") is True
+    assert _shell_result_is_error("[error: command timed out]\noutput") is True
+    assert _shell_result_is_error("output mentions [exit: 123]") is False
 
 
 def _read_events(log_path) -> list:

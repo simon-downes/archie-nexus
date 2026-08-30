@@ -6,6 +6,7 @@ Token counts are session totals (lifetime, only climb). Updated from
 Usage wire events which carry per-request values (accumulated client-side).
 """
 
+from archie_shared import __version__
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
@@ -128,7 +129,7 @@ class StatusBar(Widget):
                 f" │ [{theme.COST}]{self.pricing_label}[/]"
             )
         )
-        right.update(Text.from_markup(f"{self.session_id} "))
+        right.update(Text.from_markup(f"[{theme.MUTED}]v{__version__}[/] {self.session_id} "))
 
 
 def _fmt(n: int) -> str:

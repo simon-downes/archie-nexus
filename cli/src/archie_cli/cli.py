@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 import httpx
 import uvicorn
-from archie_shared.session import SessionDescriptor
+from archie_shared.session import SessionDescriptor, split_id
 
 from archie_cli.project import detect_project_dir
 
@@ -381,11 +381,10 @@ def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -
         click.echo("No running sessions.")
         return
 
-    click.echo(f"{'SESSION ID':<40} {'STATUS':<20} {'PORT'}")
-    click.echo(f"{'-' * 40} {'-' * 20} {'-' * 6}")
+    click.echo(f"{'SESSION ID':<40} {'WORKSPACE':<20} {'STATUS':<20} {'PORT'}")
+    click.echo(f"{'-' * 40} {'-' * 20} {'-' * 20} {'-' * 6}")
     for s in sessions:
-        port_str = str(s.port) if s.port else "-"
-        click.echo(f"{s.session_id:<40} {s.raw_docker_status:<20} {port_str}")
+        click.echo(_format_session_row(s))
 
 
 @main.command()
@@ -502,12 +501,23 @@ def stop(session_id: str | None):
     click.echo(f"  Log retained at: ~/.nexus/sessions/{target.session_id}.jsonl")
 
 
+def _format_session_row(session: SessionDescriptor, prefix: str = "") -> str:
+    """Format one session consistently for lists and selection prompts."""
+    workspace, _ = split_id(session.session_id)
+    port_str = str(session.port) if session.port else "-"
+    return (
+        f"{prefix}{session.session_id:<40} {workspace:<20} "
+        f"{session.raw_docker_status:<20} {port_str}"
+    )
+
+
 def _pick_session(sessions: list[SessionDescriptor]) -> SessionDescriptor:
-    """Display a numbered list and prompt the user to choose."""
+    """Display a numbered session table and prompt the user to choose."""
     click.echo()
+    click.echo(f"{'#':<4} {'SESSION ID':<40} {'WORKSPACE':<20} {'STATUS':<20} {'PORT'}")
+    click.echo(f"{'-' * 4} {'-' * 40} {'-' * 20} {'-' * 20} {'-' * 6}")
     for i, s in enumerate(sessions, 1):
-        port_str = f" (port {s.port})" if s.port else ""
-        click.echo(f"  {i}. {s.session_id}{port_str}")
+        click.echo(_format_session_row(s, prefix=f"{i:<4} "))
     click.echo()
 
     while True:

@@ -267,6 +267,9 @@ async def run_loop(
                     tool_use_id=result_block.tool_use_id,
                     content=result_block.content,
                     is_error=result_block.is_error,
+                    duration_ms=result_block.duration_ms,
+                    result_lines=result_block.result_lines,
+                    result_bytes=result_block.result_bytes,
                 )
             ordered_results = [
                 block

@@ -80,6 +80,9 @@ class ToolResult:
     tool_use_id: str
     content: str
     is_error: bool = False
+    duration_ms: int = 0
+    result_lines: int = 0
+    result_bytes: int = 0
 
 
 type AgentEvent = (

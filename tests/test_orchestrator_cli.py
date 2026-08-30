@@ -53,6 +53,7 @@ def test_ls_displays_sessions(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert "myproject-01abc12345" in result.output
+    assert "myproject" in result.output
     assert "Up 3 hours" in result.output
     assert "32771" in result.output
     assert "otherapp-01def67890" in result.output
