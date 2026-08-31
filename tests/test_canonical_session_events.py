@@ -15,7 +15,8 @@ def request(event_id="01J00000000000000000000000"):
     return LLMRequest(
         id=event_id,
         scope=None,
-        turn_iteration="2.1",
+        turn=2,
+        iteration=1,
         model_key="m",
         sent_at="2025-01-01T00:00:00+00:00",
         duration_ms=12,
@@ -34,7 +35,7 @@ def test_canonical_round_trip_and_order(tmp_path):
     append_event(
         path,
         SessionStarted(
-            id="01J00000000000000000000001", schema_version=1, sent_at="now", model_key="m"
+            id="01J00000000000000000000001", schema_version=2, sent_at="now", model_key="m"
         ),
     )
     event = request()
@@ -47,7 +48,7 @@ def test_canonical_round_trip_and_order(tmp_path):
 def test_old_tool_result_without_metadata_decodes_with_defaults():
     raw = (
         '{"type":"tool_result","id":"01J00000000000000000000002",'
-        '"turn_iteration":"1.1","scope":null,"request_id":"req",'
+        '"turn":1,"iteration":1,"scope":null,"request_id":"req",'
         '"tool_use_id":"tool","content":"old result","is_error":false}'
     )
     event = decode_event(raw, persisted=True)

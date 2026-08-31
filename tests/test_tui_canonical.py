@@ -34,7 +34,8 @@ def _llm_request(event_id, cost, input_tokens=100, output_tokens=10):
     return LLMRequest(
         id=event_id,
         scope=None,
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         model_key="m",
         sent_at="2025-01-01T00:00:00+00:00",
         duration_ms=12,
@@ -66,7 +67,8 @@ def test_child_ledger_does_not_overwrite_root_context():
         id="child",
         scope="task-1",
         subagent_index=0,
-        turn_iteration="1.0",
+        turn=1,
+        iteration=0,
         model_key="m",
         sent_at="2025-01-01T00:00:00+00:00",
         duration_ms=12,
@@ -113,7 +115,8 @@ def test_live_assistant_message_finalizes_stream_without_duplicate():
     conv = MagicMock()
     text_delta = TextDelta(
         id="d1",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         scope=None,
         request_id="r1",
         text="hello",
@@ -121,7 +124,6 @@ def test_live_assistant_message_finalizes_stream_without_duplicate():
     assistant = AssistantMessage(
         id="a1",
         turn=1,
-        turn_iteration="1.1",
         scope=None,
         request_ids=["r1"],
         content="hello",
@@ -161,7 +163,7 @@ def test_render_canonical_does_not_create_empty_iteration_block():
     app = _make_app()
     conv = MagicMock()
     with patch.object(app, "query_one", return_value=conv):
-        app._render_canonical(IterationStart(id="i1", turn_iteration="1.1", scope=None, index=1))
+        app._render_canonical(IterationStart(id="i1", turn=1, iteration=1, scope=None))
 
     conv.begin_iteration.assert_not_called()
 
@@ -173,11 +175,12 @@ def test_render_canonical_reconstructs_tool_summary_client_side():
     conv = MagicMock()
     conv.begin_iteration.return_value = block
     with patch.object(app, "query_one", return_value=conv):
-        app._render_canonical(IterationStart(id="i1", turn_iteration="1.1", scope=None, index=1))
+        app._render_canonical(IterationStart(id="i1", turn=1, iteration=1, scope=None))
         app._render_canonical(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope=None,
                 request_id="r1",
                 tool_use_id="t1",
@@ -188,7 +191,8 @@ def test_render_canonical_reconstructs_tool_summary_client_side():
         app._render_canonical(
             ToolResult(
                 id="r1e",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope=None,
                 request_id="r1",
                 tool_use_id="t1",
@@ -226,7 +230,6 @@ async def test_replay_events_seeds_cost_from_ledger():
         AssistantMessage(
             id="a1",
             turn=1,
-            turn_iteration="1.0",
             scope=None,
             request_ids=["l1"],
             content="ok",

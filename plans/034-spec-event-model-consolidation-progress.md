@@ -2,7 +2,7 @@
 
 - [x] M1 — Session coordinator + persistence ownership (prefactor)
 - [x] M2 — Complete the canonical public schema + single reducer
-- [ ] M3 — Turn/iteration identity unification
+- [x] M3 — Turn/iteration identity unification
 - [ ] M5 — Turn lifecycle: user-message + guaranteed terminal event
 - [ ] M4 — Reconnect reconciliation + multi-client correctness
 - [ ] M6 — Shell as canonical event

@@ -28,15 +28,16 @@ class IterationStart(
     msgspec.Struct, tag="iteration_start", tag_field="type", forbid_unknown_fields=True
 ):
     id: str
-    turn_iteration: str
+    turn: int
+    iteration: int
     scope: str | None
-    index: int
     subagent_index: int | None = None
 
 
 class TextDelta(msgspec.Struct, tag="text_delta", tag_field="type", forbid_unknown_fields=True):
     id: str
-    turn_iteration: str
+    turn: int
+    iteration: int
     scope: str | None
     request_id: str
     text: str
@@ -46,7 +47,8 @@ class TextDelta(msgspec.Struct, tag="text_delta", tag_field="type", forbid_unkno
 class LLMRequest(msgspec.Struct, tag="llm_request", tag_field="type", forbid_unknown_fields=True):
     id: str
     scope: str | None
-    turn_iteration: str
+    turn: int
+    iteration: int
     model_key: str
     sent_at: str
     duration_ms: int
@@ -64,7 +66,8 @@ class LLMRequest(msgspec.Struct, tag="llm_request", tag_field="type", forbid_unk
 
 class ToolCall(msgspec.Struct, tag="tool_call", tag_field="type", forbid_unknown_fields=True):
     id: str
-    turn_iteration: str
+    turn: int
+    iteration: int
     scope: str | None
     request_id: str
     tool_use_id: str
@@ -75,7 +78,8 @@ class ToolCall(msgspec.Struct, tag="tool_call", tag_field="type", forbid_unknown
 
 class ToolResult(msgspec.Struct, tag="tool_result", tag_field="type", forbid_unknown_fields=True):
     id: str
-    turn_iteration: str
+    turn: int
+    iteration: int
     scope: str | None
     request_id: str
     tool_use_id: str
@@ -97,9 +101,6 @@ class AssistantMessage(
     content: str
     interrupted: bool
     subagent_index: int | None = None
-    # Optional for backwards compatibility with events written before
-    # per-iteration assistant messages were introduced.
-    turn_iteration: str | None = None
 
 
 class TurnComplete(

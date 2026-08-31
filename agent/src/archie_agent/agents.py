@@ -160,6 +160,7 @@ def _optional_string(value: object, path: Path, field: str) -> str | None:
         return None
     return value
 
+
 class ChildDispatch:
     """Tool executor with process and pending state isolated to one child."""
 
@@ -237,6 +238,7 @@ class ChildDispatch:
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
 
+
 def _scoped_skills(
     catalog: dict[str, SkillEntry],
     names: list[str],
@@ -253,7 +255,9 @@ def _scoped_skills(
     return result
 
 
-def _resolve_model(entry: AgentEntry, catalog: dict[str, Any], active_model: Any) -> tuple[str, Any]:
+def _resolve_model(
+    entry: AgentEntry, catalog: dict[str, Any], active_model: Any
+) -> tuple[str, Any]:
     """Resolve an agent override as a catalog key, falling back to the active model."""
     if entry.model is None:
         return "", active_model
@@ -277,7 +281,8 @@ def create_task_tool(
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
     max_concurrent: int = 3,
-    live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]] | None = None,
+    live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
+    | None = None,
 ) -> ToolSpec:
     """Create the root task tool; launch context is injected internally."""
     if max_concurrent <= 0:
@@ -309,7 +314,9 @@ def create_task_tool(
 
             try:
                 current_model = active_model() if callable(active_model) else active_model
-                current_model_key = active_model_key() if callable(active_model_key) else active_model_key
+                current_model_key = (
+                    active_model_key() if callable(active_model_key) else active_model_key
+                )
                 model_key, child_model = _resolve_model(entry, model_catalog, current_model)
                 if not model_key:
                     model_key = current_model_key
@@ -354,7 +361,9 @@ def create_task_tool(
                 current_iteration = 0
                 current_request_id = ""
                 async for event in run_loop(
-                    messages=[Turn(role="user", content=[TextBlock(text=prompt)], turn_index=parent_turn)],
+                    messages=[
+                        Turn(role="user", content=[TextBlock(text=prompt)], turn_index=parent_turn)
+                    ],
                     system=child_prompt,
                     llm=child_llm,
                     interrupt=interrupt,
@@ -370,22 +379,24 @@ def create_task_tool(
                         assistant_event_logged = False
                         current_iteration = event.index
                         _, serialized = factory.iteration_start(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
-                            index=current_iteration,
+                            turn=parent_turn,
+                            iteration=current_iteration,
                         )
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, TextDelta):
                         text_parts.append(event.text)
                         iter_text += event.text
                         delta, serialized = factory.text_delta(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             request_id=current_request_id,
                             text=event.text,
                         )
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, RequestFinished):
                         request, serialized = factory.request(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             sent_at=event.context.sent_at,
                             duration_ms=event.duration_ms,
                             status=event.status,
@@ -401,7 +412,6 @@ def create_task_tool(
                         if iter_text and not assistant_event_logged:
                             _, serialized = factory.assistant_message(
                                 turn=parent_turn,
-                                turn_iteration=f"{parent_turn}.{current_iteration}",
                                 request_ids=request_ids.copy(),
                                 content=iter_text,
                                 interrupted=False,
@@ -409,7 +419,8 @@ def create_task_tool(
                             await broadcast_raw(broadcast, serialized)
                             assistant_event_logged = True
                         _, serialized = factory.tool_call(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             request_id=current_request_id,
                             tool_use_id=event.tool_use_id,
                             name=event.name,
@@ -418,7 +429,8 @@ def create_task_tool(
                         await broadcast_raw(broadcast, serialized)
                     elif isinstance(event, ToolResult):
                         _, serialized = factory.tool_result(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             request_id=current_request_id,
                             tool_use_id=event.tool_use_id,
                             content=event.content,
@@ -432,7 +444,6 @@ def create_task_tool(
                         if iter_text and not assistant_event_logged:
                             _, serialized = factory.assistant_message(
                                 turn=parent_turn,
-                                turn_iteration=f"{parent_turn}.{current_iteration}",
                                 request_ids=request_ids.copy(),
                                 content=iter_text,
                                 interrupted=False,
@@ -459,14 +470,25 @@ def create_task_tool(
                 if live_children is not None:
                     live_children.pop((launch_scope, index), None)
 
-    async def handler(tasks=None, _launch_scope: str | None = None, _parent_turn: int | None = None, **kwargs) -> str:
+    async def handler(
+        tasks=None, _launch_scope: str | None = None, _parent_turn: int | None = None, **kwargs
+    ) -> str:
         if not isinstance(tasks, list) or not tasks:
             return "Error: task requires one or more tasks"
         if not _launch_scope:
             return "Error: task launch context is missing"
         semaphore = asyncio.Semaphore(max_concurrent)
         results = await asyncio.gather(
-            *(run_child(item, index=index, launch_scope=_launch_scope, parent_turn=_parent_turn or session.turn_index, semaphore=semaphore) for index, item in enumerate(tasks)),
+            *(
+                run_child(
+                    item,
+                    index=index,
+                    launch_scope=_launch_scope,
+                    parent_turn=_parent_turn or session.turn_index,
+                    semaphore=semaphore,
+                )
+                for index, item in enumerate(tasks)
+            ),
         )
         return "\n".join(results)
 

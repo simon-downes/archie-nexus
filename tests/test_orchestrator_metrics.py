@@ -20,7 +20,8 @@ _next_event_id = 0
 def _make_llm_request(
     *,
     event_id: str | None = None,
-    turn_iteration: str = "1.1",
+    turn: int = 1,
+    iteration: int = 1,
     scope: str | None = None,
     model_key: str = "bedrock-anthropic.claude-sonnet-4-6",
     sent_at: str = "2026-07-01T10:00:00+00:00",
@@ -42,7 +43,8 @@ def _make_llm_request(
         LLMRequest(
             id=event_id,
             scope=scope,
-            turn_iteration=turn_iteration,
+            turn=turn,
+            iteration=iteration,
             model_key=model_key,
             sent_at=sent_at,
             duration_ms=duration_ms,
@@ -123,6 +125,8 @@ async def test_llm_request_token_and_scope_fields(tmp_path):
             _make_llm_request(
                 model_key="bedrock-anthropic.claude-sonnet-4-6",
                 scope="planner",
+                turn=4,
+                iteration=2,
                 input_tokens=500,
                 output_tokens=100,
                 cache_read_tokens=2000,
@@ -145,6 +149,8 @@ async def test_llm_request_token_and_scope_fields(tmp_path):
     assert len(rows) == 1
     row = rows[0]
     assert row["model_key"] == "bedrock-anthropic.claude-sonnet-4-6"
+    assert row["turn"] == 4
+    assert row["iteration"] == 2
     assert row["scope"] == "planner"
     assert row["cache_read_tokens"] == 2000
     assert row["cache_write_tokens"] == 500
@@ -190,7 +196,8 @@ def test_model_key_recorded_per_event(tmp_path):
             sid,
             _make_llm_request(
                 model_key="bedrock-anthropic.claude-sonnet-4-6",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 cost_usd=0.006,
             ),
         ),
@@ -198,7 +205,8 @@ def test_model_key_recorded_per_event(tmp_path):
             sid,
             _make_llm_request(
                 model_key="ollama-qwen3:30b-a3b",
-                turn_iteration="2.1",
+                turn=2,
+                iteration=1,
                 cost_usd=0.0,
             ),
         ),
@@ -259,7 +267,7 @@ def test_non_llm_request_events_ignored(tmp_path):
                 {
                     "type": "session_started",
                     "id": "s1",
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "sent_at": "2026-07-01T10:00:00+00:00",
                     "model_key": "m",
                 }
@@ -271,7 +279,8 @@ def test_non_llm_request_events_ignored(tmp_path):
                 {
                     "type": "text_delta",
                     "id": "t1",
-                    "turn_iteration": "1.1",
+                    "turn": 1,
+                    "iteration": 1,
                     "scope": None,
                     "request_id": "r1",
                     "text": "hi",
@@ -340,9 +349,9 @@ def test_batch_processing_multiple_events(tmp_path):
 
     sid = "proj-01abc12345"
     batch = [
-        (sid, _make_llm_request(turn_iteration="1.1")),
-        (sid, _make_llm_request(turn_iteration="2.1")),
-        (sid, _make_llm_request(turn_iteration="3.1")),
+        (sid, _make_llm_request(turn=1, iteration=1)),
+        (sid, _make_llm_request(turn=2, iteration=1)),
+        (sid, _make_llm_request(turn=3, iteration=1)),
     ]
 
     conn = sqlite3.connect(str(db))
@@ -355,7 +364,7 @@ def test_batch_processing_multiple_events(tmp_path):
 
     rows = _rows(db)
     assert len(rows) == 3
-    assert {r["turn_iteration"] for r in rows} == {"1.1", "2.1", "3.1"}
+    assert {r["turn"] for r in rows} == {1, 2, 3}
 
 
 def test_duplicate_event_id_ignored(tmp_path):
@@ -446,8 +455,8 @@ async def test_run_loop_processes_queued_items_before_cancellation(tmp_path):
     await asyncio.sleep(0.01)
 
     sid = "proj-01abc12345"
-    writer.queue.put_nowait((sid, _make_llm_request(turn_iteration="1.1")))
-    writer.queue.put_nowait((sid, _make_llm_request(turn_iteration="2.1")))
+    writer.queue.put_nowait((sid, _make_llm_request(turn=1, iteration=1)))
+    writer.queue.put_nowait((sid, _make_llm_request(turn=2, iteration=1)))
     # Give the loop time to drain the queue before we cancel.
     await asyncio.sleep(0.05)
     task.cancel()
@@ -477,7 +486,7 @@ async def test_run_loop_db_write_failure_continues(tmp_path, caplog):
         original_process(conn, batch)
 
     sid = "proj-01abc12345"
-    writer.queue.put_nowait((sid, _make_llm_request(turn_iteration="1.1")))
+    writer.queue.put_nowait((sid, _make_llm_request(turn=1, iteration=1)))
 
     task = asyncio.create_task(writer.run())
     await asyncio.sleep(0.05)
@@ -574,10 +583,10 @@ async def test_stale_schema_archived_not_dropped(tmp_path):
     except asyncio.CancelledError:
         pass
 
-    # A fresh version-2 DB exists at the original path.
+    # A fresh version-3 DB exists at the original path.
     conn = sqlite3.connect(str(db))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         tables = {
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()

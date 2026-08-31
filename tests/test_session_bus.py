@@ -34,7 +34,7 @@ async def test_publish_order_matches_log_and_each_client(tmp_path):
 
     events = [
         SessionStarted(
-            id="01J00000000000000000000001", schema_version=1, sent_at="now", model_key="m"
+            id="01J00000000000000000000001", schema_version=2, sent_at="now", model_key="m"
         ),
         UserMessage(id="01J00000000000000000000002", turn=1, scope=None, content="hello"),
         UserMessage(id="01J00000000000000000000003", turn=1, scope="child", content="child"),
@@ -55,7 +55,7 @@ def test_duplicate_and_conflicting_ids_use_append_index(tmp_path):
     path = tmp_path / "session.jsonl"
     bus = SessionEventBus(path)
     event = SessionStarted(
-        id="01J00000000000000000000001", schema_version=1, sent_at="now", model_key="m"
+        id="01J00000000000000000000001", schema_version=2, sent_at="now", model_key="m"
     )
 
     first = bus.append(event)
@@ -72,7 +72,7 @@ def test_duplicate_and_conflicting_ids_use_append_index(tmp_path):
 def test_append_failure_is_typed(tmp_path, monkeypatch):
     bus = SessionEventBus(tmp_path / "session.jsonl")
     event = SessionStarted(
-        id="01J00000000000000000000001", schema_version=1, sent_at="now", model_key="m"
+        id="01J00000000000000000000001", schema_version=2, sent_at="now", model_key="m"
     )
 
     def fail(*args, **kwargs):
@@ -147,7 +147,8 @@ async def test_live_event_is_queued_without_persistence(tmp_path):
     await bus.broadcast(
         TextDelta(
             id="01J00000000000000000000001",
-            turn_iteration="1.0",
+            turn=1,
+            iteration=0,
             scope=None,
             request_id="request",
             text="hello",

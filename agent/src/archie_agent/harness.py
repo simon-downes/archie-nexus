@@ -165,7 +165,7 @@ class AgentHarness:
             self._event_bus.append(
                 SessionStarted(
                     id=str(ULID()),
-                    schema_version=1,
+                    schema_version=2,
                     sent_at=now_utc(),
                     model_key=self.session.model_id,
                 )
@@ -335,15 +335,16 @@ class AgentHarness:
                     assistant_event_logged = False
                     current_iteration = event.index
                     iteration, _ = self._event_factory.iteration_start(
-                        turn_iteration=f"{turn_index}.{event.index}",
-                        index=event.index,
+                        turn=turn_index,
+                        iteration=event.index,
                     )
                     await self._event_bus.publish(iteration)
 
                 elif isinstance(event, TextDelta):
                     iter_text += event.text
                     delta, _ = self._event_factory.text_delta(
-                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        turn=turn_index,
+                        iteration=current_iteration,
                         request_id=current_request_id,
                         text=event.text,
                     )
@@ -351,7 +352,8 @@ class AgentHarness:
 
                 elif isinstance(event, RequestFinished):
                     request, _ = self._event_factory.request(
-                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        turn=turn_index,
+                        iteration=current_iteration,
                         sent_at=event.context.sent_at,
                         duration_ms=event.duration_ms,
                         status=event.status,
@@ -377,7 +379,6 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
-                            turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=False,
@@ -393,7 +394,8 @@ class AgentHarness:
                         )
                     )
                     tool_call, _ = self._event_factory.tool_call(
-                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        turn=turn_index,
+                        iteration=current_iteration,
                         request_id=current_request_id,
                         tool_use_id=event.tool_use_id,
                         name=event.name,
@@ -414,7 +416,8 @@ class AgentHarness:
                     result_lines = event.result_lines
                     result_bytes = event.result_bytes if event.content else 0
                     tool_result, _ = self._event_factory.tool_result(
-                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        turn=turn_index,
+                        iteration=current_iteration,
                         request_id=current_request_id,
                         tool_use_id=event.tool_use_id,
                         content=event.content,
@@ -439,7 +442,6 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
-                            turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=False,
@@ -456,7 +458,6 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
-                            turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=True,
@@ -484,7 +485,6 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
-                            turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=True,

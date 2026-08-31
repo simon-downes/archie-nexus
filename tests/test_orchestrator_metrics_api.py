@@ -22,7 +22,7 @@ def _app_state():
 
 _SEED_TABLE = """CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
-    timestamp TEXT NOT NULL, turn_iteration TEXT NOT NULL, scope TEXT, model_key TEXT NOT NULL,
+    timestamp TEXT NOT NULL, turn INTEGER NOT NULL, iteration INTEGER NOT NULL, scope TEXT, model_key TEXT NOT NULL,
     status TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
     cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL,
     context_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, duration_ms INTEGER NOT NULL,
@@ -36,12 +36,12 @@ def _seed_db(db_path: Path, rows: list[dict]) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_SEED_TABLE)
-    conn.execute("PRAGMA user_version = 2")
+    conn.execute("PRAGMA user_version = 3")
     conn.executemany(
-        "INSERT INTO requests (session_id, event_id, timestamp, turn_iteration, scope, "
+        "INSERT INTO requests (session_id, event_id, timestamp, turn, iteration, scope, "
         "model_key, status, input_tokens, output_tokens, cache_read_tokens, "
         "cache_write_tokens, context_tokens, cost_usd, duration_ms) "
-        "VALUES (:session_id, :event_id, :timestamp, :turn_iteration, :scope, "
+        "VALUES (:session_id, :event_id, :timestamp, :turn, :iteration, :scope, "
         ":model_key, :status, :input_tokens, :output_tokens, :cache_read_tokens, "
         ":cache_write_tokens, :context_tokens, :cost_usd, :duration_ms)",
         rows,
@@ -53,7 +53,8 @@ def _seed_db(db_path: Path, rows: list[dict]) -> None:
 def _row(
     session_id: str = "proj-01abc12345",
     timestamp: str = "2026-07-01T10:00:00+00:00",
-    turn_iteration: str = "1.1",
+    turn: int = 1,
+    iteration: int = 1,
     scope: str | None = None,
     model: str = "Claude Sonnet 4.6",
     status: str = "completed",
@@ -71,7 +72,8 @@ def _row(
         "session_id": session_id,
         "event_id": f"evt-{_next_event_id:06d}",
         "timestamp": timestamp,
-        "turn_iteration": turn_iteration,
+        "turn": turn,
+        "iteration": iteration,
         "scope": scope,
         "model_key": model,
         "status": status,

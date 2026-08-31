@@ -11,10 +11,10 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _CREATE_TABLE = """CREATE TABLE IF NOT EXISTS requests (
  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
- timestamp TEXT NOT NULL, turn_iteration TEXT NOT NULL, scope TEXT, model_key TEXT NOT NULL,
+ timestamp TEXT NOT NULL, turn INTEGER NOT NULL, iteration INTEGER NOT NULL, scope TEXT, model_key TEXT NOT NULL,
  status TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
  cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, context_tokens INTEGER NOT NULL,
  cost_usd REAL NOT NULL, duration_ms INTEGER NOT NULL, UNIQUE (session_id, event_id))"""
@@ -49,7 +49,7 @@ class MetricsWriter:
 
         If the database file exists with a ``user_version`` other than the
         current schema version, rename it to ``<path>.legacy.<UTC>`` so a fresh
-        version-2 database is created in its place. On a naming collision,
+        version-3 database is created in its place. On a naming collision,
         append ``-1``, ``-2``, ... until an unused destination is found. The
         legacy data is preserved rather than dropped.
         """
@@ -96,7 +96,8 @@ class MetricsWriter:
 
     _MATERIAL_COLUMNS = (
         "timestamp",
-        "turn_iteration",
+        "turn",
+        "iteration",
         "scope",
         "model_key",
         "status",
@@ -117,7 +118,8 @@ class MetricsWriter:
                     continue
                 values = (
                     event["sent_at"],
-                    event["turn_iteration"],
+                    event["turn"],
+                    event["iteration"],
                     event.get("scope"),
                     event["model_key"],
                     event["status"],
@@ -147,9 +149,9 @@ class MetricsWriter:
                     continue
                 conn.execute(
                     """INSERT INTO requests
-                    (session_id,event_id,timestamp,turn_iteration,scope,model_key,status,input_tokens,
+                    (session_id,event_id,timestamp,turn,iteration,scope,model_key,status,input_tokens,
                      output_tokens,cache_read_tokens,cache_write_tokens,context_tokens,cost_usd,duration_ms)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (session_id, event["id"], *values),
                 )
             except (json.JSONDecodeError, KeyError, TypeError, sqlite3.Error) as exc:

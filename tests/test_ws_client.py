@@ -58,7 +58,8 @@ def _serialize_text_event() -> str:
     return encode_event(
         TextDelta(
             id="01J00000000000000000000001",
-            turn_iteration="1.0",
+            turn=1,
+            iteration=0,
             scope=None,
             request_id="request",
             text="hi",
@@ -134,7 +135,8 @@ async def test_receive_decodes_tool_input_with_data_key():
             encode_event(
                 ToolCall(
                     id="01J00000000000000000000001",
-                    turn_iteration="1.0",
+                    turn=1,
+                    iteration=0,
                     scope="child",
                     request_id="request",
                     tool_use_id="tool",

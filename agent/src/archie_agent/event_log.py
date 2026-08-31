@@ -49,7 +49,8 @@ class EventFactory:
     def request(
         self,
         *,
-        turn_iteration: str,
+        turn: int,
+        iteration: int,
         sent_at: str,
         duration_ms: int,
         status: Literal["completed", "interrupted", "error", "no_usage"],
@@ -76,7 +77,8 @@ class EventFactory:
             id=request_id or str(ULID()),
             scope=self.scope,
             subagent_index=self.subagent_index,
-            turn_iteration=turn_iteration,
+            turn=turn,
+            iteration=iteration,
             model_key=self.model_key,
             sent_at=sent_at,
             duration_ms=max(0, duration_ms),
@@ -92,22 +94,23 @@ class EventFactory:
         )
         return event, encode_event(event)
 
-    def iteration_start(self, *, turn_iteration: str, index: int) -> tuple[IterationStart, str]:
+    def iteration_start(self, *, turn: int, iteration: int) -> tuple[IterationStart, str]:
         event = IterationStart(
             id=str(ULID()),
-            turn_iteration=turn_iteration,
+            turn=turn,
+            iteration=iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
-            index=index,
         )
         return event, encode_event(event)
 
     def text_delta(
-        self, *, turn_iteration: str, request_id: str, text: str
+        self, *, turn: int, iteration: int, request_id: str, text: str
     ) -> tuple[TextDelta, str]:
         event = TextDelta(
             id=str(ULID()),
-            turn_iteration=turn_iteration,
+            turn=turn,
+            iteration=iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
             request_id=request_id,
@@ -118,7 +121,8 @@ class EventFactory:
     def tool_call(
         self,
         *,
-        turn_iteration: str,
+        turn: int,
+        iteration: int,
         request_id: str,
         tool_use_id: str,
         name: str,
@@ -126,7 +130,8 @@ class EventFactory:
     ) -> tuple[ToolCall, str]:
         event = ToolCall(
             id=str(ULID()),
-            turn_iteration=turn_iteration,
+            turn=turn,
+            iteration=iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
             request_id=request_id,
@@ -139,7 +144,8 @@ class EventFactory:
     def tool_result(
         self,
         *,
-        turn_iteration: str,
+        turn: int,
+        iteration: int,
         request_id: str,
         tool_use_id: str,
         content: str,
@@ -150,7 +156,8 @@ class EventFactory:
     ) -> tuple[ToolResult, str]:
         event = ToolResult(
             id=str(ULID()),
-            turn_iteration=turn_iteration,
+            turn=turn,
+            iteration=iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
             request_id=request_id,
@@ -167,7 +174,6 @@ class EventFactory:
         self,
         *,
         turn: int,
-        turn_iteration: str,
         request_ids: list[str],
         content: str,
         interrupted: bool,
@@ -175,7 +181,6 @@ class EventFactory:
         event = AssistantMessage(
             id=str(ULID()),
             turn=turn,
-            turn_iteration=turn_iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
             request_ids=list(request_ids),

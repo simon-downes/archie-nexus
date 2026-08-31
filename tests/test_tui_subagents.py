@@ -22,7 +22,8 @@ def test_live_scoped_llm_cost_is_included_in_status_accounting():
         id="request-1",
         scope="task-1",
         subagent_index=0,
-        turn_iteration="1.0",
+        turn=1,
+        iteration=0,
         model_key="model",
         sent_at="2025-01-01T00:00:00Z",
         duration_ms=10,
@@ -86,7 +87,8 @@ def test_tool_error_does_not_make_child_terminal():
         app._handle_scoped_event(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -98,7 +100,8 @@ def test_tool_error_does_not_make_child_terminal():
         app._handle_scoped_event(
             ToolResult(
                 id="r1e",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -121,7 +124,8 @@ def test_child_exec_activity_has_explicit_prefix():
         app._handle_scoped_event(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -149,7 +153,8 @@ def test_child_reducer_uses_shared_summaries_and_status():
         app._handle_scoped_event(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -161,7 +166,8 @@ def test_child_reducer_uses_shared_summaries_and_status():
         app._handle_scoped_event(
             ToolResult(
                 id="r1e",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -204,7 +210,8 @@ def test_replay_scoped_event_routes_to_child_state():
     app = _app()
     event = TextDelta(
         id="delta",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         scope="task-1",
         subagent_index=1,
         request_id="r1",

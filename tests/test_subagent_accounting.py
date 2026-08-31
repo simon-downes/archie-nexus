@@ -19,12 +19,14 @@ def _llm(
     cost: float,
     *,
     request_id: str = "r1",
-    turn_iteration: str = "1.1",
+    turn: int = 1,
+    iteration: int = 1,
 ) -> LLMRequest:
     return LLMRequest(
         id=f"req-{scope}-{request_id}",
         scope=scope,
-        turn_iteration=turn_iteration,
+        turn=turn,
+        iteration=iteration,
         model_key="bedrock-anthropic.claude-sonnet-4-6",
         sent_at="2026-07-01T10:00:00+00:00",
         duration_ms=100,
@@ -38,11 +40,14 @@ def _llm(
     )
 
 
-def _launch(parent_scope: str | None, child_scope: str, *, turn_iteration: str = "1.1") -> ToolCall:
+def _launch(
+    parent_scope: str | None, child_scope: str, *, turn: int = 1, iteration: int = 1
+) -> ToolCall:
     """A tool_call issued *by* parent_scope that launches child_scope (tool_use_id)."""
     return ToolCall(
         id=f"tc-{child_scope}",
-        turn_iteration=turn_iteration,
+        turn=turn,
+        iteration=iteration,
         scope=parent_scope,
         request_id="r1",
         tool_use_id=child_scope,
@@ -118,7 +123,8 @@ def test_child_model_and_cost_independent_of_parent():
         LLMRequest(
             id="req-child-local",
             scope="child-a",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             model_key="ollama-qwen3:30b-a3b",
             sent_at="2026-07-01T10:00:00+00:00",
             duration_ms=100,
@@ -149,7 +155,8 @@ def test_child_error_before_usage_still_attributed():
         LLMRequest(
             id="req-child-err",
             scope="child-a",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             model_key="bedrock-anthropic.claude-sonnet-4-6",
             sent_at="2026-07-01T10:00:00+00:00",
             duration_ms=5,
@@ -179,7 +186,8 @@ def test_cycle_guard_terminates():
     events = [
         ToolCall(
             id="tc-a",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             scope="b",
             request_id="r1",
             tool_use_id="a",
@@ -188,7 +196,8 @@ def test_cycle_guard_terminates():
         ),
         ToolCall(
             id="tc-b",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             scope="a",
             request_id="r1",
             tool_use_id="b",
