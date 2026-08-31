@@ -13,25 +13,20 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from archie_shared.canonical_events import ModelSwitch
+from archie_shared.canonical_events import ErrorNotice, Handshake, ModelSwitch, StatusUpdated
 from archie_shared.config import home_dir
 from archie_shared.events import (
     PROTOCOL_VERSION,
     InterruptCommand,
     MessageCommand,
-    SessionInfo,
-    SessionSnapshot,
     SwitchModelCommand,
-    TurnError,
     deserialize_command,
-    serialize_event,
 )
 from archie_shared.models import get_model, load_models
 from archie_shared.schemas import load_nexus_config
 from archie_shared.session.log import (
     MessageEntry,
     read_event_lines,
-    session_accounting,
     write_entry,
 )
 from starlette.applications import Starlette
@@ -182,14 +177,15 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
     assert _catalog is not None
     assert _config is not None
 
-    turn_index = _agent.session.turn_index or 0
-
     # Guard: cannot switch during active turn
     if _agent.turn_active:
-        await _agent.event_bus.broadcast_serialized(
-            serialize_event(
-                TurnError(turn_index=turn_index, message="Cannot switch model during active turn")
-            )
+        await _agent.event_bus.send_to(
+            websocket,
+            ErrorNotice(
+                id=str(ULID()),
+                kind="switch_during_turn",
+                message="Cannot switch model during active turn",
+            ),
         )
         return
 
@@ -197,13 +193,13 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
     try:
         new_model = get_model(_catalog, command.model_key)
     except KeyError:
-        await _agent.event_bus.broadcast_serialized(
-            serialize_event(
-                TurnError(
-                    turn_index=turn_index,
-                    message=f"Unknown model: {command.model_key}",
-                )
-            )
+        await _agent.event_bus.send_to(
+            websocket,
+            ErrorNotice(
+                id=str(ULID()),
+                kind="unknown_model",
+                message=f"Unknown model: {command.model_key}",
+            ),
         )
         return
 
@@ -227,9 +223,9 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
 async def stream(websocket: WebSocket) -> None:
     """Bidirectional WebSocket endpoint for event streaming.
 
-    On connect: sends SessionSnapshot + SessionInfo events, adds to broadcast set.
+    On connect: sends one canonical Handshake followed by StatusUpdated.
     Receives: message and interrupt commands.
-    On disconnect: removes from broadcast set.
+    On disconnect: removes the client from the session bus.
     """
     await websocket.accept()
 
@@ -237,34 +233,19 @@ async def stream(websocket: WebSocket) -> None:
         await websocket.close(code=1013, reason="Agent not ready")
         return
 
-    # Send authoritative session snapshot on connect (replay cursor + accounting)
-    acct = session_accounting(_agent.log_path)
-    snapshot = SessionSnapshot(
-        protocol_version=PROTOCOL_VERSION,
-        model=_agent.session.model.name,
-        session_id=_agent.session.session_id,
-        latest_event_id=acct["latest_event_id"],
-        status="ready",
-        git_branch=_read_git_branch(),
-        total_cost=acct["total_cost"],
-        total_input_tokens=acct["total_input_tokens"],
-        total_output_tokens=acct["total_output_tokens"],
-        total_cache_read_tokens=acct["total_cache_read_tokens"],
-        total_cache_write_tokens=acct["total_cache_write_tokens"],
+    # Register and enqueue the connect sequence as one ordered operation.
+    await _agent.event_bus.add_client_with_events(
+        websocket,
+        (
+            Handshake(
+                id=str(ULID()),
+                protocol_version=PROTOCOL_VERSION,
+                session_id=_agent.session.session_id,
+                model_key=_agent.session.model_id,
+            ),
+            StatusUpdated(id=str(ULID()), git_branch=_read_git_branch()),
+        ),
     )
-    await websocket.send_text(serialize_event(snapshot))
-
-    # Send session info on connect
-    info = SessionInfo(
-        protocol_version=PROTOCOL_VERSION,
-        model=_agent.session.model.name,
-        session_id=_agent.session.session_id,
-        git_branch=_read_git_branch(),
-    )
-    await websocket.send_text(serialize_event(info))
-
-    # Register for ordered delivery after the transitional connect frames.
-    _agent.event_bus.add_client(websocket)
 
     try:
         while True:

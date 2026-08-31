@@ -52,10 +52,18 @@ def _closed(ok: bool) -> websockets.exceptions.ConnectionClosed:
 
 
 def _serialize_text_event() -> str:
-    """A minimal serialized TextDelta the deserializer accepts."""
-    from archie_shared.events import TextDelta, serialize_event
+    """A canonical live-only TextDelta frame."""
+    from archie_shared.canonical_events import TextDelta, encode_event
 
-    return serialize_event(TextDelta(text="hi", turn_index=1))
+    return encode_event(
+        TextDelta(
+            id="01J00000000000000000000001",
+            turn_iteration="1.0",
+            scope=None,
+            request_id="request",
+            text="hi",
+        )
+    )
 
 
 async def test_receive_reraises_on_unexpected_close():
@@ -115,3 +123,28 @@ async def test_connected_property_reflects_state():
     assert client.connected is True
     await client.disconnect()
     assert client.connected is False
+
+
+async def test_receive_decodes_tool_input_with_data_key():
+    from archie_shared.canonical_events import ToolCall, encode_event
+
+    client = WSClient()
+    client._ws = _FakeConnection(
+        [
+            encode_event(
+                ToolCall(
+                    id="01J00000000000000000000001",
+                    turn_iteration="1.0",
+                    scope="child",
+                    request_id="request",
+                    tool_use_id="tool",
+                    name="read",
+                    input={"data": {"path": "/tmp/file"}},
+                )
+            )
+        ],
+        None,
+    )
+
+    received = [event async for event in client.receive()]
+    assert received[0].input == {"data": {"path": "/tmp/file"}}

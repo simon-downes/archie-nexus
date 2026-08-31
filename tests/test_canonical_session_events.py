@@ -82,17 +82,11 @@ def test_canonical_metrics_are_idempotent(tmp_path):
     conn.close()
 
 
-def test_llm_request_wire_deserialize_round_trip():
-    """The broadcast llm_request frame (raw canonical JSON, no wire `data`
-    envelope) must decode through the wire deserializer with cost/tokens
-    intact so the TUI can consume it for authoritative live accounting."""
-    from archie_shared.events import deserialize_event
-
+def test_llm_request_round_trip():
+    """Canonical llm_request frames decode through the single event path."""
     event = request()
-    raw = encode_event(event)  # raw canonical JSON, top-level `type`/`cost_usd`
-    assert '"data"' not in raw
-
-    restored = deserialize_event(raw)
+    raw = encode_event(event)
+    restored = decode_event(raw)
     assert isinstance(restored, LLMRequest)
     assert restored == event
     assert restored.cost_usd == event.cost_usd

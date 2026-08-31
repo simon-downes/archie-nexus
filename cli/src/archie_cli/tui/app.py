@@ -22,25 +22,18 @@ from dataclasses import dataclass
 
 import httpx
 from archie_shared import canonical_events as ce
-from archie_shared.canonical_events import decode_event
-from archie_shared.events import (
-    PROTOCOL_VERSION,
-    InterruptCommand,
+from archie_shared.canonical_events import (
     IterationStart,
     LLMRequest,
-    ModelSwitched,
-    SessionInfo,
-    SessionSnapshot,
-    StatusUpdated,
-    SwitchModelCommand,
     TextDelta,
     ToolCall,
     ToolResult,
     TurnComplete,
     TurnError,
     TurnInterrupted,
-    Usage,
+    decode_event,
 )
+from archie_shared.events import PROTOCOL_VERSION, InterruptCommand, SwitchModelCommand
 from archie_shared.models import load_models
 from archie_shared.tool_summaries import (
     format_tool_activity,
@@ -125,7 +118,7 @@ class ArchieApp(App):
         self._child_widgets: dict[tuple[str, int], SubagentActivity] = {}
         self._active_child_key: tuple[str, int] | None = None
 
-        # Session state for local accumulation. Seeded from SessionSnapshot.accounting
+        # Session state for local accumulation. Seeded from Handshake.accounting
         # on connect, then updated live from broadcast llm_request ledger events.
         self._session_id: str = ""
         self._cumulative_input: int = 0
@@ -143,7 +136,7 @@ class ArchieApp(App):
         self._turn_cost = 0.0
         self._turn_duration_s = 0.0
 
-        # Live output estimation (chars/4, reconciled on Usage)
+        # Live output estimation (chars/4, reconciled on LLMRequest)
         self._estimated_output: int = 0
 
         # Direct shell (! prefix) state
@@ -163,7 +156,7 @@ class ArchieApp(App):
         """Connect to agent and start receiving events.
 
         Ordering: subscribe WS first → start receive loop (buffering) → the
-        SessionSnapshot frame provides the replay cursor → replay canonical
+        Handshake frame provides the replay cursor → replay canonical
         events via /events → reconcile buffered live events by event id.
         """
         self.query_one("#input", MessageInput).focus()
@@ -237,9 +230,13 @@ class ArchieApp(App):
             if event_id in self._seen_event_ids:
                 return
             self._seen_event_ids.add(event_id)
-            self._last_event_id = event_id
+            if isinstance(event, ce.PersistedEventTypes):
+                self._last_event_id = event_id
 
-        if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
+        if (
+            getattr(event, "scope", None) is not None
+            and getattr(event, "subagent_index", None) is not None
+        ):
             if isinstance(event, LLMRequest):
                 self._accumulate_ledger(event)
             self._handle_scoped_event(event)
@@ -251,8 +248,56 @@ class ArchieApp(App):
             self._reset_turn_metrics()
             if event.content:
                 conv.add_user_message(event.content)
+        elif isinstance(event, ce.Handshake):
+            status = self.query_one("#status", StatusBar)
+            status.session_id = event.session_id
+            self._session_id = event.session_id
+            model = load_models().get(event.model_key)
+            if model is not None:
+                status.model_name = model.name
+                status.supports_cache = model.can_cache
+            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
+                self._protocol_warned = True
+                self._show_client_error(
+                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
+                    f"this client supports v{PROTOCOL_VERSION}. "
+                    "Some features may not work — consider updating the CLI."
+                )
+        elif isinstance(event, ce.StatusUpdated):
+            self.query_one("#status", StatusBar).git_branch = event.git_branch
+        elif isinstance(event, ce.ErrorNotice):
+            self._show_client_error(event.message)
+            if event.kind in {"turn_error", "storage_error"} and self._turn_active:
+                self._end_turn()
+        elif isinstance(event, ce.ModelSwitch):
+            status = self.query_one("#status", StatusBar)
+            model = load_models().get(event.model_key)
+            if model is not None:
+                status.model_name = model.name
+                status.supports_cache = model.can_cache
+                self.notify(f"Switched to {model.name}")
+        elif isinstance(event, ce.TextDelta):
+            self._remove_throbber()
+            if self._streaming is None:
+                self._streaming = conv.begin_streaming()
+                self._turn_active = True
+            self._stream_text += event.text
+            self._streaming.append(event.text)
+            self._estimated_output += len(event.text) // 4
+            status = self.query_one("#status", StatusBar)
+            status.session_output = self._cumulative_output + self._estimated_output
+            conv.scroll_if_at_bottom()
         elif isinstance(event, ce.AssistantMessage):
-            if event.content:
+            if self._streaming is not None:
+                if self._stream_text == event.content:
+                    self._finalise_streaming()
+                else:
+                    self._streaming.remove()
+                    self._streaming = None
+                    self._stream_text = ""
+                    if event.content:
+                        conv.add_assistant_message(event.content)
+            elif event.content:
                 conv.add_assistant_message(event.content)
             if event.interrupted:
                 conv.add_cancelled()
@@ -276,7 +321,9 @@ class ArchieApp(App):
                 pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
                 if pending is not None:
                     name, tool_input = pending
-                    summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
+                    summary = format_tool_complete(
+                        name, tool_input, event.content, event.is_error, event.duration_ms
+                    )
                 else:
                     summary = event.content[:200] if event.content else ""
                 self._iteration_block.complete_tool(
@@ -299,12 +346,15 @@ class ArchieApp(App):
         elif isinstance(event, ce.TurnError):
             conv.add_error(event.message)
             self._iteration_block = None
+            self._end_turn()
         elif isinstance(event, ce.TurnInterrupted):
             conv.add_cancelled()
             self._iteration_block = None
+            self._end_turn()
         elif isinstance(event, ce.TurnComplete):
             self._show_turn_status()
             self._iteration_block = None
+            self._end_turn()
         elif isinstance(event, ce.ShellCommand):
             conv.add_shell_output(event.command, event.output, exit_code=event.exit_code)
 
@@ -318,13 +368,16 @@ class ArchieApp(App):
         if event.id in self._seen_accounted_ids:
             return
         self._seen_accounted_ids.add(event.id)
+        self._estimated_output = 0
         self._cumulative_input += event.input_tokens
         self._cumulative_output += event.output_tokens
         self._cumulative_cache_read += event.cache_read_tokens
         self._cumulative_cache_write += event.cache_write_tokens
         if event.scope is None and event.subagent_index is None:
             self._latest_context_tokens = event.context_tokens
-            self._latest_context_pct = self._estimate_context_pct(event.context_tokens, event.model_key)
+            self._latest_context_pct = self._estimate_context_pct(
+                event.context_tokens, event.model_key
+            )
         self._cumulative_cost += event.cost_usd
         self._update_accounting_status()
 
@@ -359,10 +412,7 @@ class ArchieApp(App):
         """
         try:
             async for event in self._ws.receive():
-                if isinstance(event, (SessionSnapshot, SessionInfo, ModelSwitched, StatusUpdated)):
-                    # Session-level events have no turn_index — always dispatch immediately
-                    self._handle_event(event)
-                elif self._buffering:
+                if self._buffering:
                     self._event_buffer.append(event)
                 else:
                     self._handle_event(event)
@@ -447,179 +497,8 @@ class ArchieApp(App):
             self._reconnecting = False
 
     def _handle_event(self, event) -> None:
-        """Dispatch one server event to the appropriate widget update."""
-        conv = self.query_one("#conversation", Conversation)
-
-        # Child activity is broadcast as canonical events rather than wrapped
-        # wire events. Route scoped canonical events before the root reducers.
-        if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
-            if isinstance(event, LLMRequest):
-                self._accumulate_ledger(event)
-            if self._handle_scoped_event(event):
-                return
-
-        if isinstance(event, SessionSnapshot):
-            # Authoritative session state at connect. Seed cumulative accounting
-            # and the replay cursor from the persisted ledger.
-            status = self.query_one("#status", StatusBar)
-            status.session_id = event.session_id
-            status.model_name = event.model
-            status.git_branch = event.git_branch
-            self._session_id = event.session_id
-            self._last_event_id = event.latest_event_id
-            self._cumulative_input = event.total_input_tokens
-            self._cumulative_output = event.total_output_tokens
-            self._cumulative_cache_read = event.total_cache_read_tokens
-            self._cumulative_cache_write = event.total_cache_write_tokens
-            self._cumulative_cost = event.total_cost
-            self._update_accounting_status()
-            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
-                self._protocol_warned = True
-                self._show_client_error(
-                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
-                    f"this client supports v{PROTOCOL_VERSION}. "
-                    "Some features may not work — consider updating the CLI."
-                )
-
-        elif isinstance(event, SessionInfo):
-            status = self.query_one("#status", StatusBar)
-            status.session_id = event.session_id
-            status.model_name = event.model
-            status.git_branch = event.git_branch
-            self._session_id = event.session_id
-            # Warn if the session's protocol version is newer than this client supports
-            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
-                self._protocol_warned = True
-                self._show_client_error(
-                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
-                    f"this client supports v{PROTOCOL_VERSION}. "
-                    "Some features may not work — consider updating the CLI."
-                )
-
-        elif isinstance(event, ModelSwitched):
-            status = self.query_one("#status", StatusBar)
-            status.model_name = event.model_name
-            status.supports_cache = event.supports_cache
-            self.notify(f"Switched to {event.model_name}")
-
-        elif isinstance(event, LLMRequest):
-            # Authoritative live cost/token source from the broadcast ledger.
-            self._accumulate_ledger(event)
-            if event.scope is None and event.subagent_index is None:
-                self._turn_input += event.input_tokens
-                self._turn_cache_read += event.cache_read_tokens
-                self._turn_cache_write += event.cache_write_tokens
-                self._turn_output += event.output_tokens
-                self._turn_cost += event.cost_usd
-                self._turn_duration_s += event.duration_ms / 1000
-            if self._handle_scoped_event(event):
-                return
-
-        elif isinstance(event, StatusUpdated):
-            status = self.query_one("#status", StatusBar)
-            status.git_branch = event.git_branch
-
-        elif isinstance(event, IterationStart):
-            if self._handle_scoped_event(event):
-                return
-            # Deterministic block boundary: finalise any in-progress streaming
-            # and reset the iteration block so the next TextDelta/ToolCall opens
-            # a fresh visual block. Decoupled from Usage metadata.
-            if self._streaming is not None:
-                self._finalise_streaming()
-            self._iteration_block = None
-            # Agent is working towards the next response — show the thinking
-            # indicator again until the first TextDelta/ToolCall of this iteration.
-            self._show_throbber()
-
-        elif isinstance(event, TextDelta):
-            if self._handle_scoped_event(event):
-                return
-            self._remove_throbber()
-            if self._streaming is None:
-                self._streaming = conv.begin_streaming()
-                self._turn_active = True
-            self._stream_text += event.text
-            self._streaming.append(event.text)
-            # Live output estimation
-            self._estimated_output += len(event.text) // 4
-            status = self.query_one("#status", StatusBar)
-            status.session_output = self._cumulative_output + self._estimated_output
-            conv.scroll_if_at_bottom()
-
-        elif isinstance(event, Usage):
-            # Tokens/cost come authoritatively from the llm_request ledger; the
-            # Usage event carries the latest request's context-token components
-            # and the server-computed context percentage.
-            self._estimated_output = 0
-            self._latest_context_tokens = (
-                event.input_tokens + event.cache_read_tokens + event.cache_write_tokens
-            )
-            status = self.query_one("#status", StatusBar)
-            status.session_output = self._cumulative_output
-            status.context_tokens = self._latest_context_tokens
-            status.context_pct = event.context_pct
-
-        elif isinstance(event, TurnComplete):
-            if self._handle_scoped_event(event):
-                return
-            self._show_turn_status()
-            self._end_turn()
-
-        elif isinstance(event, TurnInterrupted):
-            if self._handle_scoped_event(event):
-                return
-            conv.add_cancelled()
-            self._end_turn()
-
-        elif isinstance(event, TurnError):
-            if self._handle_scoped_event(event):
-                return
-            self._show_error(event.message)
-            self._end_turn()
-
-        elif isinstance(event, ToolCall):
-            if self._handle_scoped_event(event):
-                return
-            self._remove_throbber()
-            # Finalise any in-progress streaming text before showing tool activity
-            if self._streaming is not None:
-                self._finalise_streaming()
-            # Start a new iteration block if needed
-            if self._iteration_block is None:
-                self._iteration_block = conv.begin_iteration()
-            # Add pending entry (format summary client-side from raw input)
-            input_summary = format_tool_pending(event.name, event.input)
-            self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
-            entry = self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
-            if event.name == "task":
-                tasks = event.input.get("tasks", [])
-                if isinstance(tasks, list):
-                    self._parent_task_inputs[event.tool_use_id] = tasks
-                    self._parent_task_entries[event.tool_use_id] = entry
-            conv.scroll_if_at_bottom()
-
-        elif isinstance(event, ToolResult):
-            if self._handle_scoped_event(event):
-                return
-            if self._iteration_block is not None:
-                pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
-                if pending is not None:
-                    name, tool_input = pending
-                    summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
-                else:
-                    summary = event.content[:200] if event.content else ""
-                self._iteration_block.complete_tool(
-                    event.tool_use_id,
-                    event.is_error,
-                    event.duration_ms,
-                    event.result_lines,
-                    event.result_bytes,
-                    summary,
-                )
-                conv.scroll_if_at_bottom()
-            # Tool finished — agent is thinking about the next step again.
-            self._show_throbber()
+        """Reduce one live or replay canonical event."""
+        self._render_canonical(event)
 
     def _handle_scoped_event(self, event) -> bool:
         """Reduce one canonical/live child event into shared child state."""
@@ -647,7 +526,9 @@ class ArchieApp(App):
         elif isinstance(event, (ToolResult, ce.ToolResult)):
             pending = self._child_pending_tools.pop((scope, index, event.tool_use_id), None)
             name, tool_input = pending or ("tool", {})
-            result_summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
+            result_summary = format_tool_complete(
+                name, tool_input, event.content, event.is_error, event.duration_ms
+            )
             child.add_line(result_summary)
             if event.is_error:
                 child.activity = result_summary
@@ -697,9 +578,7 @@ class ArchieApp(App):
         if child is None:
             return
         self._active_child_key = key
-        self.push_screen(
-            SubagentScreen(child)
-        )
+        self.push_screen(SubagentScreen(child))
 
     async def action_subagent_picker(self) -> None:
         """Open the command palette filtered to subagent entries."""
@@ -755,9 +634,6 @@ class ArchieApp(App):
         self._turn_output = 0
         self._turn_cost = 0.0
         self._turn_duration_s = 0.0
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_user_message(content)
-
         # Show throbber while waiting
         self._show_throbber()
 
@@ -864,7 +740,13 @@ class ArchieApp(App):
     def _show_turn_status(self) -> None:
         """Render client-only metrics for the completed root turn."""
         if self._turn_started_at is None and not any(
-            (self._turn_input, self._turn_cache_read, self._turn_cache_write, self._turn_output, self._turn_cost)
+            (
+                self._turn_input,
+                self._turn_cache_read,
+                self._turn_cache_write,
+                self._turn_output,
+                self._turn_cost,
+            )
         ):
             return
         duration_s = (

@@ -1,14 +1,13 @@
-"""Tests for SwitchModelCommand and ModelSwitched wire protocol types."""
+"""Tests for SwitchModelCommand and ModelSwitch wire protocol types."""
+
+import asyncio
 
 import pytest
+from archie_shared.canonical_events import ErrorNotice, ModelSwitch, decode_event, encode_event
 from archie_shared.events import (
-    ModelSwitched,
     SwitchModelCommand,
-    TurnError,
     deserialize_command,
-    deserialize_event,
     serialize_command,
-    serialize_event,
 )
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
 
@@ -42,60 +41,24 @@ class TestSwitchModelCommand:
         assert result.model_key == "my-model"
 
 
-class TestModelSwitched:
-    """Tests for ModelSwitched event serialization."""
+class TestModelSwitch:
+    """Tests for the canonical model-switch event."""
 
-    def test_to_json(self):
-        event = ModelSwitched(
+    def test_round_trip(self):
+        event = ModelSwitch(
+            id="01J00000000000000000000001",
             model_key="bedrock-claude-haiku-4-5",
-            model_name="Claude Haiku 4.5",
-            supports_cache=True,
+            sent_at="2025-01-01T00:00:00+00:00",
         )
-        data = event.to_json()
-        assert data == {
-            "type": "model_switched",
-            "data": {
-                "model_key": "bedrock-claude-haiku-4-5",
-                "model_name": "Claude Haiku 4.5",
-                "supports_cache": True,
-            },
-        }
+        restored = decode_event(encode_event(event), persisted=True)
+        assert restored == event
+        assert restored.model_key == "bedrock-claude-haiku-4-5"
 
-    def test_from_json(self):
-        event = ModelSwitched.from_json(
-            {
-                "model_key": "bedrock-claude-haiku-4-5",
-                "model_name": "Claude Haiku 4.5",
-                "supports_cache": True,
-            }
-        )
-        assert event.model_key == "bedrock-claude-haiku-4-5"
-        assert event.model_name == "Claude Haiku 4.5"
-        assert event.supports_cache is True
-
-    def test_from_json_defaults_supports_cache(self):
-        """Missing supports_cache defaults to False (backward compat)."""
-        event = ModelSwitched.from_json({"model_key": "k", "model_name": "n"})
-        assert event.supports_cache is False
-
-    def test_serialize_round_trip(self):
-        event = ModelSwitched(
-            model_key="bedrock-claude-sonnet-4-6",
-            model_name="Claude Sonnet 4.6",
-            supports_cache=True,
-        )
-        raw = serialize_event(event)
-        result = deserialize_event(raw)
-        assert isinstance(result, ModelSwitched)
-        assert result.model_key == "bedrock-claude-sonnet-4-6"
-        assert result.model_name == "Claude Sonnet 4.6"
-        assert result.supports_cache is True
-
-    def test_no_turn_index_in_wire_format(self):
-        """ModelSwitched is a session-level event — no turn_index in JSON."""
-        event = ModelSwitched(model_key="k", model_name="n")
-        data = event.to_json()
-        assert "turn_index" not in data
+    def test_display_properties_are_not_persisted(self):
+        event = ModelSwitch(id="01J00000000000000000000001", model_key="haiku", sent_at="now")
+        raw = encode_event(event)
+        assert "model_name" not in raw
+        assert "supports_cache" not in raw
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +163,7 @@ class TestModelSwitchHandler:
 
     @pytest.mark.asyncio
     async def test_switch_model_broadcasts_to_clients(self, tmp_path, monkeypatch, _setup_app):
-        """ModelSwitched event is broadcast to all connected clients."""
+        """ModelSwitch event is broadcast to all connected clients."""
         harness, _ = _setup_app
 
         sent: list[str] = []
@@ -215,19 +178,19 @@ class TestModelSwitchHandler:
         from archie_agent.app import _handle_model_switch
 
         cmd = SwitchModelCommand(model_key="model-b")
-        await _handle_model_switch(cmd, FakeWS())
+        await _handle_model_switch(cmd, ws)
+        await asyncio.sleep(0)
 
-        # Client should have received the ModelSwitched event
+        # Client should have received the ModelSwitch event
         assert len(sent) == 1
-        event = deserialize_event(sent[0])
-        assert isinstance(event, ModelSwitched)
+        event = decode_event(sent[0])
+        assert isinstance(event, ModelSwitch)
         assert event.model_key == "model-b"
-        assert event.model_name == "Test Model B"
-        assert event.supports_cache is False  # model-b has can_cache=False
+        assert event.sent_at
 
     @pytest.mark.asyncio
     async def test_switch_model_during_active_turn(self, tmp_path, monkeypatch, _setup_app):
-        """Switching during active turn returns TurnError."""
+        """Switching during active turn returns ErrorNotice."""
         harness, _ = _setup_app
         harness._turn_active = True
 
@@ -237,15 +200,19 @@ class TestModelSwitchHandler:
             async def send_text(self, data):
                 sent.append(data)
 
+        ws = FakeWS()
+        harness.event_bus.add_client(ws)
+
         from archie_agent.app import _handle_model_switch
 
         cmd = SwitchModelCommand(model_key="model-b")
-        await _handle_model_switch(cmd, FakeWS())
+        await _handle_model_switch(cmd, ws)
+        await asyncio.sleep(0)
 
-        # Should get a TurnError on the requesting WS
+        # Should get a ErrorNotice on the requesting WS
         assert len(sent) == 1
-        event = deserialize_event(sent[0])
-        assert isinstance(event, TurnError)
+        event = decode_event(sent[0])
+        assert isinstance(event, ErrorNotice)
         assert "active turn" in event.message.lower()
 
         # Session should NOT have changed
@@ -253,7 +220,7 @@ class TestModelSwitchHandler:
 
     @pytest.mark.asyncio
     async def test_switch_model_invalid_key(self, tmp_path, monkeypatch, _setup_app):
-        """Unknown model key returns TurnError."""
+        """Unknown model key returns ErrorNotice."""
         harness, _ = _setup_app
 
         sent: list[str] = []
@@ -262,14 +229,18 @@ class TestModelSwitchHandler:
             async def send_text(self, data):
                 sent.append(data)
 
+        ws = FakeWS()
+        harness.event_bus.add_client(ws)
+
         from archie_agent.app import _handle_model_switch
 
         cmd = SwitchModelCommand(model_key="nonexistent-model")
-        await _handle_model_switch(cmd, FakeWS())
+        await _handle_model_switch(cmd, ws)
+        await asyncio.sleep(0)
 
         assert len(sent) == 1
-        event = deserialize_event(sent[0])
-        assert isinstance(event, TurnError)
+        event = decode_event(sent[0])
+        assert isinstance(event, ErrorNotice)
         assert "nonexistent-model" in event.message
 
         # Session unchanged

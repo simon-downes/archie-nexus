@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from archie_shared.canonical_events import (
     AssistantMessage,
+    ErrorNotice,
     IterationStart,
     LLMRequest,
+    TextDelta,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -96,13 +98,62 @@ def test_accumulate_ledger_deduplicates_by_id():
     assert app._cumulative_input == 100
 
 
-def test_render_canonical_deduplicates_by_id():
+def test_accumulate_ledger_resets_streaming_output_estimate():
     app = _make_app()
-    app._seen_event_ids = {"u1"}
+    app._estimated_output = 25
+    with patch.object(app, "_update_accounting_status"):
+        app._accumulate_ledger(_llm_request("e1", 0.10))
+
+    assert app._estimated_output == 0
+
+
+def test_live_assistant_message_finalizes_stream_without_duplicate():
+    """The persisted assistant record must reconcile the live text stream."""
+    app = _make_app()
     conv = MagicMock()
+    text_delta = TextDelta(
+        id="d1",
+        turn_iteration="1.1",
+        scope=None,
+        request_id="r1",
+        text="hello",
+    )
+    assistant = AssistantMessage(
+        id="a1",
+        turn=1,
+        turn_iteration="1.1",
+        scope=None,
+        request_ids=["r1"],
+        content="hello",
+        interrupted=False,
+    )
+
     with patch.object(app, "query_one", return_value=conv):
-        app._render_canonical(UserMessage(id="u1", turn=1, scope=None, content="hi"))
-    conv.add_user_message.assert_not_called()
+        app._render_canonical(text_delta)
+        app._render_canonical(assistant)
+
+    conv.finalise_streaming.assert_called_once()
+    conv.add_assistant_message.assert_not_called()
+
+
+def test_turn_error_notice_ends_pending_turn():
+    """A server-side rejection/error returns the local TUI to an idle state."""
+    app = _make_app()
+    app._turn_active = True
+    throbber = MagicMock()
+    conv = MagicMock()
+    input_widget = MagicMock()
+    app._throbber = throbber
+
+    def query_one(selector, _type=None):
+        return {"#conversation": conv, "#throbber": throbber, "#input": input_widget}[selector]
+
+    with patch.object(app, "query_one", side_effect=query_one):
+        app._render_canonical(ErrorNotice(id="e1", kind="turn_error", message="provider failed"))
+
+    assert app._turn_active is False
+    assert input_widget.disabled is False
+    conv.add_client_error.assert_called_once_with("provider failed")
 
 
 def test_render_canonical_does_not_create_empty_iteration_block():
@@ -173,7 +224,13 @@ async def test_replay_events_seeds_cost_from_ledger():
         UserMessage(id="u1", turn=1, scope=None, content="hi"),
         _llm_request("l1", 0.25, input_tokens=200, output_tokens=20),
         AssistantMessage(
-            id="a1", turn=1, turn_iteration="1.0", scope=None, request_ids=["l1"], content="ok", interrupted=False
+            id="a1",
+            turn=1,
+            turn_iteration="1.0",
+            scope=None,
+            request_ids=["l1"],
+            content="ok",
+            interrupted=False,
         ),
     ]
     body = "".join(encode_event(e) + "\n" for e in events)

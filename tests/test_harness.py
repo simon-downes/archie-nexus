@@ -128,7 +128,8 @@ async def test_normal_flow(tmp_path):
 
     # Verify wire event sequence
     assert "text_delta" in event_types
-    assert "usage" in event_types
+    # Usage is internal; the public ledger is llm_request.
+    assert "usage" not in event_types
     assert "turn_complete" in event_types
 
     # Verify session state
@@ -278,11 +279,11 @@ async def test_turn_already_active(tmp_path):
     assert harness.turn_active is True
     await harness.handle_message("second")
 
-    # Should get a turn_error for the rejected message
+    # Should get a live-only error_notice for the rejected message.
     events = ws.parsed_events()
-    error_events = [e for e in events if e["type"] == "turn_error"]
+    error_events = [e for e in events if e["type"] == "error_notice"]
     assert len(error_events) >= 1
-    assert "already active" in error_events[0]["data"]["message"]
+    assert "already active" in error_events[0]["message"]
 
     await task
 

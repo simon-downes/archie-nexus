@@ -18,25 +18,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from archie_shared.canonical_events import (
+    ErrorNotice,
     SessionStarted,
+    StatusUpdated,
     UserMessage,
     decode_event,
 )
 from archie_shared.canonical_events import (
     TextDelta as CanonicalTextDelta,
-)
-from archie_shared.events import (
-    StatusUpdated,
-    serialize_event,
-)
-from archie_shared.events import (
-    TurnError as WireTurnError,
-)
-from archie_shared.events import (
-    TurnInterrupted as WireTurnInterrupted,
-)
-from archie_shared.events import (
-    Usage as WireUsage,
 )
 from archie_shared.schemas import SubagentsConfig
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
@@ -263,8 +252,12 @@ class AgentHarness:
 
         if self._turn_active:
             turn_index = self.session.turn_index or 1
-            await self._event_bus.broadcast_serialized(
-                serialize_event(WireTurnError(turn_index=turn_index, message="Turn already active"))
+            await self._event_bus.broadcast(
+                ErrorNotice(
+                    id=str(ULID()),
+                    kind="turn_active",
+                    message="Turn already active",
+                )
             )
             return
 
@@ -379,16 +372,6 @@ class AgentHarness:
                         cache_read_tokens=event.cache_read_tokens,
                         cache_write_tokens=event.cache_write_tokens,
                     )
-                    await self._broadcast(
-                        WireUsage(
-                            turn_index=turn_index,
-                            input_tokens=event.input_tokens,
-                            output_tokens=event.output_tokens,
-                            cache_read_tokens=event.cache_read_tokens,
-                            cache_write_tokens=event.cache_write_tokens,
-                            context_pct=self.session.context_pct,
-                        )
-                    )
 
                 elif isinstance(event, ToolCall):
                     if iter_text and not assistant_event_logged:
@@ -494,7 +477,6 @@ class AgentHarness:
                     self.session.display_entries.append(
                         DisplayEntry(role="error", content=event.error, turn_index=turn_index)
                     )
-                    await self._broadcast(WireTurnError(turn_index=turn_index, message=event.error))
 
                 elif isinstance(event, TurnInterrupted):
                     # Persist any final assistant text before flushing the
@@ -525,19 +507,20 @@ class AgentHarness:
                     self.session.display_entries.append(
                         DisplayEntry(role="interrupted", content="", turn_index=turn_index)
                     )
-                    await self._broadcast(WireTurnInterrupted(turn_index=turn_index))
 
         except Exception as e:
             log.exception("Error in harness event consumption")
-            await self._broadcast(WireTurnError(turn_index=turn_index, message=str(e)))
+            await self._event_bus.broadcast(
+                ErrorNotice(id=str(ULID()), kind="turn_error", message=str(e))
+            )
 
         finally:
             self._turn_active = False
             # Broadcast status refresh (git branch may have changed during the turn).
             from archie_agent.app import _read_git_branch
 
-            await self._event_bus.broadcast_serialized(
-                serialize_event(StatusUpdated(git_branch=_read_git_branch()))
+            await self._event_bus.broadcast(
+                StatusUpdated(id=str(ULID()), git_branch=_read_git_branch())
             )
 
     def interrupt(self, target: tuple[str, int] | None = None) -> None:
@@ -667,11 +650,3 @@ class AgentHarness:
             await self._event_bus.broadcast(event)
         else:
             await self._event_bus.publish(event)
-
-    async def _broadcast_raw(self, data: str) -> None:
-        """Broadcast a transitional serialized frame through the event bus."""
-        await self._event_bus.broadcast_serialized(data)
-
-    async def _broadcast(self, event) -> None:
-        """Broadcast a transitional serialized frame through the event bus."""
-        await self._event_bus.broadcast_serialized(serialize_event(event))

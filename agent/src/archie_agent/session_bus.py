@@ -7,40 +7,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from archie_shared.canonical_events import (
-    AssistantMessage,
-    IterationStart,
-    LLMRequest,
-    ModelSwitch,
-    PersistedEvent,
-    SessionStarted,
-    ShellCommand,
-    ToolCall,
-    ToolResult,
-    TurnComplete,
-    TurnError,
-    TurnInterrupted,
-    UserMessage,
-    encode_event,
-)
+from archie_shared.canonical_events import PersistedEvent, PersistedEventTypes, encode_event
 from archie_shared.session.log import append_serialized_event, read_event_lines
 
 log = logging.getLogger(__name__)
 
-_PERSISTED_TYPES = (
-    SessionStarted,
-    UserMessage,
-    IterationStart,
-    LLMRequest,
-    ToolCall,
-    ToolResult,
-    AssistantMessage,
-    TurnComplete,
-    TurnError,
-    TurnInterrupted,
-    ModelSwitch,
-    ShellCommand,
-)
+_PERSISTED_TYPES = PersistedEventTypes
 
 
 class LogAppendError(RuntimeError):
@@ -108,6 +80,7 @@ class SessionEventBus:
             line, inserted = self._append_line(event.id, encode_event(event))
             if inserted:
                 self._enqueue_all(line)
+            await asyncio.sleep(0)
             return line
 
     async def broadcast(self, event: Any) -> None:
@@ -116,11 +89,7 @@ class SessionEventBus:
             raise TypeError(f"persisted event {type(event).__name__} must use publish")
         async with self._ordering:
             self._enqueue_all(encode_event(event))
-
-    async def broadcast_serialized(self, line: str) -> None:
-        """Enqueue a transitional serialized frame without appending it."""
-        async with self._ordering:
-            self._enqueue_all(line)
+        await asyncio.sleep(0)
 
     async def send_to(self, websocket: Any, event: Any) -> None:
         """Enqueue a live-only event to one client in its existing order."""
@@ -130,6 +99,17 @@ class SessionEventBus:
             queue = self._clients.get(websocket)
             if queue is not None:
                 self._enqueue(websocket, queue, encode_event(event))
+
+    async def add_client_with_events(self, websocket: Any, events: tuple[Any, ...]) -> None:
+        """Register a client and enqueue its initial frames atomically."""
+        async with self._ordering:
+            self.add_client(websocket)
+            queue = self._clients[websocket]
+            for event in events:
+                if isinstance(event, _PERSISTED_TYPES):
+                    raise TypeError(f"persisted event {type(event).__name__} must use publish")
+                self._enqueue(websocket, queue, encode_event(event))
+        await asyncio.sleep(0)
 
     def add_client(self, websocket: Any) -> None:
         """Register a client and start its independent sender task."""

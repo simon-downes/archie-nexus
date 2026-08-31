@@ -146,6 +146,26 @@ class ShellCommand(
     scope: str | None = None
 
 
+class Handshake(msgspec.Struct, tag="handshake", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    protocol_version: int
+    session_id: str
+    model_key: str
+
+
+class StatusUpdated(
+    msgspec.Struct, tag="status_updated", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    git_branch: str
+
+
+class ErrorNotice(msgspec.Struct, tag="error_notice", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    kind: str
+    message: str
+
+
 CanonicalEvent = (
     SessionStarted
     | UserMessage
@@ -160,6 +180,9 @@ CanonicalEvent = (
     | TurnInterrupted
     | ModelSwitch
     | ShellCommand
+    | Handshake
+    | StatusUpdated
+    | ErrorNotice
 )
 PersistedEvent = (
     SessionStarted
@@ -174,6 +197,20 @@ PersistedEvent = (
     | TurnInterrupted
     | ModelSwitch
     | ShellCommand
+)
+PersistedEventTypes = (
+    SessionStarted,
+    UserMessage,
+    IterationStart,
+    LLMRequest,
+    ToolCall,
+    ToolResult,
+    AssistantMessage,
+    TurnComplete,
+    TurnError,
+    TurnInterrupted,
+    ModelSwitch,
+    ShellCommand,
 )
 
 

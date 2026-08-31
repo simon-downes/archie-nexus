@@ -77,8 +77,8 @@ def test_events_on_start_has_only_session_started(client):
 def _run_turn(client):
     """Drive one message turn to completion so the canonical log is populated."""
     with client.websocket_connect("/stream") as ws:
-        ws.receive_text()  # session_snapshot
-        ws.receive_text()  # session_info
+        ws.receive_text()  # handshake
+        ws.receive_text()  # status_updated
         ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
         while True:
             if json.loads(ws.receive_text())["type"] == "turn_complete":
@@ -124,57 +124,43 @@ def test_events_unknown_cursor_returns_409(client):
     assert resp.json()["error"] == "cursor_not_found"
 
 
-def test_websocket_session_info_on_connect(client):
-    """Verify WS connect sends SessionSnapshot then SessionInfo events."""
+def test_websocket_handshake_on_connect(client):
+    """Verify connect sends one handshake followed by one status frame."""
     with client.websocket_connect("/stream") as ws:
-        snapshot = json.loads(ws.receive_text())
-        assert snapshot["type"] == "session_snapshot"
-        assert snapshot["data"]["protocol_version"] == 1
-        assert snapshot["data"]["model"] == "Claude Sonnet 4.6"
-        assert snapshot["data"]["session_id"] == "test-session"
-        assert isinstance(snapshot["data"]["latest_event_id"], str)
-        assert snapshot["data"]["accounting"]["total_cost"] == 0.0
+        handshake = json.loads(ws.receive_text())
+        assert handshake["type"] == "handshake"
+        assert handshake["protocol_version"] == 2
+        assert handshake["model_key"] == "bedrock-claude-sonnet-4-6"
+        assert handshake["session_id"] == "test-session"
+        assert handshake["id"]
 
-        data = json.loads(ws.receive_text())
-        assert data["type"] == "session_info"
-        assert data["data"]["protocol_version"] == 1
-        assert data["data"]["model"] == "Claude Sonnet 4.6"
-        assert data["data"]["session_id"] == "test-session"
+        status = json.loads(ws.receive_text())
+        assert status["type"] == "status_updated"
+        assert status["git_branch"]
+        assert status["id"]
 
 
 def test_websocket_message_and_events(client):
-    """Verify sending a message yields text_delta and turn_complete events."""
+    """Verify sending a message yields canonical live and persisted events."""
     with client.websocket_connect("/stream") as ws:
-        # Consume session_snapshot + session_info
-        session_snapshot = json.loads(ws.receive_text())
-        assert session_snapshot["type"] == "session_snapshot"
-        session_info = json.loads(ws.receive_text())
-        assert session_info["type"] == "session_info"
-
-        # Send a message
+        json.loads(ws.receive_text())  # handshake
+        json.loads(ws.receive_text())  # status_updated
         ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
 
-        # Collect events until turn_complete
         events = []
         while True:
-            raw = ws.receive_text()
-            event = json.loads(raw)
+            event = json.loads(ws.receive_text())
             events.append(event)
             if event["type"] == "turn_complete":
                 break
 
-        # Should have text_delta(s), usage, turn_complete
         types = [e["type"] for e in events]
+        assert "user_message" in types
         assert "text_delta" in types
-        assert "usage" in types
+        assert "llm_request" in types
+        assert "usage" not in types
         assert types[-1] == "turn_complete"
-
-        # Wire events carry turn_index. The `llm_request` frame is a raw canonical
-        # event broadcast for the metrics pipeline and has no wire turn_index.
-        for e in events:
-            if e["type"] == "llm_request":
-                continue
-            assert e["turn_index"] == 1
+        assert all(e.get("id") for e in events)
 
 
 # --- Tool turn integration test ---
@@ -229,7 +215,7 @@ def test_websocket_tool_turn(mock_env, tmp_path):
 
                 with TestClient(app) as client:
                     with client.websocket_connect("/stream") as ws:
-                        # Consume session_snapshot + session_info
+                        # Consume handshake + status_updated
                         ws.receive_text()
                         ws.receive_text()
 
@@ -255,8 +241,8 @@ def test_websocket_tool_turn(mock_env, tmp_path):
 
                         # Verify tool_call event content
                         tc = next(e for e in events if e["type"] == "tool_call")
-                        assert tc["data"]["name"] == "exec"
+                        assert tc["name"] == "exec"
 
                         # Verify tool_result event
                         tr = next(e for e in events if e["type"] == "tool_result")
-                        assert tr["data"]["is_error"] is False
+                        assert tr["is_error"] is False

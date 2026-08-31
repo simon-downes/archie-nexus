@@ -2,7 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from archie_shared.events import PROTOCOL_VERSION, SessionInfo
+from archie_shared.canonical_events import Handshake
+from archie_shared.events import PROTOCOL_VERSION
 
 
 def _make_app():
@@ -15,12 +16,12 @@ def _make_app():
     )
 
 
-def _make_session_info(protocol_version: int) -> SessionInfo:
-    return SessionInfo(
+def _make_session_info(protocol_version: int) -> Handshake:
+    return Handshake(
+        id="01J00000000000000000000001",
         protocol_version=protocol_version,
-        model="Claude Sonnet 4.6",
+        model_key="bedrock-claude-sonnet-4-6",
         session_id="proj-01abc12345",
-        git_branch="main",
     )
 
 

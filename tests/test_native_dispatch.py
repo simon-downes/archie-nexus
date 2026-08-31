@@ -59,7 +59,7 @@ def _get_tool_results(ws: FakeWebSocket) -> list[dict]:
     for m in ws.messages:
         parsed = json.loads(m)
         if parsed.get("type") == "tool_result":
-            results.append(parsed["data"])
+            results.append(parsed)
     return results
 
 
@@ -196,7 +196,11 @@ async def test_native_shell_nonzero_exit_is_error(tmp_path, monkeypatch):
             Usage(input_tokens=100, output_tokens=50),
             Done(stop_reason="tool_use"),
         ],
-        [TextDelta(text="Handled."), Usage(input_tokens=200, output_tokens=60), Done(stop_reason="end_turn")],
+        [
+            TextDelta(text="Handled."),
+            Usage(input_tokens=200, output_tokens=60),
+            Done(stop_reason="end_turn"),
+        ],
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
@@ -492,8 +496,8 @@ async def test_native_read_input_summary(tmp_path, monkeypatch):
     # Wire tool_call carries raw input; client formats via shared formatter.
     tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    assert tool_calls[0]["data"]["input"] == {"path": "foo.py"}
-    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
+    assert tool_calls[0]["input"] == {"path": "foo.py"}
+    summary = format_tool_pending(tool_calls[0]["name"], tool_calls[0]["input"])
     assert "Read" in summary
     assert "foo.py" in summary
 
@@ -527,8 +531,8 @@ async def test_native_shell_input_summary(tmp_path, monkeypatch):
 
     tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    assert tool_calls[0]["data"]["input"] == {"command": "echo test"}
-    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
+    assert tool_calls[0]["input"] == {"command": "echo test"}
+    summary = format_tool_pending(tool_calls[0]["name"], tool_calls[0]["input"])
     assert "Shell" in summary
     assert "echo test" in summary
 
@@ -563,7 +567,7 @@ async def test_native_grep_input_summary(tmp_path, monkeypatch):
 
     tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    assert tool_calls[0]["data"]["input"] == {"pattern": "hello"}
-    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
+    assert tool_calls[0]["input"] == {"pattern": "hello"}
+    summary = format_tool_pending(tool_calls[0]["name"], tool_calls[0]["input"])
     assert "Grep" in summary
     assert "hello" in summary

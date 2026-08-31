@@ -1,7 +1,7 @@
 # 034 — Event Model Consolidation and Session Coordinator Progress
 
 - [x] M1 — Session coordinator + persistence ownership (prefactor)
-- [ ] M2 — Complete the canonical public schema + single reducer
+- [x] M2 — Complete the canonical public schema + single reducer
 - [ ] M3 — Turn/iteration identity unification
 - [ ] M5 — Turn lifecycle: user-message + guaranteed terminal event
 - [ ] M4 — Reconnect reconciliation + multi-client correctness
