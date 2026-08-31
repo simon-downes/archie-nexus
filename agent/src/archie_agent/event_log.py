@@ -1,4 +1,4 @@
-"""Construction and persistence helpers for canonical session events."""
+"""Pure construction helpers for canonical session events."""
 
 from __future__ import annotations
 
@@ -19,14 +19,18 @@ from archie_shared.canonical_events import (
     encode_event,
 )
 from archie_shared.models import ModelEntry, calculate_cost
-from archie_shared.session.log import append_event
 from ulid import ULID
 
 from archie_agent.events import Usage
 
 
 class EventFactory:
-    """Create canonical request events with immutable model/accounting data."""
+    """Create canonical events with immutable model/accounting data.
+
+    Construction is intentionally separate from persistence and delivery. The
+    path argument remains accepted for compatibility with existing callers but
+    is not accessed.
+    """
 
     def __init__(
         self,
@@ -86,9 +90,7 @@ class EventFactory:
             stop_reason=stop_reason,
             error=error,
         )
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        return event, encode_event(event)
 
     def iteration_start(self, *, turn_iteration: str, index: int) -> tuple[IterationStart, str]:
         event = IterationStart(
@@ -98,14 +100,11 @@ class EventFactory:
             subagent_index=self.subagent_index,
             index=index,
         )
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        return event, encode_event(event)
 
     def text_delta(
         self, *, turn_iteration: str, request_id: str, text: str
     ) -> tuple[TextDelta, str]:
-        """Live-only event — broadcast but NOT persisted (excluded from PersistedEvent)."""
         event = TextDelta(
             id=str(ULID()),
             turn_iteration=turn_iteration,
@@ -135,9 +134,7 @@ class EventFactory:
             name=name,
             input=input,
         )
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        return event, encode_event(event)
 
     def tool_result(
         self,
@@ -164,9 +161,7 @@ class EventFactory:
             result_bytes=result_bytes,
             result_lines=result_lines,
         )
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        return event, encode_event(event)
 
     def assistant_message(
         self,
@@ -187,27 +182,36 @@ class EventFactory:
             content=content,
             interrupted=interrupted,
         )
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        return event, encode_event(event)
 
     def turn_complete(self, *, turn: int, stop_reason: str) -> tuple[TurnComplete, str]:
-        event = TurnComplete(id=str(ULID()), turn=turn, scope=self.scope, subagent_index=self.subagent_index, stop_reason=stop_reason)
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        event = TurnComplete(
+            id=str(ULID()),
+            turn=turn,
+            scope=self.scope,
+            subagent_index=self.subagent_index,
+            stop_reason=stop_reason,
+        )
+        return event, encode_event(event)
 
     def turn_error(self, *, turn: int, message: str) -> tuple[TurnError, str]:
-        event = TurnError(id=str(ULID()), turn=turn, scope=self.scope, subagent_index=self.subagent_index, message=message)
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        event = TurnError(
+            id=str(ULID()),
+            turn=turn,
+            scope=self.scope,
+            subagent_index=self.subagent_index,
+            message=message,
+        )
+        return event, encode_event(event)
 
     def turn_interrupted(self, *, turn: int) -> tuple[TurnInterrupted, str]:
-        event = TurnInterrupted(id=str(ULID()), turn=turn, scope=self.scope, subagent_index=self.subagent_index)
-        serialized = encode_event(event)
-        append_event(self.path, event, serialized)
-        return event, serialized
+        event = TurnInterrupted(
+            id=str(ULID()),
+            turn=turn,
+            scope=self.scope,
+            subagent_index=self.subagent_index,
+        )
+        return event, encode_event(event)
 
 
 def now_utc() -> str:

@@ -17,25 +17,17 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from archie_shared.canonical_events import ModelSwitch, SessionStarted, UserMessage
-from archie_shared.events import (
-    IterationStart as WireIterationStart,
+from archie_shared.canonical_events import (
+    SessionStarted,
+    UserMessage,
+    decode_event,
+)
+from archie_shared.canonical_events import (
+    TextDelta as CanonicalTextDelta,
 )
 from archie_shared.events import (
     StatusUpdated,
     serialize_event,
-)
-from archie_shared.events import (
-    TextDelta as WireTextDelta,
-)
-from archie_shared.events import (
-    ToolCall as WireToolCall,
-)
-from archie_shared.events import (
-    ToolResult as WireToolResult,
-)
-from archie_shared.events import (
-    TurnComplete as WireTurnComplete,
 )
 from archie_shared.events import (
     TurnError as WireTurnError,
@@ -47,9 +39,7 @@ from archie_shared.events import (
     Usage as WireUsage,
 )
 from archie_shared.schemas import SubagentsConfig
-from archie_shared.session.log import append_event
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
-from starlette.websockets import WebSocket
 from ulid import ULID
 
 from archie_agent.agents import AgentEntry, create_task_tool, discover_agents
@@ -69,6 +59,7 @@ from archie_agent.exec.tools._subprocess import kill_process_group
 from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session
+from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import create_skill_tool, discover_skills
 
 if TYPE_CHECKING:
@@ -130,8 +121,8 @@ class AgentHarness:
         self._exec_python = exec_python
         self._exec_run_root = exec_run_root
 
-        # Connected WebSocket clients for broadcast
-        self.clients: set[WebSocket] = set()
+        # Session-global ordered persistence and client delivery.
+        self._event_bus = SessionEventBus(self.log_path)
 
         # Turn state
         self._turn_active = False
@@ -160,7 +151,7 @@ class AgentHarness:
                 active_model_key=lambda: self.session.model_id,
                 region=self._region,
                 log_path=self.log_path,
-                broadcast=self._broadcast_raw,
+                broadcast=self._publish_serialized,
                 exec_python=self._exec_python,
                 exec_run_root=self._exec_run_root,
                 max_concurrent=self._subagents.max_concurrent,
@@ -182,14 +173,13 @@ class AgentHarness:
         self._request_ids: list[str] = []
         self._event_factory = EventFactory(self.log_path, self.session.model_id, self.session.model)
         if not self.log_path.exists() or not self.log_path.read_text().strip():
-            append_event(
-                self.log_path,
+            self._event_bus.append(
                 SessionStarted(
                     id=str(ULID()),
                     schema_version=1,
                     sent_at=now_utc(),
                     model_key=self.session.model_id,
-                ),
+                )
             )
 
     def _make_task_placeholder(self):
@@ -241,14 +231,20 @@ class AgentHarness:
         self.session.model_id = model_key
         self.session.model = model
         self._event_factory = EventFactory(self.log_path, model_key, model)
-        append_event(
-            self.log_path, ModelSwitch(id=str(ULID()), model_key=model_key, sent_at=now_utc())
-        )
 
     @property
     def log_path(self) -> Path:
         """Path to the JSONL log file for this session."""
         return self._log_dir / f"{self.session.session_id}.jsonl"
+
+    @property
+    def clients(self):
+        """Set-like view of clients owned by the session event bus."""
+        return self._event_bus.clients
+
+    @property
+    def event_bus(self) -> SessionEventBus:
+        return self._event_bus
 
     @property
     def turn_active(self) -> bool:
@@ -267,8 +263,8 @@ class AgentHarness:
 
         if self._turn_active:
             turn_index = self.session.turn_index or 1
-            await self._broadcast(
-                WireTurnError(turn_index=turn_index, message="Turn already active")
+            await self._event_bus.broadcast_serialized(
+                serialize_event(WireTurnError(turn_index=turn_index, message="Turn already active"))
             )
             return
 
@@ -279,15 +275,14 @@ class AgentHarness:
         current_request_id = ""
         current_iteration = 0
 
-        # Persist canonical user message before streaming starts.
-        append_event(
-            self.log_path,
+        # Persist and enqueue the user message before provider streaming starts.
+        await self._event_bus.publish(
             UserMessage(
                 id=str(ULID()),
                 turn=turn_index,
                 scope=self._event_factory.scope,
                 content=content,
-            ),
+            )
         )
 
         # Add user message to in-memory transcript
@@ -346,20 +341,23 @@ class AgentHarness:
                     iter_text = ""
                     assistant_event_logged = False
                     current_iteration = event.index
-                    self._event_factory.iteration_start(
+                    iteration, _ = self._event_factory.iteration_start(
                         turn_iteration=f"{turn_index}.{event.index}",
                         index=event.index,
                     )
-                    await self._broadcast(
-                        WireIterationStart(turn_index=turn_index, index=event.index)
-                    )
+                    await self._event_bus.publish(iteration)
 
                 elif isinstance(event, TextDelta):
                     iter_text += event.text
-                    await self._broadcast(WireTextDelta(turn_index=turn_index, text=event.text))
+                    delta, _ = self._event_factory.text_delta(
+                        turn_iteration=f"{turn_index}.{current_iteration}",
+                        request_id=current_request_id,
+                        text=event.text,
+                    )
+                    await self._event_bus.broadcast(delta)
 
                 elif isinstance(event, RequestFinished):
-                    request, serialized = self._event_factory.request(
+                    request, _ = self._event_factory.request(
                         turn_iteration=f"{turn_index}.{current_iteration}",
                         sent_at=event.context.sent_at,
                         duration_ms=event.duration_ms,
@@ -371,7 +369,7 @@ class AgentHarness:
                     )
                     self._request_ids.append(request.id)
                     current_request_id = request.id
-                    await self._broadcast_raw(serialized)
+                    await self._event_bus.publish(request)
 
                 elif isinstance(event, Usage):
                     last_usage = event
@@ -394,13 +392,14 @@ class AgentHarness:
 
                 elif isinstance(event, ToolCall):
                     if iter_text and not assistant_event_logged:
-                        self._event_factory.assistant_message(
+                        assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
                             turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=False,
                         )
+                        await self._event_bus.publish(assistant)
                         assistant_event_logged = True
                     # Accumulate for transcript reconstruction
                     iter_tool_uses.append(
@@ -410,23 +409,14 @@ class AgentHarness:
                             input=event.input,
                         )
                     )
-                    # Persist canonical tool_call event.
-                    self._event_factory.tool_call(
+                    tool_call, _ = self._event_factory.tool_call(
                         turn_iteration=f"{turn_index}.{current_iteration}",
                         request_id=current_request_id,
                         tool_use_id=event.tool_use_id,
                         name=event.name,
                         input=event.input,
                     )
-                    # Broadcast wire event with raw input; client formats.
-                    await self._broadcast(
-                        WireToolCall(
-                            turn_index=turn_index,
-                            tool_use_id=event.tool_use_id,
-                            name=event.name,
-                            input=event.input,
-                        )
-                    )
+                    await self._event_bus.publish(tool_call)
 
                 elif isinstance(event, ToolResult):
                     # Accumulate for transcript reconstruction
@@ -440,8 +430,7 @@ class AgentHarness:
                     duration_ms = event.duration_ms
                     result_lines = event.result_lines
                     result_bytes = event.result_bytes if event.content else 0
-                    # Persist canonical tool_result event.
-                    self._event_factory.tool_result(
+                    tool_result, _ = self._event_factory.tool_result(
                         turn_iteration=f"{turn_index}.{current_iteration}",
                         request_id=current_request_id,
                         tool_use_id=event.tool_use_id,
@@ -451,18 +440,7 @@ class AgentHarness:
                         result_bytes=result_bytes,
                         result_lines=result_lines,
                     )
-                    # Broadcast wire event with raw content; client formats.
-                    await self._broadcast(
-                        WireToolResult(
-                            turn_index=turn_index,
-                            tool_use_id=event.tool_use_id,
-                            is_error=event.is_error,
-                            content=event.content,
-                            duration_ms=duration_ms,
-                            result_bytes=result_bytes,
-                            result_lines=result_lines,
-                        )
-                    )
+                    await self._event_bus.publish(tool_result)
 
                 elif isinstance(event, TurnComplete):
                     # Final iteration is text-only (stop_reason=end_turn); any
@@ -476,31 +454,31 @@ class AgentHarness:
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                         )
                     if iter_text and not assistant_event_logged:
-                        self._event_factory.assistant_message(
+                        assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
                             turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=False,
                         )
-                    self._event_factory.turn_complete(
+                        await self._event_bus.publish(assistant)
+                    complete, _ = self._event_factory.turn_complete(
                         turn=turn_index, stop_reason=event.stop_reason
                     )
-                    await self._broadcast(
-                        WireTurnComplete(turn_index=turn_index, stop_reason=event.stop_reason)
-                    )
+                    await self._event_bus.publish(complete)
 
                 elif isinstance(event, TurnError):
                     # Persist any final assistant text before flushing the
                     # iteration's tool context.
                     if iter_text and not assistant_event_logged:
-                        self._event_factory.assistant_message(
+                        assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
                             turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=True,
                         )
+                        await self._event_bus.publish(assistant)
                     _flush_iteration()
                     if iter_text:
                         self.session.add_turn(
@@ -509,8 +487,10 @@ class AgentHarness:
                             turn_index=turn_index,
                             interrupted=True,
                         )
-                    # Persist and record the error for history replay
-                    self._event_factory.turn_error(turn=turn_index, message=event.error)
+                    error_event, _ = self._event_factory.turn_error(
+                        turn=turn_index, message=event.error
+                    )
+                    await self._event_bus.publish(error_event)
                     self.session.display_entries.append(
                         DisplayEntry(role="error", content=event.error, turn_index=turn_index)
                     )
@@ -520,13 +500,14 @@ class AgentHarness:
                     # Persist any final assistant text before flushing the
                     # iteration's tool context.
                     if iter_text and not assistant_event_logged:
-                        self._event_factory.assistant_message(
+                        assistant, _ = self._event_factory.assistant_message(
                             turn=turn_index,
                             turn_iteration=f"{turn_index}.{current_iteration}",
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=True,
                         )
+                        await self._event_bus.publish(assistant)
                     # Flush the final (unterminated) iteration. The loop already
                     # appends "cancelled" repair results on interrupt, but those
                     # live only inside run_loop; reconstruct here from events.
@@ -539,8 +520,8 @@ class AgentHarness:
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                             interrupted=True,
                         )
-                    # Persist and record the interruption for history replay
-                    self._event_factory.turn_interrupted(turn=turn_index)
+                    interrupted, _ = self._event_factory.turn_interrupted(turn=turn_index)
+                    await self._event_bus.publish(interrupted)
                     self.session.display_entries.append(
                         DisplayEntry(role="interrupted", content="", turn_index=turn_index)
                     )
@@ -552,10 +533,12 @@ class AgentHarness:
 
         finally:
             self._turn_active = False
-            # Broadcast status refresh (git branch may have changed during the turn)
+            # Broadcast status refresh (git branch may have changed during the turn).
             from archie_agent.app import _read_git_branch
 
-            await self._broadcast(StatusUpdated(git_branch=_read_git_branch()))
+            await self._event_bus.broadcast_serialized(
+                serialize_event(StatusUpdated(git_branch=_read_git_branch()))
+            )
 
     def interrupt(self, target: tuple[str, int] | None = None) -> None:
         """Signal the current turn or one child to stop."""
@@ -677,23 +660,18 @@ class AgentHarness:
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
 
+    async def _publish_serialized(self, data: str) -> None:
+        """Decode a child factory result and route it through the bus."""
+        event = decode_event(data)
+        if isinstance(event, CanonicalTextDelta):
+            await self._event_bus.broadcast(event)
+        else:
+            await self._event_bus.publish(event)
+
     async def _broadcast_raw(self, data: str) -> None:
-        """Broadcast an already-canonical serialized event."""
-        disconnected = set()
-        for ws in list(self.clients):
-            try:
-                await ws.send_text(data)
-            except Exception:
-                disconnected.add(ws)
-        self.clients -= disconnected
+        """Broadcast a transitional serialized frame through the event bus."""
+        await self._event_bus.broadcast_serialized(data)
 
     async def _broadcast(self, event) -> None:
-        """Serialize and send an event to all connected WebSocket clients."""
-        data = serialize_event(event)
-        disconnected = set()
-        for ws in list(self.clients):
-            try:
-                await ws.send_text(data)
-            except Exception:
-                disconnected.add(ws)
-        self.clients -= disconnected
+        """Broadcast a transitional serialized frame through the event bus."""
+        await self._event_bus.broadcast_serialized(serialize_event(event))

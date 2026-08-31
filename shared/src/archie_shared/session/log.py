@@ -68,23 +68,34 @@ def write_entry(path: Path, entry: MessageEntry) -> None:
         f.write(msgspec.json.encode(entry).decode() + "\n")
 
 
+def append_serialized_event(path: Path, line: str) -> None:
+    """Append one already-validated canonical line without reparsing the log."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+
+
 def append_event(path: Path, event: CanonicalEvent, serialized: str | None = None) -> str:
-    """Append a canonical event, returning the exact persisted JSON string."""
+    """Append a canonical event, returning the exact persisted JSON string.
+
+    This compatibility helper retains the original stateless API. New agent
+    code uses ``SessionEventBus`` so duplicate detection is performed by its
+    append-side index rather than reparsing the complete log per event.
+    """
     if not getattr(event, "id", ""):
         raise ValueError("canonical events require a non-empty id")
     line = serialized if serialized is not None else encode_event(event)
     decoded = decode_event(line, persisted=True)
     if decoded.id != event.id:
         raise ValueError("serialized event id does not match event")
-    path.parent.mkdir(parents=True, exist_ok=True)
     existing = read_event_lines(path)
     for old in existing:
         if old.get("id") == event.id:
             if old["line"] == line:
                 return line
             raise ValueError(f"conflicting duplicate event id: {event.id}")
-    with path.open("a") as f:
-        f.write(line + "\n")
+    append_serialized_event(path, line)
     return line
 
 

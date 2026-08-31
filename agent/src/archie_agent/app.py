@@ -13,12 +13,12 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from archie_shared.canonical_events import ModelSwitch
 from archie_shared.config import home_dir
 from archie_shared.events import (
     PROTOCOL_VERSION,
     InterruptCommand,
     MessageCommand,
-    ModelSwitched,
     SessionInfo,
     SessionSnapshot,
     SwitchModelCommand,
@@ -186,7 +186,7 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
 
     # Guard: cannot switch during active turn
     if _agent.turn_active:
-        await websocket.send_text(
+        await _agent.event_bus.broadcast_serialized(
             serialize_event(
                 TurnError(turn_index=turn_index, message="Cannot switch model during active turn")
             )
@@ -197,7 +197,7 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
     try:
         new_model = get_model(_catalog, command.model_key)
     except KeyError:
-        await websocket.send_text(
+        await _agent.event_bus.broadcast_serialized(
             serialize_event(
                 TurnError(
                     turn_index=turn_index,
@@ -213,13 +213,13 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
     # Update harness state via public method
     _agent.switch_model(command.model_key, new_model, new_llm)
 
-    # Broadcast confirmation to all clients
-    event = ModelSwitched(
-        model_key=command.model_key,
-        model_name=new_model.name,
-        supports_cache=new_model.can_cache,
+    await _agent.event_bus.publish(
+        ModelSwitch(
+            id=str(ULID()),
+            model_key=command.model_key,
+            sent_at=datetime.now(UTC).isoformat(),
+        )
     )
-    await _agent._broadcast(event)
 
     log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
 
@@ -263,8 +263,8 @@ async def stream(websocket: WebSocket) -> None:
     )
     await websocket.send_text(serialize_event(info))
 
-    # Register for broadcast
-    _agent.clients.add(websocket)
+    # Register for ordered delivery after the transitional connect frames.
+    _agent.event_bus.add_client(websocket)
 
     try:
         while True:
@@ -289,7 +289,7 @@ async def stream(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        _agent.clients.discard(websocket)
+        _agent.event_bus.discard_client(websocket)
 
 
 async def shell_log(request: Request) -> JSONResponse:
