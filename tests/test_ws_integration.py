@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -246,3 +247,56 @@ def test_websocket_tool_turn(mock_env, tmp_path):
                         # Verify tool_result event
                         tr = next(e for e in events if e["type"] == "tool_result")
                         assert tr["is_error"] is False
+
+
+def test_concurrent_message_rejection_is_targeted(mock_env):
+    """A rejected second message does not disturb the accepted client's turn."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def stream_fn(messages, system, tool_config=None):
+        started.set()
+        yield TextDelta(text="slow")
+        release.wait(timeout=2)
+        yield Done(stop_reason="end_turn")
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.model_id = "eu.anthropic.claude-sonnet-4-6"
+    mock_bedrock.stream = stream_fn
+
+    with patch.dict(os.environ, mock_env):
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
+            from archie_agent.app import app
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/stream") as first:
+                    first.receive_text()
+                    first.receive_text()
+                    first.send_text(json.dumps({"type": "message", "data": {"content": "first"}}))
+                    first_types = []
+                    while "text_delta" not in first_types:
+                        first_types.append(json.loads(first.receive_text())["type"])
+                    assert started.is_set()
+
+                    with client.websocket_connect("/stream") as second:
+                        second.receive_text()
+                        second.receive_text()
+                        second.send_text(
+                            json.dumps({"type": "message", "data": {"content": "second"}})
+                        )
+                        rejection = json.loads(second.receive_text())
+                        assert rejection["type"] == "error_notice"
+                        assert rejection["kind"] == "turn_active"
+
+                    release.set()
+                    accepted_events = []
+                    while True:
+                        event = json.loads(first.receive_text())
+                        accepted_events.append(event)
+                        if event["type"] == "turn_complete":
+                            break
+
+                    assert not any(
+                        event["type"] == "error_notice" and event["kind"] == "turn_active"
+                        for event in accepted_events
+                    )

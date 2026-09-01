@@ -257,11 +257,21 @@ async def stream(websocket: WebSocket) -> None:
                 continue
 
             if isinstance(command, MessageCommand):
-                # Store task reference to prevent garbage collection.
-                # Task removes itself from the set on completion.
-                task = asyncio.create_task(_agent.handle_message(command.content))
-                task.add_done_callback(lambda t: _active_tasks.discard(t))
-                _active_tasks.add(task)
+                if _agent.try_begin_turn():
+                    # Store task reference to prevent garbage collection.
+                    # Task removes itself from the set on completion.
+                    task = asyncio.create_task(_agent.handle_message(command.content))
+                    task.add_done_callback(lambda t: _active_tasks.discard(t))
+                    _active_tasks.add(task)
+                else:
+                    await _agent.event_bus.send_to(
+                        websocket,
+                        ErrorNotice(
+                            id=str(ULID()),
+                            kind="turn_active",
+                            message="Turn already active",
+                        ),
+                    )
             elif isinstance(command, InterruptCommand):
                 _agent.interrupt(command.target)
             elif isinstance(command, SwitchModelCommand):

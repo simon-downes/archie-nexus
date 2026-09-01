@@ -267,7 +267,7 @@ class ArchieApp(App):
             self.query_one("#status", StatusBar).git_branch = event.git_branch
         elif isinstance(event, ce.ErrorNotice):
             self._show_client_error(event.message)
-            if event.kind in {"turn_error", "storage_error"} and self._turn_active:
+            if event.kind in {"turn_active", "turn_error", "storage_error"} and self._turn_active:
                 self._end_turn()
         elif isinstance(event, ce.ModelSwitch):
             status = self.query_one("#status", StatusBar)

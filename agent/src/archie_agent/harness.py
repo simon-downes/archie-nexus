@@ -19,14 +19,14 @@ from typing import TYPE_CHECKING
 
 from archie_shared.canonical_events import (
     ErrorNotice,
+    PersistedEvent,
+    PersistedEventTypes,
     SessionStarted,
     StatusUpdated,
     UserMessage,
     decode_event,
 )
-from archie_shared.canonical_events import (
-    TextDelta as CanonicalTextDelta,
-)
+from archie_shared.canonical_events import TurnError as CanonicalTurnError
 from archie_shared.schemas import SubagentsConfig
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
@@ -48,7 +48,7 @@ from archie_agent.exec.tools._subprocess import kill_process_group
 from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session
-from archie_agent.session_bus import SessionEventBus
+from archie_agent.session_bus import LogAppendError, SessionEventBus
 from archie_agent.skills import create_skill_tool, discover_skills
 
 if TYPE_CHECKING:
@@ -239,29 +239,101 @@ class AgentHarness:
     def turn_active(self) -> bool:
         return self._turn_active
 
-    async def handle_message(self, content: str) -> None:
-        """Process a user message: stream LLM response and broadcast events.
+    def try_begin_turn(self) -> bool:
+        """Atomically admit one root turn on the event-loop thread."""
+        if self._turn_active:
+            return False
+        self._turn_active = True
+        return True
 
-        Clears the interrupt flag at entry to prevent stale flags leaking.
-        """
+    async def handle_message(self, content: str) -> None:
+        """Run one accepted turn and guarantee terminal cleanup."""
+        if not self._turn_active:
+            # Direct callers (tests and local integrations) have no stream
+            # admission step; the WebSocket path calls try_begin_turn first.
+            self._turn_active = True
+        self._terminal_emitted = False
+        self._storage_failed = False
+        self._fallback_attempted = False
+        try:
+            await self._handle_message_body(content)
+        except LogAppendError as exc:
+            self._storage_failed = True
+            await self._broadcast_storage_error(str(exc))
+        except Exception as exc:  # noqa: BLE001 — guarantee a terminal event
+            log.exception("Error in harness event consumption")
+            if not self._terminal_emitted and not self._fallback_attempted:
+                self._fallback_attempted = True
+                await self._publish_fallback_terminal(str(exc))
+        finally:
+            if (
+                not self._terminal_emitted
+                and not self._storage_failed
+                and not self._fallback_attempted
+            ):
+                self._fallback_attempted = True
+                await self._publish_fallback_terminal("Turn ended without a terminal event")
+            self._turn_active = False
+            from archie_agent.app import _read_git_branch
+
+            try:
+                await self._event_bus.broadcast(
+                    StatusUpdated(id=str(ULID()), git_branch=_read_git_branch())
+                )
+            except Exception:  # noqa: BLE001 — status refresh is best effort
+                log.warning("Failed to broadcast final turn status", exc_info=True)
+
+    async def _broadcast_storage_error(self, message: str) -> None:
+        """Best-effort live notice when durable append fails."""
+        try:
+            await self._event_bus.broadcast(
+                ErrorNotice(id=str(ULID()), kind="storage_error", message=message)
+            )
+        except Exception:  # noqa: BLE001 — storage error handling must not hang
+            log.warning("Failed to broadcast storage error", exc_info=True)
+
+    async def _publish_root_terminal(self, event: PersistedEvent) -> None:
+        """Publish a terminal event without allowing cancellation to duplicate it."""
+        self._terminal_emitted = True
+        try:
+            await asyncio.shield(self._event_bus.publish(event))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._terminal_emitted = False
+            raise
+
+    async def _publish_fallback_terminal(self, message: str) -> None:
+        """Persist one root terminal error after an unexpected turn failure."""
+        try:
+            try:
+                terminal, _ = self._event_factory.turn_error(
+                    turn=self._current_turn_index or self.session.turn_index or 1,
+                    message=message,
+                )
+            except Exception:
+                terminal = CanonicalTurnError(
+                    id=str(ULID()),
+                    turn=self._current_turn_index or self.session.turn_index or 1,
+                    scope=None,
+                    message=message,
+                )
+            await self._event_bus.publish(terminal)
+            self._terminal_emitted = True
+        except LogAppendError as exc:
+            self._storage_failed = True
+            await self._broadcast_storage_error(str(exc))
+        except Exception:
+            log.warning("Failed to publish fallback terminal event", exc_info=True)
+
+    async def _handle_message_body(self, content: str) -> None:
+        """Process a message after stream admission has accepted its turn."""
         self._interrupt.clear()
         # Capture the running loop and (re)create the async interrupt bound to
         # it so interrupt() can wake the tool batch via call_soon_threadsafe.
         self._loop = asyncio.get_running_loop()
         self._interrupt_async = asyncio.Event()
 
-        if self._turn_active:
-            turn_index = self.session.turn_index or 1
-            await self._event_bus.broadcast(
-                ErrorNotice(
-                    id=str(ULID()),
-                    kind="turn_active",
-                    message="Turn already active",
-                )
-            )
-            return
-
-        self._turn_active = True
         turn_index = self.session.next_turn_index()
         self._current_turn_index = turn_index
         self._request_ids = []
@@ -450,7 +522,7 @@ class AgentHarness:
                     complete, _ = self._event_factory.turn_complete(
                         turn=turn_index, stop_reason=event.stop_reason
                     )
-                    await self._event_bus.publish(complete)
+                    await self._publish_root_terminal(complete)
 
                 elif isinstance(event, TurnError):
                     # Persist any final assistant text before flushing the
@@ -474,7 +546,7 @@ class AgentHarness:
                     error_event, _ = self._event_factory.turn_error(
                         turn=turn_index, message=event.error
                     )
-                    await self._event_bus.publish(error_event)
+                    await self._publish_root_terminal(error_event)
                     self.session.display_entries.append(
                         DisplayEntry(role="error", content=event.error, turn_index=turn_index)
                     )
@@ -503,25 +575,13 @@ class AgentHarness:
                             interrupted=True,
                         )
                     interrupted, _ = self._event_factory.turn_interrupted(turn=turn_index)
-                    await self._event_bus.publish(interrupted)
+                    await self._publish_root_terminal(interrupted)
                     self.session.display_entries.append(
                         DisplayEntry(role="interrupted", content="", turn_index=turn_index)
                     )
 
-        except Exception as e:
-            log.exception("Error in harness event consumption")
-            await self._event_bus.broadcast(
-                ErrorNotice(id=str(ULID()), kind="turn_error", message=str(e))
-            )
-
-        finally:
-            self._turn_active = False
-            # Broadcast status refresh (git branch may have changed during the turn).
-            from archie_agent.app import _read_git_branch
-
-            await self._event_bus.broadcast(
-                StatusUpdated(id=str(ULID()), git_branch=_read_git_branch())
-            )
+        except Exception:
+            raise
 
     def interrupt(self, target: tuple[str, int] | None = None) -> None:
         """Signal the current turn or one child to stop."""
@@ -646,7 +706,7 @@ class AgentHarness:
     async def _publish_serialized(self, data: str) -> None:
         """Decode a child factory result and route it through the bus."""
         event = decode_event(data)
-        if isinstance(event, CanonicalTextDelta):
-            await self._event_bus.broadcast(event)
-        else:
+        if isinstance(event, PersistedEventTypes):
             await self._event_bus.publish(event)
+        else:
+            await self._event_bus.broadcast(event)

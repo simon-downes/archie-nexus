@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from archie_shared.canonical_events import ErrorNotice, encode_event
+from archie_shared.canonical_events import TurnError as CanonicalTurnError
 from archie_shared.config import persona_dir
 from archie_shared.types import ToolResultBlock, ToolUseBlock
 from ulid import ULID
@@ -38,6 +40,7 @@ from archie_agent.llm import create_llm_client
 from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import build_subagent_prompt
 from archie_agent.session import Session, Turn
+from archie_agent.session_bus import LogAppendError
 from archie_agent.skills import SkillEntry, create_skill_tool
 from archie_agent.tools import ToolRegistry, ToolSpec
 
@@ -297,6 +300,7 @@ def create_task_tool(
         semaphore: asyncio.Semaphore,
     ) -> str:
         async with semaphore:
+            terminal_emitted = False
             agent_name = task.get("agent")
             prompt = task.get("prompt")
             if not isinstance(agent_name, str) or not isinstance(prompt, str) or not prompt.strip():
@@ -311,6 +315,66 @@ def create_task_tool(
                 )
                 log.warning("%s", warning.rstrip())
                 entry = DEFAULT_AGENT
+
+            async def _broadcast_child_error(kind: str, message: str) -> None:
+                try:
+                    await broadcast_raw(
+                        broadcast,
+                        encode_event(ErrorNotice(id=str(ULID()), kind=kind, message=message)),
+                    )
+                except Exception:  # noqa: BLE001 — best effort only
+                    log.warning("Failed to broadcast child %s", kind, exc_info=True)
+
+            factory: EventFactory | None = None
+            storage_failed = False
+            fallback_attempted = False
+
+            async def _publish_child_terminal(serialized: str) -> None:
+                nonlocal terminal_emitted
+                terminal_emitted = True
+                try:
+                    await asyncio.shield(broadcast_raw(broadcast, serialized))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    terminal_emitted = False
+                    raise
+
+            async def _publish_child_fallback(message: str) -> None:
+                nonlocal terminal_emitted, storage_failed, fallback_attempted
+                if terminal_emitted or storage_failed or fallback_attempted:
+                    return
+                fallback_attempted = True
+                try:
+                    if factory is None:
+                        serialized = encode_event(
+                            CanonicalTurnError(
+                                id=str(ULID()),
+                                turn=parent_turn,
+                                scope=launch_scope,
+                                message=message,
+                                subagent_index=index,
+                            )
+                        )
+                    else:
+                        try:
+                            _, serialized = factory.turn_error(turn=parent_turn, message=message)
+                        except Exception:
+                            serialized = encode_event(
+                                CanonicalTurnError(
+                                    id=str(ULID()),
+                                    turn=parent_turn,
+                                    scope=launch_scope,
+                                    message=message,
+                                    subagent_index=index,
+                                )
+                            )
+                    await _publish_child_terminal(serialized)
+                except LogAppendError as error:
+                    storage_failed = True
+                    await _broadcast_child_error("storage_error", str(error))
+                except Exception:
+                    log.warning("Failed to publish child terminal event", exc_info=True)
 
             try:
                 current_model = active_model() if callable(active_model) else active_model
@@ -360,6 +424,7 @@ def create_task_tool(
                 request_ids: list[str] = []
                 current_iteration = 0
                 current_request_id = ""
+
                 async for event in run_loop(
                     messages=[
                         Turn(role="user", content=[TextBlock(text=prompt)], turn_index=parent_turn)
@@ -452,21 +517,28 @@ def create_task_tool(
                         _, serialized = factory.turn_complete(
                             turn=parent_turn, stop_reason=event.stop_reason
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await _publish_child_terminal(serialized)
                     elif isinstance(event, TurnError):
                         _, serialized = factory.turn_error(turn=parent_turn, message=event.error)
-                        await broadcast_raw(broadcast, serialized)
+                        await _publish_child_terminal(serialized)
                         return f"[{index}] {agent_name}: {warning}Error: {event.error}"
                     elif isinstance(event, TurnInterrupted):
                         _, serialized = factory.turn_interrupted(turn=parent_turn)
-                        await broadcast_raw(broadcast, serialized)
+                        await _publish_child_terminal(serialized)
                         return f"[{index}] {agent_name}: {warning}interrupted"
                 result = "".join(text_parts)
                 return f"[{index}] {agent_name}: {warning}{result}"
+            except LogAppendError as error:
+                storage_failed = True
+                await _broadcast_child_error("storage_error", str(error))
+                return f"[{index}] {agent_name}: {warning}{type(error).__name__}: {error}"
             except Exception as error:  # noqa: BLE001 - per-child isolation
                 log.exception("Child agent %s failed", agent_name)
+                await _publish_child_fallback(str(error))
                 return f"[{index}] {agent_name}: {warning}{type(error).__name__}: {error}"
             finally:
+                if not terminal_emitted and not storage_failed and not fallback_attempted:
+                    await _publish_child_fallback("Child ended without a terminal event")
                 if live_children is not None:
                     live_children.pop((launch_scope, index), None)
 
