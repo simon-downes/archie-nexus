@@ -12,6 +12,7 @@ from archie_shared.canonical_events import (
     encode_event,
 )
 from starlette.testclient import TestClient
+from ulid import ULID
 
 
 def test_live_event_round_trip():
@@ -134,6 +135,62 @@ class TestShellEndpoint:
         replay = client.get("/events")
         assert replay.status_code == 200
         assert decode_event(replay.text.strip(), persisted=True) == event
+
+    def test_shell_log_preserves_client_ulid_and_idempotent_duplicate(self, client, tmp_path):
+        from archie_agent import app as app_module
+
+        log_path = tmp_path / "session.jsonl"
+
+        class MockAgent:
+            pass
+
+        MockAgent.log_path = log_path
+        MockAgent.event_bus = SessionEventBus(log_path)
+        app_module._agent = MockAgent()
+
+        event_id = str(ULID())
+        payload = {
+            "command": "printf ok",
+            "exit_code": 0,
+            "output": "ok",
+            "event_id": event_id,
+        }
+        first = client.post("/shell", json=payload)
+        duplicate = client.post("/shell", json=payload)
+        conflict = client.post("/shell", json={**payload, "output": "different"})
+
+        assert first.status_code == 200
+        assert duplicate.status_code == 200
+        assert conflict.status_code == 409
+        event = decode_event(log_path.read_text().strip(), persisted=True)
+        assert event.id == event_id
+        assert event.output == "ok"
+
+    @pytest.mark.parametrize("event_id", ["x", "0" * 25, "!" * 26])
+    def test_shell_log_rejects_malformed_event_ids(self, client, tmp_path, event_id):
+        from archie_agent import app as app_module
+
+        log_path = tmp_path / "session.jsonl"
+
+        class MockAgent:
+            pass
+
+        MockAgent.log_path = log_path
+        MockAgent.event_bus = SessionEventBus(log_path)
+        app_module._agent = MockAgent()
+
+        response = client.post(
+            "/shell",
+            json={
+                "command": "echo ok",
+                "exit_code": 0,
+                "output": "ok",
+                "event_id": event_id,
+            },
+        )
+
+        assert response.status_code == 400
+        assert not log_path.exists()
 
     @pytest.mark.parametrize(
         "payload",

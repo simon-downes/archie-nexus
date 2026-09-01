@@ -613,14 +613,11 @@ class ArchieApp(App):
             child.add_line(event.text)
             child.activity = "Responding..."
         elif isinstance(event, ce.AssistantMessage) and replay:
-            baseline = next(
-                (
-                    self._child_stream_bases[(scope, index, request_id)]
-                    for request_id in event.request_ids
-                    if (scope, index, request_id) in self._child_stream_bases
-                ),
-                None,
-            )
+            baseline = None
+            for request_id in reversed(event.request_ids):
+                baseline = self._child_stream_bases.get((scope, index, request_id))
+                if baseline is not None:
+                    break
             if baseline is not None:
                 child.lines = list(baseline)
             child.add_line(event.content)

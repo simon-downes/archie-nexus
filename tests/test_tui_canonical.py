@@ -631,6 +631,60 @@ async def test_shell_fallback_is_removed_when_canonical_event_arrives():
     ]
 
 
+def test_child_replay_uses_latest_request_baseline():
+    """Cumulative request IDs preserve earlier child history on reconnect."""
+    app = _make_app()
+    first_delta = TextDelta(
+        id="child-delta-1",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="request-1",
+        text="first answer",
+    )
+    tool_call = ToolCall(
+        id="child-tool-call",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="request-1",
+        tool_use_id="tool-1",
+        name="read",
+        input={"path": "README.md"},
+    )
+    second_delta = TextDelta(
+        id="child-delta-2",
+        turn=1,
+        iteration=2,
+        scope="task-1",
+        subagent_index=0,
+        request_id="request-2",
+        text="second partial",
+    )
+    replayed_assistant = AssistantMessage(
+        id="child-assistant-2",
+        turn=1,
+        scope="task-1",
+        subagent_index=0,
+        request_ids=["request-1", "request-2"],
+        content="second answer",
+        interrupted=False,
+    )
+
+    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
+        app._render_canonical(first_delta)
+        app._render_canonical(tool_call)
+        app._render_canonical(second_delta)
+        app._render_canonical(replayed_assistant, replay=True)
+
+    lines = app._child_activity[("task-1", 0)].lines
+    assert "first answer" in lines
+    assert "second answer" in lines
+    assert "second partial" not in lines
+
+
 @pytest.mark.parametrize("scope, subagent_index", [(None, None), ("task-1", 0)])
 def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_index):
     """Durable assistant content wins over a duplicate buffered live delta."""

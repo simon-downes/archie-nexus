@@ -40,7 +40,7 @@ from ulid import ULID
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
-from archie_agent.session_bus import LogAppendError
+from archie_agent.session_bus import EventIdConflict, LogAppendError
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -325,6 +325,12 @@ async def shell_log(request: Request) -> JSONResponse:
     ):
         return JSONResponse({"error": "invalid shell payload"}, status_code=400)
 
+    if event_id is not None:
+        try:
+            ULID.from_str(event_id)
+        except ValueError:
+            return JSONResponse({"error": "invalid shell event id"}, status_code=400)
+
     try:
         event = ShellCommand(
             id=event_id or str(ULID()),
@@ -334,6 +340,8 @@ async def shell_log(request: Request) -> JSONResponse:
         )
         await _agent.event_bus.publish(event)
         return JSONResponse({"ok": True})
+    except EventIdConflict as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
     except Exception as e:
         log.warning("Failed to log shell command", exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
