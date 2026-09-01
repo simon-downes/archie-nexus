@@ -728,3 +728,19 @@ def test_reset_and_backfill_rebuilds_integer_identity(tmp_path):
     assert rows[0]["turn"] == 7
     assert rows[0]["iteration"] == 3
     assert list(tmp_path.glob("metrics.db.legacy.*"))
+
+
+def test_reset_and_backfill_propagates_database_failure(tmp_path, monkeypatch):
+    """A failed backfill must not be reported as a successful rebuild."""
+    db = tmp_path / "metrics.db"
+    log_path = tmp_path / "session-1.jsonl"
+    log_path.write_text(_make_llm_request(event_id="request-1") + "\n")
+
+    def fail_process(self, conn, batch, *, strict=False):
+        assert strict is True
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr(MetricsWriter, "_process_batch", fail_process)
+
+    with pytest.raises(sqlite3.OperationalError, match="disk full"):
+        reset_and_backfill(db, [log_path])

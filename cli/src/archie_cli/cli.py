@@ -1,6 +1,7 @@
 """Archie CLI — orchestrator protocol client."""
 
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -341,7 +342,7 @@ def migrate_sessions(sessions_dir: Path | None, metrics_db: Path | None, force: 
     try:
         migrated = migrate_session_logs(paths, force=force)
         reset_and_backfill(metrics_db, paths)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:
         raise click.ClickException(str(exc)) from None
 
     suffix = "" if migrated == 1 else "s"

@@ -5,7 +5,7 @@ Textual app by stubbing `query_one` and the status-bar update.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from archie_shared.canonical_events import (
@@ -14,6 +14,7 @@ from archie_shared.canonical_events import (
     Handshake,
     IterationStart,
     LLMRequest,
+    ShellCommand,
     StatusUpdated,
     TextDelta,
     ToolCall,
@@ -388,7 +389,7 @@ async def test_direct_shell_waits_for_canonical_event_before_rendering():
         await app._run_direct_shell("printf output")
 
     conversation.add_shell_output.assert_not_called()
-    log_shell.assert_called_once_with("printf output", 0, "output\n")
+    log_shell.assert_called_once_with("printf output", 0, "output\n", ANY)
 
 
 @pytest.mark.asyncio
@@ -428,4 +429,238 @@ async def test_direct_shell_cancel_posts_one_canonical_event():
         await task
 
     conversation.add_shell_output.assert_not_called()
-    log_shell.assert_called_once_with("long command", 130, "partial\n")
+    log_shell.assert_called_once_with("long command", 130, "partial\n", ANY)
+
+
+@pytest.mark.asyncio
+async def test_replay_events_reports_http_failure():
+    """Replay failure is explicit instead of being treated as an empty history."""
+    app = _make_app()
+    response = MagicMock(status_code=503, text="unavailable")
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+    mock_http.get = AsyncMock(return_value=response)
+
+    with patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http):
+        assert await app._replay_events() is False
+
+
+@pytest.mark.asyncio
+async def test_reconnect_retries_when_replay_fails():
+    """Reconnect does not report success until canonical replay succeeds."""
+    app = _make_app()
+    app._ws.connect = AsyncMock()
+    app._ws.disconnect = AsyncMock()
+    app._receive_loop = AsyncMock()
+    app._replay_events = AsyncMock(side_effect=[False, True])
+
+    async def no_sleep(_delay):
+        return None
+
+    with (
+        patch("archie_cli.tui.app.asyncio.sleep", side_effect=no_sleep),
+        patch.object(app, "notify") as notify,
+    ):
+        await app._reconnect()
+
+    assert app._ws.connect.await_count == 2
+    assert app._replay_events.await_count == 2
+    app._ws.disconnect.assert_awaited_once()
+    assert any(call.args == ("Reconnected to agent",) for call in notify.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_replay_child_assistant_message_reconstructs_child_output():
+    """Persisted child assistant messages rebuild child detail on replay."""
+    app = _make_app()
+    event = AssistantMessage(
+        id="child-assistant",
+        turn=1,
+        scope="task-1",
+        subagent_index=0,
+        request_ids=["request-1"],
+        content="persisted child response",
+        interrupted=False,
+    )
+
+    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
+        app._render_canonical(event, replay=True)
+
+    assert "persisted child response" in app._child_activity[("task-1", 0)].lines
+
+
+@pytest.mark.asyncio
+async def test_shell_persistence_failure_keeps_output_visible():
+    """A failed shell event POST still shows output and reports the local failure."""
+    app = _make_app()
+    response = MagicMock(status_code=503, text="agent unavailable")
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+    mock_http.post = AsyncMock(return_value=response)
+
+    conversation = MagicMock()
+    with (
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
+        patch.object(app, "query_one", return_value=conversation),
+        patch.object(app, "_show_client_error") as show_error,
+    ):
+        await app._log_shell_async("false", 1, "output\n")
+
+    conversation.add_shell_output.assert_called_once_with("false", "output\n", exit_code=1)
+    show_error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_receive_disconnect_preserves_partial_stream_until_replay():
+    """A transient socket close must not finalize partial assistant output."""
+    app = _make_app()
+    app._turn_active = True
+    app._streaming = MagicMock()
+    app._stream_text = "partial response"
+
+    async def empty_receive():
+        if False:
+            yield None
+
+    app._ws.receive = empty_receive
+    with (
+        patch.object(app, "_show_client_error"),
+        patch.object(app, "_schedule_reconnect"),
+        patch.object(app, "_end_turn") as end_turn,
+    ):
+        await app._receive_loop()
+
+    end_turn.assert_not_called()
+    assert app._stream_text == "partial response"
+    assert app._turn_active is True
+
+
+@pytest.mark.asyncio
+async def test_shell_response_loss_after_commit_does_not_duplicate_output():
+    """A canonical event seen before POST failure suppresses the fallback copy."""
+    app = _make_app()
+    event = ShellCommand(id="shell-1", command="false", exit_code=1, output="output\n")
+    conversation = MagicMock()
+    response = MagicMock(status_code=503, text="connection lost")
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+    mock_http.post = AsyncMock(return_value=response)
+
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
+        patch.object(app, "_show_client_error") as show_error,
+    ):
+        app._render_canonical(event)
+        await app._log_shell_async("false", 1, "output\n", "shell-1")
+
+    conversation.add_shell_output.assert_called_once_with("false", "output\n", exit_code=1)
+    show_error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_child_replay_replaces_live_child_deltas():
+    """Durable child content replaces partial live deltas after reconnect."""
+    app = _make_app()
+    live_delta = TextDelta(
+        id="child-delta",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="request-1",
+        text="partial ",
+    )
+    durable = AssistantMessage(
+        id="child-assistant-reconnect",
+        turn=1,
+        scope="task-1",
+        subagent_index=0,
+        request_ids=["request-1"],
+        content="partial response",
+        interrupted=False,
+    )
+
+    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
+        app._render_canonical(live_delta)
+        app._render_canonical(durable, replay=True)
+
+    assert app._child_activity[("task-1", 0)].lines == ["partial response"]
+
+
+@pytest.mark.asyncio
+async def test_shell_persistence_failure_after_canonical_delivery_is_silent():
+    """A lost POST acknowledgement is not reported after canonical delivery."""
+    app = _make_app()
+    app._canonical_shell_ids.add("shell-1")
+    with patch.object(app, "_show_client_error") as show_error:
+        app._show_shell_persistence_failure("false", 1, "output\n", "HTTP 503", "shell-1")
+
+    show_error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shell_fallback_is_removed_when_canonical_event_arrives():
+    """A fallback rendered first is replaced by the matching canonical event."""
+    app = _make_app()
+    event = ShellCommand(id="shell-2", command="false", exit_code=1, output="output\n")
+    conversation = MagicMock()
+    fallback = MagicMock()
+    conversation.add_shell_output.return_value = fallback
+    response = MagicMock(status_code=503, text="unavailable")
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+    mock_http.post = AsyncMock(return_value=response)
+
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
+        patch.object(app, "_show_client_error"),
+    ):
+        await app._log_shell_async("false", 1, "output\n", "shell-2")
+        app._render_canonical(event)
+
+    fallback.remove.assert_called_once_with()
+    assert conversation.add_shell_output.call_args_list == [
+        (("false", "output\n"), {"exit_code": 1}),
+        (("false", "output\n"), {"exit_code": 1}),
+    ]
+
+
+@pytest.mark.parametrize("scope, subagent_index", [(None, None), ("task-1", 0)])
+def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_index):
+    """Durable assistant content wins over a duplicate buffered live delta."""
+    app = _make_app()
+    assistant = AssistantMessage(
+        id=f"assistant-{scope}",
+        turn=1,
+        scope=scope,
+        subagent_index=subagent_index,
+        request_ids=["request-1"],
+        content="durable response",
+        interrupted=False,
+    )
+    delta = TextDelta(
+        id=f"delta-{scope}",
+        turn=1,
+        iteration=1,
+        scope=scope,
+        subagent_index=subagent_index,
+        request_id="request-1",
+        text="durable response",
+    )
+    app._event_buffer = [delta]
+    with (
+        patch.object(app, "query_one", return_value=MagicMock()),
+        patch.object(app, "_render_child"),
+        patch.object(app, "_update_child_modal"),
+        patch.object(app, "_handle_event") as handle,
+    ):
+        app._render_canonical(assistant, replay=True)
+        app._dispatch_buffered_events()
+
+    handle.assert_not_called()

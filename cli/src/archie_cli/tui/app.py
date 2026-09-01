@@ -43,9 +43,10 @@ from archie_shared.tool_summaries import (
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
+from ulid import ULID
 
 from archie_cli.tui import theme
-from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingMessage
+from archie_cli.tui.conversation import Conversation, IterationBlock, ShellOutput, StreamingMessage
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.status import StatusBar
@@ -98,6 +99,13 @@ class ArchieApp(App):
         self._last_event_id: str | None = None
         # Ids of canonical events already rendered — dedup across replay + live.
         self._seen_event_ids: set[str] = set()
+        # Request IDs represented by replayed assistant messages. Buffered live
+        # deltas for these requests are already represented by durable content.
+        self._replayed_assistant_request_ids: set[str] = set()
+        # Shell event IDs correlate persistence failures with later canonical
+        # delivery, preventing response-loss duplicates.
+        self._canonical_shell_ids: set[str] = set()
+        self._shell_fallbacks: dict[str, ShellOutput] = {}
         # Ids of llm_request ledger events already folded into accounting —
         # prevents double-counting across replay + live broadcast.
         self._seen_accounted_ids: set[str] = set()
@@ -112,6 +120,7 @@ class ArchieApp(App):
         # tool_use_id -> (name, input) for client-side result formatting
         self._pending_tool_inputs: dict[str, tuple[str, dict]] = {}
         self._child_activity: dict[tuple[str, int], ChildActivity] = {}
+        self._child_stream_bases: dict[tuple[str, int, str], list[str]] = {}
         self._child_pending_tools: dict[tuple[str, int, str], tuple[str, dict]] = {}
         self._parent_task_inputs: dict[str, list[dict]] = {}
         self._parent_task_entries: dict[str, object] = {}
@@ -174,20 +183,36 @@ class ArchieApp(App):
         self._receive_task = asyncio.create_task(self._receive_loop())
 
         # Replay persisted canonical events while the receive loop buffers.
-        await self._replay_events()
+        if not await self._replay_events():
+            self._buffering = False
+            self._event_buffer = []
+            self._show_client_error("Initial event replay failed; retrying connection.")
+            if self._receive_task is not None and not self._receive_task.done():
+                self._receive_task.cancel()
+                try:
+                    await self._receive_task
+                except asyncio.CancelledError:
+                    pass
+            await self._ws.disconnect()
+            self._schedule_reconnect()
+            return
 
         # Reconcile: dispatch buffered live events not already rendered.
         self._buffering = False
-        for event in self._event_buffer:
-            self._handle_event(event)
+        self._dispatch_buffered_events()
+
         self._event_buffer = []
 
-    async def _replay_events(self) -> None:
+    async def _replay_events(self) -> bool:
         """Fetch and render persisted canonical events, advancing the cursor.
 
         Requests /events?after=<cursor> when a cursor is known (reconnect),
         otherwise the full log. Each NDJSON line is a canonical event which is
         rendered via the shared reducer and deduplicated by event id.
+
+        Returns ``False`` when the history request cannot be completed. Callers
+        must not flush buffered live events or report a successful reconnect in
+        that case, because those events cannot fill the history gap.
         """
         after = self._last_event_id
         url = f"{self._api_url}/events"
@@ -202,11 +227,11 @@ class ArchieApp(App):
                     await self._reset_replay_state()
                     resp = await client.get(f"{self._api_url}/events", timeout=5.0)
                 if resp.status_code != 200:
-                    return
+                    return False
                 body = resp.text
         except Exception as e:
             log.warning("Failed to replay events: %s", e)
-            return
+            return False
 
         for line in body.splitlines():
             line = line.strip()
@@ -217,12 +242,16 @@ class ArchieApp(App):
             except Exception as e:  # noqa: BLE001 — skip malformed replay lines
                 log.warning("Skipping malformed replay event: %s", e)
                 continue
-            self._render_canonical(event)
+            self._render_canonical(event, replay=True)
+
+        return True
 
     async def _reset_replay_state(self) -> None:
         """Clear all client state reconstructed from the persisted event stream."""
         self._last_event_id = None
         self._seen_event_ids.clear()
+        self._replayed_assistant_request_ids.clear()
+        self._canonical_shell_ids.clear()
         self._seen_accounted_ids.clear()
         self._cumulative_input = 0
         self._cumulative_output = 0
@@ -239,6 +268,7 @@ class ArchieApp(App):
         self._iteration_block = None
         self._pending_tool_inputs.clear()
         self._child_activity.clear()
+        self._child_stream_bases.clear()
         self._child_pending_tools.clear()
         self._parent_task_inputs.clear()
         self._parent_task_entries.clear()
@@ -257,7 +287,7 @@ class ArchieApp(App):
             await removal
         self._update_accounting_status()
 
-    def _render_canonical(self, event) -> None:
+    def _render_canonical(self, event, *, replay: bool = False) -> None:
         """Render one persisted canonical event, deduplicated by id.
 
         Replay path only: assistant text arrives as AssistantMessage (no
@@ -272,13 +302,16 @@ class ArchieApp(App):
             if isinstance(event, ce.PersistedEventTypes):
                 self._last_event_id = event_id
 
+        if replay and isinstance(event, ce.AssistantMessage):
+            self._replayed_assistant_request_ids.update(event.request_ids)
+
         if (
             getattr(event, "scope", None) is not None
             and getattr(event, "subagent_index", None) is not None
         ):
             if isinstance(event, LLMRequest):
                 self._accumulate_ledger(event)
-            self._handle_scoped_event(event)
+            self._handle_scoped_event(event, replay=replay)
             return
 
         conv = self.query_one("#conversation", Conversation)
@@ -395,6 +428,10 @@ class ArchieApp(App):
             self._iteration_block = None
             self._end_turn()
         elif isinstance(event, ce.ShellCommand):
+            self._canonical_shell_ids.add(event.id)
+            fallback = self._shell_fallbacks.pop(event.id, None)
+            if fallback is not None:
+                fallback.remove()
             conv.add_shell_output(event.command, event.output, exit_code=event.exit_code)
 
     def _accumulate_ledger(self, event: LLMRequest) -> None:
@@ -459,7 +496,6 @@ class ArchieApp(App):
             log.warning("WS receive loop error: %s", e)
             if not self._shutting_down:
                 self._show_client_error(f"Connection lost: {e}")
-                self._end_turn()
                 close_code = getattr(getattr(e, "rcvd", None), "code", None)
                 self._schedule_reconnect(close_code)
             return
@@ -467,7 +503,6 @@ class ArchieApp(App):
         # Generator ended without raising — connection closed underneath us.
         if not self._shutting_down:
             self._show_client_error("Connection lost: the agent closed the stream.")
-            self._end_turn()
             self._schedule_reconnect(None)
 
     def _schedule_reconnect(self, close_code: int | None = None) -> None:
@@ -523,10 +558,19 @@ class ArchieApp(App):
                     except asyncio.CancelledError:
                         pass
                 self._receive_task = asyncio.create_task(self._receive_loop())
-                await self._replay_events()
+                if not await self._replay_events():
+                    self._buffering = False
+                    self._event_buffer = []
+                    if self._receive_task is not None and not self._receive_task.done():
+                        self._receive_task.cancel()
+                        try:
+                            await self._receive_task
+                        except asyncio.CancelledError:
+                            pass
+                    await self._ws.disconnect()
+                    continue
                 self._buffering = False
-                for event in self._event_buffer:
-                    self._handle_event(event)
+                self._dispatch_buffered_events()
                 self._event_buffer = []
                 self.notify("Reconnected to agent")
                 return
@@ -535,11 +579,20 @@ class ArchieApp(App):
         finally:
             self._reconnecting = False
 
+    def _dispatch_buffered_events(self) -> None:
+        """Flush live frames after replay, suppressing durable text duplicates."""
+        for event in self._event_buffer:
+            if isinstance(event, ce.TextDelta) and event.request_id in (
+                self._replayed_assistant_request_ids
+            ):
+                continue
+            self._handle_event(event)
+
     def _handle_event(self, event) -> None:
         """Reduce one live or replay canonical event."""
         self._render_canonical(event)
 
-    def _handle_scoped_event(self, event) -> bool:
+    def _handle_scoped_event(self, event, *, replay: bool = False) -> bool:
         """Reduce one canonical/live child event into shared child state."""
         scope = getattr(event, "scope", None)
         index = getattr(event, "subagent_index", None)
@@ -553,7 +606,24 @@ class ArchieApp(App):
         elif isinstance(event, (IterationStart, ce.IterationStart)):
             child.set_activity("Thinking...")
         elif isinstance(event, (TextDelta, ce.TextDelta)):
+            request_id = getattr(event, "request_id", "")
+            if request_id:
+                stream_key = (scope, index, request_id)
+                self._child_stream_bases.setdefault(stream_key, list(child.lines))
             child.add_line(event.text)
+            child.activity = "Responding..."
+        elif isinstance(event, ce.AssistantMessage) and replay:
+            baseline = next(
+                (
+                    self._child_stream_bases[(scope, index, request_id)]
+                    for request_id in event.request_ids
+                    if (scope, index, request_id) in self._child_stream_bases
+                ),
+                None,
+            )
+            if baseline is not None:
+                child.lines = list(baseline)
+            child.add_line(event.content)
             child.activity = "Responding..."
         elif isinstance(event, (ToolCall, ce.ToolCall)):
             summary = format_tool_activity(event.name, event.input)
@@ -703,6 +773,7 @@ class ArchieApp(App):
         self._shell_active = True
         self._shell_command = command
         self._shell_cancel_requested = False
+        event_id = str(ULID())
         max_output_lines = 10_000
         timeout = 30
 
@@ -727,7 +798,7 @@ class ArchieApp(App):
             except TimeoutError:
                 self._shell_proc.kill()
                 await self._shell_proc.wait()
-                self._log_shell(command, 124, "(timed out)")
+                self._log_shell(command, 124, "(timed out)", event_id)
                 return
 
             exit_code = 130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
@@ -738,7 +809,7 @@ class ArchieApp(App):
             if len(lines) > max_output_lines:
                 output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
 
-            self._log_shell(command, exit_code, output)
+            self._log_shell(command, exit_code, output, event_id)
 
         except Exception as e:
             conv.add_client_error(f"Docker exec failed: {e}")
@@ -748,21 +819,50 @@ class ArchieApp(App):
             self._shell_command = ""
             self._shell_cancel_requested = False
 
-    def _log_shell(self, command: str, exit_code: int, output: str) -> None:
+    def _log_shell(
+        self, command: str, exit_code: int, output: str, event_id: str | None = None
+    ) -> None:
         """Best-effort POST to /shell endpoint to log command in session."""
-        asyncio.create_task(self._log_shell_async(command, exit_code, output))
+        asyncio.create_task(self._log_shell_async(command, exit_code, output, event_id))
 
-    async def _log_shell_async(self, command: str, exit_code: int, output: str) -> None:
+    async def _log_shell_async(
+        self, command: str, exit_code: int, output: str, event_id: str | None = None
+    ) -> None:
         """Async POST to /shell endpoint."""
         try:
+            payload = {"command": command, "exit_code": exit_code, "output": output}
+            if event_id is not None:
+                payload["event_id"] = event_id
             async with httpx.AsyncClient() as client:
-                await client.post(
+                response = await client.post(
                     f"{self._api_url}/shell",
-                    json={"command": command, "exit_code": exit_code, "output": output},
+                    json=payload,
                     timeout=5,
                 )
-        except Exception:
-            pass  # Best-effort
+            if not 200 <= response.status_code < 300:
+                self._show_shell_persistence_failure(
+                    command, exit_code, output, f"HTTP {response.status_code}", event_id
+                )
+        except Exception as exc:
+            self._show_shell_persistence_failure(command, exit_code, output, str(exc), event_id)
+
+    def _show_shell_persistence_failure(
+        self,
+        command: str,
+        exit_code: int,
+        output: str,
+        reason: str,
+        event_id: str | None = None,
+    ) -> None:
+        """Keep shell output visible when its canonical event cannot be saved."""
+        if event_id is not None and event_id in self._canonical_shell_ids:
+            # The event was already observed; only the HTTP acknowledgement was lost.
+            return
+        conv = self.query_one("#conversation", Conversation)
+        fallback = conv.add_shell_output(command, output, exit_code=exit_code)
+        if event_id is not None:
+            self._shell_fallbacks[event_id] = fallback
+        self._show_client_error(f"Shell output could not be saved: {reason}")
 
     # --- UI helpers ---
 

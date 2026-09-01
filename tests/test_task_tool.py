@@ -1,3 +1,4 @@
+import json
 
 import pytest
 from archie_agent.agents import AgentEntry, create_task_tool
@@ -51,7 +52,13 @@ async def _make_tool(tmp_path, monkeypatch, clients, agents=None, skills=None, m
 @pytest.mark.asyncio
 async def test_single_task_returns_child_text_and_scoped_events(tmp_path, monkeypatch):
     child_llm = FakeLLMClient(
-        [[TextDelta(text="child result"), Usage(input_tokens=10, output_tokens=5), Done("end_turn")]]
+        [
+            [
+                TextDelta(text="child result"),
+                Usage(input_tokens=10, output_tokens=5),
+                Done("end_turn"),
+            ]
+        ]
     )
     spec, broadcasts = await _make_tool(tmp_path, monkeypatch, [child_llm])
 
@@ -190,3 +197,20 @@ async def test_max_concurrent_one_serializes_children(tmp_path, monkeypatch):
 
     assert "one" in result and "two" in result
     assert maximum == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_child_item_emits_scoped_terminal_event(tmp_path, monkeypatch):
+    """A malformed task item still receives the child terminal guarantee."""
+    client = FakeLLMClient([])
+    spec, broadcasts = await _make_tool(tmp_path, monkeypatch, [client])
+
+    result = await spec.handler(tasks=[["not a task mapping"]], _launch_scope="scope-1")
+
+    assert "requires" in result
+    events = [json.loads(raw) for raw in broadcasts]
+    terminal = [event for event in events if event["type"] == "turn_error"]
+    assert len(terminal) == 1
+    assert terminal[0]["scope"] == "scope-1"
+    assert terminal[0]["subagent_index"] == 0
+    assert client.calls == []

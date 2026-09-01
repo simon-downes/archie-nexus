@@ -301,20 +301,10 @@ def create_task_tool(
     ) -> str:
         async with semaphore:
             terminal_emitted = False
-            agent_name = task.get("agent")
-            prompt = task.get("prompt")
-            if not isinstance(agent_name, str) or not isinstance(prompt, str) or not prompt.strip():
-                return f"[{index}] Error: task requires non-empty string agent and prompt"
-            entry = agent_catalog.get(agent_name)
+            raw_agent_name = task.get("agent") if isinstance(task, dict) else None
+            agent_name = raw_agent_name if isinstance(raw_agent_name, str) else "child"
+            prompt = task.get("prompt") if isinstance(task, dict) else None
             warning = ""
-            if entry is None:
-                available = ", ".join(sorted(agent_catalog)) or "(none)"
-                warning = (
-                    f"Warning: unknown agent '{agent_name}' (available: {available}); "
-                    "using default agent. "
-                )
-                log.warning("%s", warning.rstrip())
-                entry = DEFAULT_AGENT
 
             async def _broadcast_child_error(kind: str, message: str) -> None:
                 try:
@@ -377,6 +367,23 @@ def create_task_tool(
                     log.warning("Failed to publish child terminal event", exc_info=True)
 
             try:
+                if (
+                    not isinstance(task, dict)
+                    or not isinstance(task.get("agent"), str)
+                    or not isinstance(task.get("prompt"), str)
+                    or not task.get("prompt", "").strip()
+                ):
+                    raise ValueError("task requires non-empty string agent and prompt")
+                entry = agent_catalog.get(agent_name)
+                if entry is None:
+                    available = ", ".join(sorted(agent_catalog)) or "(none)"
+                    warning = (
+                        f"Warning: unknown agent '{agent_name}' (available: {available}); "
+                        "using default agent. "
+                    )
+                    log.warning("%s", warning.rstrip())
+                    entry = DEFAULT_AGENT
+
                 current_model = active_model() if callable(active_model) else active_model
                 current_model_key = (
                     active_model_key() if callable(active_model_key) else active_model_key
@@ -454,7 +461,7 @@ def create_task_tool(
                         delta, serialized = factory.text_delta(
                             turn=parent_turn,
                             iteration=current_iteration,
-                            request_id=current_request_id,
+                            request_id=event.request_id or current_request_id,
                             text=event.text,
                         )
                         await broadcast_raw(broadcast, serialized)

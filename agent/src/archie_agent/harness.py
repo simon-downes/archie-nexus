@@ -417,7 +417,7 @@ class AgentHarness:
                     delta, _ = self._event_factory.text_delta(
                         turn=turn_index,
                         iteration=current_iteration,
-                        request_id=current_request_id,
+                        request_id=event.request_id or current_request_id,
                         text=event.text,
                     )
                     await self._event_bus.broadcast(delta)

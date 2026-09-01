@@ -315,17 +315,19 @@ async def shell_log(request: Request) -> JSONResponse:
     command = body.get("command")
     exit_code = body.get("exit_code")
     output = body.get("output")
+    event_id = body.get("event_id")
     if (
         not isinstance(command, str)
         or not isinstance(exit_code, int)
         or isinstance(exit_code, bool)
         or not isinstance(output, str)
+        or (event_id is not None and (not isinstance(event_id, str) or not event_id))
     ):
         return JSONResponse({"error": "invalid shell payload"}, status_code=400)
 
     try:
         event = ShellCommand(
-            id=str(ULID()),
+            id=event_id or str(ULID()),
             command=command,
             exit_code=exit_code,
             output=output,

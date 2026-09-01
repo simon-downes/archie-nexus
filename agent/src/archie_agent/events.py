@@ -30,6 +30,7 @@ class TextDelta:
     """A chunk of generated assistant text."""
 
     text: str
+    request_id: str = ""
 
 
 @dataclass

@@ -111,7 +111,9 @@ class MetricsWriter:
         "duration_ms",
     )
 
-    def _process_batch(self, conn: sqlite3.Connection, batch: list[tuple[str, str]]) -> None:
+    def _process_batch(
+        self, conn: sqlite3.Connection, batch: list[tuple[str, str]], *, strict: bool = False
+    ) -> None:
         for session_id, raw in batch:
             try:
                 event = json.loads(raw)
@@ -158,7 +160,11 @@ class MetricsWriter:
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (session_id, event["id"], *values),
                 )
-            except (json.JSONDecodeError, KeyError, TypeError, sqlite3.Error) as exc:
+            except sqlite3.Error as exc:
+                if strict:
+                    raise
+                log.warning("Metrics request skipped: %s", exc)
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
                 log.warning("Metrics request skipped: %s", exc)
         conn.commit()
 
@@ -199,6 +205,6 @@ def reset_and_backfill(db_path: Path, session_log_paths: Iterable[Path]) -> None
             path = Path(path)
             session_id = path.stem
             batch = [(session_id, raw) for raw in path.read_text(encoding="utf-8").splitlines()]
-            writer._process_batch(conn, batch)
+            writer._process_batch(conn, batch, strict=True)
     finally:
         conn.close()
