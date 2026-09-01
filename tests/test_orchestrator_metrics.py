@@ -7,7 +7,7 @@ from datetime import UTC
 from pathlib import Path
 
 import pytest
-from archie_orchestrator.metrics import MetricsWriter
+from archie_orchestrator.metrics import MetricsWriter, reset_and_backfill
 from archie_shared.canonical_events import LLMRequest, encode_event
 
 # ---------------------------------------------------------------------------
@@ -703,3 +703,28 @@ def test_identical_duplicate_no_error(tmp_path, caplog):
 
     assert len(_rows(db)) == 1
     assert not any("conflicting" in r.message.lower() for r in caplog.records)
+
+
+def test_reset_and_backfill_rebuilds_integer_identity(tmp_path):
+    db = tmp_path / "metrics.db"
+    old_writer = MetricsWriter(db)
+    conn = sqlite3.connect(db)
+    try:
+        old_writer._ensure_schema(conn)
+        old_writer._process_batch(conn, [("old-session", _make_llm_request(event_id="old"))])
+    finally:
+        conn.close()
+
+    log_path = tmp_path / "session-1.jsonl"
+    raw = _make_llm_request(event_id="new", turn=7, iteration=3)
+    log_path.write_text(raw + "\n" + raw + "\n")
+
+    reset_and_backfill(db, [log_path])
+
+    rows = _rows(db)
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "session-1"
+    assert rows[0]["event_id"] == "new"
+    assert rows[0]["turn"] == 7
+    assert rows[0]["iteration"] == 3
+    assert list(tmp_path.glob("metrics.db.legacy.*"))

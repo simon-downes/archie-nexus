@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -114,6 +115,9 @@ class MetricsWriter:
         for session_id, raw in batch:
             try:
                 event = json.loads(raw)
+                if not isinstance(event, dict):
+                    log.warning("Metrics request skipped: expected a JSON object")
+                    continue
                 if event.get("type") != "llm_request":
                     continue
                 values = (
@@ -157,3 +161,44 @@ class MetricsWriter:
             except (json.JSONDecodeError, KeyError, TypeError, sqlite3.Error) as exc:
                 log.warning("Metrics request skipped: %s", exc)
         conn.commit()
+
+
+def _archive_database(db_path: Path) -> Path | None:
+    """Archive an existing metrics database without overwriting a prior archive."""
+    if not db_path.exists():
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    base = db_path.with_name(f"{db_path.name}.legacy.{stamp}")
+    destination = base
+    suffix = 0
+    while destination.exists():
+        suffix += 1
+        destination = base.with_name(f"{base.name}-{suffix}")
+    db_path.rename(destination)
+    return destination
+
+
+def reset_and_backfill(db_path: Path, session_log_paths: Iterable[Path]) -> None:
+    """Create a fresh metrics index and rebuild it from migrated session logs.
+
+    The existing database is archived before the new schema is created. Logs
+    are read only, so a backfill failure leaves them intact and a later run can
+    archive the partial index and retry safely.
+    """
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    archived = _archive_database(db_path)
+    if archived is not None:
+        log.info("Archived metrics database to %s", archived)
+
+    writer = MetricsWriter(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        writer._ensure_schema(conn)
+        for path in session_log_paths:
+            path = Path(path)
+            session_id = path.stem
+            batch = [(session_id, raw) for raw in path.read_text(encoding="utf-8").splitlines()]
+            writer._process_batch(conn, batch)
+    finally:
+        conn.close()
