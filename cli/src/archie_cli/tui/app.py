@@ -196,9 +196,9 @@ class ArchieApp(App):
             async with httpx.AsyncClient() as client:
                 resp = await client.get(url, timeout=5.0)
                 if resp.status_code == 409:
-                    # Cursor no longer in the log (rotated/archived) — full replay.
-                    self._last_event_id = None
-                    self._seen_event_ids.clear()
+                    # Cursor no longer exists in the log (rotated/archived). Reset
+                    # every replay-derived view before rebuilding from the full log.
+                    await self._reset_replay_state()
                     resp = await client.get(f"{self._api_url}/events", timeout=5.0)
                 if resp.status_code != 200:
                     return
@@ -217,6 +217,44 @@ class ArchieApp(App):
                 log.warning("Skipping malformed replay event: %s", e)
                 continue
             self._render_canonical(event)
+
+    async def _reset_replay_state(self) -> None:
+        """Clear all client state reconstructed from the persisted event stream."""
+        self._last_event_id = None
+        self._seen_event_ids.clear()
+        self._seen_accounted_ids.clear()
+        self._cumulative_input = 0
+        self._cumulative_output = 0
+        self._cumulative_cache_read = 0
+        self._cumulative_cache_write = 0
+        self._latest_context_tokens = 0
+        self._latest_context_pct = 0.0
+        self._cumulative_cost = 0.0
+        self._estimated_output = 0
+        self._reset_turn_metrics()
+        self._turn_active = False
+        self._streaming = None
+        self._stream_text = ""
+        self._iteration_block = None
+        self._pending_tool_inputs.clear()
+        self._child_activity.clear()
+        self._child_pending_tools.clear()
+        self._parent_task_inputs.clear()
+        self._parent_task_entries.clear()
+        self._child_widgets.clear()
+        try:
+            screen = self.screen
+        except Exception:  # noqa: BLE001 — headless tests have no screen stack
+            screen = None
+        if isinstance(screen, SubagentScreen):
+            await self.pop_screen()
+        self._active_child_key = None
+
+        conversation = self.query_one("#conversation", Conversation)
+        removal = conversation.remove_children()
+        if hasattr(removal, "__await__"):
+            await removal
+        self._update_accounting_status()
 
     def _render_canonical(self, event) -> None:
         """Render one persisted canonical event, deduplicated by id.

@@ -300,3 +300,48 @@ def test_concurrent_message_rejection_is_targeted(mock_env):
                         event["type"] == "error_notice" and event["kind"] == "turn_active"
                         for event in accepted_events
                     )
+
+
+def test_two_clients_receive_identical_completed_turn(client):
+    """Both attached clients receive the same prompt, order, and ledger totals."""
+    with client.websocket_connect("/stream") as first:
+        first.receive_text()
+        first.receive_text()
+        with client.websocket_connect("/stream") as second:
+            second.receive_text()
+            second.receive_text()
+
+            first.send_text(json.dumps({"type": "message", "data": {"content": "hello two"}}))
+
+            def drain(ws):
+                events = []
+                while True:
+                    event = json.loads(ws.receive_text())
+                    events.append(event)
+                    if event["type"] == "turn_complete":
+                        return events
+
+            first_events = drain(first)
+            second_events = drain(second)
+
+            assert [event["id"] for event in first_events] == [
+                event["id"] for event in second_events
+            ]
+            for events in (first_events, second_events):
+                assert sum(event["type"] == "user_message" for event in events) == 1
+                assert (
+                    next(event["content"] for event in events if event["type"] == "user_message")
+                    == "hello two"
+                )
+
+            first_cost = sum(
+                event.get("cost_usd", 0.0)
+                for event in first_events
+                if event["type"] == "llm_request"
+            )
+            second_cost = sum(
+                event.get("cost_usd", 0.0)
+                for event in second_events
+                if event["type"] == "llm_request"
+            )
+            assert first_cost == second_cost

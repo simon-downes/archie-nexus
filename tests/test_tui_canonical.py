@@ -4,14 +4,17 @@ These exercise the M4 client-side reconstruction path without a running
 Textual app by stubbing `query_one` and the status-bar update.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from archie_shared.canonical_events import (
     AssistantMessage,
     ErrorNotice,
+    Handshake,
     IterationStart,
     LLMRequest,
+    StatusUpdated,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -263,8 +266,15 @@ async def test_replay_events_409_falls_back_to_full_replay():
     app = _make_app()
     app._last_event_id = "gone"
     app._seen_event_ids = {"gone"}
+    app._seen_accounted_ids = {"old-ledger"}
+    app._cumulative_input = 999
+    app._cumulative_cost = 9.99
 
-    full_body = encode_event(UserMessage(id="u1", turn=1, scope=None, content="hi")) + "\n"
+    full_events = [
+        UserMessage(id="u1", turn=1, scope=None, content="hi"),
+        _llm_request("l1", 0.25, input_tokens=200, output_tokens=20),
+    ]
+    full_body = "".join(encode_event(e) + "\n" for e in full_events)
     resp_409 = MagicMock(status_code=409, text="")
     resp_full = MagicMock(status_code=200, text=full_body)
 
@@ -289,4 +299,70 @@ async def test_replay_events_409_falls_back_to_full_replay():
     assert "after=gone" in urls[0]
     assert urls[1].endswith("/events")  # full replay, no cursor
     conv.add_user_message.assert_called_once_with("hi")
-    assert app._last_event_id == "u1"
+    conv.remove_children.assert_called_once_with()
+    assert app._last_event_id == "l1"
+    assert app._seen_accounted_ids == {"l1"}
+    assert app._cumulative_input == 200
+    assert app._cumulative_cost == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
+    """Reconnect reconciliation keeps the completed turn and ledger totals stable."""
+    app = _make_app()
+    ledger = _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)
+    with patch.object(app, "_update_accounting_status"):
+        app._accumulate_ledger(ledger)
+    app._last_event_id = ledger.id
+    app._seen_event_ids.add(ledger.id)
+
+    status = MagicMock()
+    conversation = MagicMock()
+
+    def query_one(selector, _type=None):
+        return {"#status": status, "#conversation": conversation}[selector]
+
+    response = MagicMock(status_code=200, text="")
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+
+    async def get_response(*args, **kwargs):
+        await asyncio.sleep(0)
+        return response
+
+    mock_http.get = AsyncMock(side_effect=get_response)
+
+    async def buffered_receive_loop():
+        app._event_buffer.extend(
+            [
+                Handshake(
+                    id="h1",
+                    protocol_version=2,
+                    session_id="session-1",
+                    model_key="m",
+                ),
+                StatusUpdated(id="s1", git_branch="main"),
+                ledger,
+            ]
+        )
+
+    app._ws.connect = AsyncMock()
+    app._receive_loop = buffered_receive_loop
+
+    with (
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
+        patch.object(app, "query_one", side_effect=query_one),
+        patch.object(app, "notify"),
+    ):
+        await app._reconnect()
+
+    app._ws.connect.assert_awaited_once_with(app._ws_url)
+    requested_url = mock_http.get.await_args.args[0]
+    assert requested_url.endswith(f"/events?after={ledger.id}")
+    assert app._session_id == "session-1"
+    assert status.git_branch == "main"
+    assert app._last_event_id == ledger.id
+    assert app._seen_accounted_ids == {ledger.id}
+    assert app._cumulative_input == 200
+    assert app._cumulative_cost == pytest.approx(0.25)
