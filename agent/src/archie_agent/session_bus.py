@@ -173,3 +173,5 @@ class SessionEventBus:
     def _require_persisted(event: Any) -> None:
         if not isinstance(event, _PERSISTED_TYPES):
             raise TypeError(f"event {type(event).__name__} is live-only")
+        if not event.id:
+            raise ValueError("canonical events require a non-empty id")

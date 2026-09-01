@@ -69,6 +69,15 @@ def test_duplicate_and_conflicting_ids_use_append_index(tmp_path):
         bus.append(conflicting)
 
 
+def test_empty_event_id_is_rejected(tmp_path):
+    bus = SessionEventBus(tmp_path / "session.jsonl")
+    event = UserMessage(id="", turn=1, scope=None, content="hello")
+
+    with pytest.raises(ValueError, match="non-empty id"):
+        bus.append(event)
+    assert not (tmp_path / "session.jsonl").exists()
+
+
 def test_append_failure_is_typed(tmp_path, monkeypatch):
     bus = SessionEventBus(tmp_path / "session.jsonl")
     event = SessionStarted(

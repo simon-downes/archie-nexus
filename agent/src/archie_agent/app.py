@@ -40,6 +40,7 @@ from ulid import ULID
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
+from archie_agent.session_bus import LogAppendError
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -207,16 +208,27 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
     # Rebuild LLM client
     new_llm = create_llm_client(new_model, _config.global_.region)
 
-    # Update harness state via public method
-    _agent.switch_model(command.model_key, new_model, new_llm)
-
-    await _agent.event_bus.publish(
-        ModelSwitch(
-            id=str(ULID()),
-            model_key=command.model_key,
-            sent_at=datetime.now(UTC).isoformat(),
+    # Publish first so a storage failure leaves runtime state unchanged.
+    try:
+        await _agent.event_bus.publish(
+            ModelSwitch(
+                id=str(ULID()),
+                model_key=command.model_key,
+                sent_at=datetime.now(UTC).isoformat(),
+            )
         )
-    )
+    except LogAppendError as exc:
+        await _agent.event_bus.send_to(
+            websocket,
+            ErrorNotice(
+                id=str(ULID()),
+                kind="storage_error",
+                message=str(exc),
+            ),
+        )
+        return
+
+    _agent.switch_model(command.model_key, new_model, new_llm)
 
     log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
 

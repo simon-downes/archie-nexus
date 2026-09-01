@@ -59,6 +59,8 @@ def read_event_lines(path: Path) -> list[dict[str, str]]:
     for number, raw in enumerate(path.read_text().splitlines(), 1):
         try:
             event = decode_event(raw, persisted=True)
+            if not event.id:
+                raise ValueError("canonical events require a non-empty id")
         except (ValueError, TypeError, msgspec.DecodeError) as exc:
             log.warning("Skipping malformed canonical event line %d: %s", number, exc)
             continue

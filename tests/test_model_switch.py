@@ -162,6 +162,39 @@ class TestModelSwitchHandler:
         assert len(sent) == 0  # broadcast goes to harness.clients, not the requesting WS
 
     @pytest.mark.asyncio
+    async def test_switch_model_append_failure_keeps_old_state(self, _setup_app, monkeypatch):
+        """A failed model-switch append does not mutate runtime model state."""
+        harness, _ = _setup_app
+        from archie_agent.app import _handle_model_switch
+        from archie_agent.session_bus import LogAppendError
+
+        sent: list[str] = []
+
+        class FakeWS:
+            async def send_text(self, data):
+                sent.append(data)
+
+        ws = FakeWS()
+        harness.event_bus.add_client(ws)
+
+        async def fail_publish(event):
+            raise LogAppendError("disk full")
+
+        monkeypatch.setattr(harness.event_bus, "publish", fail_publish)
+        await _handle_model_switch(SwitchModelCommand(model_key="model-b"), ws)
+        await asyncio.sleep(0)
+
+        assert harness.session.model_id == "model-a"
+        assert harness.session.model.name == "Test Model A"
+        assert len(sent) == 1
+        notice = decode_event(sent[0])
+        assert isinstance(notice, ErrorNotice)
+        assert notice.kind == "storage_error"
+        assert "disk full" in notice.message
+        assert not harness.log_path.exists() or "model_switch" not in harness.log_path.read_text()
+        harness.event_bus.discard_client(ws)
+
+    @pytest.mark.asyncio
     async def test_switch_model_broadcasts_to_clients(self, tmp_path, monkeypatch, _setup_app):
         """ModelSwitch event is broadcast to all connected clients."""
         harness, _ = _setup_app
