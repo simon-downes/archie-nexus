@@ -1,7 +1,13 @@
 """Tests for session log persistence (log.py) — per-message schema."""
 
 import msgspec
-from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
+from archie_shared.session.migrate import MessageEntry, MessageMetadata
+
+
+def _write_legacy(path, entry):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
+        stream.write(msgspec.json.encode(entry).decode() + "\n")
 
 
 def test_write_user_entry(tmp_path):
@@ -13,7 +19,7 @@ def test_write_user_entry(tmp_path):
         role="user",
         content="hello",
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
     assert path.exists()
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 1
@@ -37,7 +43,7 @@ def test_write_assistant_entry(tmp_path):
             backend="bedrock",
         ),
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
 
     line = path.read_text().strip()
     decoded = msgspec.json.decode(line, type=MessageEntry)
@@ -61,7 +67,7 @@ def test_roundtrip_encode_decode(tmp_path):
             interrupted=True,
         ),
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
 
     line = path.read_text().strip()
     decoded = msgspec.json.decode(line, type=MessageEntry)
@@ -79,7 +85,7 @@ def test_append_multiple(tmp_path):
             content=f"message {i}",
             metadata=MessageMetadata(model="test") if i % 2 == 1 else None,
         )
-        write_entry(path, entry)
+        _write_legacy(path, entry)
 
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 3
@@ -114,7 +120,7 @@ def test_interrupted_empty_content(tmp_path):
         content="",
         metadata=MessageMetadata(model="test", interrupted=True),
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
 
     line = path.read_text().strip()
     decoded = msgspec.json.decode(line, type=MessageEntry)

@@ -366,3 +366,66 @@ async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
     assert app._seen_accounted_ids == {ledger.id}
     assert app._cumulative_input == 200
     assert app._cumulative_cost == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_waits_for_canonical_event_before_rendering():
+    """The initiating client does not optimistically duplicate ShellCommand output."""
+    app = _make_app()
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"output\n", None))
+    conversation = MagicMock()
+
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch(
+            "archie_cli.tui.app.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=process,
+        ),
+        patch.object(app, "_log_shell") as log_shell,
+    ):
+        await app._run_direct_shell("printf output")
+
+    conversation.add_shell_output.assert_not_called()
+    log_shell.assert_called_once_with("printf output", 0, "output\n")
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_cancel_posts_one_canonical_event():
+    """Esc signals the shell task; it remains the sole canonical event producer."""
+    import asyncio
+
+    app = _make_app()
+    conversation = MagicMock()
+    released = asyncio.Event()
+
+    class FakeProcess:
+        returncode = None
+
+        def kill(self):
+            self.returncode = -9
+            released.set()
+
+        async def communicate(self):
+            await released.wait()
+            return b"partial\n", None
+
+    process = FakeProcess()
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch(
+            "archie_cli.tui.app.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=process,
+        ),
+        patch.object(app, "_log_shell") as log_shell,
+    ):
+        task = asyncio.create_task(app._run_direct_shell("long command"))
+        while app._shell_proc is not process:
+            await asyncio.sleep(0)
+        app.action_cancel()
+        await task
+
+    conversation.add_shell_output.assert_not_called()
+    log_shell.assert_called_once_with("long command", 130, "partial\n")

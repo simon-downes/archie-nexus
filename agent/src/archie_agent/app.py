@@ -6,14 +6,19 @@ Endpoints:
 """
 
 import asyncio
-import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from archie_shared.canonical_events import ErrorNotice, Handshake, ModelSwitch, StatusUpdated
+from archie_shared.canonical_events import (
+    ErrorNotice,
+    Handshake,
+    ModelSwitch,
+    ShellCommand,
+    StatusUpdated,
+)
 from archie_shared.config import home_dir
 from archie_shared.events import (
     PROTOCOL_VERSION,
@@ -24,11 +29,7 @@ from archie_shared.events import (
 )
 from archie_shared.models import get_model, load_models
 from archie_shared.schemas import load_nexus_config
-from archie_shared.session.log import (
-    MessageEntry,
-    read_event_lines,
-    write_entry,
-)
+from archie_shared.session.log import read_event_lines
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -284,31 +285,40 @@ async def stream(websocket: WebSocket) -> None:
 
 
 async def shell_log(request: Request) -> JSONResponse:
-    """Log a direct shell command (! prefix) to the session JSONL.
+    """Persist a direct shell command as a canonical session event.
 
     Accepts JSON: {command: str, exit_code: int, output: str}.
-    Writes a MessageEntry with role="shell".
     """
     if _agent is None:
         return JSONResponse({"error": "no session"}, status_code=503)
 
     try:
         body = await request.json()
-        content = json.dumps(
-            {
-                "command": body.get("command", ""),
-                "exit_code": body.get("exit_code", 0),
-                "output": body.get("output", ""),
-            },
-            ensure_ascii=False,
-        )
-        entry = MessageEntry(
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid shell payload"}, status_code=400)
+
+    command = body.get("command")
+    exit_code = body.get("exit_code")
+    output = body.get("output")
+    if (
+        not isinstance(command, str)
+        or not isinstance(exit_code, int)
+        or isinstance(exit_code, bool)
+        or not isinstance(output, str)
+    ):
+        return JSONResponse({"error": "invalid shell payload"}, status_code=400)
+
+    try:
+        event = ShellCommand(
             id=str(ULID()),
-            when=datetime.now(UTC).isoformat(),
-            role="shell",
-            content=content,
+            command=command,
+            exit_code=exit_code,
+            output=output,
         )
-        write_entry(_agent.log_path, entry)
+        await _agent.event_bus.publish(event)
         return JSONResponse({"ok": True})
     except Exception as e:
         log.warning("Failed to log shell command", exc_info=True)

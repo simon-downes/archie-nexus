@@ -143,6 +143,7 @@ class ArchieApp(App):
         self._shell_active: bool = False
         self._shell_proc: asyncio.subprocess.Process | None = None
         self._shell_command: str = ""
+        self._shell_cancel_requested: bool = False
 
     def compose(self) -> ComposeResult:
         """Build the main UI layout."""
@@ -701,6 +702,7 @@ class ArchieApp(App):
         conv = self.query_one("#conversation", Conversation)
         self._shell_active = True
         self._shell_command = command
+        self._shell_cancel_requested = False
         max_output_lines = 10_000
         timeout = 30
 
@@ -725,11 +727,10 @@ class ArchieApp(App):
             except TimeoutError:
                 self._shell_proc.kill()
                 await self._shell_proc.wait()
-                conv.add_shell_output(command, "(timed out)", exit_code=124)
                 self._log_shell(command, 124, "(timed out)")
                 return
 
-            exit_code = self._shell_proc.returncode or 0
+            exit_code = 130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
             output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
 
             # Truncate large output
@@ -737,7 +738,6 @@ class ArchieApp(App):
             if len(lines) > max_output_lines:
                 output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
 
-            conv.add_shell_output(command, output.rstrip(), exit_code=exit_code)
             self._log_shell(command, exit_code, output)
 
         except Exception as e:
@@ -746,6 +746,7 @@ class ArchieApp(App):
             self._shell_active = False
             self._shell_proc = None
             self._shell_command = ""
+            self._shell_cancel_requested = False
 
     def _log_shell(self, command: str, exit_code: int, output: str) -> None:
         """Best-effort POST to /shell endpoint to log command in session."""
@@ -873,11 +874,8 @@ class ArchieApp(App):
         When idle, double-tap within 500ms clears the input.
         """
         if self._shell_active and self._shell_proc is not None:
+            self._shell_cancel_requested = True
             self._shell_proc.kill()
-            conv = self.query_one("#conversation", Conversation)
-            cmd = self._shell_command or "?"
-            conv.add_shell_output(cmd, "(interrupted)", exit_code=130)
-            self._log_shell(cmd, 130, "(interrupted)")
             return
         if self._turn_active:
             asyncio.create_task(self._ws.send_interrupt())

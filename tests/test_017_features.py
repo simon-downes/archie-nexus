@@ -1,18 +1,16 @@
 """Tests for canonical live events and the /shell endpoint."""
 
-import json
-
-import msgspec
 import pytest
+from archie_agent.session_bus import SessionEventBus
 from archie_shared.canonical_events import (
     ErrorNotice,
     Handshake,
     ModelSwitch,
+    ShellCommand,
     StatusUpdated,
     decode_event,
     encode_event,
 )
-from archie_shared.session.log import MessageEntry
 from starlette.testclient import TestClient
 
 
@@ -74,11 +72,16 @@ class TestShellEndpoint:
         yield
         app_module._agent = None
 
-    def test_shell_log_creates_entry(self, client, tmp_path):
+    def test_shell_log_creates_canonical_event(self, client, tmp_path):
         from archie_agent import app as app_module
 
+        log_path = tmp_path / "session.jsonl"
+
         class MockAgent:
-            log_path = tmp_path / "session.jsonl"
+            pass
+
+        MockAgent.log_path = log_path
+        MockAgent.event_bus = SessionEventBus(log_path)
 
         app_module._agent = MockAgent()
         response = client.post(
@@ -88,10 +91,74 @@ class TestShellEndpoint:
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 
-        entry = msgspec.json.decode(MockAgent.log_path.read_text().strip(), type=MessageEntry)
-        assert entry.role == "shell"
-        content = json.loads(entry.content)
-        assert content == {"command": "ls -l", "exit_code": 0, "output": "total 0\n"}
+        events = [
+            decode_event(line, persisted=True) for line in log_path.read_text().splitlines() if line
+        ]
+        assert len(events) == 1
+        assert events[0] == ShellCommand(
+            id=events[0].id,
+            command="ls -l",
+            exit_code=0,
+            output="total 0\n",
+        )
+
+        replay = client.get("/events")
+        assert replay.status_code == 200
+        assert decode_event(replay.text.strip(), persisted=True) == events[0]
+
+    def test_shell_log_preserves_nonzero_exit_with_empty_output(self, client, tmp_path):
+        from archie_agent import app as app_module
+
+        log_path = tmp_path / "session.jsonl"
+
+        class MockAgent:
+            pass
+
+        MockAgent.log_path = log_path
+        MockAgent.event_bus = SessionEventBus(log_path)
+        app_module._agent = MockAgent()
+
+        response = client.post(
+            "/shell",
+            json={"command": "false", "exit_code": 1, "output": ""},
+        )
+
+        assert response.status_code == 200
+        event = decode_event(log_path.read_text().strip(), persisted=True)
+        assert event == ShellCommand(
+            id=event.id,
+            command="false",
+            exit_code=1,
+            output="",
+        )
+        replay = client.get("/events")
+        assert replay.status_code == 200
+        assert decode_event(replay.text.strip(), persisted=True) == event
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"command": 123, "exit_code": 0, "output": "ok"},
+            {"command": "echo ok", "exit_code": True, "output": "ok"},
+            {"command": "echo ok", "exit_code": 0, "output": ["ok"]},
+        ],
+    )
+    def test_shell_log_rejects_invalid_payload_types(self, client, tmp_path, payload):
+        from archie_agent import app as app_module
+
+        log_path = tmp_path / "session.jsonl"
+
+        class MockAgent:
+            pass
+
+        MockAgent.log_path = log_path
+        MockAgent.event_bus = SessionEventBus(log_path)
+        app_module._agent = MockAgent()
+
+        response = client.post("/shell", json=payload)
+
+        assert response.status_code == 400
+        assert not log_path.exists()
 
     def test_shell_log_no_agent(self, client):
         response = client.post(
