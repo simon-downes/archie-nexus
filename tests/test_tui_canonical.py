@@ -142,6 +142,52 @@ def test_live_assistant_message_finalizes_stream_without_duplicate():
     conv.add_assistant_message.assert_not_called()
 
 
+def test_throbber_tracks_provider_request_lifecycle():
+    """Show while a provider request is pending, not while tools execute."""
+    app = _make_app()
+    app._turn_active = True
+    throbber = MagicMock()
+    conv = MagicMock()
+    conv.begin_streaming.return_value = MagicMock()
+    conv.begin_iteration.return_value = MagicMock()
+    status = MagicMock()
+
+    def query_one(selector, _type=None):
+        return {"#conversation": conv, "#throbber": throbber, "#status": status}[selector]
+
+    with patch.object(app, "query_one", side_effect=query_one):
+        app._apply_event(IterationStart(id="i1", turn=1, iteration=0, scope=None))
+        assert throbber.display is True
+
+        app._apply_event(
+            TextDelta(
+                id="d1",
+                turn=1,
+                iteration=0,
+                scope=None,
+                request_id="r1",
+                text="partial",
+            )
+        )
+        assert throbber.display is False
+
+        app._apply_event(IterationStart(id="i2", turn=1, iteration=1, scope=None))
+        assert throbber.display is True
+        app._apply_event(
+            ToolCall(
+                id="c1",
+                turn=1,
+                iteration=1,
+                scope=None,
+                request_id="r2",
+                tool_use_id="t1",
+                name="read",
+                input={"path": "/etc/hosts"},
+            )
+        )
+        assert throbber.display is False
+
+
 def test_turn_error_notice_ends_pending_turn():
     """A server-side rejection/error returns the local TUI to an idle state."""
     app = _make_app()

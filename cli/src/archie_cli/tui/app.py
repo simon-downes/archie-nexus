@@ -396,7 +396,12 @@ class ArchieApp(App):
             # Create a visual block lazily when this iteration contains tools.
             # Text-only iterations should not leave empty blocks in replay.
             self._iteration_block = None
+            # A new iteration means a new provider request is outstanding.
+            self._show_throbber()
         elif isinstance(event, ce.ToolCall):
+            # The provider has responded with a tool request; pending tool rows
+            # represent execution while the next iteration owns the throbber.
+            self._remove_throbber()
             if self._iteration_block is None:
                 self._iteration_block = conv.begin_iteration()
             input_summary = format_tool_pending(event.name, event.input)
