@@ -7,4 +7,4 @@
 - [x] 5. Make direct shell execution local-only
 - [x] 6. Make assistant streams request-scoped end to end
 - [x] 7. Retarget migration and metrics to the final version-2 schema
-- [ ] 8. Finalize documentation and repository validation
+- [x] 8. Finalize documentation and repository validation

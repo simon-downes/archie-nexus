@@ -21,6 +21,21 @@ The public event union has exactly four live-only types: `text_delta`, `handshak
 `session_status`, and `error_notice`. Every other remaining type below is persisted and may be
 replayed through `GET /events`.
 
+## Client commands
+
+Client-to-agent commands are strict, flat tagged `msgspec` records defined in
+`shared/src/archie_shared/commands.py`. They are encoded without a nested `data` object:
+
+```json
+{"type":"message","content":"hello"}
+{"type":"interrupt"}
+{"type":"interrupt","scope":"task-01","subagent_index":0}
+{"type":"switch_model","model_key":"bedrock-anthropic.claude-sonnet-4-6"}
+```
+
+Unknown fields and tags are rejected. An `interrupt` command either targets the root with no
+fields or targets a child with both `scope` and `subagent_index`; partial targets are invalid.
+
 ## Event catalog
 
 `id` is included in every row below. Optional fields use `?`; `scope` and
@@ -35,7 +50,7 @@ replayed through `GET /events`.
 | `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?` |
 | `tool_call` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `name: string`, `input: dict[string, object]`, `subagent_index: int?` |
 | `tool_result` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `content: string`, `is_error: bool`, `duration_ms: int`, `result_bytes: int`, `result_lines: int`, `subagent_index: int?` |
-| `assistant_message` | persisted | `turn: int`, `scope: string?`, `request_ids: list[string]`, `content: string`, `interrupted: bool`, `subagent_index: int?` |
+| `assistant_message` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `content: string`, `interrupted: bool`, `subagent_index: int?` |
 | `turn_complete` | persisted | `turn: int`, `scope: string?`, `stop_reason: string`, `subagent_index: int?` |
 | `turn_error` | persisted | `turn: int`, `scope: string?`, `message: string`, `subagent_index: int?` |
 | `turn_interrupted` | persisted | `turn: int`, `scope: string?`, `subagent_index: int?` |
@@ -45,36 +60,40 @@ replayed through `GET /events`.
 
 There is no public `usage` event. Provider usage is folded into the persisted
 `llm_request`; clients derive cumulative token and cost totals by summing those events,
-deduplicated by `id`. Model switches are live-only status updates and do not reprice historical
-requests. The model catalog maps `model_key` to display metadata, so `session_status` and
-`handshake` do not repeat unnecessary model fields.
+deduplicated by `id`. Model changes are live-only `session_status` updates and do not reprice
+historical requests. The model catalog maps `model_key` to display metadata, so `session_status`
+and `handshake` do not repeat unnecessary model fields.
 
 ## Turn and replay rules
 
 `turn` and `iteration` are structured integers. Request and tool identity is
-`(scope, turn, iteration, request_id)`; the old composite `turn_iteration` string is not
-part of the schema.
+`(scope, subagent_index, turn, iteration, request_id)`; the old composite `turn_iteration` string
+is not part of the schema.
 
 The coordinator persists an event before broadcasting it. Live-only events are enqueued
 without appending. The client advances its replay cursor only after applying a persisted
 event, so the cursor always names a logged event. On reconnect, the client replays
-`GET /events?after=<cursor>`, then flushes buffered live events through the same reducer
-and deduplicates by event ID. `handshake` is followed by `session_status`; neither is a
+`GET /events?after=<cursor>`, applies history through `_render_canonical(event, replay=True)`, then
+flushes buffered live events through `_apply_event()` and deduplicates by event ID and request
+identity. `handshake` is followed by `session_status`; neither is a
 snapshot or accounting authority.
 
 `error_notice` is used for targeted command rejections and best-effort storage-failure
 notification. It is not a persisted turn terminal event. Accepted turns emit exactly
 one persisted `turn_complete`, `turn_error`, or `turn_interrupted`, except when the
-append path itself fails.
+append path itself fails. Available partial assistant text is persisted as an interrupted
+`assistant_message` before the matching terminal event.
 
 ## Persistence and migration
 
 Session logs live at `<ARCHIE_HOME_DIR>/sessions/<session-id>.jsonl`. The host command
 `archie migrate-sessions` is a one-shot operation to run with sessions and the
-orchestrator stopped. It upgrades legacy canonical identity fields, removes model-switch records while preserving IDs and
-order of remaining records, discards legacy shell records by discriminator,
-retains the source as `.legacy`, and writes each log through a same-directory temporary file and
-atomic rename. Logs declaring `session_started.schema_version == 2` are skipped. The command then
-archives and rebuilds `<ARCHIE_HOME_DIR>/metrics.db` from migrated `llm_request` events. Metrics
-use integer `turn`/`iteration` columns and deduplicate by `(session_id, event_id)`; the session log
-remains the source of truth.
+orchestrator stopped. It upgrades legacy identity fields, selects the final request ID
+that generated each assistant message and derives its turn/iteration from the referenced
+`llm_request`, removes model-switch records while preserving IDs and order of remaining
+records, discards legacy shell records by discriminator, retains the source as `.legacy`,
+and writes each log through a same-directory temporary file and atomic rename. Logs
+declaring `session_started.schema_version == 2` are skipped. The command then archives
+and rebuilds `<ARCHIE_HOME_DIR>/metrics.db` from decoded migrated `llm_request` events.
+Metrics use integer `turn`/`iteration` columns and deduplicate by `(session_id, event_id)`;
+the session log remains the source of truth.
