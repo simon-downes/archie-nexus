@@ -423,7 +423,6 @@ def create_task_tool(
                 text_parts: list[str] = []
                 iter_text = ""
                 assistant_event_logged = False
-                request_ids: list[str] = []
                 current_iteration = 0
                 current_request_id = ""
 
@@ -472,14 +471,14 @@ def create_task_tool(
                             error=event.error,
                             request_id=event.context.request_id,
                         )
-                        request_ids.append(request.id)
                         current_request_id = request.id
                         await emit(request)
                     elif isinstance(event, ToolCall):
                         if iter_text and not assistant_event_logged:
                             assistant = factory.assistant_message(
                                 turn=parent_turn,
-                                request_ids=request_ids.copy(),
+                                iteration=current_iteration,
+                                request_id=current_request_id,
                                 content=iter_text,
                                 interrupted=False,
                             )
@@ -511,7 +510,8 @@ def create_task_tool(
                         if iter_text and not assistant_event_logged:
                             assistant = factory.assistant_message(
                                 turn=parent_turn,
-                                request_ids=request_ids.copy(),
+                                iteration=current_iteration,
+                                request_id=current_request_id,
                                 content=iter_text,
                                 interrupted=False,
                             )
@@ -521,10 +521,28 @@ def create_task_tool(
                         )
                         await _publish_child_terminal(complete)
                     elif isinstance(event, TurnError):
+                        if iter_text and not assistant_event_logged:
+                            assistant = factory.assistant_message(
+                                turn=parent_turn,
+                                iteration=current_iteration,
+                                request_id=current_request_id,
+                                content=iter_text,
+                                interrupted=True,
+                            )
+                            await emit(assistant)
                         error_event = factory.turn_error(turn=parent_turn, message=event.error)
                         await _publish_child_terminal(error_event)
                         return f"[{index}] {agent_name}: {warning}Error: {event.error}"
                     elif isinstance(event, TurnInterrupted):
+                        if iter_text and not assistant_event_logged:
+                            assistant = factory.assistant_message(
+                                turn=parent_turn,
+                                iteration=current_iteration,
+                                request_id=current_request_id,
+                                content=iter_text,
+                                interrupted=True,
+                            )
+                            await emit(assistant)
                         interrupted = factory.turn_interrupted(turn=parent_turn)
                         await _publish_child_terminal(interrupted)
                         return f"[{index}] {agent_name}: {warning}interrupted"

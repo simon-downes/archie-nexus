@@ -57,6 +57,17 @@ from archie_cli.ws_client import WSClient
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class RequestKey:
+    """Exact identity for one root or child assistant request."""
+
+    scope: str | None
+    subagent_index: int | None
+    turn: int
+    iteration: int
+    request_id: str
+
+
 @dataclass
 class ChildActivity(ChildActivityState):
     """Compatibility alias for the shared child view state."""
@@ -99,9 +110,11 @@ class ArchieApp(App):
         self._last_event_id: str | None = None
         # Ids of canonical events already rendered — dedup across replay + live.
         self._seen_event_ids: set[str] = set()
-        # Request IDs represented by replayed assistant messages. Buffered live
-        # deltas for these requests are already represented by durable content.
-        self._replayed_assistant_request_ids: set[str] = set()
+        # Request-scoped assistant reconciliation. Durable assistant events mark
+        # a key finalized so late buffered deltas for that exact request are ignored.
+        self._transient_assistant_text: dict[RequestKey, str] = {}
+        self._finalized_assistant_requests: set[RequestKey] = set()
+        self._stream_request_key: RequestKey | None = None
         # Ids of llm_request ledger events already folded into accounting —
         # prevents double-counting across replay + live broadcast.
         self._seen_accounted_ids: set[str] = set()
@@ -116,7 +129,6 @@ class ArchieApp(App):
         # tool_use_id -> (name, input) for client-side result formatting
         self._pending_tool_inputs: dict[str, tuple[str, dict]] = {}
         self._child_activity: dict[tuple[str, int], ChildActivity] = {}
-        self._child_stream_bases: dict[tuple[str, int, str], list[str]] = {}
         self._child_pending_tools: dict[tuple[str, int, str], tuple[str, dict]] = {}
         self._parent_task_inputs: dict[str, list[dict]] = {}
         self._parent_task_entries: dict[str, object] = {}
@@ -246,7 +258,9 @@ class ArchieApp(App):
         """Clear all client state reconstructed from the persisted event stream."""
         self._last_event_id = None
         self._seen_event_ids.clear()
-        self._replayed_assistant_request_ids.clear()
+        self._transient_assistant_text.clear()
+        self._finalized_assistant_requests.clear()
+        self._stream_request_key = None
         self._seen_accounted_ids.clear()
         self._cumulative_input = 0
         self._cumulative_output = 0
@@ -263,7 +277,6 @@ class ArchieApp(App):
         self._iteration_block = None
         self._pending_tool_inputs.clear()
         self._child_activity.clear()
-        self._child_stream_bases.clear()
         self._child_pending_tools.clear()
         self._parent_task_inputs.clear()
         self._parent_task_entries.clear()
@@ -282,6 +295,15 @@ class ArchieApp(App):
             await removal
         self._update_accounting_status()
 
+    def _request_key(self, event) -> RequestKey:
+        return RequestKey(
+            scope=getattr(event, "scope", None),
+            subagent_index=getattr(event, "subagent_index", None),
+            turn=event.turn,
+            iteration=event.iteration,
+            request_id=event.request_id,
+        )
+
     def _render_canonical(self, event, *, replay: bool = False) -> None:
         """Render one persisted canonical event, deduplicated by id.
 
@@ -296,9 +318,6 @@ class ArchieApp(App):
             self._seen_event_ids.add(event_id)
             if event.persist:
                 self._last_event_id = event_id
-
-        if replay and isinstance(event, ce.AssistantMessage):
-            self._replayed_assistant_request_ids.update(event.request_ids)
 
         if (
             getattr(event, "scope", None) is not None
@@ -338,24 +357,35 @@ class ArchieApp(App):
             if event.kind in {"turn_active", "turn_error", "storage_error"} and self._turn_active:
                 self._end_turn()
         elif isinstance(event, ce.TextDelta):
+            key = self._request_key(event)
+            if key in self._finalized_assistant_requests:
+                return
             self._remove_throbber()
+            self._transient_assistant_text[key] = (
+                self._transient_assistant_text.get(key, "") + event.text
+            )
             if self._streaming is None:
                 self._streaming = conv.begin_streaming()
                 self._turn_active = True
-            self._stream_text += event.text
+            self._stream_request_key = key
+            self._stream_text = self._transient_assistant_text[key]
             self._streaming.append(event.text)
             self._estimated_output += len(event.text) // 4
             status = self.query_one("#status", StatusBar)
             status.session_output = self._cumulative_output + self._estimated_output
             conv.scroll_if_at_bottom()
         elif isinstance(event, ce.AssistantMessage):
-            if self._streaming is not None:
-                if self._stream_text == event.content:
+            key = self._request_key(event)
+            transient = self._transient_assistant_text.pop(key, None)
+            self._finalized_assistant_requests.add(key)
+            if self._streaming is not None and self._stream_request_key == key:
+                if transient == event.content:
                     self._finalise_streaming()
                 else:
                     self._streaming.remove()
                     self._streaming = None
                     self._stream_text = ""
+                    self._stream_request_key = None
                     if event.content:
                         conv.add_assistant_message(event.content)
             elif event.content:
@@ -474,7 +504,7 @@ class ArchieApp(App):
                 if self._buffering:
                     self._event_buffer.append(event)
                 else:
-                    self._handle_event(event)
+                    self._apply_event(event)
         except Exception as e:
             log.warning("WS receive loop error: %s", e)
             if not self._shutting_down:
@@ -563,16 +593,12 @@ class ArchieApp(App):
             self._reconnecting = False
 
     def _dispatch_buffered_events(self) -> None:
-        """Flush live frames after replay, suppressing durable text duplicates."""
+        """Flush live frames after history; request keys suppress duplicates."""
         for event in self._event_buffer:
-            if isinstance(event, ce.TextDelta) and event.request_id in (
-                self._replayed_assistant_request_ids
-            ):
-                continue
-            self._handle_event(event)
+            self._apply_event(event)
 
-    def _handle_event(self, event) -> None:
-        """Reduce one live or replay canonical event."""
+    def _apply_event(self, event) -> None:
+        """Apply one live or historical event through the imperative UI path."""
         self._render_canonical(event)
 
     def _handle_scoped_event(self, event, *, replay: bool = False) -> bool:
@@ -589,21 +615,18 @@ class ArchieApp(App):
         elif isinstance(event, (IterationStart, ce.IterationStart)):
             child.set_activity("Thinking...")
         elif isinstance(event, (TextDelta, ce.TextDelta)):
-            request_id = getattr(event, "request_id", "")
-            if request_id:
-                stream_key = (scope, index, request_id)
-                self._child_stream_bases.setdefault(stream_key, list(child.lines))
-            child.add_line(event.text)
-            child.activity = "Responding..."
-        elif isinstance(event, ce.AssistantMessage) and replay:
-            baseline = None
-            for request_id in reversed(event.request_ids):
-                baseline = self._child_stream_bases.get((scope, index, request_id))
-                if baseline is not None:
-                    break
-            if baseline is not None:
-                child.lines = list(baseline)
-            child.add_line(event.content)
+            key = self._request_key(event)
+            if key in self._finalized_assistant_requests:
+                return True
+            text = self._transient_assistant_text.get(key, "") + event.text
+            self._transient_assistant_text[key] = text
+            child.activity = text[-512:] or "Responding..."
+        elif isinstance(event, ce.AssistantMessage):
+            key = self._request_key(event)
+            self._transient_assistant_text.pop(key, None)
+            self._finalized_assistant_requests.add(key)
+            if event.content:
+                child.add_line(event.content)
             child.activity = "Responding..."
         elif isinstance(event, (ToolCall, ce.ToolCall)):
             summary = format_tool_activity(event.name, event.input)
@@ -858,6 +881,7 @@ class ArchieApp(App):
             self._streaming.remove()
         self._streaming = None
         self._stream_text = ""
+        self._stream_request_key = None
 
     def _show_throbber(self) -> None:
         """Show the fixed throbber while the agent is thinking."""

@@ -154,7 +154,6 @@ class AgentHarness:
         self._interrupt_async: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        self._request_ids: list[str] = []
         self._event_factory = EventFactory(self.log_path, self.session.model_id, self.session.model)
 
     def _make_task_placeholder(self):
@@ -326,7 +325,6 @@ class AgentHarness:
 
         turn_index = self.session.next_turn_index()
         self._current_turn_index = turn_index
-        self._request_ids = []
         current_request_id = ""
         current_iteration = 0
 
@@ -424,7 +422,6 @@ class AgentHarness:
                         error=event.error,
                         request_id=event.context.request_id,
                     )
-                    self._request_ids.append(request.id)
                     current_request_id = request.id
                     await self._event_bus.emit(request)
 
@@ -441,7 +438,8 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant = self._event_factory.assistant_message(
                             turn=turn_index,
-                            request_ids=self._request_ids.copy(),
+                            iteration=current_iteration,
+                            request_id=current_request_id,
                             content=iter_text,
                             interrupted=False,
                         )
@@ -504,7 +502,8 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant = self._event_factory.assistant_message(
                             turn=turn_index,
-                            request_ids=self._request_ids.copy(),
+                            iteration=current_iteration,
+                            request_id=current_request_id,
                             content=iter_text,
                             interrupted=False,
                         )
@@ -520,7 +519,8 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant = self._event_factory.assistant_message(
                             turn=turn_index,
-                            request_ids=self._request_ids.copy(),
+                            iteration=current_iteration,
+                            request_id=current_request_id,
                             content=iter_text,
                             interrupted=True,
                         )
@@ -547,7 +547,8 @@ class AgentHarness:
                     if iter_text and not assistant_event_logged:
                         assistant = self._event_factory.assistant_message(
                             turn=turn_index,
-                            request_ids=self._request_ids.copy(),
+                            iteration=current_iteration,
+                            request_id=current_request_id,
                             content=iter_text,
                             interrupted=True,
                         )

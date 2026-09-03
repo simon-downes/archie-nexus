@@ -49,8 +49,9 @@ def test_scoped_events_roundtrip_with_none_scope():
         AssistantMessage(
             id="a1",
             turn=1,
+            iteration=1,
             scope=None,
-            request_ids=["r1"],
+            request_id="r1",
             content="done",
             interrupted=False,
         ),
@@ -63,16 +64,19 @@ def test_scoped_events_roundtrip_with_none_scope():
             assert restored.iteration == 1
 
 
-def test_assistant_message_has_no_iteration_backcompat_field():
+def test_assistant_message_has_singular_request_identity():
     raw = (
-        '{"type":"assistant_message","id":"a1","turn":1,"scope":null,'
-        '"request_ids":["r1"],"content":"response","interrupted":false}'
+        '{"type":"assistant_message","id":"a1","turn":1,"iteration":1,"scope":null,'
+        '"request_id":"r1","content":"response","interrupted":false}'
     )
 
     event = decode_event(raw)
 
     assert isinstance(event, AssistantMessage)
     assert event.content == "response"
+    assert event.request_id == "r1"
+    assert event.iteration == 1
+    assert not hasattr(event, "request_ids")
     assert not hasattr(event, "turn_iteration")
 
 

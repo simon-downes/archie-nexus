@@ -166,16 +166,18 @@ class EventFactory:
         self,
         *,
         turn: int,
-        request_ids: list[str],
+        iteration: int,
+        request_id: str,
         content: str,
         interrupted: bool,
     ) -> AssistantMessage:
         return AssistantMessage(
             id=str(ULID()),
             turn=turn,
+            iteration=iteration,
             scope=self.scope,
             subagent_index=self.subagent_index,
-            request_ids=list(request_ids),
+            request_id=request_id,
             content=content,
             interrupted=interrupted,
         )

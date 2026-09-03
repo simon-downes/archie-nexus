@@ -6,7 +6,22 @@ import pytest
 from archie_agent.harness import AgentHarness, _shell_result_is_error
 from archie_agent.llm._types import Done, TextDelta, Usage
 from archie_agent.llm.fake import FakeLLMClient
-from archie_agent.loop_events import TurnComplete as AgentTurnComplete
+from archie_agent.loop_events import (
+    IterationStart as AgentIterationStart,
+)
+from archie_agent.loop_events import (
+    RequestContext,
+    RequestFinished,
+)
+from archie_agent.loop_events import (
+    TextDelta as AgentTextDelta,
+)
+from archie_agent.loop_events import (
+    TurnComplete as AgentTurnComplete,
+)
+from archie_agent.loop_events import (
+    TurnInterrupted as AgentTurnInterrupted,
+)
 from archie_agent.session import Session
 from archie_shared.events import (
     AssistantMessage,
@@ -163,7 +178,8 @@ async def test_normal_flow(tmp_path):
     assert len(assistant_msgs) == 1
     assert assistant_msgs[0].content == "Hello world"
     assert assistant_msgs[0].interrupted is False
-    assert assistant_msgs[0].request_ids == [requests[0].id]
+    assert assistant_msgs[0].request_id == requests[0].id
+    assert assistant_msgs[0].iteration == 0
 
     assert len(_of(events, TurnComplete)) == 1
 
@@ -399,6 +415,52 @@ async def test_partial_text_before_error(tmp_path):
     assert harness.turn_active is False
 
 
+@pytest.mark.asyncio
+async def test_child_partial_text_is_persisted_before_interruption(tmp_path, monkeypatch):
+    """A child interruption keeps its request-scoped partial assistant text."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    async def interrupted_child_loop(**kwargs):
+        yield AgentIterationStart(index=0)
+        yield AgentTextDelta(text="partial child", request_id="child-request")
+        yield RequestFinished(
+            context=RequestContext("child-request", "2025-01-01T00:00:00Z"),
+            duration_ms=1,
+            status="interrupted",
+            usage=None,
+            stop_reason=None,
+            error=None,
+        )
+        yield AgentTurnInterrupted()
+
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *args: object())
+    monkeypatch.setattr("archie_agent.agents.run_loop", interrupted_child_loop)
+    task_spec = harness._registry.get("task")
+    assert task_spec is not None
+
+    await task_spec.handler(
+        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        _launch_scope="task-interrupt",
+        _parent_turn=3,
+    )
+
+    events = _read_events(harness.log_path)
+    child_events = [
+        event
+        for event in events
+        if getattr(event, "scope", None) == "task-interrupt"
+        and getattr(event, "subagent_index", None) == 0
+    ]
+    assistant = next(event for event in child_events if isinstance(event, AssistantMessage))
+    terminal = next(event for event in child_events if isinstance(event, TurnInterrupted))
+
+    assert assistant.content == "partial child"
+    assert assistant.request_id == "child-request"
+    assert assistant.iteration == 0
+    assert assistant.interrupted is True
+    assert child_events.index(assistant) < child_events.index(terminal)
+
+
 # --- Tool orchestration tests ---
 
 
@@ -459,9 +521,13 @@ async def test_tool_round_trip_persists_and_broadcasts(tmp_path):
     tool_result = _of(events, ToolResult)[0]
     assert "hello" in tool_result.content
 
-    # tool_call/tool_result reference the tool-use request; assistant references both.
+    # tool_call/tool_result reference the tool-use request; assistant references the second request.
     assert tool_call.tool_use_id == tool_result.tool_use_id
-    assert len(_of(events, LLMRequest)) == 2
+    requests = _of(events, LLMRequest)
+    assert len(requests) == 2
+    assistant_msgs = _of(events, AssistantMessage)
+    assert assistant_msgs[0].request_id == requests[1].id
+    assert assistant_msgs[0].iteration == 1
 
     # Verify wire events include tool events
     messages = [json.loads(m) for m in ws.messages]

@@ -36,7 +36,7 @@ def test_live_scoped_llm_cost_is_included_in_status_accounting():
         cost_usd=0.0085,
     )
     with patch.object(app, "query_one", return_value=MagicMock()):
-        app._handle_event(event)
+        app._apply_event(event)
 
     assert app._cumulative_cost == 0.0085
     app._update_accounting_status.assert_called_once()
@@ -220,4 +220,5 @@ def test_replay_scoped_event_routes_to_child_state():
     with patch.object(app, "_render_child"):
         app._render_canonical(event)
 
-    assert app._child_activity[("task-1", 1)].lines == ["replayed output"]
+    assert app._child_activity[("task-1", 1)].activity == "replayed output"
+    assert app._transient_assistant_text

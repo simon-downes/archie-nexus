@@ -108,8 +108,9 @@ class AssistantMessage(
 ):
     id: str
     turn: int
+    iteration: int
     scope: str | None
-    request_ids: list[str]
+    request_id: str
     content: str
     interrupted: bool
     subagent_index: int | None = None

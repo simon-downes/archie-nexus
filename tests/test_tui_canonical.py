@@ -128,7 +128,8 @@ def test_live_assistant_message_finalizes_stream_without_duplicate():
         id="a1",
         turn=1,
         scope=None,
-        request_ids=["r1"],
+        iteration=1,
+        request_id="r1",
         content="hello",
         interrupted=False,
     )
@@ -234,7 +235,8 @@ async def test_replay_events_seeds_cost_from_ledger():
             id="a1",
             turn=1,
             scope=None,
-            request_ids=["l1"],
+            iteration=1,
+            request_id="l1",
             content="ok",
             interrupted=False,
         ),
@@ -477,7 +479,8 @@ async def test_replay_child_assistant_message_reconstructs_child_output():
         turn=1,
         scope="task-1",
         subagent_index=0,
-        request_ids=["request-1"],
+        iteration=1,
+        request_id="request-1",
         content="persisted child response",
         interrupted=False,
     )
@@ -531,7 +534,8 @@ async def test_child_replay_replaces_live_child_deltas():
         turn=1,
         scope="task-1",
         subagent_index=0,
-        request_ids=["request-1"],
+        iteration=1,
+        request_id="request-1",
         content="partial response",
         interrupted=False,
     )
@@ -543,28 +547,18 @@ async def test_child_replay_replaces_live_child_deltas():
     assert app._child_activity[("task-1", 0)].lines == ["partial response"]
 
 
-def test_child_replay_uses_latest_request_baseline():
-    """Cumulative request IDs preserve earlier child history on reconnect."""
+def test_child_replay_preserves_durable_lines_across_requests():
+    """Reconnect reconciliation keeps each request's durable child answer."""
     app = _make_app()
-    first_delta = TextDelta(
-        id="child-delta-1",
+    first_assistant = AssistantMessage(
+        id="child-assistant-1",
         turn=1,
-        iteration=1,
         scope="task-1",
         subagent_index=0,
-        request_id="request-1",
-        text="first answer",
-    )
-    tool_call = ToolCall(
-        id="child-tool-call",
-        turn=1,
         iteration=1,
-        scope="task-1",
-        subagent_index=0,
         request_id="request-1",
-        tool_use_id="tool-1",
-        name="read",
-        input={"path": "README.md"},
+        content="first answer",
+        interrupted=False,
     )
     second_delta = TextDelta(
         id="child-delta-2",
@@ -575,26 +569,71 @@ def test_child_replay_uses_latest_request_baseline():
         request_id="request-2",
         text="second partial",
     )
-    replayed_assistant = AssistantMessage(
+    second_assistant = AssistantMessage(
         id="child-assistant-2",
         turn=1,
         scope="task-1",
         subagent_index=0,
-        request_ids=["request-1", "request-2"],
+        iteration=2,
+        request_id="request-2",
         content="second answer",
         interrupted=False,
     )
 
     with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._render_canonical(first_delta)
-        app._render_canonical(tool_call)
+        app._render_canonical(first_assistant, replay=True)
         app._render_canonical(second_delta)
-        app._render_canonical(replayed_assistant, replay=True)
+        app._render_canonical(second_assistant, replay=True)
 
-    lines = app._child_activity[("task-1", 0)].lines
-    assert "first answer" in lines
-    assert "second answer" in lines
-    assert "second partial" not in lines
+    assert app._child_activity[("task-1", 0)].lines == ["first answer", "second answer"]
+    assert "second partial" not in app._child_activity[("task-1", 0)].lines
+
+
+def test_sibling_child_streams_finalize_independently():
+    """Finalizing one child request leaves a sibling transient request untouched."""
+    app = _make_app()
+    child_zero_delta = TextDelta(
+        id="child-zero-delta",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="request-zero",
+        text="zero partial",
+    )
+    child_one_delta = TextDelta(
+        id="child-one-delta",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=1,
+        request_id="request-one",
+        text="one partial",
+    )
+    child_zero_assistant = AssistantMessage(
+        id="child-zero-assistant",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="request-zero",
+        content="zero answer",
+        interrupted=False,
+    )
+
+    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
+        app._render_canonical(child_zero_delta)
+        app._render_canonical(child_one_delta)
+        app._render_canonical(child_zero_assistant)
+
+    zero_key = app._request_key(child_zero_assistant)
+    one_key = app._request_key(child_one_delta)
+    assert zero_key in app._finalized_assistant_requests
+    assert zero_key not in app._transient_assistant_text
+    assert app._transient_assistant_text[one_key] == "one partial"
+    assert app._child_activity[("task-1", 0)].lines == ["zero answer"]
+    assert app._child_activity[("task-1", 1)].lines == []
+    assert app._child_activity[("task-1", 1)].activity == "one partial"
 
 
 @pytest.mark.parametrize("scope, subagent_index", [(None, None), ("task-1", 0)])
@@ -606,7 +645,8 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
         turn=1,
         scope=scope,
         subagent_index=subagent_index,
-        request_ids=["request-1"],
+        iteration=1,
+        request_id="request-1",
         content="durable response",
         interrupted=False,
     )
@@ -624,12 +664,13 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
         patch.object(app, "query_one", return_value=MagicMock()),
         patch.object(app, "_render_child"),
         patch.object(app, "_update_child_modal"),
-        patch.object(app, "_handle_event") as handle,
     ):
         app._render_canonical(assistant, replay=True)
         app._dispatch_buffered_events()
 
-    handle.assert_not_called()
+    key = app._request_key(assistant)
+    assert key in app._finalized_assistant_requests
+    assert key not in app._transient_assistant_text
 
 
 @pytest.mark.asyncio
