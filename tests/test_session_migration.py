@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from archie_cli.cli import main
+from archie_shared.events import decode_event
 from archie_shared.session.migrate import MigrationStats, migrate_session_log, migrate_session_logs
 from click.testing import CliRunner
 
@@ -106,10 +107,82 @@ def test_migrate_session_log_preserves_order_and_identity(tmp_path):
     assert migrated[2]["iteration"] == 1
     assert "turn_iteration" not in migrated[2]
     assert "turn_iteration" not in migrated[3]
+    assert migrated[3]["request_id"] == "request-1"
+    assert migrated[3]["iteration"] == 1
+    for line in path.read_text().splitlines():
+        decode_event(line, persisted=True)
     assert all(line["type"] != "shell_command" for line in migrated)
 
 
-def test_migrate_session_log_skips_schema_v2(tmp_path):
+def test_assistant_without_matching_request_aborts_without_replacement(tmp_path):
+    path = tmp_path / "session-missing-request.jsonl"
+    original = (
+        json.dumps(
+            {
+                "type": "assistant_message",
+                "id": "assistant-1",
+                "turn": 1,
+                "scope": None,
+                "request_ids": ["missing"],
+                "content": "partial",
+                "interrupted": True,
+                "subagent_index": None,
+            }
+        )
+        + "\n"
+    )
+    path.write_text(original)
+
+    with pytest.raises(ValueError, match="matching request identity"):
+        migrate_session_log(path)
+
+    assert path.read_text() == original
+    backup = path.with_name(f"{path.name}.legacy")
+    assert backup.read_bytes() == original.encode()
+
+
+def test_assistant_uses_final_legacy_request_as_direct_producer(tmp_path):
+    path = tmp_path / "session-request-chain.jsonl"
+    request_one = _legacy_line(event_id="request-1", turn_iteration="1.0")
+    request_two = _legacy_line(event_id="request-2", turn_iteration="2.3")
+    assistant = {
+        "type": "assistant_message",
+        "id": "assistant-1",
+        "turn": 99,
+        "scope": None,
+        "request_ids": ["request-1", "request-2"],
+        "content": "done",
+        "interrupted": False,
+        "subagent_index": None,
+    }
+    path.write_text(
+        "\n".join(
+            json.dumps(line)
+            for line in (
+                {
+                    "type": "session_started",
+                    "id": "session-chain",
+                    "schema_version": 1,
+                    "sent_at": "2026-07-01T10:00:00+00:00",
+                    "model_key": "model",
+                },
+                request_one,
+                request_two,
+                assistant,
+            )
+        )
+        + "\n"
+    )
+
+    migrate_session_log(path)
+
+    migrated = [json.loads(line) for line in path.read_text().splitlines()]
+    converted = migrated[-1]
+    assert converted["request_id"] == "request-2"
+    assert converted["turn"] == 2
+    assert converted["iteration"] == 3
+    assert "request_ids" not in converted
+
     path = tmp_path / "session-2.jsonl"
     event = {
         "type": "session_started",

@@ -49,6 +49,10 @@ class MigrationStats:
     model_switch_records_removed: int = 0
 
 
+class MigrationAbortError(ValueError):
+    """A supported log cannot be converted into the final event schema."""
+
+
 _IDENTITY_EVENT_TYPES = {"iteration_start", "text_delta", "llm_request", "tool_call", "tool_result"}
 
 
@@ -80,7 +84,34 @@ def _split_turn_iteration(value: object) -> tuple[int, int]:
     return turn, iteration
 
 
-def _migrate_line(raw: str, path: Path, number: int) -> tuple[str | None, int, int]:
+def _request_index(lines: list[str], path: Path) -> dict[str, tuple[int, int]]:
+    """Index legacy request IDs and their turn/iteration identity."""
+    requests: dict[str, tuple[int, int]] = {}
+    for number, raw in enumerate(lines, 1):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict) or data.get("type") != "llm_request":
+            continue
+        request_id = data.get("id")
+        turn_iteration = data.get("turn_iteration")
+        if isinstance(request_id, str) and turn_iteration is not None:
+            try:
+                requests[request_id] = _split_turn_iteration(turn_iteration)
+            except ValueError as exc:
+                log.warning(
+                    "Migration skipped request identity on line %d in %s: %s",
+                    number,
+                    path,
+                    exc,
+                )
+    return requests
+
+
+def _migrate_line(
+    raw: str, path: Path, number: int, request_index: dict[str, tuple[int, int]]
+) -> tuple[str | None, int, int]:
     """Convert one line and return ``(line, shell_removed, model_removed)``."""
     try:
         data = json.loads(raw)
@@ -109,11 +140,29 @@ def _migrate_line(raw: str, path: Path, number: int) -> tuple[str | None, int, i
             if event_type == "iteration_start":
                 data.pop("index", None)
         elif event_type == "assistant_message":
+            request_ids = data.get("request_ids")
+            if (
+                not isinstance(request_ids, list)
+                or not request_ids
+                or not isinstance(request_ids[-1], str)
+                or request_ids[-1] not in request_index
+            ):
+                raise MigrationAbortError(
+                    f"assistant_message on line {number} has no matching request identity"
+                )
+            request_id = request_ids[-1]
+            turn, iteration = request_index[request_id]
+            data["turn"] = turn
+            data["iteration"] = iteration
+            data["request_id"] = request_id
+            data.pop("request_ids", None)
             data.pop("turn_iteration", None)
 
         migrated = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         decode_event(migrated, persisted=True)
         return migrated, 0, 0
+    except MigrationAbortError:
+        raise
     except (ValueError, TypeError, msgspec.DecodeError, msgspec.ValidationError) as exc:
         log.warning("Migration copied unrecognised line %d in %s: %s", number, path, exc)
         return raw, 0, 0
@@ -136,6 +185,8 @@ def migrate_session_log(path: Path, *, force: bool = False) -> MigrationStats:
         raise FileExistsError(f"migration backup already exists: {backup}")
 
     original = path.read_text(encoding="utf-8")
+    lines = original.splitlines()
+    request_index = _request_index(lines, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup)
     temporary: Path | None = None
@@ -151,8 +202,8 @@ def migrate_session_log(path: Path, *, force: bool = False) -> MigrationStats:
             delete=False,
         ) as output:
             temporary = Path(output.name)
-            for number, raw in enumerate(original.splitlines(), 1):
-                migrated, shell_count, model_count = _migrate_line(raw, path, number)
+            for number, raw in enumerate(lines, 1):
+                migrated, shell_count, model_count = _migrate_line(raw, path, number, request_index)
                 shell_removed += shell_count
                 model_switch_removed += model_count
                 if migrated is not None:

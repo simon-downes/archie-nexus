@@ -10,6 +10,9 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from archie_shared.events import encode_event
+from archie_shared.session.log import SessionLog
+
 log = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = 3
@@ -204,7 +207,8 @@ def reset_and_backfill(db_path: Path, session_log_paths: Iterable[Path]) -> None
         for path in session_log_paths:
             path = Path(path)
             session_id = path.stem
-            batch = [(session_id, raw) for raw in path.read_text(encoding="utf-8").splitlines()]
+            events = SessionLog(path).read()
+            batch = [(session_id, encode_event(event)) for event in events]
             writer._process_batch(conn, batch, strict=True)
     finally:
         conn.close()
