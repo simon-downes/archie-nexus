@@ -74,15 +74,14 @@ The orchestrator exposes these application routes:
 | `POST` | `/sessions` | start a session; body `{"workspace":"name"}` |
 | `DELETE` | `/sessions/{id}` | stop a session |
 | `GET` | `/sessions/{id}/status` | proxy agent status |
-| `GET` | `/sessions/{id}/events?after=<id>` | proxy canonical event replay |
-| `POST` | `/sessions/{id}/shell` | proxy canonical shell command event |
+| `GET` | `/sessions/{id}/events?after=<id>` | proxy session history read |
 | `GET` | `/sessions/{id}/metrics` | metrics for one session |
 | `GET` | `/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
 | `POST` | `/credentials` | replace the host credentials file |
 | WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/static/*` | static assets for the session page |
 
-The agent service itself listens on port 8080 and provides `/status`, `/events`, `/shell`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
+The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
 
 ### Credential push security
 
@@ -144,7 +143,7 @@ so it is the sole accounting source for clients and the orchestrator metrics ind
 - `SessionLog.append()` validates canonical events and rejects conflicting duplicate IDs; identical duplicates are idempotent.
 - `SessionLog.read()` preserves append order and skips malformed or unrecognised records with a warning.
 - The user message is written before provider streaming; the assistant message is written after streaming completes.
-- Legacy `MessageEntry` structures remain only in `session.migrate` for the one-shot host migration; runtime shell writes use `shell_command`.
+- Legacy `MessageEntry` structures remain only in `session.migrate` for the one-shot host migration; direct `!` shell output is rendered only by the initiating TUI.
 
 Each `llm_request` contains the model key, status, sent time, duration, token categories (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`), context token count, and immutable `cost_usd`. Session totals are recomputed from these events on disk, so a newly attached client does not depend on the agent process’s in-memory state. Model switches do not reprice historical requests.
 

@@ -142,17 +142,6 @@ class TurnInterrupted(
     subagent_index: int | None = None
 
 
-class ShellCommand(
-    PersistedEvent, tag="shell_command", tag_field="type", forbid_unknown_fields=True
-):
-    id: str
-    command: str
-    exit_code: int
-    output: str
-    turn: int | None = None
-    scope: str | None = None
-
-
 class Handshake(Event, tag="handshake", tag_field="type", forbid_unknown_fields=True):
     id: str
     protocol_version: int
@@ -183,7 +172,6 @@ type SessionEvent = (
     | TurnComplete
     | TurnError
     | TurnInterrupted
-    | ShellCommand
     | Handshake
     | SessionStatus
     | ErrorNotice

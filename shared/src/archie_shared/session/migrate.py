@@ -12,7 +12,7 @@ from pathlib import Path
 
 import msgspec
 
-from archie_shared.events import ShellCommand, decode_event, encode_event
+from archie_shared.events import decode_event
 
 log = logging.getLogger(__name__)
 
@@ -80,37 +80,6 @@ def _split_turn_iteration(value: object) -> tuple[int, int]:
     return turn, iteration
 
 
-def _convert_legacy_shell(data: object) -> str | None:
-    """Convert one legacy shell MessageEntry, or return None for other records."""
-    if not isinstance(data, dict) or data.get("role") != "shell":
-        return None
-    try:
-        entry = msgspec.convert(data, MessageEntry, strict=False)
-        content = json.loads(entry.content)
-        if not isinstance(content, dict):
-            raise ValueError("shell content must be a JSON object")
-        command = content.get("command")
-        exit_code = content.get("exit_code")
-        output = content.get("output")
-        if (
-            not isinstance(command, str)
-            or not isinstance(exit_code, int)
-            or isinstance(exit_code, bool)
-            or not isinstance(output, str)
-        ):
-            raise ValueError("shell content has invalid field types")
-        return encode_event(
-            ShellCommand(
-                id=entry.id,
-                command=command,
-                exit_code=exit_code,
-                output=output,
-            )
-        )
-    except (ValueError, TypeError, msgspec.ValidationError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid legacy shell entry: {exc}") from exc
-
-
 def _migrate_line(raw: str, path: Path, number: int) -> tuple[str | None, int, int]:
     """Convert one line and return ``(line, shell_removed, model_removed)``."""
     try:
@@ -119,21 +88,15 @@ def _migrate_line(raw: str, path: Path, number: int) -> tuple[str | None, int, i
         log.warning("Migration copied malformed line %d in %s: %s", number, path, exc)
         return raw, 0, 0
 
-    try:
-        shell_line = _convert_legacy_shell(data)
-    except ValueError as exc:
-        log.warning("Migration copied malformed shell line %d in %s: %s", number, path, exc)
-        return raw, 0, 0
-    if shell_line is not None:
-        return shell_line, 0, 0
-
     if not isinstance(data, dict):
         log.warning("Migration copied unrecognised line %d in %s", number, path)
         return raw, 0, 0
 
     event_type = data.get("type")
     has_shell_discriminator = data.get("role") == "shell" or event_type == "shell_command"
-    if event_type == "model_switch" and not has_shell_discriminator:
+    if has_shell_discriminator:
+        return None, 1, 0
+    if event_type == "model_switch":
         return None, 0, 1
 
     try:

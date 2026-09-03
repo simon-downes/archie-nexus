@@ -5,8 +5,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+import pytest
 from archie_cli.cli import main
-from archie_shared.events import ShellCommand, decode_event
 from archie_shared.session.migrate import MigrationStats, migrate_session_log, migrate_session_logs
 from click.testing import CliRunner
 
@@ -85,7 +85,7 @@ def test_migrate_session_log_preserves_order_and_identity(tmp_path):
 
     assert migrate_session_log(path) == MigrationStats(
         logs_migrated=1,
-        shell_records_removed=0,
+        shell_records_removed=1,
         model_switch_records_removed=1,
     )
 
@@ -97,7 +97,6 @@ def test_migrate_session_log_preserves_order_and_identity(tmp_path):
         "iteration-1",
         "request-1",
         "assistant-1",
-        "shell-1",
     ]
     assert migrated[0]["schema_version"] == 2
     assert migrated[1]["turn"] == 2
@@ -107,12 +106,7 @@ def test_migrate_session_log_preserves_order_and_identity(tmp_path):
     assert migrated[2]["iteration"] == 1
     assert "turn_iteration" not in migrated[2]
     assert "turn_iteration" not in migrated[3]
-    assert decode_event(path.read_text().splitlines()[-1], persisted=True) == ShellCommand(
-        id="shell-1",
-        command="false",
-        exit_code=1,
-        output="",
-    )
+    assert all(line["type"] != "shell_command" for line in migrated)
 
 
 def test_migrate_session_log_skips_schema_v2(tmp_path):
@@ -165,8 +159,29 @@ def test_model_switch_overlap_reserves_shell_precedence(tmp_path):
     stats = migrate_session_log(path)
 
     assert stats.model_switch_records_removed == 0
-    assert stats.shell_records_removed == 0
-    assert json.loads(path.read_text())["type"] == "shell_command"
+    assert stats.shell_records_removed == 1
+    assert path.read_text() == ""
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"role": "shell", "id": "malformed-role", "content": "not-json"},
+        {"type": "shell_command", "id": "malformed-type", "command": 123},
+    ],
+)
+def test_malformed_shell_discriminators_are_removed_before_validation(tmp_path, record):
+    path = tmp_path / "malformed-shell.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+
+    stats = migrate_session_log(path)
+
+    assert stats == MigrationStats(
+        logs_migrated=1,
+        shell_records_removed=1,
+        model_switch_records_removed=0,
+    )
+    assert path.read_text() == ""
 
 
 def test_migrate_session_logs_aggregates_statistics(tmp_path):
@@ -177,7 +192,7 @@ def test_migrate_session_logs_aggregates_statistics(tmp_path):
 
     assert migrate_session_logs([first, second]) == MigrationStats(
         logs_migrated=2,
-        shell_records_removed=0,
+        shell_records_removed=2,
         model_switch_records_removed=2,
     )
 
@@ -238,7 +253,7 @@ def test_migrate_sessions_cli_backfills_metrics(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert (
-        f"Migrated 1 session logs; removed 0 shell records and 1 model-switch records; "
+        f"Migrated 1 session logs; removed 1 shell records and 1 model-switch records; "
         f"rebuilt metrics at {metrics_path}"
     ) in result.output
     conn = sqlite3.connect(metrics_path)

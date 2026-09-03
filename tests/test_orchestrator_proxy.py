@@ -1,4 +1,4 @@
-"""Tests for orchestrator HTTP proxy routes (/sessions/{id}/status, /shell)."""
+"""Tests for orchestrator HTTP proxy routes (status, events, and metrics)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -118,45 +118,6 @@ async def test_proxy_status_backend_timeout(http_client):
     assert response.status_code == 504
 
 
-# ---------------------------------------------------------------------------
-# POST /sessions/{id}/shell
-# ---------------------------------------------------------------------------
-
-
-async def test_proxy_shell_success(http_client):
-    """POST /sessions/{id}/shell forwards body to session /shell."""
-    session = _running_session()
-    backend_resp = _mock_backend_response(content=b'{"logged": true}')
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(return_value=backend_resp)
-
-    payload = b'{"command": "ls", "exit_code": 0, "output": "file.txt"}'
-
-    with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
-        patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
-    ):
-        async with http_client as client:
-            response = await client.post(
-                "/sessions/proj-01abc12345/shell",
-                content=payload,
-                headers={"content-type": "application/json"},
-            )
-
-    assert response.status_code == 200
-    mock_client.post.assert_called_once()
-    call_args = mock_client.post.call_args
-    assert call_args[0][0] == "http://127.0.0.1:32771/shell"
-    assert call_args.kwargs["content"] == payload
-
-
-async def test_proxy_shell_session_not_found(http_client):
-    """POST /sessions/{id}/shell with unknown session → 404."""
-    with patch("archie_orchestrator.proxy.list_sessions", return_value=[]):
-        async with http_client as client:
-            response = await client.post("/sessions/unknown-01abc12345/shell", content=b"{}")
-
-    assert response.status_code == 404
+def test_orchestrator_shell_route_is_removed():
+    paths = [getattr(route, "path", None) for route in app.routes]
+    assert "/sessions/{session_id}/shell" not in paths

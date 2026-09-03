@@ -5,7 +5,7 @@ Textual app by stubbing `query_one` and the status-bar update.
 """
 
 import asyncio
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from archie_shared.events import (
@@ -15,7 +15,6 @@ from archie_shared.events import (
     IterationStart,
     LLMRequest,
     SessionStatus,
-    ShellCommand,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -369,8 +368,8 @@ async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
 
 
 @pytest.mark.asyncio
-async def test_direct_shell_waits_for_canonical_event_before_rendering():
-    """The initiating client does not optimistically duplicate ShellCommand output."""
+async def test_direct_shell_renders_locally_without_network_logging():
+    """The initiating TUI renders shell output directly and makes no POST."""
     app = _make_app()
     process = MagicMock(returncode=0)
     process.communicate = AsyncMock(return_value=(b"output\n", None))
@@ -383,17 +382,17 @@ async def test_direct_shell_waits_for_canonical_event_before_rendering():
             new_callable=AsyncMock,
             return_value=process,
         ),
-        patch.object(app, "_log_shell") as log_shell,
+        patch("archie_cli.tui.app.httpx.AsyncClient") as http_client,
     ):
         await app._run_direct_shell("printf output")
 
-    conversation.add_shell_output.assert_not_called()
-    log_shell.assert_called_once_with("printf output", 0, "output\n", ANY)
+    conversation.add_shell_output.assert_called_once_with("printf output", "output\n", exit_code=0)
+    http_client.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_direct_shell_cancel_posts_one_canonical_event():
-    """Esc signals the shell task; it remains the sole canonical event producer."""
+async def test_direct_shell_cancel_renders_local_output():
+    """Esc cancels local shell execution without creating a session event."""
     import asyncio
 
     app = _make_app()
@@ -419,7 +418,6 @@ async def test_direct_shell_cancel_posts_one_canonical_event():
             new_callable=AsyncMock,
             return_value=process,
         ),
-        patch.object(app, "_log_shell") as log_shell,
     ):
         task = asyncio.create_task(app._run_direct_shell("long command"))
         while app._shell_proc is not process:
@@ -427,8 +425,9 @@ async def test_direct_shell_cancel_posts_one_canonical_event():
         app.action_cancel()
         await task
 
-    conversation.add_shell_output.assert_not_called()
-    log_shell.assert_called_once_with("long command", 130, "partial\n", ANY)
+    conversation.add_shell_output.assert_called_once_with(
+        "long command", "partial\n", exit_code=130
+    )
 
 
 @pytest.mark.asyncio
@@ -490,28 +489,6 @@ async def test_replay_child_assistant_message_reconstructs_child_output():
 
 
 @pytest.mark.asyncio
-async def test_shell_persistence_failure_keeps_output_visible():
-    """A failed shell event POST still shows output and reports the local failure."""
-    app = _make_app()
-    response = MagicMock(status_code=503, text="agent unavailable")
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.post = AsyncMock(return_value=response)
-
-    conversation = MagicMock()
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "query_one", return_value=conversation),
-        patch.object(app, "_show_client_error") as show_error,
-    ):
-        await app._log_shell_async("false", 1, "output\n")
-
-    conversation.add_shell_output.assert_called_once_with("false", "output\n", exit_code=1)
-    show_error.assert_called_once()
-
-
-@pytest.mark.asyncio
 async def test_receive_disconnect_preserves_partial_stream_until_replay():
     """A transient socket close must not finalize partial assistant output."""
     app = _make_app()
@@ -534,30 +511,6 @@ async def test_receive_disconnect_preserves_partial_stream_until_replay():
     end_turn.assert_not_called()
     assert app._stream_text == "partial response"
     assert app._turn_active is True
-
-
-@pytest.mark.asyncio
-async def test_shell_response_loss_after_commit_does_not_duplicate_output():
-    """A canonical event seen before POST failure suppresses the fallback copy."""
-    app = _make_app()
-    event = ShellCommand(id="shell-1", command="false", exit_code=1, output="output\n")
-    conversation = MagicMock()
-    response = MagicMock(status_code=503, text="connection lost")
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.post = AsyncMock(return_value=response)
-
-    with (
-        patch.object(app, "query_one", return_value=conversation),
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "_show_client_error") as show_error,
-    ):
-        app._render_canonical(event)
-        await app._log_shell_async("false", 1, "output\n", "shell-1")
-
-    conversation.add_shell_output.assert_called_once_with("false", "output\n", exit_code=1)
-    show_error.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -588,46 +541,6 @@ async def test_child_replay_replaces_live_child_deltas():
         app._render_canonical(durable, replay=True)
 
     assert app._child_activity[("task-1", 0)].lines == ["partial response"]
-
-
-@pytest.mark.asyncio
-async def test_shell_persistence_failure_after_canonical_delivery_is_silent():
-    """A lost POST acknowledgement is not reported after canonical delivery."""
-    app = _make_app()
-    app._canonical_shell_ids.add("shell-1")
-    with patch.object(app, "_show_client_error") as show_error:
-        app._show_shell_persistence_failure("false", 1, "output\n", "HTTP 503", "shell-1")
-
-    show_error.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_shell_fallback_is_removed_when_canonical_event_arrives():
-    """A fallback rendered first is replaced by the matching canonical event."""
-    app = _make_app()
-    event = ShellCommand(id="shell-2", command="false", exit_code=1, output="output\n")
-    conversation = MagicMock()
-    fallback = MagicMock()
-    conversation.add_shell_output.return_value = fallback
-    response = MagicMock(status_code=503, text="unavailable")
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.post = AsyncMock(return_value=response)
-
-    with (
-        patch.object(app, "query_one", return_value=conversation),
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "_show_client_error"),
-    ):
-        await app._log_shell_async("false", 1, "output\n", "shell-2")
-        app._render_canonical(event)
-
-    fallback.remove.assert_called_once_with()
-    assert conversation.add_shell_output.call_args_list == [
-        (("false", "output\n"), {"exit_code": 1}),
-        (("false", "output\n"), {"exit_code": 1}),
-    ]
 
 
 def test_child_replay_uses_latest_request_baseline():
@@ -717,3 +630,72 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
         app._dispatch_buffered_events()
 
     handle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_timeout_renders_exit_124():
+    app = _make_app()
+    process = MagicMock(returncode=None)
+    process.communicate = MagicMock()
+    process.wait = AsyncMock()
+    conversation = MagicMock()
+
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch(
+            "archie_cli.tui.app.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=process,
+        ),
+        patch("archie_cli.tui.app.asyncio.wait_for", side_effect=TimeoutError),
+    ):
+        await app._run_direct_shell("sleep 60")
+
+    process.kill.assert_called_once_with()
+    process.wait.assert_awaited_once()
+    conversation.add_shell_output.assert_called_once_with("sleep 60", "(timed out)", exit_code=124)
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_truncates_output_after_10000_lines():
+    app = _make_app()
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(
+        return_value=("\n".join(f"line-{index}" for index in range(10_001)).encode(), None)
+    )
+    conversation = MagicMock()
+
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch(
+            "archie_cli.tui.app.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=process,
+        ),
+    ):
+        await app._run_direct_shell("generate-lines")
+
+    output = conversation.add_shell_output.call_args.args[1]
+    assert output.splitlines()[-1] == "(truncated)"
+    assert len(output.splitlines()) == 10_001
+    assert output.splitlines()[0] == "line-0"
+    assert output.splitlines()[-2] == "line-9999"
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_failure_renders_local_error():
+    app = _make_app()
+    conversation = MagicMock()
+
+    with (
+        patch.object(app, "query_one", return_value=conversation),
+        patch(
+            "archie_cli.tui.app.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            side_effect=OSError("docker unavailable"),
+        ),
+    ):
+        await app._run_direct_shell("pwd")
+
+    conversation.add_client_error.assert_called_once_with("Docker exec failed: docker unavailable")
+    conversation.add_shell_output.assert_not_called()

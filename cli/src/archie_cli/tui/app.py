@@ -44,10 +44,9 @@ from archie_shared.tool_summaries import (
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
-from ulid import ULID
 
 from archie_cli.tui import theme
-from archie_cli.tui.conversation import Conversation, IterationBlock, ShellOutput, StreamingMessage
+from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingMessage
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.status import StatusBar
@@ -103,10 +102,6 @@ class ArchieApp(App):
         # Request IDs represented by replayed assistant messages. Buffered live
         # deltas for these requests are already represented by durable content.
         self._replayed_assistant_request_ids: set[str] = set()
-        # Shell event IDs correlate persistence failures with later canonical
-        # delivery, preventing response-loss duplicates.
-        self._canonical_shell_ids: set[str] = set()
-        self._shell_fallbacks: dict[str, ShellOutput] = {}
         # Ids of llm_request ledger events already folded into accounting —
         # prevents double-counting across replay + live broadcast.
         self._seen_accounted_ids: set[str] = set()
@@ -252,7 +247,6 @@ class ArchieApp(App):
         self._last_event_id = None
         self._seen_event_ids.clear()
         self._replayed_assistant_request_ids.clear()
-        self._canonical_shell_ids.clear()
         self._seen_accounted_ids.clear()
         self._cumulative_input = 0
         self._cumulative_output = 0
@@ -422,12 +416,6 @@ class ArchieApp(App):
             self._show_turn_status()
             self._iteration_block = None
             self._end_turn()
-        elif isinstance(event, ce.ShellCommand):
-            self._canonical_shell_ids.add(event.id)
-            fallback = self._shell_fallbacks.pop(event.id, None)
-            if fallback is not None:
-                fallback.remove()
-            conv.add_shell_output(event.command, event.output, exit_code=event.exit_code)
 
     def _accumulate_ledger(self, event: LLMRequest) -> None:
         """Fold an llm_request ledger event into cumulative accounting.
@@ -760,27 +748,21 @@ class ArchieApp(App):
             self._schedule_reconnect()
 
     async def _run_direct_shell(self, command: str) -> None:
-        """Execute a command in the session container via docker exec.
-
-        Runs async so the TUI stays responsive. Output is displayed in a
-        ShellOutput widget. Errors (docker exec failure) use ClientErrorMessage.
-        """
+        """Execute and render a command locally through host-side docker exec."""
         conv = self.query_one("#conversation", Conversation)
         self._shell_active = True
         self._shell_command = command
         self._shell_cancel_requested = False
-        event_id = str(ULID())
         max_output_lines = 10_000
         timeout = 30
 
         try:
-            cname = self._container_name
             self._shell_proc = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
                 "-w",
                 "/workspace",
-                cname,
+                self._container_name,
                 "bash",
                 "-c",
                 command,
@@ -791,74 +773,27 @@ class ArchieApp(App):
                 stdout_bytes, _ = await asyncio.wait_for(
                     self._shell_proc.communicate(), timeout=timeout
                 )
+                exit_code = (
+                    130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
+                )
+                output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
             except TimeoutError:
                 self._shell_proc.kill()
                 await self._shell_proc.wait()
-                self._log_shell(command, 124, "(timed out)", event_id)
-                return
+                exit_code = 124
+                output = "(timed out)"
 
-            exit_code = 130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
-            output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-
-            # Truncate large output
             lines = output.split("\n")
             if len(lines) > max_output_lines:
                 output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
-
-            self._log_shell(command, exit_code, output, event_id)
-
-        except Exception as e:
-            conv.add_client_error(f"Docker exec failed: {e}")
+            conv.add_shell_output(command, output, exit_code=exit_code)
+        except Exception as exc:  # noqa: BLE001 — local execution failure
+            conv.add_client_error(f"Docker exec failed: {exc}")
         finally:
             self._shell_active = False
             self._shell_proc = None
             self._shell_command = ""
             self._shell_cancel_requested = False
-
-    def _log_shell(
-        self, command: str, exit_code: int, output: str, event_id: str | None = None
-    ) -> None:
-        """Best-effort POST to /shell endpoint to log command in session."""
-        asyncio.create_task(self._log_shell_async(command, exit_code, output, event_id))
-
-    async def _log_shell_async(
-        self, command: str, exit_code: int, output: str, event_id: str | None = None
-    ) -> None:
-        """Async POST to /shell endpoint."""
-        try:
-            payload = {"command": command, "exit_code": exit_code, "output": output}
-            if event_id is not None:
-                payload["event_id"] = event_id
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self._api_url}/shell",
-                    json=payload,
-                    timeout=5,
-                )
-            if not 200 <= response.status_code < 300:
-                self._show_shell_persistence_failure(
-                    command, exit_code, output, f"HTTP {response.status_code}", event_id
-                )
-        except Exception as exc:
-            self._show_shell_persistence_failure(command, exit_code, output, str(exc), event_id)
-
-    def _show_shell_persistence_failure(
-        self,
-        command: str,
-        exit_code: int,
-        output: str,
-        reason: str,
-        event_id: str | None = None,
-    ) -> None:
-        """Keep shell output visible when its canonical event cannot be saved."""
-        if event_id is not None and event_id in self._canonical_shell_ids:
-            # The event was already observed; only the HTTP acknowledgement was lost.
-            return
-        conv = self.query_one("#conversation", Conversation)
-        fallback = conv.add_shell_output(command, output, exit_code=exit_code)
-        if event_id is not None:
-            self._shell_fallbacks[event_id] = fallback
-        self._show_client_error(f"Shell output could not be saved: {reason}")
 
     # --- UI helpers ---
 

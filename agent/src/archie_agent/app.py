@@ -24,13 +24,12 @@ from archie_shared.events import (
     Handshake,
     SessionStarted,
     SessionStatus,
-    ShellCommand,
     encode_event,
 )
 from archie_shared.models import get_model, load_models
 from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import load_nexus_config
-from archie_shared.session.log import CursorNotFound, EventIdConflict
+from archie_shared.session.log import CursorNotFound
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -284,62 +283,10 @@ async def stream(websocket: WebSocket) -> None:
         _agent.event_bus.discard_client(websocket)
 
 
-async def shell_log(request: Request) -> JSONResponse:
-    """Persist a direct shell command as a canonical session event.
-
-    Accepts JSON: {command: str, exit_code: int, output: str}.
-    """
-    if _agent is None:
-        return JSONResponse({"error": "no session"}, status_code=503)
-
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "invalid shell payload"}, status_code=400)
-
-    command = body.get("command")
-    exit_code = body.get("exit_code")
-    output = body.get("output")
-    event_id = body.get("event_id")
-    if (
-        not isinstance(command, str)
-        or not isinstance(exit_code, int)
-        or isinstance(exit_code, bool)
-        or not isinstance(output, str)
-        or (event_id is not None and (not isinstance(event_id, str) or not event_id))
-    ):
-        return JSONResponse({"error": "invalid shell payload"}, status_code=400)
-
-    if event_id is not None:
-        try:
-            ULID.from_str(event_id)
-        except ValueError:
-            return JSONResponse({"error": "invalid shell event id"}, status_code=400)
-
-    try:
-        event = ShellCommand(
-            id=event_id or str(ULID()),
-            command=command,
-            exit_code=exit_code,
-            output=output,
-        )
-        await _agent.event_bus.emit(event)
-        return JSONResponse({"ok": True})
-    except EventIdConflict as e:
-        return JSONResponse({"error": str(e)}, status_code=409)
-    except Exception as e:
-        log.warning("Failed to log shell command", exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
 app = Starlette(
     routes=[
         Route("/status", status, methods=["GET"]),
         Route("/events", events, methods=["GET"]),
-        Route("/shell", shell_log, methods=["POST"]),
         WebSocketRoute("/stream", stream),
     ],
     lifespan=lifespan,

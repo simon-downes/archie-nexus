@@ -39,7 +39,6 @@ replayed through `GET /events`.
 | `turn_complete` | persisted | `turn: int`, `scope: string?`, `stop_reason: string`, `subagent_index: int?` |
 | `turn_error` | persisted | `turn: int`, `scope: string?`, `message: string`, `subagent_index: int?` |
 | `turn_interrupted` | persisted | `turn: int`, `scope: string?`, `subagent_index: int?` |
-| `shell_command` | persisted | `command: string`, `exit_code: int`, `output: string`, `turn: int?`, `scope: string?` |
 | `handshake` | live-only | `protocol_version: int`, `session_id: string` |
 | `session_status` | live-only | `model_key: string`, `git_branch: string` |
 | `error_notice` | live-only | `kind: string`, `message: string` |
@@ -73,7 +72,7 @@ append path itself fails.
 Session logs live at `<ARCHIE_HOME_DIR>/sessions/<session-id>.jsonl`. The host command
 `archie migrate-sessions` is a one-shot operation to run with sessions and the
 orchestrator stopped. It upgrades legacy canonical identity fields, removes model-switch records while preserving IDs and
-order of remaining records, converts legacy shell `MessageEntry` records to `shell_command`,
+order of remaining records, discards legacy shell records by discriminator,
 retains the source as `.legacy`, and writes each log through a same-directory temporary file and
 atomic rename. Logs declaring `session_started.schema_version == 2` are skipped. The command then
 archives and rebuilds `<ARCHIE_HOME_DIR>/metrics.db` from migrated `llm_request` events. Metrics

@@ -7,7 +7,6 @@ Routes:
   POST   /sessions                        — start a new session
   DELETE /sessions/{session_id}           — stop a running session
   GET    /sessions/{session_id}/status    — proxy to session /status
-  POST   /sessions/{session_id}/shell     — proxy to session /shell
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
   GET    /static/*                        — static files (CSS, etc.)
 """
@@ -36,7 +35,6 @@ from archie_orchestrator.metrics import MetricsWriter
 from archie_orchestrator.proxy import (
     get_active_ws_connections,
     proxy_events,
-    proxy_shell,
     proxy_status,
     proxy_stream,
 )
@@ -384,7 +382,6 @@ app = Starlette(
         Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
         Route("/sessions/{session_id}/status", proxy_status, methods=["GET"]),
         Route("/sessions/{session_id}/events", proxy_events, methods=["GET"]),
-        Route("/sessions/{session_id}/shell", proxy_shell, methods=["POST"]),
         Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
         Route("/metrics", get_metrics, methods=["GET"]),
         Route("/credentials", push_credentials, methods=["POST"]),
