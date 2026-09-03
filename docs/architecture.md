@@ -107,30 +107,30 @@ The orchestrator WebSocket proxy is intended to be transparent: it forwards clie
 
 ## Event layers
 
-The canonical event union is the only server-to-client event contract for both live delivery and
+The public event union is the only server-to-client event contract for both live delivery and
 replay. The complete catalog, field types, persisted/live-only classification, identity rules, and
 migration contract are in [Event specification](event-spec.md).
 
-Canonical events are flat tagged `msgspec` records defined in
-`shared/src/archie_shared/canonical_events.py`. Persisted records are newline-delimited JSON in:
+Public events are flat tagged `msgspec` records defined in
+`shared/src/archie_shared/events.py`. Persisted records are newline-delimited JSON in:
 
 ```text
 <ARCHIE_HOME_DIR>/sessions/<session-id>.jsonl
 ```
 
 The persisted stream includes `session_started`, `user_message`, `iteration_start`, `llm_request`,
-`tool_call`, `tool_result`, `assistant_message`, `turn_complete`, `turn_error`,
-`turn_interrupted`, `model_switch`, and `shell_command`. The live-only set is exactly `text_delta`,
-`handshake`, `status_updated`, and `error_notice`.
+`tool_call`, `tool_result`, `assistant_message`, `turn_complete`, `turn_error`, `turn_interrupted`,
+and `shell_command`. The live-only set is exactly `text_delta`, `handshake`, `session_status`, and
+`error_notice`.
 
 `GET /events` returns ordered persisted NDJSON. Its optional `after` parameter is the client's last
 applied persisted event ID; live-only frames never advance that cursor. The TUI decodes live and
 replayed frames through one canonical path and deduplicates by event ID.
 
-A connect sends one live-only `handshake` containing protocol/session/model metadata, followed by
-one `status_updated` frame. There is no `session_snapshot` or `session_info` envelope and no
-parallel wire event schema. `PROTOCOL_VERSION` is bumped with this clean protocol break; clients
-and agents are upgraded together.
+A connect sends one live-only `handshake` containing protocol and session identity, followed by
+one `session_status` frame carrying the current model and Git branch. There is no
+`session_snapshot` or `session_info` envelope and no parallel wire event schema. `PROTOCOL_VERSION`
+is bumped with this clean protocol break; clients and agents are upgraded together.
 
 The coordinator persists a persisted event before enqueueing it for broadcast. Live-only events are
 never appended. `text_delta` is intentionally excluded from replay; assistant content is rebuilt
@@ -141,8 +141,8 @@ so it is the sole accounting source for clients and the orchestrator metrics ind
 
 ### Canonical log rules
 
-- `append_event()` validates the serialized event and rejects conflicting duplicate IDs; identical duplicates are idempotent.
-- Replay preserves append order and skips malformed or unrecognised records with a warning.
+- `SessionLog.append()` validates canonical events and rejects conflicting duplicate IDs; identical duplicates are idempotent.
+- `SessionLog.read()` preserves append order and skips malformed or unrecognised records with a warning.
 - The user message is written before provider streaming; the assistant message is written after streaming completes.
 - Legacy `MessageEntry` structures remain only in `session.migrate` for the one-shot host migration; runtime shell writes use `shell_command`.
 
@@ -183,8 +183,8 @@ The agent owns the session process, provider requests, tool execution, and canon
 
 ## Change impact guide
 
-- **Changing `shared/canonical_events.py`** affects persisted logs, replay, agent writes, orchestrator metrics, and clients. Add compatibility tests, update [event-spec.md](event-spec.md), and update this document.
-- **Changing `shared/events.py`** affects client commands, agent WebSocket dispatch, and protocol versioning; it no longer defines server-to-client event types.
+- **Changing `shared/events.py`** affects persisted logs, replay, agent writes, orchestrator metrics, and clients. Add compatibility tests, update [event-spec.md](event-spec.md), and update this document.
+- **Changing `shared/commands.py`** affects client commands, agent WebSocket dispatch, and protocol versioning.
 - **Changing mounts, ports, or lifecycle** affects `Dockerfile`, orchestrator lifecycle, readiness checks, security assumptions, and local setup instructions.
 - **Changing accounting** requires tests for model switches, interruptions/errors, duplicate ingestion, and nested scopes.
 - **Changing `persona/`** changes runtime prompts or capabilities without changing package APIs; review the resulting agent behavior and relevant skill/agent metadata.

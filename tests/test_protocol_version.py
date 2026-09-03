@@ -20,7 +20,6 @@ def _make_session_info(protocol_version: int) -> Handshake:
     return Handshake(
         id="01J00000000000000000000001",
         protocol_version=protocol_version,
-        model_key="bedrock-claude-sonnet-4-6",
         session_id="proj-01abc12345",
     )
 

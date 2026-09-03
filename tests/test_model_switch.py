@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from archie_shared.commands import SwitchModelCommand, decode_command, encode_command
-from archie_shared.events import ErrorNotice, ModelSwitch, decode_event, encode_event
+from archie_shared.events import ErrorNotice, SessionStatus, decode_event, encode_event
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
 
 
@@ -35,24 +35,25 @@ class TestSwitchModelCommand:
             decode_command(raw)
 
 
-class TestModelSwitch:
-    """Tests for the canonical model-switch event."""
+class TestSessionStatus:
+    """Tests for the live mutable session status event."""
+
+    @pytest.mark.parametrize("tag", ["model_switch"])
+    def test_removed_model_switch_tag_is_rejected(self, tag):
+        with pytest.raises((ValueError, TypeError)):
+            decode_event(
+                '{"type":"' + tag + '","id":"01J00000000000000000000001",'
+                '"model_key":"m","sent_at":"now"}'
+            )
 
     def test_round_trip(self):
-        event = ModelSwitch(
+        event = SessionStatus(
             id="01J00000000000000000000001",
             model_key="bedrock-claude-haiku-4-5",
-            sent_at="2025-01-01T00:00:00+00:00",
+            git_branch="main",
         )
-        restored = decode_event(encode_event(event), persisted=True)
+        restored = decode_event(encode_event(event))
         assert restored == event
-        assert restored.model_key == "bedrock-claude-haiku-4-5"
-
-    def test_display_properties_are_not_persisted(self):
-        event = ModelSwitch(id="01J00000000000000000000001", model_key="haiku", sent_at="now")
-        raw = encode_event(event)
-        assert "model_name" not in raw
-        assert "supports_cache" not in raw
 
 
 # ---------------------------------------------------------------------------
@@ -156,11 +157,9 @@ class TestModelSwitchHandler:
         assert len(sent) == 0  # broadcast goes to harness.clients, not the requesting WS
 
     @pytest.mark.asyncio
-    async def test_switch_model_append_failure_keeps_old_state(self, _setup_app, monkeypatch):
-        """A failed model-switch append does not mutate runtime model state."""
+    async def test_switch_model_is_live_status_only(self, _setup_app):
+        """A successful switch updates runtime state without model history."""
         harness, _ = _setup_app
-        from archie_agent.app import _handle_model_switch
-        from archie_shared.session.log import LogAppendError
 
         sent: list[str] = []
 
@@ -171,26 +170,23 @@ class TestModelSwitchHandler:
         ws = FakeWS()
         harness.event_bus.add_client(ws)
 
-        def fail_append(event):
-            raise LogAppendError("disk full")
+        from archie_agent.app import _handle_model_switch
 
-        monkeypatch.setattr(harness.event_bus.log, "append", fail_append)
         await _handle_model_switch(SwitchModelCommand(model_key="model-b"), ws)
         await asyncio.sleep(0)
 
-        assert harness.session.model_id == "model-a"
-        assert harness.session.model.name == "Test Model A"
+        assert harness.session.model_id == "model-b"
+        assert harness.session.model.name == "Test Model B"
         assert len(sent) == 1
-        notice = decode_event(sent[0])
-        assert isinstance(notice, ErrorNotice)
-        assert notice.kind == "storage_error"
-        assert "disk full" in notice.message
-        assert not harness.log_path.exists() or "model_switch" not in harness.log_path.read_text()
+        status = decode_event(sent[0])
+        assert isinstance(status, SessionStatus)
+        assert status.model_key == "model-b"
+        assert not harness.log_path.exists()
         harness.event_bus.discard_client(ws)
 
     @pytest.mark.asyncio
     async def test_switch_model_broadcasts_to_clients(self, tmp_path, monkeypatch, _setup_app):
-        """ModelSwitch event is broadcast to all connected clients."""
+        """A successful model switch broadcasts live session status."""
         harness, _ = _setup_app
 
         sent: list[str] = []
@@ -208,12 +204,12 @@ class TestModelSwitchHandler:
         await _handle_model_switch(cmd, ws)
         await asyncio.sleep(0)
 
-        # Client should have received the ModelSwitch event
+        # Client should receive the live session status event.
         assert len(sent) == 1
         event = decode_event(sent[0])
-        assert isinstance(event, ModelSwitch)
+        assert isinstance(event, SessionStatus)
         assert event.model_key == "model-b"
-        assert event.sent_at
+        assert event.git_branch
 
     @pytest.mark.asyncio
     async def test_switch_model_during_active_turn(self, tmp_path, monkeypatch, _setup_app):

@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import msgspec
@@ -37,6 +38,15 @@ class MessageEntry(msgspec.Struct):
     role: str
     content: str
     metadata: MessageMetadata | None = None
+
+
+@dataclass(frozen=True)
+class MigrationStats:
+    """Counts produced by one session-log migration."""
+
+    logs_migrated: int = 0
+    shell_records_removed: int = 0
+    model_switch_records_removed: int = 0
 
 
 _IDENTITY_EVENT_TYPES = {"iteration_start", "text_delta", "llm_request", "tool_call", "tool_result"}
@@ -101,27 +111,31 @@ def _convert_legacy_shell(data: object) -> str | None:
         raise ValueError(f"invalid legacy shell entry: {exc}") from exc
 
 
-def _migrate_line(raw: str, path: Path, number: int) -> str:
-    """Convert one line, preserving it verbatim when it cannot be recognised."""
+def _migrate_line(raw: str, path: Path, number: int) -> tuple[str | None, int, int]:
+    """Convert one line and return ``(line, shell_removed, model_removed)``."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         log.warning("Migration copied malformed line %d in %s: %s", number, path, exc)
-        return raw
+        return raw, 0, 0
 
     try:
         shell_line = _convert_legacy_shell(data)
     except ValueError as exc:
         log.warning("Migration copied malformed shell line %d in %s: %s", number, path, exc)
-        return raw
+        return raw, 0, 0
     if shell_line is not None:
-        return shell_line
+        return shell_line, 0, 0
 
     if not isinstance(data, dict):
         log.warning("Migration copied unrecognised line %d in %s", number, path)
-        return raw
+        return raw, 0, 0
 
     event_type = data.get("type")
+    has_shell_discriminator = data.get("role") == "shell" or event_type == "shell_command"
+    if event_type == "model_switch" and not has_shell_discriminator:
+        return None, 0, 1
+
     try:
         if event_type == "session_started":
             data["schema_version"] = 2
@@ -136,23 +150,23 @@ def _migrate_line(raw: str, path: Path, number: int) -> str:
 
         migrated = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         decode_event(migrated, persisted=True)
-        return migrated
+        return migrated, 0, 0
     except (ValueError, TypeError, msgspec.DecodeError, msgspec.ValidationError) as exc:
         log.warning("Migration copied unrecognised line %d in %s: %s", number, path, exc)
-        return raw
+        return raw, 0, 0
 
 
-def migrate_session_log(path: Path, *, force: bool = False) -> bool:
+def migrate_session_log(path: Path, *, force: bool = False) -> MigrationStats:
     """Migrate one session log atomically and retain the original as ``.legacy``.
 
-    Returns ``False`` when the log already declares schema version 2 and ``True``
-    after a rewrite. A failed temporary-file write or rename leaves the original
-    log untouched; the backup may remain and must be explicitly forced on retry.
+    A schema-version-2 log is skipped and returns zero counts. A failed
+    temporary-file write or rename leaves the original log untouched; the
+    backup may remain and must be explicitly forced on retry.
     """
     path = Path(path)
     if _schema_version(path) == 2:
         log.info("Skipping already migrated session log %s", path)
-        return False
+        return MigrationStats()
 
     backup = path.with_name(f"{path.name}.legacy")
     if backup.exists() and not force:
@@ -162,6 +176,8 @@ def migrate_session_log(path: Path, *, force: bool = False) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup)
     temporary: Path | None = None
+    shell_removed = 0
+    model_switch_removed = 0
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -173,8 +189,12 @@ def migrate_session_log(path: Path, *, force: bool = False) -> bool:
         ) as output:
             temporary = Path(output.name)
             for number, raw in enumerate(original.splitlines(), 1):
-                output.write(_migrate_line(raw, path, number))
-                output.write("\n")
+                migrated, shell_count, model_count = _migrate_line(raw, path, number)
+                shell_removed += shell_count
+                model_switch_removed += model_count
+                if migrated is not None:
+                    output.write(migrated)
+                    output.write("\n")
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
@@ -182,13 +202,23 @@ def migrate_session_log(path: Path, *, force: bool = False) -> bool:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return True
+    return MigrationStats(
+        logs_migrated=1,
+        shell_records_removed=shell_removed,
+        model_switch_records_removed=model_switch_removed,
+    )
 
 
-def migrate_session_logs(paths: list[Path], *, force: bool = False) -> int:
-    """Migrate the supplied logs and return the number rewritten."""
-    migrated = 0
+def migrate_session_logs(paths: list[Path], *, force: bool = False) -> MigrationStats:
+    """Migrate supplied logs and aggregate their immutable statistics."""
+    total = MigrationStats()
     for path in paths:
-        if migrate_session_log(path, force=force):
-            migrated += 1
-    return migrated
+        stats = migrate_session_log(path, force=force)
+        total = MigrationStats(
+            logs_migrated=total.logs_migrated + stats.logs_migrated,
+            shell_records_removed=total.shell_records_removed + stats.shell_records_removed,
+            model_switch_records_removed=(
+                total.model_switch_records_removed + stats.model_switch_records_removed
+            ),
+        )
+    return total

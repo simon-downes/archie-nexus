@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from archie_shared.events import CanonicalEvent, ErrorNotice, Event, StatusUpdated, UserMessage
+from archie_shared.events import CanonicalEvent, ErrorNotice, Event, SessionStatus, UserMessage
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.schemas import SubagentsConfig
 from archie_shared.session.log import LogAppendError, SessionLog
@@ -264,7 +264,11 @@ class AgentHarness:
 
             try:
                 await self._event_bus.emit(
-                    StatusUpdated(id=str(ULID()), git_branch=_read_git_branch())
+                    SessionStatus(
+                        id=str(ULID()),
+                        model_key=self.session.model_id,
+                        git_branch=_read_git_branch(),
+                    )
                 )
             except Exception:  # noqa: BLE001 — status refresh is best effort
                 log.warning("Failed to broadcast final turn status", exc_info=True)

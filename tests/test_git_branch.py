@@ -1,29 +1,31 @@
 """Tests for canonical connect/status events and git branch discovery."""
 
-from archie_shared.events import Handshake, StatusUpdated, decode_event, encode_event
+from archie_shared.events import Handshake, SessionStatus, decode_event, encode_event
 
 
-def test_handshake_contains_model_key_and_session_metadata():
+def test_handshake_contains_only_protocol_and_session_metadata():
     event = Handshake(
         id="01J00000000000000000000001",
         protocol_version=2,
-        model_key="model-key",
         session_id="abc",
     )
     restored = decode_event(encode_event(event))
     assert restored == event
-    assert restored.model_key == "model-key"
+    assert not hasattr(restored, "model_key")
 
 
-def test_status_updated_round_trip():
-    event = StatusUpdated(id="01J00000000000000000000001", git_branch="feature/abc")
+def test_session_status_round_trip():
+    event = SessionStatus(
+        id="01J00000000000000000000001", model_key="model-key", git_branch="feature/abc"
+    )
     restored = decode_event(encode_event(event))
-    assert isinstance(restored, StatusUpdated)
+    assert isinstance(restored, SessionStatus)
+    assert restored.model_key == "model-key"
     assert restored.git_branch == "feature/abc"
 
 
-def test_status_updated_is_live_only():
-    event = StatusUpdated(id="01J00000000000000000000001", git_branch="main")
+def test_session_status_is_live_only():
+    event = SessionStatus(id="01J00000000000000000000001", model_key="m", git_branch="main")
     raw = encode_event(event)
     try:
         decode_event(raw, persisted=True)

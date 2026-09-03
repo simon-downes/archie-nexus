@@ -14,8 +14,8 @@ from archie_shared.events import (
     Handshake,
     IterationStart,
     LLMRequest,
+    SessionStatus,
     ShellCommand,
-    StatusUpdated,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -341,9 +341,8 @@ async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
                     id="h1",
                     protocol_version=2,
                     session_id="session-1",
-                    model_key="m",
                 ),
-                StatusUpdated(id="s1", git_branch="main"),
+                SessionStatus(id="s1", model_key="m", git_branch="main"),
                 ledger,
             ]
         )

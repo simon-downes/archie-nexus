@@ -163,12 +163,13 @@ def test_websocket_handshake_on_connect(client):
         handshake = json.loads(ws.receive_text())
         assert handshake["type"] == "handshake"
         assert handshake["protocol_version"] == 2
-        assert handshake["model_key"] == "bedrock-claude-sonnet-4-6"
+        assert "model_key" not in handshake
         assert handshake["session_id"] == "test-session"
         assert handshake["id"]
 
         status = json.loads(ws.receive_text())
-        assert status["type"] == "status_updated"
+        assert status["type"] == "session_status"
+        assert status["model_key"] == "bedrock-claude-sonnet-4-6"
         assert status["git_branch"]
         assert status["id"]
 
@@ -177,7 +178,7 @@ def test_websocket_message_and_events(client):
     """Verify sending a message yields canonical live and persisted events."""
     with client.websocket_connect("/stream") as ws:
         json.loads(ws.receive_text())  # handshake
-        json.loads(ws.receive_text())  # status_updated
+        json.loads(ws.receive_text())  # session status
         ws.send_text(json.dumps({"type": "message", "content": "hello"}))
 
         events = []
@@ -248,7 +249,7 @@ def test_websocket_tool_turn(mock_env, tmp_path):
 
                 with TestClient(app) as client:
                     with client.websocket_connect("/stream") as ws:
-                        # Consume handshake + status_updated
+                        # Consume handshake + session status
                         ws.receive_text()
                         ws.receive_text()
 

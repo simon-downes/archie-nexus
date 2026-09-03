@@ -340,13 +340,17 @@ def migrate_sessions(sessions_dir: Path | None, metrics_db: Path | None, force: 
 
     paths = sorted(sessions_dir.glob("*.jsonl"))
     try:
-        migrated = migrate_session_logs(paths, force=force)
+        stats = migrate_session_logs(paths, force=force)
         reset_and_backfill(metrics_db, paths)
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise click.ClickException(str(exc)) from None
 
-    suffix = "" if migrated == 1 else "s"
-    click.echo(f"Migrated {migrated} session log{suffix}; rebuilt metrics at {metrics_db}")
+    click.echo(
+        f"Migrated {stats.logs_migrated} session logs; removed "
+        f"{stats.shell_records_removed} shell records and "
+        f"{stats.model_switch_records_removed} model-switch records; "
+        f"rebuilt metrics at {metrics_db}"
+    )
 
 
 @main.command(name="ls")

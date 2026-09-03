@@ -22,16 +22,15 @@ from archie_shared.config import home_dir
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
-    ModelSwitch,
     SessionStarted,
+    SessionStatus,
     ShellCommand,
-    StatusUpdated,
     encode_event,
 )
 from archie_shared.models import get_model, load_models
 from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import load_nexus_config
-from archie_shared.session.log import CursorNotFound, EventIdConflict, LogAppendError
+from archie_shared.session.log import CursorNotFound, EventIdConflict
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -208,33 +207,21 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
         return
 
     new_llm = create_llm_client(new_model, _config.global_.region)
-    try:
-        await _agent.event_bus.emit(
-            ModelSwitch(
-                id=str(ULID()),
-                model_key=command.model_key,
-                sent_at=datetime.now(UTC).isoformat(),
-            )
-        )
-    except LogAppendError as exc:
-        await _agent.event_bus.emit(
-            ErrorNotice(
-                id=str(ULID()),
-                kind="storage_error",
-                message=str(exc),
-            ),
-            target=websocket,
-        )
-        return
-
     _agent.switch_model(command.model_key, new_model, new_llm)
+    await _agent.event_bus.emit(
+        SessionStatus(
+            id=str(ULID()),
+            model_key=_agent.session.model_id,
+            git_branch=_read_git_branch(),
+        )
+    )
     log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
 
 
 async def stream(websocket: WebSocket) -> None:
     """Bidirectional WebSocket endpoint for event streaming.
 
-    On connect: sends one canonical Handshake followed by StatusUpdated.
+    On connect: sends one canonical Handshake followed by SessionStatus.
     Receives: message and interrupt commands.
     On disconnect: removes the client from the session bus.
     """
@@ -252,9 +239,12 @@ async def stream(websocket: WebSocket) -> None:
                 id=str(ULID()),
                 protocol_version=PROTOCOL_VERSION,
                 session_id=_agent.session.session_id,
-                model_key=_agent.session.model_id,
             ),
-            StatusUpdated(id=str(ULID()), git_branch=_read_git_branch()),
+            SessionStatus(
+                id=str(ULID()),
+                model_key=_agent.session.model_id,
+                git_branch=_read_git_branch(),
+            ),
         ),
     )
 

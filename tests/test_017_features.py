@@ -5,9 +5,8 @@ from archie_agent.session_bus import SessionEventBus
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
-    ModelSwitch,
+    SessionStatus,
     ShellCommand,
-    StatusUpdated,
     decode_event,
     encode_event,
 )
@@ -30,7 +29,6 @@ def test_handshake_contains_only_connection_metadata():
         id="01J00000000000000000000001",
         protocol_version=2,
         session_id="test-abc",
-        model_key="model-key",
     )
     raw = encode_event(event)
     assert "total_cost" not in raw
@@ -38,17 +36,10 @@ def test_handshake_contains_only_connection_metadata():
     assert decode_event(raw) == event
 
 
-def test_status_and_model_switch_are_canonical():
-    status = StatusUpdated(id="01J00000000000000000000001", git_branch="main")
-    switch = ModelSwitch(
-        id="01J00000000000000000000002",
-        model_key="haiku",
-        sent_at="2025-01-01T00:00:00+00:00",
-    )
+def test_session_status_is_canonical():
+    status = SessionStatus(id="01J00000000000000000000001", model_key="haiku", git_branch="main")
     assert decode_event(encode_event(status)) == status
-    assert decode_event(encode_event(switch), persisted=True) == switch
-    assert "model_name" not in encode_event(switch)
-    assert "supports_cache" not in encode_event(switch)
+    assert status.model_key == "haiku"
 
 
 class TestShellEndpoint:

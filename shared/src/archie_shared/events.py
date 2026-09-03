@@ -142,12 +142,6 @@ class TurnInterrupted(
     subagent_index: int | None = None
 
 
-class ModelSwitch(PersistedEvent, tag="model_switch", tag_field="type", forbid_unknown_fields=True):
-    id: str
-    model_key: str
-    sent_at: str
-
-
 class ShellCommand(
     PersistedEvent, tag="shell_command", tag_field="type", forbid_unknown_fields=True
 ):
@@ -163,11 +157,11 @@ class Handshake(Event, tag="handshake", tag_field="type", forbid_unknown_fields=
     id: str
     protocol_version: int
     session_id: str
-    model_key: str
 
 
-class StatusUpdated(Event, tag="status_updated", tag_field="type", forbid_unknown_fields=True):
+class SessionStatus(Event, tag="session_status", tag_field="type", forbid_unknown_fields=True):
     id: str
+    model_key: str
     git_branch: str
 
 
@@ -189,10 +183,9 @@ type SessionEvent = (
     | TurnComplete
     | TurnError
     | TurnInterrupted
-    | ModelSwitch
     | ShellCommand
     | Handshake
-    | StatusUpdated
+    | SessionStatus
     | ErrorNotice
 )
 

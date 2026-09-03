@@ -325,10 +325,6 @@ class ArchieApp(App):
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
             self._session_id = event.session_id
-            model = load_models().get(event.model_key)
-            if model is not None:
-                status.model_name = model.name
-                status.supports_cache = model.can_cache
             if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
                 self._protocol_warned = True
                 self._show_client_error(
@@ -336,19 +332,17 @@ class ArchieApp(App):
                     f"this client supports v{PROTOCOL_VERSION}. "
                     "Some features may not work — consider updating the CLI."
                 )
-        elif isinstance(event, ce.StatusUpdated):
-            self.query_one("#status", StatusBar).git_branch = event.git_branch
-        elif isinstance(event, ce.ErrorNotice):
-            self._show_client_error(event.message)
-            if event.kind in {"turn_active", "turn_error", "storage_error"} and self._turn_active:
-                self._end_turn()
-        elif isinstance(event, ce.ModelSwitch):
+        elif isinstance(event, ce.SessionStatus):
             status = self.query_one("#status", StatusBar)
             model = load_models().get(event.model_key)
             if model is not None:
                 status.model_name = model.name
                 status.supports_cache = model.can_cache
-                self.notify(f"Switched to {model.name}")
+            status.git_branch = event.git_branch
+        elif isinstance(event, ce.ErrorNotice):
+            self._show_client_error(event.message)
+            if event.kind in {"turn_active", "turn_error", "storage_error"} and self._turn_active:
+                self._end_turn()
         elif isinstance(event, ce.TextDelta):
             self._remove_throbber()
             if self._streaming is None:

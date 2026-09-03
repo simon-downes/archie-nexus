@@ -7,7 +7,7 @@ from pathlib import Path
 
 from archie_cli.cli import main
 from archie_shared.events import ShellCommand, decode_event
-from archie_shared.session.migrate import migrate_session_log
+from archie_shared.session.migrate import MigrationStats, migrate_session_log, migrate_session_logs
 from click.testing import CliRunner
 
 
@@ -63,6 +63,12 @@ def _write_legacy_log(path: Path) -> None:
             "turn_iteration": "2.1",
         },
         {
+            "type": "model_switch",
+            "id": "model-switch-1",
+            "model_key": "other-model",
+            "sent_at": "2026-07-01T10:02:00+00:00",
+        },
+        {
             "id": "shell-1",
             "when": "2026-07-01T10:01:00+00:00",
             "role": "shell",
@@ -77,7 +83,11 @@ def test_migrate_session_log_preserves_order_and_identity(tmp_path):
     _write_legacy_log(path)
     original = path.read_bytes()
 
-    assert migrate_session_log(path) is True
+    assert migrate_session_log(path) == MigrationStats(
+        logs_migrated=1,
+        shell_records_removed=0,
+        model_switch_records_removed=1,
+    )
 
     backup = path.with_name(f"{path.name}.legacy")
     assert backup.read_bytes() == original
@@ -117,9 +127,59 @@ def test_migrate_session_log_skips_schema_v2(tmp_path):
     path.write_text(json.dumps(event) + "\n")
     original = path.read_bytes()
 
-    assert migrate_session_log(path) is False
+    assert migrate_session_log(path) == MigrationStats()
     assert path.read_bytes() == original
     assert not path.with_name(f"{path.name}.legacy").exists()
+
+
+def test_model_switch_removal_uses_discriminator_before_validation(tmp_path):
+    path = tmp_path / "session-model-switch.jsonl"
+    path.write_text(json.dumps({"type": "model_switch", "id": 123}) + "\n")
+
+    stats = migrate_session_log(path)
+
+    assert stats == MigrationStats(
+        logs_migrated=1,
+        shell_records_removed=0,
+        model_switch_records_removed=1,
+    )
+    assert path.read_text() == ""
+    assert json.loads(path.with_suffix(".jsonl.legacy").read_text())["id"] == 123
+
+
+def test_model_switch_overlap_reserves_shell_precedence(tmp_path):
+    path = tmp_path / "session-shell-overlap.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "model_switch",
+                "id": "shell-overlap",
+                "role": "shell",
+                "when": "2026-07-01T10:00:00+00:00",
+                "content": json.dumps({"command": "true", "exit_code": 0, "output": ""}),
+            }
+        )
+        + "\n"
+    )
+
+    stats = migrate_session_log(path)
+
+    assert stats.model_switch_records_removed == 0
+    assert stats.shell_records_removed == 0
+    assert json.loads(path.read_text())["type"] == "shell_command"
+
+
+def test_migrate_session_logs_aggregates_statistics(tmp_path):
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    _write_legacy_log(first)
+    _write_legacy_log(second)
+
+    assert migrate_session_logs([first, second]) == MigrationStats(
+        logs_migrated=2,
+        shell_records_removed=0,
+        model_switch_records_removed=2,
+    )
 
 
 def test_migrate_session_log_keeps_malformed_lines(tmp_path, caplog):
@@ -177,7 +237,10 @@ def test_migrate_sessions_cli_backfills_metrics(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert "Migrated 1 session log" in result.output
+    assert (
+        f"Migrated 1 session logs; removed 0 shell records and 1 model-switch records; "
+        f"rebuilt metrics at {metrics_path}"
+    ) in result.output
     conn = sqlite3.connect(metrics_path)
     try:
         row = conn.execute("SELECT session_id, event_id, turn, iteration FROM requests").fetchone()
