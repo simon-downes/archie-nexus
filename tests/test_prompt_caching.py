@@ -98,7 +98,6 @@ def test_harness_captures_agents_context_once(monkeypatch, tmp_path):
     assert "changed rules" not in second.static_system.text
 
 
-
 def _marked_texts(request: dict) -> list[str]:
     marked: list[str] = []
     for item in request["input"]:

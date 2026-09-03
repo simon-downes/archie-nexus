@@ -1,6 +1,7 @@
 """Archie CLI — orchestrator protocol client."""
 
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -136,16 +137,14 @@ def start(detach: bool, workspace: str | None):
         )
     except httpx.HTTPError as exc:
         raise click.ClickException(
-            f"Cannot reach the orchestrator at {url}: {exc}\n"
-            "Start it first with: archie serve"
+            f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
         ) from None
 
     if response.status_code == 400:
         raise click.ClickException(_error_body(response, "Bad request"))
     if response.status_code != 200:
         raise click.ClickException(
-            f"Orchestrator error ({response.status_code}): "
-            f"{_error_body(response)}"
+            f"Orchestrator error ({response.status_code}): {_error_body(response)}"
         )
 
     import msgspec
@@ -153,9 +152,7 @@ def start(detach: bool, workspace: str | None):
     try:
         descriptor = msgspec.json.decode(response.content, type=SessionDescriptor)
     except msgspec.DecodeError as exc:
-        raise click.ClickException(
-            f"Unexpected response from orchestrator: {exc}"
-        ) from None
+        raise click.ClickException(f"Unexpected response from orchestrator: {exc}") from None
 
     # Always print session ID (visible in scrollback if TUI crashes)
     click.echo(f"Session: {descriptor.session_id}")
@@ -181,8 +178,7 @@ def _fetch_sessions(url: str) -> list[SessionDescriptor]:
         response.raise_for_status()
     except httpx.ConnectError:
         raise click.ClickException(
-            f"Cannot connect to the orchestrator at {url}.\n"
-            "Start it first with: archie serve"
+            f"Cannot connect to the orchestrator at {url}.\nStart it first with: archie serve"
         ) from None
     except httpx.HTTPStatusError as exc:
         raise click.ClickException(
@@ -194,9 +190,7 @@ def _fetch_sessions(url: str) -> list[SessionDescriptor]:
     try:
         return msgspec.json.decode(response.content, type=list[SessionDescriptor])
     except msgspec.DecodeError as exc:
-        raise click.ClickException(
-            f"Unexpected response from orchestrator: {exc}"
-        ) from None
+        raise click.ClickException(f"Unexpected response from orchestrator: {exc}") from None
 
 
 def _resolve_prefix(
@@ -314,6 +308,49 @@ def serve():
 
     click.echo(f"Starting archie orchestrator on {host}:{port}")
     uvicorn.run("archie_orchestrator.app:app", host=host, port=port)
+
+
+@main.command(name="migrate-sessions")
+@click.option(
+    "--sessions-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Directory containing session .jsonl files (default: ~/.nexus/sessions).",
+)
+@click.option(
+    "--metrics-db",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Metrics database path (default: ~/.nexus/metrics.db).",
+)
+@click.option("--force", is_flag=True, help="Overwrite existing .legacy log backups.")
+def migrate_sessions(sessions_dir: Path | None, metrics_db: Path | None, force: bool):
+    """Migrate stopped session logs and rebuild the metrics index.
+
+    Stop all sessions and the orchestrator before running this one-shot command.
+    """
+    from archie_orchestrator.metrics import reset_and_backfill
+    from archie_shared.config import home_dir
+    from archie_shared.session.migrate import migrate_session_logs
+
+    sessions_dir = sessions_dir or home_dir() / "sessions"
+    metrics_db = metrics_db or home_dir() / "metrics.db"
+    if not sessions_dir.exists():
+        raise click.ClickException(f"Session directory not found: {sessions_dir}")
+
+    paths = sorted(sessions_dir.glob("*.jsonl"))
+    try:
+        stats = migrate_session_logs(paths, force=force)
+        reset_and_backfill(metrics_db, paths)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise click.ClickException(str(exc)) from None
+
+    click.echo(
+        f"Migrated {stats.logs_migrated} session logs; removed "
+        f"{stats.shell_records_removed} shell records and "
+        f"{stats.model_switch_records_removed} model-switch records; "
+        f"rebuilt metrics at {metrics_db}"
+    )
 
 
 @main.command(name="ls")
@@ -479,23 +516,16 @@ def stop(session_id: str | None):
 
     # Stop via orchestrator
     try:
-        stop_response = httpx.delete(
-            f"{url}/sessions/{target.session_id}", timeout=15.0
-        )
+        stop_response = httpx.delete(f"{url}/sessions/{target.session_id}", timeout=15.0)
     except httpx.HTTPError as exc:
         raise click.ClickException(
-            f"Cannot reach the orchestrator at {url}: {exc}\n"
-            "Start it first with: archie serve"
+            f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
         ) from None
 
     if stop_response.status_code == 404:
-        raise click.ClickException(
-            f"Session '{target.session_id}' is no longer running."
-        )
+        raise click.ClickException(f"Session '{target.session_id}' is no longer running.")
     if stop_response.status_code != 200:
-        raise click.ClickException(
-            f"Failed to stop session: {_error_body(stop_response)}"
-        )
+        raise click.ClickException(f"Failed to stop session: {_error_body(stop_response)}")
 
     click.echo(f"✓ Stopped session: {target.session_id}")
     click.echo(f"  Log retained at: ~/.nexus/sessions/{target.session_id}.jsonl")

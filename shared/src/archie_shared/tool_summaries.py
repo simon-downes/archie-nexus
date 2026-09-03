@@ -239,10 +239,7 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
                     status = _esc(first_line[:80])
             else:
                 status = _esc(first_line[:80])
-            header = (
-                f"Shell {_hi(command)} — [{ERROR}]{status}[/] "
-                f"{_dim(f'({line_count} lines)')}"
-            )
+            header = f"Shell {_hi(command)} — [{ERROR}]{status}[/] {_dim(f'({line_count} lines)')}"
             body_text = "\n".join(result.splitlines()[1:]).strip("\n")
             body = _format_output_block(body_text, colour="red") if body_text else ""
             return f"{header}\n{body}" if body else header
@@ -405,7 +402,9 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
             return f"{_esc(name)} {_dim(f'({size} chars)')}"
 
 
-def format_tool_complete(name: str, input_dict: dict, result: str, is_error: bool, duration_ms: int = 0) -> str:
+def format_tool_complete(
+    name: str, input_dict: dict, result: str, is_error: bool, duration_ms: int = 0
+) -> str:
     """Format a completed tool summary and append measured execution duration."""
     summary = _format_tool_complete(name, input_dict, result, is_error)
     if duration_ms <= 0 or not summary:

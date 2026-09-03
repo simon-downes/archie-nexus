@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -74,12 +75,44 @@ def test_events_on_start_has_only_session_started(client):
     assert lines[0]["type"] == "session_started"
 
 
+def test_existing_session_does_not_duplicate_session_started(mock_env, mock_events):
+    """Startup against a valid log preserves its single session_started event."""
+    from pathlib import Path
+
+    from archie_shared.events import SessionStarted, encode_event
+
+    sessions_dir = Path(mock_env["ARCHIE_HOME_DIR"]) / "sessions"
+    sessions_dir.mkdir()
+    event = SessionStarted(
+        id="01J00000000000000000000001",
+        schema_version=2,
+        sent_at="now",
+        model_key="bedrock-claude-sonnet-4-6",
+    )
+    (sessions_dir / "test-session.jsonl").write_text(encode_event(event) + "\n")
+
+    with patch.dict(os.environ, mock_env):
+        mock_bedrock = _make_mock_bedrock_client(mock_events)
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
+            from archie_agent.app import app
+
+            with TestClient(app) as existing_client:
+                lines = [
+                    json.loads(line)
+                    for line in existing_client.get("/events").text.splitlines()
+                    if line
+                ]
+
+    assert [line["type"] for line in lines] == ["session_started"]
+    assert [line["id"] for line in lines] == [event.id]
+
+
 def _run_turn(client):
     """Drive one message turn to completion so the canonical log is populated."""
     with client.websocket_connect("/stream") as ws:
-        ws.receive_text()  # session_snapshot
-        ws.receive_text()  # session_info
-        ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
+        ws.receive_text()  # handshake
+        ws.receive_text()  # session status
+        ws.send_text(json.dumps({"type": "message", "content": "hello"}))
         while True:
             if json.loads(ws.receive_text())["type"] == "turn_complete":
                 break
@@ -124,57 +157,44 @@ def test_events_unknown_cursor_returns_409(client):
     assert resp.json()["error"] == "cursor_not_found"
 
 
-def test_websocket_session_info_on_connect(client):
-    """Verify WS connect sends SessionSnapshot then SessionInfo events."""
+def test_websocket_handshake_on_connect(client):
+    """Verify connect sends one handshake followed by one status frame."""
     with client.websocket_connect("/stream") as ws:
-        snapshot = json.loads(ws.receive_text())
-        assert snapshot["type"] == "session_snapshot"
-        assert snapshot["data"]["protocol_version"] == 1
-        assert snapshot["data"]["model"] == "Claude Sonnet 4.6"
-        assert snapshot["data"]["session_id"] == "test-session"
-        assert isinstance(snapshot["data"]["latest_event_id"], str)
-        assert snapshot["data"]["accounting"]["total_cost"] == 0.0
+        handshake = json.loads(ws.receive_text())
+        assert handshake["type"] == "handshake"
+        assert handshake["protocol_version"] == 2
+        assert "model_key" not in handshake
+        assert handshake["session_id"] == "test-session"
+        assert handshake["id"]
 
-        data = json.loads(ws.receive_text())
-        assert data["type"] == "session_info"
-        assert data["data"]["protocol_version"] == 1
-        assert data["data"]["model"] == "Claude Sonnet 4.6"
-        assert data["data"]["session_id"] == "test-session"
+        status = json.loads(ws.receive_text())
+        assert status["type"] == "session_status"
+        assert status["model_key"] == "bedrock-claude-sonnet-4-6"
+        assert status["git_branch"]
+        assert status["id"]
 
 
 def test_websocket_message_and_events(client):
-    """Verify sending a message yields text_delta and turn_complete events."""
+    """Verify sending a message yields canonical live and persisted events."""
     with client.websocket_connect("/stream") as ws:
-        # Consume session_snapshot + session_info
-        session_snapshot = json.loads(ws.receive_text())
-        assert session_snapshot["type"] == "session_snapshot"
-        session_info = json.loads(ws.receive_text())
-        assert session_info["type"] == "session_info"
+        json.loads(ws.receive_text())  # handshake
+        json.loads(ws.receive_text())  # session status
+        ws.send_text(json.dumps({"type": "message", "content": "hello"}))
 
-        # Send a message
-        ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
-
-        # Collect events until turn_complete
         events = []
         while True:
-            raw = ws.receive_text()
-            event = json.loads(raw)
+            event = json.loads(ws.receive_text())
             events.append(event)
             if event["type"] == "turn_complete":
                 break
 
-        # Should have text_delta(s), usage, turn_complete
         types = [e["type"] for e in events]
+        assert "user_message" in types
         assert "text_delta" in types
-        assert "usage" in types
+        assert "llm_request" in types
+        assert "usage" not in types
         assert types[-1] == "turn_complete"
-
-        # Wire events carry turn_index. The `llm_request` frame is a raw canonical
-        # event broadcast for the metrics pipeline and has no wire turn_index.
-        for e in events:
-            if e["type"] == "llm_request":
-                continue
-            assert e["turn_index"] == 1
+        assert all(e.get("id") for e in events)
 
 
 # --- Tool turn integration test ---
@@ -229,14 +249,12 @@ def test_websocket_tool_turn(mock_env, tmp_path):
 
                 with TestClient(app) as client:
                     with client.websocket_connect("/stream") as ws:
-                        # Consume session_snapshot + session_info
+                        # Consume handshake + session status
                         ws.receive_text()
                         ws.receive_text()
 
                         # Send message
-                        ws.send_text(
-                            json.dumps({"type": "message", "data": {"content": "what is 21*2"}})
-                        )
+                        ws.send_text(json.dumps({"type": "message", "content": "what is 21*2"}))
 
                         # Collect events until turn_complete
                         events = []
@@ -255,8 +273,104 @@ def test_websocket_tool_turn(mock_env, tmp_path):
 
                         # Verify tool_call event content
                         tc = next(e for e in events if e["type"] == "tool_call")
-                        assert tc["data"]["name"] == "exec"
+                        assert tc["name"] == "exec"
 
                         # Verify tool_result event
                         tr = next(e for e in events if e["type"] == "tool_result")
-                        assert tr["data"]["is_error"] is False
+                        assert tr["is_error"] is False
+
+
+def test_concurrent_message_rejection_is_targeted(mock_env):
+    """A rejected second message does not disturb the accepted client's turn."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def stream_fn(messages, system, tool_config=None):
+        started.set()
+        yield TextDelta(text="slow")
+        release.wait(timeout=2)
+        yield Done(stop_reason="end_turn")
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.model_id = "eu.anthropic.claude-sonnet-4-6"
+    mock_bedrock.stream = stream_fn
+
+    with patch.dict(os.environ, mock_env):
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
+            from archie_agent.app import app
+
+            with TestClient(app) as client:
+                with client.websocket_connect("/stream") as first:
+                    first.receive_text()
+                    first.receive_text()
+                    first.send_text(json.dumps({"type": "message", "content": "first"}))
+                    first_types = []
+                    while "text_delta" not in first_types:
+                        first_types.append(json.loads(first.receive_text())["type"])
+                    assert started.is_set()
+
+                    with client.websocket_connect("/stream") as second:
+                        second.receive_text()
+                        second.receive_text()
+                        second.send_text(json.dumps({"type": "message", "content": "second"}))
+                        rejection = json.loads(second.receive_text())
+                        assert rejection["type"] == "error_notice"
+                        assert rejection["kind"] == "turn_active"
+
+                    release.set()
+                    accepted_events = []
+                    while True:
+                        event = json.loads(first.receive_text())
+                        accepted_events.append(event)
+                        if event["type"] == "turn_complete":
+                            break
+
+                    assert not any(
+                        event["type"] == "error_notice" and event["kind"] == "turn_active"
+                        for event in accepted_events
+                    )
+
+
+def test_two_clients_receive_identical_completed_turn(client):
+    """Both attached clients receive the same prompt, order, and ledger totals."""
+    with client.websocket_connect("/stream") as first:
+        first.receive_text()
+        first.receive_text()
+        with client.websocket_connect("/stream") as second:
+            second.receive_text()
+            second.receive_text()
+
+            first.send_text(json.dumps({"type": "message", "content": "hello two"}))
+
+            def drain(ws):
+                events = []
+                while True:
+                    event = json.loads(ws.receive_text())
+                    events.append(event)
+                    if event["type"] == "turn_complete":
+                        return events
+
+            first_events = drain(first)
+            second_events = drain(second)
+
+            assert [event["id"] for event in first_events] == [
+                event["id"] for event in second_events
+            ]
+            for events in (first_events, second_events):
+                assert sum(event["type"] == "user_message" for event in events) == 1
+                assert (
+                    next(event["content"] for event in events if event["type"] == "user_message")
+                    == "hello two"
+                )
+
+            first_cost = sum(
+                event.get("cost_usd", 0.0)
+                for event in first_events
+                if event["type"] == "llm_request"
+            )
+            second_cost = sum(
+                event.get("cost_usd", 0.0)
+                for event in second_events
+                if event["type"] == "llm_request"
+            )
+            assert first_cost == second_cost

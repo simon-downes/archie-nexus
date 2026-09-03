@@ -4,7 +4,10 @@ import asyncio
 import threading
 
 import pytest
-from archie_agent.events import (
+from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
+from archie_agent.llm.fake import FakeLLMClient
+from archie_agent.loop import run_loop
+from archie_agent.loop_events import (
     IterationStart,
     ToolCall,
     ToolResult,
@@ -12,15 +15,12 @@ from archie_agent.events import (
     TurnError,
     TurnInterrupted,
 )
-from archie_agent.events import (
+from archie_agent.loop_events import (
     TextDelta as AgentTextDelta,
 )
-from archie_agent.events import (
+from archie_agent.loop_events import (
     Usage as AgentUsage,
 )
-from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
-from archie_agent.llm.fake import FakeLLMClient
-from archie_agent.loop import run_loop
 from archie_agent.session import Turn
 from archie_shared.types import TextBlock, ToolResultBlock
 

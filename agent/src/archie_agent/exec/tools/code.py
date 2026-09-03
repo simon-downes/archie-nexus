@@ -222,9 +222,7 @@ async def _discover_files(dir_path: Path, language: str | None = None) -> list[P
     result = await run_exec("rg", "--files", cwd=dir_path)
 
     if result.returncode not in (0, 1) and result.returncode is not None:
-        raise RuntimeError(
-            f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}")
 
     files: list[Path] = []
     for line in result.stdout.strip().split("\n"):
@@ -260,7 +258,6 @@ def _filter_symbols(symbols: list[Symbol], name: str) -> list[Symbol]:
         child_matches = _filter_symbols(sym.children, name)
         results.extend(child_matches)
     return results
-
 
 
 # ---------------------------------------------------------------------------

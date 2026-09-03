@@ -145,22 +145,6 @@ async def proxy_events(request: Request) -> Response:
     return await forward_http(session, path)
 
 
-async def proxy_shell(request: Request) -> Response:
-    """POST /sessions/{session_id}/shell — proxy to session /shell."""
-    session_id = request.path_params["session_id"]
-    try:
-        session = _resolve_session(session_id)
-    except KeyError:
-        return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    body = await request.body()
-    content_type = request.headers.get("content-type")
-    return await forward_http(
-        session, "/shell", method="POST", body=body, content_type=content_type
-    )
-
-
 # ---------------------------------------------------------------------------
 # WebSocket proxy
 # ---------------------------------------------------------------------------

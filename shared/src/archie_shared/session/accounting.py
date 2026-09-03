@@ -9,7 +9,7 @@ launching tool IDs:
   launched it. The root agent has ``scope = None``.
 - Each provider request a child makes emits exactly one ``llm_request`` whose
   ``scope`` is that child's scope.
-- A request is uniquely identified by ``(scope, turn_iteration, request_id)``.
+- A request is uniquely identified by ``(scope, turn, iteration, request_id)``.
 - Parent/child links are reconstructed from ``tool_call`` events: the tool call
   that produced ``tool_use_id == S`` carries the ``scope`` of the *parent* that
   issued it, so ``parent_of(S) = tool_call(tool_use_id=S).scope``.
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from archie_shared.canonical_events import LLMRequest, ToolCall
+from archie_shared.events import LLMRequest, ToolCall
 
 
 def _parent_map(events: list[LLMRequest | ToolCall]) -> dict[str, str | None]:

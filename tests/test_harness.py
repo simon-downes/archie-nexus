@@ -6,8 +6,24 @@ import pytest
 from archie_agent.harness import AgentHarness, _shell_result_is_error
 from archie_agent.llm._types import Done, TextDelta, Usage
 from archie_agent.llm.fake import FakeLLMClient
+from archie_agent.loop_events import (
+    IterationStart as AgentIterationStart,
+)
+from archie_agent.loop_events import (
+    RequestContext,
+    RequestFinished,
+)
+from archie_agent.loop_events import (
+    TextDelta as AgentTextDelta,
+)
+from archie_agent.loop_events import (
+    TurnComplete as AgentTurnComplete,
+)
+from archie_agent.loop_events import (
+    TurnInterrupted as AgentTurnInterrupted,
+)
 from archie_agent.session import Session
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     AssistantMessage,
     LLMRequest,
     ToolCall,
@@ -19,6 +35,7 @@ from archie_shared.canonical_events import (
     decode_event,
 )
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.session.log import EventIdConflict, LogAppendError
 
 
 def test_shell_result_error_uses_only_first_line():
@@ -30,6 +47,8 @@ def test_shell_result_error_uses_only_first_line():
 
 def _read_events(log_path) -> list:
     """Decode all persisted canonical events from a session JSONL log."""
+    if not log_path.exists():
+        return []
     return [
         decode_event(line, persisted=True)
         for line in log_path.read_bytes().splitlines()
@@ -119,7 +138,7 @@ async def test_normal_flow(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("Hi there")
 
@@ -128,7 +147,8 @@ async def test_normal_flow(tmp_path):
 
     # Verify wire event sequence
     assert "text_delta" in event_types
-    assert "usage" in event_types
+    # Usage is internal; the public ledger is llm_request.
+    assert "usage" not in event_types
     assert "turn_complete" in event_types
 
     # Verify session state
@@ -158,7 +178,8 @@ async def test_normal_flow(tmp_path):
     assert len(assistant_msgs) == 1
     assert assistant_msgs[0].content == "Hello world"
     assert assistant_msgs[0].interrupted is False
-    assert assistant_msgs[0].request_ids == [requests[0].id]
+    assert assistant_msgs[0].request_id == requests[0].id
+    assert assistant_msgs[0].iteration == 0
 
     assert len(_of(events, TurnComplete)) == 1
 
@@ -180,7 +201,7 @@ async def test_interrupt_mid_stream(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     # Set interrupt shortly after start
     async def _interrupt_soon():
@@ -239,7 +260,7 @@ async def test_llm_error(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("hello")
 
@@ -266,7 +287,7 @@ async def test_turn_already_active(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     import asyncio
 
@@ -274,15 +295,9 @@ async def test_turn_already_active(tmp_path):
     task = asyncio.create_task(harness.handle_message("first"))
     await asyncio.sleep(0.02)  # Let it start
 
-    # Try second message while first is active
+    # Admission is owned by the WebSocket stream, not handle_message.
     assert harness.turn_active is True
-    await harness.handle_message("second")
-
-    # Should get a turn_error for the rejected message
-    events = ws.parsed_events()
-    error_events = [e for e in events if e["type"] == "turn_error"]
-    assert len(error_events) >= 1
-    assert "already active" in error_events[0]["data"]["message"]
+    assert harness.try_begin_turn() is False
 
     await task
 
@@ -372,7 +387,7 @@ async def test_partial_text_before_error(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("hello")
 
@@ -398,6 +413,52 @@ async def test_partial_text_before_error(tmp_path):
 
     # Turn should be released
     assert harness.turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_child_partial_text_is_persisted_before_interruption(tmp_path, monkeypatch):
+    """A child interruption keeps its request-scoped partial assistant text."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    async def interrupted_child_loop(**kwargs):
+        yield AgentIterationStart(index=0)
+        yield AgentTextDelta(text="partial child", request_id="child-request")
+        yield RequestFinished(
+            context=RequestContext("child-request", "2025-01-01T00:00:00Z"),
+            duration_ms=1,
+            status="interrupted",
+            usage=None,
+            stop_reason=None,
+            error=None,
+        )
+        yield AgentTurnInterrupted()
+
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *args: object())
+    monkeypatch.setattr("archie_agent.agents.run_loop", interrupted_child_loop)
+    task_spec = harness._registry.get("task")
+    assert task_spec is not None
+
+    await task_spec.handler(
+        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        _launch_scope="task-interrupt",
+        _parent_turn=3,
+    )
+
+    events = _read_events(harness.log_path)
+    child_events = [
+        event
+        for event in events
+        if getattr(event, "scope", None) == "task-interrupt"
+        and getattr(event, "subagent_index", None) == 0
+    ]
+    assistant = next(event for event in child_events if isinstance(event, AssistantMessage))
+    terminal = next(event for event in child_events if isinstance(event, TurnInterrupted))
+
+    assert assistant.content == "partial child"
+    assert assistant.request_id == "child-request"
+    assert assistant.iteration == 0
+    assert assistant.interrupted is True
+    assert child_events.index(assistant) < child_events.index(terminal)
 
 
 # --- Tool orchestration tests ---
@@ -436,7 +497,7 @@ async def test_tool_round_trip_persists_and_broadcasts(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("run some code")
 
@@ -460,9 +521,13 @@ async def test_tool_round_trip_persists_and_broadcasts(tmp_path):
     tool_result = _of(events, ToolResult)[0]
     assert "hello" in tool_result.content
 
-    # tool_call/tool_result reference the tool-use request; assistant references both.
+    # tool_call/tool_result reference the tool-use request; assistant references the second request.
     assert tool_call.tool_use_id == tool_result.tool_use_id
-    assert len(_of(events, LLMRequest)) == 2
+    requests = _of(events, LLMRequest)
+    assert len(requests) == 2
+    assistant_msgs = _of(events, AssistantMessage)
+    assert assistant_msgs[0].request_id == requests[1].id
+    assert assistant_msgs[0].iteration == 1
 
     # Verify wire events include tool events
     messages = [json.loads(m) for m in ws.messages]
@@ -507,3 +572,239 @@ async def test_usage_accumulates_across_tool_iterations(tmp_path):
     # Total should be sum of both requests
     assert harness.session.total_input_tokens == 300
     assert harness.session.total_output_tokens == 30
+
+
+@pytest.mark.asyncio
+async def test_unexpected_turn_failure_persists_one_terminal_event(tmp_path):
+    """A body exception is converted into one durable root turn_error."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    async def fail_body(content: str) -> None:
+        raise RuntimeError("body exploded")
+
+    harness._handle_message_body = fail_body
+    await harness.handle_message("hello")
+
+    events = _read_events(harness.log_path)
+    terminal = _of(events, TurnError)
+    assert len(terminal) == 1
+    assert terminal[0].message == "body exploded"
+    assert harness.turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_user_message_append_failure_clears_turn_and_notifies(tmp_path):
+    """A user-message append failure emits only a live storage notice."""
+    harness = _make_harness(tmp_path, responses=[])
+    ws = FakeWebSocket()
+    await harness.event_bus.register_client(ws, ())
+
+    def fail_append(event) -> bool:
+        raise LogAppendError("disk full")
+
+    harness.event_bus.log.append = fail_append
+    await harness.handle_message("hello")
+
+    events = _read_events(harness.log_path)
+    assert not _of(events, UserMessage)
+    assert not _of(events, TurnError)
+    assert harness.turn_active is False
+    notices = [event for event in ws.parsed_events() if event["type"] == "error_notice"]
+    assert len(notices) == 1
+    assert notices[0]["kind"] == "storage_error"
+
+
+@pytest.mark.asyncio
+async def test_normal_return_without_terminal_gets_fallback(tmp_path):
+    """A body that exits without a terminal is repaired during teardown."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    async def no_terminal(content: str) -> None:
+        return None
+
+    harness._handle_message_body = no_terminal
+    await harness.handle_message("hello")
+
+    events = _read_events(harness.log_path)
+    assert len(_of(events, TurnError)) == 1
+    assert "without a terminal" in _of(events, TurnError)[0].message
+    assert harness.turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_terminal_append_does_not_duplicate(tmp_path):
+    """Cancellation after append but before publish returns cannot add a fallback."""
+    import asyncio
+
+    harness = _make_harness(
+        tmp_path,
+        responses=[[TextDelta(text="done"), Done(stop_reason="end_turn")]],
+    )
+    appended = asyncio.Event()
+    release = asyncio.Event()
+    original_publish = harness.event_bus.emit
+
+    async def delayed_publish(event) -> str:
+        line = await original_publish(event)
+        if isinstance(event, TurnComplete):
+            appended.set()
+            await release.wait()
+        return line
+
+    harness.event_bus.emit = delayed_publish
+    task = asyncio.create_task(harness.handle_message("hello"))
+    await appended.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await asyncio.sleep(0)
+
+    events = _read_events(harness.log_path)
+    assert len(_of(events, TurnComplete)) == 1
+    assert not _of(events, TurnError)
+    assert harness.turn_active is False
+
+
+@pytest.mark.asyncio
+async def test_child_normal_return_gets_scoped_fallback(tmp_path, monkeypatch):
+    """A child that returns without a terminal gets one scoped turn_error."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    async def no_terminal_loop(**kwargs):
+        if False:
+            yield None
+
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *args: object())
+    monkeypatch.setattr("archie_agent.agents.run_loop", no_terminal_loop)
+    task_spec = harness._registry.get("task")
+    assert task_spec is not None
+
+    await task_spec.handler(
+        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        _launch_scope="task-1",
+        _parent_turn=1,
+    )
+
+    terminal = [
+        event
+        for event in _read_events(harness.log_path)
+        if isinstance(event, TurnError) and event.scope == "task-1" and event.subagent_index == 0
+    ]
+    assert len(terminal) == 1
+    assert "without a terminal" in terminal[0].message
+
+
+@pytest.mark.asyncio
+async def test_child_setup_failure_gets_scoped_fallback(tmp_path, monkeypatch):
+    """A child setup exception still gets a canonical scoped terminal event."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    def fail_client(*args):
+        raise RuntimeError("child setup exploded")
+
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", fail_client)
+    task_spec = harness._registry.get("task")
+    assert task_spec is not None
+
+    await task_spec.handler(
+        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        _launch_scope="task-2",
+        _parent_turn=1,
+    )
+
+    terminal = [
+        event
+        for event in _read_events(harness.log_path)
+        if isinstance(event, TurnError) and event.scope == "task-2" and event.subagent_index == 0
+    ]
+    assert len(terminal) == 1
+    assert terminal[0].message == "child setup exploded"
+
+
+@pytest.mark.asyncio
+async def test_child_append_failure_notifies_without_terminal(tmp_path, monkeypatch):
+    """A child append failure emits a live storage notice and no terminal."""
+    harness = _make_harness(tmp_path, responses=[])
+    ws = FakeWebSocket()
+    await harness.event_bus.register_client(ws, ())
+
+    def fail_append(event) -> bool:
+        raise LogAppendError("disk full")
+
+    harness.event_bus.log.append = fail_append
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *args: object())
+    task_spec = harness._registry.get("task")
+    assert task_spec is not None
+
+    async def no_terminal_loop(**kwargs):
+        if False:
+            yield None
+
+    monkeypatch.setattr("archie_agent.agents.run_loop", no_terminal_loop)
+    await task_spec.handler(
+        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        _launch_scope="task-3",
+        _parent_turn=1,
+    )
+
+    assert not [event for event in _read_events(harness.log_path) if isinstance(event, TurnError)]
+    notices = [event for event in ws.parsed_events() if event["type"] == "error_notice"]
+    assert len(notices) == 1
+    assert notices[0]["kind"] == "storage_error"
+
+
+@pytest.mark.asyncio
+async def test_child_failure_after_terminal_does_not_duplicate(tmp_path, monkeypatch):
+    """A child failure after a terminal event does not emit a second terminal."""
+    harness = _make_harness(tmp_path, responses=[])
+
+    async def terminal_then_failure(**kwargs):
+        yield AgentTurnComplete(stop_reason="end_turn")
+        raise RuntimeError("late child failure")
+
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *args: object())
+    monkeypatch.setattr("archie_agent.agents.run_loop", terminal_then_failure)
+    task_spec = harness._registry.get("task")
+    assert task_spec is not None
+
+    await task_spec.handler(
+        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        _launch_scope="task-4",
+        _parent_turn=1,
+    )
+
+    terminals = [
+        event
+        for event in _read_events(harness.log_path)
+        if isinstance(event, (TurnComplete, TurnError, TurnInterrupted)) and event.scope == "task-4"
+    ]
+    assert len(terminals) == 1
+    assert isinstance(terminals[0], TurnComplete)
+
+
+@pytest.mark.asyncio
+async def test_terminal_publish_conflict_falls_back_to_one_error(tmp_path):
+    """A non-storage terminal publication failure still gets one fallback terminal."""
+    harness = _make_harness(
+        tmp_path,
+        responses=[[TextDelta(text="done"), Done(stop_reason="end_turn")]],
+    )
+    original_publish = harness.event_bus.emit
+    failed = False
+
+    async def fail_terminal_once(event) -> str:
+        nonlocal failed
+        if isinstance(event, TurnComplete) and not failed:
+            failed = True
+            raise EventIdConflict("injected terminal conflict")
+        return await original_publish(event)
+
+    harness.event_bus.emit = fail_terminal_once
+    await harness.handle_message("hello")
+
+    events = _read_events(harness.log_path)
+    assert len(_of(events, TurnComplete)) == 0
+    assert len(_of(events, TurnError)) == 1
+    assert "injected terminal conflict" in _of(events, TurnError)[0].message
+    assert harness.turn_active is False

@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
-from archie_shared.canonical_events import LLMRequest, TextDelta, ToolCall, ToolResult, TurnComplete
+from archie_shared.events import LLMRequest, TextDelta, ToolCall, ToolResult, TurnComplete
 from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
 from rich.text import Text
 
@@ -22,7 +22,8 @@ def test_live_scoped_llm_cost_is_included_in_status_accounting():
         id="request-1",
         scope="task-1",
         subagent_index=0,
-        turn_iteration="1.0",
+        turn=1,
+        iteration=0,
         model_key="model",
         sent_at="2025-01-01T00:00:00Z",
         duration_ms=10,
@@ -35,7 +36,7 @@ def test_live_scoped_llm_cost_is_included_in_status_accounting():
         cost_usd=0.0085,
     )
     with patch.object(app, "query_one", return_value=MagicMock()):
-        app._handle_event(event)
+        app._apply_event(event)
 
     assert app._cumulative_cost == 0.0085
     app._update_accounting_status.assert_called_once()
@@ -86,7 +87,8 @@ def test_tool_error_does_not_make_child_terminal():
         app._handle_scoped_event(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -98,7 +100,8 @@ def test_tool_error_does_not_make_child_terminal():
         app._handle_scoped_event(
             ToolResult(
                 id="r1e",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -121,7 +124,8 @@ def test_child_exec_activity_has_explicit_prefix():
         app._handle_scoped_event(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -149,7 +153,8 @@ def test_child_reducer_uses_shared_summaries_and_status():
         app._handle_scoped_event(
             ToolCall(
                 id="c1",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -161,7 +166,8 @@ def test_child_reducer_uses_shared_summaries_and_status():
         app._handle_scoped_event(
             ToolResult(
                 id="r1e",
-                turn_iteration="1.1",
+                turn=1,
+                iteration=1,
                 scope="task-1",
                 subagent_index=0,
                 request_id="r1",
@@ -204,13 +210,15 @@ def test_replay_scoped_event_routes_to_child_state():
     app = _app()
     event = TextDelta(
         id="delta",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         scope="task-1",
         subagent_index=1,
         request_id="r1",
         text="replayed output",
     )
     with patch.object(app, "_render_child"):
-        app._render_canonical(event)
+        app._apply_event(event)
 
-    assert app._child_activity[("task-1", 1)].lines == ["replayed output"]
+    assert app._child_activity[("task-1", 1)].activity == "Responding..."
+    assert app._transient_assistant_text

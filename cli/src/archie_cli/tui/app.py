@@ -21,27 +21,21 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from archie_shared import canonical_events as ce
-from archie_shared.canonical_events import decode_event
+from archie_shared import events as ce
+from archie_shared.commands import InterruptCommand, SwitchModelCommand
 from archie_shared.events import (
-    PROTOCOL_VERSION,
-    InterruptCommand,
     IterationStart,
     LLMRequest,
-    ModelSwitched,
-    SessionInfo,
-    SessionSnapshot,
-    StatusUpdated,
-    SwitchModelCommand,
     TextDelta,
     ToolCall,
     ToolResult,
     TurnComplete,
     TurnError,
     TurnInterrupted,
-    Usage,
+    decode_event,
 )
 from archie_shared.models import load_models
+from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.tool_summaries import (
     format_tool_activity,
     format_tool_complete,
@@ -61,6 +55,17 @@ from archie_cli.tui.throbber import Throbber, ThrobberContainer
 from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RequestKey:
+    """Exact identity for one root or child assistant request."""
+
+    scope: str | None
+    subagent_index: int | None
+    turn: int
+    iteration: int
+    request_id: str
 
 
 @dataclass
@@ -105,6 +110,11 @@ class ArchieApp(App):
         self._last_event_id: str | None = None
         # Ids of canonical events already rendered — dedup across replay + live.
         self._seen_event_ids: set[str] = set()
+        # Request-scoped assistant reconciliation. Durable assistant events mark
+        # a key finalized so late buffered deltas for that exact request are ignored.
+        self._transient_assistant_text: dict[RequestKey, str] = {}
+        self._finalized_assistant_requests: set[RequestKey] = set()
+        self._stream_request_key: RequestKey | None = None
         # Ids of llm_request ledger events already folded into accounting —
         # prevents double-counting across replay + live broadcast.
         self._seen_accounted_ids: set[str] = set()
@@ -125,7 +135,7 @@ class ArchieApp(App):
         self._child_widgets: dict[tuple[str, int], SubagentActivity] = {}
         self._active_child_key: tuple[str, int] | None = None
 
-        # Session state for local accumulation. Seeded from SessionSnapshot.accounting
+        # Session state for local accumulation. Seeded from Handshake.accounting
         # on connect, then updated live from broadcast llm_request ledger events.
         self._session_id: str = ""
         self._cumulative_input: int = 0
@@ -143,13 +153,14 @@ class ArchieApp(App):
         self._turn_cost = 0.0
         self._turn_duration_s = 0.0
 
-        # Live output estimation (chars/4, reconciled on Usage)
+        # Live output estimation (chars/4, reconciled on LLMRequest)
         self._estimated_output: int = 0
 
         # Direct shell (! prefix) state
         self._shell_active: bool = False
         self._shell_proc: asyncio.subprocess.Process | None = None
         self._shell_command: str = ""
+        self._shell_cancel_requested: bool = False
 
     def compose(self) -> ComposeResult:
         """Build the main UI layout."""
@@ -163,7 +174,7 @@ class ArchieApp(App):
         """Connect to agent and start receiving events.
 
         Ordering: subscribe WS first → start receive loop (buffering) → the
-        SessionSnapshot frame provides the replay cursor → replay canonical
+        Handshake frame provides the replay cursor → replay canonical
         events via /events → reconcile buffered live events by event id.
         """
         self.query_one("#input", MessageInput).focus()
@@ -180,20 +191,36 @@ class ArchieApp(App):
         self._receive_task = asyncio.create_task(self._receive_loop())
 
         # Replay persisted canonical events while the receive loop buffers.
-        await self._replay_events()
+        if not await self._replay_events():
+            self._buffering = False
+            self._event_buffer = []
+            self._show_client_error("Initial event replay failed; retrying connection.")
+            if self._receive_task is not None and not self._receive_task.done():
+                self._receive_task.cancel()
+                try:
+                    await self._receive_task
+                except asyncio.CancelledError:
+                    pass
+            await self._ws.disconnect()
+            self._schedule_reconnect()
+            return
 
         # Reconcile: dispatch buffered live events not already rendered.
         self._buffering = False
-        for event in self._event_buffer:
-            self._handle_event(event)
+        self._dispatch_buffered_events()
+
         self._event_buffer = []
 
-    async def _replay_events(self) -> None:
+    async def _replay_events(self) -> bool:
         """Fetch and render persisted canonical events, advancing the cursor.
 
         Requests /events?after=<cursor> when a cursor is known (reconnect),
         otherwise the full log. Each NDJSON line is a canonical event which is
         rendered via the shared reducer and deduplicated by event id.
+
+        Returns ``False`` when the history request cannot be completed. Callers
+        must not flush buffered live events or report a successful reconnect in
+        that case, because those events cannot fill the history gap.
         """
         after = self._last_event_id
         url = f"{self._api_url}/events"
@@ -203,16 +230,16 @@ class ArchieApp(App):
             async with httpx.AsyncClient() as client:
                 resp = await client.get(url, timeout=5.0)
                 if resp.status_code == 409:
-                    # Cursor no longer in the log (rotated/archived) — full replay.
-                    self._last_event_id = None
-                    self._seen_event_ids.clear()
+                    # Cursor no longer exists in the log (rotated/archived). Reset
+                    # every replay-derived view before rebuilding from the full log.
+                    await self._reset_replay_state()
                     resp = await client.get(f"{self._api_url}/events", timeout=5.0)
                 if resp.status_code != 200:
-                    return
+                    return False
                 body = resp.text
         except Exception as e:
             log.warning("Failed to replay events: %s", e)
-            return
+            return False
 
         for line in body.splitlines():
             line = line.strip()
@@ -223,26 +250,82 @@ class ArchieApp(App):
             except Exception as e:  # noqa: BLE001 — skip malformed replay lines
                 log.warning("Skipping malformed replay event: %s", e)
                 continue
-            self._render_canonical(event)
+            self._apply_event(event, historical=True)
 
-    def _render_canonical(self, event) -> None:
-        """Render one persisted canonical event, deduplicated by id.
+        return True
 
-        Replay path only: assistant text arrives as AssistantMessage (no
-        streaming deltas) and tool summaries are reconstructed client-side via
-        the shared formatters. Advances the replay cursor.
+    async def _reset_replay_state(self) -> None:
+        """Clear all client state reconstructed from the persisted event stream."""
+        self._last_event_id = None
+        self._seen_event_ids.clear()
+        self._transient_assistant_text.clear()
+        self._finalized_assistant_requests.clear()
+        self._stream_request_key = None
+        self._seen_accounted_ids.clear()
+        self._cumulative_input = 0
+        self._cumulative_output = 0
+        self._cumulative_cache_read = 0
+        self._cumulative_cache_write = 0
+        self._latest_context_tokens = 0
+        self._latest_context_pct = 0.0
+        self._cumulative_cost = 0.0
+        self._estimated_output = 0
+        self._reset_turn_metrics()
+        self._turn_active = False
+        self._streaming = None
+        self._stream_text = ""
+        self._iteration_block = None
+        self._pending_tool_inputs.clear()
+        self._child_activity.clear()
+        self._child_pending_tools.clear()
+        self._parent_task_inputs.clear()
+        self._parent_task_entries.clear()
+        self._child_widgets.clear()
+        try:
+            screen = self.screen
+        except Exception:  # noqa: BLE001 — headless tests have no screen stack
+            screen = None
+        if isinstance(screen, SubagentScreen):
+            await self.pop_screen()
+        self._active_child_key = None
+
+        conversation = self.query_one("#conversation", Conversation)
+        removal = conversation.remove_children()
+        if hasattr(removal, "__await__"):
+            await removal
+        self._update_accounting_status()
+
+    def _request_key(self, event) -> RequestKey:
+        return RequestKey(
+            scope=getattr(event, "scope", None),
+            subagent_index=getattr(event, "subagent_index", None),
+            turn=event.turn,
+            iteration=event.iteration,
+            request_id=event.request_id,
+        )
+
+    def _render_canonical(self, event, *, replay: bool = False) -> None:
+        """Render one event after application-path dispatch and deduplicate by id.
+
+        Historical events arrive with ``replay=True`` so assistant text and tool
+        summaries are reconstructed without streamed deltas. Live events use the
+        same renderer after ``_apply_event`` dispatch.
         """
         event_id = getattr(event, "id", None)
         if event_id is not None:
             if event_id in self._seen_event_ids:
                 return
             self._seen_event_ids.add(event_id)
-            self._last_event_id = event_id
+            if event.persist:
+                self._last_event_id = event_id
 
-        if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
+        if (
+            getattr(event, "scope", None) is not None
+            and getattr(event, "subagent_index", None) is not None
+        ):
             if isinstance(event, LLMRequest):
                 self._accumulate_ledger(event)
-            self._handle_scoped_event(event)
+            self._handle_scoped_event(event, replay=replay)
             return
 
         conv = self.query_one("#conversation", Conversation)
@@ -251,8 +334,61 @@ class ArchieApp(App):
             self._reset_turn_metrics()
             if event.content:
                 conv.add_user_message(event.content)
+        elif isinstance(event, ce.Handshake):
+            status = self.query_one("#status", StatusBar)
+            status.session_id = event.session_id
+            self._session_id = event.session_id
+            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
+                self._protocol_warned = True
+                self._show_client_error(
+                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
+                    f"this client supports v{PROTOCOL_VERSION}. "
+                    "Some features may not work — consider updating the CLI."
+                )
+        elif isinstance(event, ce.SessionStatus):
+            status = self.query_one("#status", StatusBar)
+            model = load_models().get(event.model_key)
+            if model is not None:
+                status.model_name = model.name
+                status.supports_cache = model.can_cache
+            status.git_branch = event.git_branch
+        elif isinstance(event, ce.ErrorNotice):
+            self._show_client_error(event.message)
+            if event.kind in {"turn_active", "turn_error", "storage_error"} and self._turn_active:
+                self._end_turn()
+        elif isinstance(event, ce.TextDelta):
+            key = self._request_key(event)
+            if key in self._finalized_assistant_requests:
+                return
+            self._remove_throbber()
+            self._transient_assistant_text[key] = (
+                self._transient_assistant_text.get(key, "") + event.text
+            )
+            if self._streaming is None:
+                self._streaming = conv.begin_streaming()
+                self._turn_active = True
+            self._stream_request_key = key
+            self._stream_text = self._transient_assistant_text[key]
+            self._streaming.append(event.text)
+            self._estimated_output += len(event.text) // 4
+            status = self.query_one("#status", StatusBar)
+            status.session_output = self._cumulative_output + self._estimated_output
+            conv.scroll_if_at_bottom()
         elif isinstance(event, ce.AssistantMessage):
-            if event.content:
+            key = self._request_key(event)
+            transient = self._transient_assistant_text.pop(key, None)
+            self._finalized_assistant_requests.add(key)
+            if self._streaming is not None and self._stream_request_key == key:
+                if transient == event.content:
+                    self._finalise_streaming()
+                else:
+                    self._streaming.remove()
+                    self._streaming = None
+                    self._stream_text = ""
+                    self._stream_request_key = None
+                    if event.content:
+                        conv.add_assistant_message(event.content)
+            elif event.content:
                 conv.add_assistant_message(event.content)
             if event.interrupted:
                 conv.add_cancelled()
@@ -260,7 +396,12 @@ class ArchieApp(App):
             # Create a visual block lazily when this iteration contains tools.
             # Text-only iterations should not leave empty blocks in replay.
             self._iteration_block = None
+            # A new iteration means a new provider request is outstanding.
+            self._show_throbber()
         elif isinstance(event, ce.ToolCall):
+            # The provider has responded with a tool request; pending tool rows
+            # represent execution while the next iteration owns the throbber.
+            self._remove_throbber()
             if self._iteration_block is None:
                 self._iteration_block = conv.begin_iteration()
             input_summary = format_tool_pending(event.name, event.input)
@@ -276,7 +417,9 @@ class ArchieApp(App):
                 pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
                 if pending is not None:
                     name, tool_input = pending
-                    summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
+                    summary = format_tool_complete(
+                        name, tool_input, event.content, event.is_error, event.duration_ms
+                    )
                 else:
                     summary = event.content[:200] if event.content else ""
                 self._iteration_block.complete_tool(
@@ -299,14 +442,15 @@ class ArchieApp(App):
         elif isinstance(event, ce.TurnError):
             conv.add_error(event.message)
             self._iteration_block = None
+            self._end_turn()
         elif isinstance(event, ce.TurnInterrupted):
             conv.add_cancelled()
             self._iteration_block = None
+            self._end_turn()
         elif isinstance(event, ce.TurnComplete):
             self._show_turn_status()
             self._iteration_block = None
-        elif isinstance(event, ce.ShellCommand):
-            conv.add_shell_output(event.command, event.output, exit_code=event.exit_code)
+            self._end_turn()
 
     def _accumulate_ledger(self, event: LLMRequest) -> None:
         """Fold an llm_request ledger event into cumulative accounting.
@@ -318,13 +462,16 @@ class ArchieApp(App):
         if event.id in self._seen_accounted_ids:
             return
         self._seen_accounted_ids.add(event.id)
+        self._estimated_output = 0
         self._cumulative_input += event.input_tokens
         self._cumulative_output += event.output_tokens
         self._cumulative_cache_read += event.cache_read_tokens
         self._cumulative_cache_write += event.cache_write_tokens
         if event.scope is None and event.subagent_index is None:
             self._latest_context_tokens = event.context_tokens
-            self._latest_context_pct = self._estimate_context_pct(event.context_tokens, event.model_key)
+            self._latest_context_pct = self._estimate_context_pct(
+                event.context_tokens, event.model_key
+            )
         self._cumulative_cost += event.cost_usd
         self._update_accounting_status()
 
@@ -359,18 +506,14 @@ class ArchieApp(App):
         """
         try:
             async for event in self._ws.receive():
-                if isinstance(event, (SessionSnapshot, SessionInfo, ModelSwitched, StatusUpdated)):
-                    # Session-level events have no turn_index — always dispatch immediately
-                    self._handle_event(event)
-                elif self._buffering:
+                if self._buffering:
                     self._event_buffer.append(event)
                 else:
-                    self._handle_event(event)
+                    self._apply_event(event)
         except Exception as e:
             log.warning("WS receive loop error: %s", e)
             if not self._shutting_down:
                 self._show_client_error(f"Connection lost: {e}")
-                self._end_turn()
                 close_code = getattr(getattr(e, "rcvd", None), "code", None)
                 self._schedule_reconnect(close_code)
             return
@@ -378,7 +521,6 @@ class ArchieApp(App):
         # Generator ended without raising — connection closed underneath us.
         if not self._shutting_down:
             self._show_client_error("Connection lost: the agent closed the stream.")
-            self._end_turn()
             self._schedule_reconnect(None)
 
     def _schedule_reconnect(self, close_code: int | None = None) -> None:
@@ -434,10 +576,19 @@ class ArchieApp(App):
                     except asyncio.CancelledError:
                         pass
                 self._receive_task = asyncio.create_task(self._receive_loop())
-                await self._replay_events()
+                if not await self._replay_events():
+                    self._buffering = False
+                    self._event_buffer = []
+                    if self._receive_task is not None and not self._receive_task.done():
+                        self._receive_task.cancel()
+                        try:
+                            await self._receive_task
+                        except asyncio.CancelledError:
+                            pass
+                    await self._ws.disconnect()
+                    continue
                 self._buffering = False
-                for event in self._event_buffer:
-                    self._handle_event(event)
+                self._dispatch_buffered_events()
                 self._event_buffer = []
                 self.notify("Reconnected to agent")
                 return
@@ -446,182 +597,16 @@ class ArchieApp(App):
         finally:
             self._reconnecting = False
 
-    def _handle_event(self, event) -> None:
-        """Dispatch one server event to the appropriate widget update."""
-        conv = self.query_one("#conversation", Conversation)
+    def _dispatch_buffered_events(self) -> None:
+        """Flush live frames after history; request keys suppress duplicates."""
+        for event in self._event_buffer:
+            self._apply_event(event)
 
-        # Child activity is broadcast as canonical events rather than wrapped
-        # wire events. Route scoped canonical events before the root reducers.
-        if getattr(event, "scope", None) is not None and getattr(event, "subagent_index", None) is not None:
-            if isinstance(event, LLMRequest):
-                self._accumulate_ledger(event)
-            if self._handle_scoped_event(event):
-                return
+    def _apply_event(self, event, *, historical: bool = False) -> None:
+        """Apply one live or historical event through the imperative UI path."""
+        self._render_canonical(event, replay=historical)
 
-        if isinstance(event, SessionSnapshot):
-            # Authoritative session state at connect. Seed cumulative accounting
-            # and the replay cursor from the persisted ledger.
-            status = self.query_one("#status", StatusBar)
-            status.session_id = event.session_id
-            status.model_name = event.model
-            status.git_branch = event.git_branch
-            self._session_id = event.session_id
-            self._last_event_id = event.latest_event_id
-            self._cumulative_input = event.total_input_tokens
-            self._cumulative_output = event.total_output_tokens
-            self._cumulative_cache_read = event.total_cache_read_tokens
-            self._cumulative_cache_write = event.total_cache_write_tokens
-            self._cumulative_cost = event.total_cost
-            self._update_accounting_status()
-            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
-                self._protocol_warned = True
-                self._show_client_error(
-                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
-                    f"this client supports v{PROTOCOL_VERSION}. "
-                    "Some features may not work — consider updating the CLI."
-                )
-
-        elif isinstance(event, SessionInfo):
-            status = self.query_one("#status", StatusBar)
-            status.session_id = event.session_id
-            status.model_name = event.model
-            status.git_branch = event.git_branch
-            self._session_id = event.session_id
-            # Warn if the session's protocol version is newer than this client supports
-            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
-                self._protocol_warned = True
-                self._show_client_error(
-                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
-                    f"this client supports v{PROTOCOL_VERSION}. "
-                    "Some features may not work — consider updating the CLI."
-                )
-
-        elif isinstance(event, ModelSwitched):
-            status = self.query_one("#status", StatusBar)
-            status.model_name = event.model_name
-            status.supports_cache = event.supports_cache
-            self.notify(f"Switched to {event.model_name}")
-
-        elif isinstance(event, LLMRequest):
-            # Authoritative live cost/token source from the broadcast ledger.
-            self._accumulate_ledger(event)
-            if event.scope is None and event.subagent_index is None:
-                self._turn_input += event.input_tokens
-                self._turn_cache_read += event.cache_read_tokens
-                self._turn_cache_write += event.cache_write_tokens
-                self._turn_output += event.output_tokens
-                self._turn_cost += event.cost_usd
-                self._turn_duration_s += event.duration_ms / 1000
-            if self._handle_scoped_event(event):
-                return
-
-        elif isinstance(event, StatusUpdated):
-            status = self.query_one("#status", StatusBar)
-            status.git_branch = event.git_branch
-
-        elif isinstance(event, IterationStart):
-            if self._handle_scoped_event(event):
-                return
-            # Deterministic block boundary: finalise any in-progress streaming
-            # and reset the iteration block so the next TextDelta/ToolCall opens
-            # a fresh visual block. Decoupled from Usage metadata.
-            if self._streaming is not None:
-                self._finalise_streaming()
-            self._iteration_block = None
-            # Agent is working towards the next response — show the thinking
-            # indicator again until the first TextDelta/ToolCall of this iteration.
-            self._show_throbber()
-
-        elif isinstance(event, TextDelta):
-            if self._handle_scoped_event(event):
-                return
-            self._remove_throbber()
-            if self._streaming is None:
-                self._streaming = conv.begin_streaming()
-                self._turn_active = True
-            self._stream_text += event.text
-            self._streaming.append(event.text)
-            # Live output estimation
-            self._estimated_output += len(event.text) // 4
-            status = self.query_one("#status", StatusBar)
-            status.session_output = self._cumulative_output + self._estimated_output
-            conv.scroll_if_at_bottom()
-
-        elif isinstance(event, Usage):
-            # Tokens/cost come authoritatively from the llm_request ledger; the
-            # Usage event carries the latest request's context-token components
-            # and the server-computed context percentage.
-            self._estimated_output = 0
-            self._latest_context_tokens = (
-                event.input_tokens + event.cache_read_tokens + event.cache_write_tokens
-            )
-            status = self.query_one("#status", StatusBar)
-            status.session_output = self._cumulative_output
-            status.context_tokens = self._latest_context_tokens
-            status.context_pct = event.context_pct
-
-        elif isinstance(event, TurnComplete):
-            if self._handle_scoped_event(event):
-                return
-            self._show_turn_status()
-            self._end_turn()
-
-        elif isinstance(event, TurnInterrupted):
-            if self._handle_scoped_event(event):
-                return
-            conv.add_cancelled()
-            self._end_turn()
-
-        elif isinstance(event, TurnError):
-            if self._handle_scoped_event(event):
-                return
-            self._show_error(event.message)
-            self._end_turn()
-
-        elif isinstance(event, ToolCall):
-            if self._handle_scoped_event(event):
-                return
-            self._remove_throbber()
-            # Finalise any in-progress streaming text before showing tool activity
-            if self._streaming is not None:
-                self._finalise_streaming()
-            # Start a new iteration block if needed
-            if self._iteration_block is None:
-                self._iteration_block = conv.begin_iteration()
-            # Add pending entry (format summary client-side from raw input)
-            input_summary = format_tool_pending(event.name, event.input)
-            self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
-            entry = self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
-            if event.name == "task":
-                tasks = event.input.get("tasks", [])
-                if isinstance(tasks, list):
-                    self._parent_task_inputs[event.tool_use_id] = tasks
-                    self._parent_task_entries[event.tool_use_id] = entry
-            conv.scroll_if_at_bottom()
-
-        elif isinstance(event, ToolResult):
-            if self._handle_scoped_event(event):
-                return
-            if self._iteration_block is not None:
-                pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
-                if pending is not None:
-                    name, tool_input = pending
-                    summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
-                else:
-                    summary = event.content[:200] if event.content else ""
-                self._iteration_block.complete_tool(
-                    event.tool_use_id,
-                    event.is_error,
-                    event.duration_ms,
-                    event.result_lines,
-                    event.result_bytes,
-                    summary,
-                )
-                conv.scroll_if_at_bottom()
-            # Tool finished — agent is thinking about the next step again.
-            self._show_throbber()
-
-    def _handle_scoped_event(self, event) -> bool:
+    def _handle_scoped_event(self, event, *, replay: bool = False) -> bool:
         """Reduce one canonical/live child event into shared child state."""
         scope = getattr(event, "scope", None)
         index = getattr(event, "subagent_index", None)
@@ -635,7 +620,18 @@ class ArchieApp(App):
         elif isinstance(event, (IterationStart, ce.IterationStart)):
             child.set_activity("Thinking...")
         elif isinstance(event, (TextDelta, ce.TextDelta)):
-            child.add_line(event.text)
+            key = self._request_key(event)
+            if key in self._finalized_assistant_requests:
+                return True
+            text = self._transient_assistant_text.get(key, "") + event.text
+            self._transient_assistant_text[key] = text
+            child.activity = "Responding..."
+        elif isinstance(event, ce.AssistantMessage):
+            key = self._request_key(event)
+            self._transient_assistant_text.pop(key, None)
+            self._finalized_assistant_requests.add(key)
+            if event.content:
+                child.add_line(event.content)
             child.activity = "Responding..."
         elif isinstance(event, (ToolCall, ce.ToolCall)):
             summary = format_tool_activity(event.name, event.input)
@@ -647,7 +643,9 @@ class ArchieApp(App):
         elif isinstance(event, (ToolResult, ce.ToolResult)):
             pending = self._child_pending_tools.pop((scope, index, event.tool_use_id), None)
             name, tool_input = pending or ("tool", {})
-            result_summary = format_tool_complete(name, tool_input, event.content, event.is_error, event.duration_ms)
+            result_summary = format_tool_complete(
+                name, tool_input, event.content, event.is_error, event.duration_ms
+            )
             child.add_line(result_summary)
             if event.is_error:
                 child.activity = result_summary
@@ -697,9 +695,7 @@ class ArchieApp(App):
         if child is None:
             return
         self._active_child_key = key
-        self.push_screen(
-            SubagentScreen(child)
-        )
+        self.push_screen(SubagentScreen(child))
 
     async def action_subagent_picker(self) -> None:
         """Open the command palette filtered to subagent entries."""
@@ -709,7 +705,11 @@ class ArchieApp(App):
         """Target-stop the selected child while leaving siblings active."""
         if self._active_child_key is not None:
             asyncio.create_task(
-                self._ws.send_command(InterruptCommand(target=self._active_child_key))
+                self._ws.send_command(
+                    InterruptCommand(
+                        scope=self._active_child_key[0], subagent_index=self._active_child_key[1]
+                    )
+                )
             )
 
     def _child(self, scope: str, index: int) -> ChildActivity:
@@ -755,9 +755,6 @@ class ArchieApp(App):
         self._turn_output = 0
         self._turn_cost = 0.0
         self._turn_duration_s = 0.0
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_user_message(content)
-
         # Show throbber while waiting
         self._show_throbber()
 
@@ -779,25 +776,21 @@ class ArchieApp(App):
             self._schedule_reconnect()
 
     async def _run_direct_shell(self, command: str) -> None:
-        """Execute a command in the session container via docker exec.
-
-        Runs async so the TUI stays responsive. Output is displayed in a
-        ShellOutput widget. Errors (docker exec failure) use ClientErrorMessage.
-        """
+        """Execute and render a command locally through host-side docker exec."""
         conv = self.query_one("#conversation", Conversation)
         self._shell_active = True
         self._shell_command = command
+        self._shell_cancel_requested = False
         max_output_lines = 10_000
         timeout = 30
 
         try:
-            cname = self._container_name
             self._shell_proc = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
                 "-w",
                 "/workspace",
-                cname,
+                self._container_name,
                 "bash",
                 "-c",
                 command,
@@ -808,46 +801,27 @@ class ArchieApp(App):
                 stdout_bytes, _ = await asyncio.wait_for(
                     self._shell_proc.communicate(), timeout=timeout
                 )
+                exit_code = (
+                    130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
+                )
+                output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
             except TimeoutError:
                 self._shell_proc.kill()
                 await self._shell_proc.wait()
-                conv.add_shell_output(command, "(timed out)", exit_code=124)
-                self._log_shell(command, 124, "(timed out)")
-                return
+                exit_code = 124
+                output = "(timed out)"
 
-            exit_code = self._shell_proc.returncode or 0
-            output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-
-            # Truncate large output
             lines = output.split("\n")
             if len(lines) > max_output_lines:
                 output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
-
-            conv.add_shell_output(command, output.rstrip(), exit_code=exit_code)
-            self._log_shell(command, exit_code, output)
-
-        except Exception as e:
-            conv.add_client_error(f"Docker exec failed: {e}")
+            conv.add_shell_output(command, output, exit_code=exit_code)
+        except Exception as exc:  # noqa: BLE001 — local execution failure
+            conv.add_client_error(f"Docker exec failed: {exc}")
         finally:
             self._shell_active = False
             self._shell_proc = None
             self._shell_command = ""
-
-    def _log_shell(self, command: str, exit_code: int, output: str) -> None:
-        """Best-effort POST to /shell endpoint to log command in session."""
-        asyncio.create_task(self._log_shell_async(command, exit_code, output))
-
-    async def _log_shell_async(self, command: str, exit_code: int, output: str) -> None:
-        """Async POST to /shell endpoint."""
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{self._api_url}/shell",
-                    json={"command": command, "exit_code": exit_code, "output": output},
-                    timeout=5,
-                )
-        except Exception:
-            pass  # Best-effort
+            self._shell_cancel_requested = False
 
     # --- UI helpers ---
 
@@ -864,7 +838,13 @@ class ArchieApp(App):
     def _show_turn_status(self) -> None:
         """Render client-only metrics for the completed root turn."""
         if self._turn_started_at is None and not any(
-            (self._turn_input, self._turn_cache_read, self._turn_cache_write, self._turn_output, self._turn_cost)
+            (
+                self._turn_input,
+                self._turn_cache_read,
+                self._turn_cache_write,
+                self._turn_output,
+                self._turn_cost,
+            )
         ):
             return
         duration_s = (
@@ -906,6 +886,7 @@ class ArchieApp(App):
             self._streaming.remove()
         self._streaming = None
         self._stream_text = ""
+        self._stream_request_key = None
 
     def _show_throbber(self) -> None:
         """Show the fixed throbber while the agent is thinking."""
@@ -953,11 +934,8 @@ class ArchieApp(App):
         When idle, double-tap within 500ms clears the input.
         """
         if self._shell_active and self._shell_proc is not None:
+            self._shell_cancel_requested = True
             self._shell_proc.kill()
-            conv = self.query_one("#conversation", Conversation)
-            cmd = self._shell_command or "?"
-            conv.add_shell_output(cmd, "(interrupted)", exit_code=130)
-            self._log_shell(cmd, 130, "(interrupted)")
             return
         if self._turn_active:
             asyncio.create_task(self._ws.send_interrupt())

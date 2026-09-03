@@ -20,16 +20,9 @@ from archie_shared.session.identity import (
     parse_container_name,
     split_id,
 )
-from archie_shared.session.log import (
-    MessageEntry,
-    MessageMetadata,
-    write_entry,
-)
 
 __all__ = [
     "CONTAINER_PREFIX",
-    "MessageEntry",
-    "MessageMetadata",
     "SESSION_PATTERN",
     "SessionDescriptor",
     "StatusPayload",
@@ -40,5 +33,4 @@ __all__ = [
     "scope_direct_costs",
     "scope_inclusive_costs",
     "split_id",
-    "write_entry",
 ]

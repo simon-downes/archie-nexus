@@ -43,9 +43,7 @@ def _make_session(session_id: str = "proj-01abc12345", port: int = 32771) -> Ses
 @pytest.mark.asyncio
 async def test_health_accessible_from_any_client():
     """GET /health returns 200 regardless of calling client."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
@@ -72,9 +70,7 @@ async def test_response_bodies_contain_no_hardcoded_localhost():
     """Session list responses do not embed localhost/127.0.0.1 addresses."""
     sessions = [_make_session(port=32771)]
     with patch("archie_orchestrator.app.list_sessions", return_value=sessions):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/sessions")
 
     body_text = resp.text
@@ -130,9 +126,7 @@ async def test_proxy_status_forwards_to_loopback(tmp_path):
         patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
         patch("archie_orchestrator.proxy.httpx.AsyncClient", _FakeAsyncClient),
     ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             await client.get(f"/sessions/{session.session_id}/status")
 
     assert len(captured_urls) == 1
