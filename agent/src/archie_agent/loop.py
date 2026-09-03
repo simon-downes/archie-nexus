@@ -11,9 +11,14 @@ from typing import TYPE_CHECKING
 
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 
-from archie_agent.events import (
+from archie_agent.llm._types import Done, StreamEvent, ToolUseEvent, ToolUseStart
+from archie_agent.llm._types import TextDelta as LLMTextDelta
+from archie_agent.llm._types import Usage as LLMUsage
+from archie_agent.loop_events import (
     AgentEvent,
     IterationStart,
+    RequestContext,
+    RequestFinished,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -22,9 +27,6 @@ from archie_agent.events import (
     TurnInterrupted,
     Usage,
 )
-from archie_agent.llm._types import Done, StreamEvent, ToolUseEvent, ToolUseStart
-from archie_agent.llm._types import TextDelta as LLMTextDelta
-from archie_agent.llm._types import Usage as LLMUsage
 from archie_agent.prompt import SystemPrompt
 
 if TYPE_CHECKING:
@@ -39,22 +41,6 @@ _DEFAULT_MAX_ITERATIONS = 100
 @dataclass
 class _WorkerError:
     msg: str
-
-
-@dataclass(frozen=True)
-class RequestContext:
-    request_id: str
-    sent_at: str
-
-
-@dataclass
-class RequestFinished:
-    context: RequestContext
-    duration_ms: int
-    status: str
-    usage: Usage | None
-    stop_reason: str | None
-    error: str | None
 
 
 @dataclass

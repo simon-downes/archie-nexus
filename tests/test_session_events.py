@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     AssistantMessage,
     IterationStart,
     LLMRequest,

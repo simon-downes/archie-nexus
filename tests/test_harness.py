@@ -3,13 +3,12 @@
 import json
 
 import pytest
-from archie_agent.events import TurnComplete as AgentTurnComplete
 from archie_agent.harness import AgentHarness, _shell_result_is_error
 from archie_agent.llm._types import Done, TextDelta, Usage
 from archie_agent.llm.fake import FakeLLMClient
+from archie_agent.loop_events import TurnComplete as AgentTurnComplete
 from archie_agent.session import Session
-from archie_agent.session_bus import EventIdConflict, LogAppendError
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     AssistantMessage,
     LLMRequest,
     ToolCall,
@@ -21,6 +20,7 @@ from archie_shared.canonical_events import (
     decode_event,
 )
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.session.log import EventIdConflict, LogAppendError
 
 
 def test_shell_result_error_uses_only_first_line():
@@ -32,6 +32,8 @@ def test_shell_result_error_uses_only_first_line():
 
 def _read_events(log_path) -> list:
     """Decode all persisted canonical events from a session JSONL log."""
+    if not log_path.exists():
+        return []
     return [
         decode_event(line, persisted=True)
         for line in log_path.read_bytes().splitlines()
@@ -531,10 +533,10 @@ async def test_user_message_append_failure_clears_turn_and_notifies(tmp_path):
     ws = FakeWebSocket()
     harness.clients.add(ws)
 
-    async def fail_publish(event) -> str:
+    def fail_append(event) -> bool:
         raise LogAppendError("disk full")
 
-    harness.event_bus.publish = fail_publish
+    harness.event_bus.log.append = fail_append
     await harness.handle_message("hello")
 
     events = _read_events(harness.log_path)
@@ -574,7 +576,7 @@ async def test_cancellation_after_terminal_append_does_not_duplicate(tmp_path):
     )
     appended = asyncio.Event()
     release = asyncio.Event()
-    original_publish = harness.event_bus.publish
+    original_publish = harness.event_bus.emit
 
     async def delayed_publish(event) -> str:
         line = await original_publish(event)
@@ -583,7 +585,7 @@ async def test_cancellation_after_terminal_append_does_not_duplicate(tmp_path):
             await release.wait()
         return line
 
-    harness.event_bus.publish = delayed_publish
+    harness.event_bus.emit = delayed_publish
     task = asyncio.create_task(harness.handle_message("hello"))
     await appended.wait()
     task.cancel()
@@ -661,10 +663,10 @@ async def test_child_append_failure_notifies_without_terminal(tmp_path, monkeypa
     ws = FakeWebSocket()
     harness.clients.add(ws)
 
-    async def fail_publish(event) -> str:
+    def fail_append(event) -> bool:
         raise LogAppendError("disk full")
 
-    harness.event_bus.publish = fail_publish
+    harness.event_bus.log.append = fail_append
     monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *args: object())
     task_spec = harness._registry.get("task")
     assert task_spec is not None
@@ -722,7 +724,7 @@ async def test_terminal_publish_conflict_falls_back_to_one_error(tmp_path):
         tmp_path,
         responses=[[TextDelta(text="done"), Done(stop_reason="end_turn")]],
     )
-    original_publish = harness.event_bus.publish
+    original_publish = harness.event_bus.emit
     failed = False
 
     async def fail_terminal_once(event) -> str:
@@ -732,7 +734,7 @@ async def test_terminal_publish_conflict_falls_back_to_one_error(tmp_path):
             raise EventIdConflict("injected terminal conflict")
         return await original_publish(event)
 
-    harness.event_bus.publish = fail_terminal_once
+    harness.event_bus.emit = fail_terminal_once
     await harness.handle_message("hello")
 
     events = _read_events(harness.log_path)

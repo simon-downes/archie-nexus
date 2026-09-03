@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from archie_shared.canonical_events import LLMRequest, ToolCall
+from archie_shared.events import LLMRequest, ToolCall
 
 
 def _parent_map(events: list[LLMRequest | ToolCall]) -> dict[str, str | None]:

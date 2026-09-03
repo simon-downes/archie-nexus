@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from archie_shared.canonical_events import Handshake
-from archie_shared.events import PROTOCOL_VERSION
+from archie_shared.events import Handshake
+from archie_shared.protocol import PROTOCOL_VERSION
 
 
 def _make_app():

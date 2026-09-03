@@ -2,7 +2,7 @@
 
 import pytest
 from archie_agent.session_bus import SessionEventBus
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     ErrorNotice,
     Handshake,
     ModelSwitch,

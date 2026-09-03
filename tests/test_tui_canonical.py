@@ -8,7 +8,7 @@ import asyncio
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     AssistantMessage,
     ErrorNotice,
     Handshake,

@@ -17,24 +17,22 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from archie_shared.canonical_events import (
-    ErrorNotice,
-    PersistedEvent,
-    PersistedEventTypes,
-    SessionStarted,
-    StatusUpdated,
-    UserMessage,
-    decode_event,
-)
-from archie_shared.canonical_events import TurnError as CanonicalTurnError
+from archie_shared.events import CanonicalEvent, ErrorNotice, Event, StatusUpdated, UserMessage
+from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.schemas import SubagentsConfig
+from archie_shared.session.log import LogAppendError, SessionLog
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
 from archie_agent.agents import AgentEntry, create_task_tool, discover_agents
-from archie_agent.event_log import EventFactory, now_utc
-from archie_agent.events import (
+from archie_agent.event_factory import EventFactory, now_utc
+from archie_agent.exec.tool import create_registry, format_result, run_exec
+from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.loop import run_loop
+from archie_agent.loop_events import (
     IterationStart,
+    RequestContext,
+    RequestFinished,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -43,12 +41,9 @@ from archie_agent.events import (
     TurnInterrupted,
     Usage,
 )
-from archie_agent.exec.tool import create_registry, format_result, run_exec
-from archie_agent.exec.tools._subprocess import kill_process_group
-from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session
-from archie_agent.session_bus import LogAppendError, SessionEventBus
+from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import create_skill_tool, discover_skills
 
 if TYPE_CHECKING:
@@ -111,7 +106,7 @@ class AgentHarness:
         self._exec_run_root = exec_run_root
 
         # Session-global ordered persistence and client delivery.
-        self._event_bus = SessionEventBus(self.log_path)
+        self._event_bus = SessionEventBus(SessionLog(self.log_path))
 
         # Turn state
         self._turn_active = False
@@ -140,7 +135,7 @@ class AgentHarness:
                 active_model_key=lambda: self.session.model_id,
                 region=self._region,
                 log_path=self.log_path,
-                broadcast=self._publish_serialized,
+                emit=self._emit_event,
                 exec_python=self._exec_python,
                 exec_run_root=self._exec_run_root,
                 max_concurrent=self._subagents.max_concurrent,
@@ -161,15 +156,6 @@ class AgentHarness:
 
         self._request_ids: list[str] = []
         self._event_factory = EventFactory(self.log_path, self.session.model_id, self.session.model)
-        if not self.log_path.exists() or not self.log_path.read_text().strip():
-            self._event_bus.append(
-                SessionStarted(
-                    id=str(ULID()),
-                    schema_version=2,
-                    sent_at=now_utc(),
-                    model_key=self.session.model_id,
-                )
-            )
 
     def _make_task_placeholder(self):
         """Create the root task tool placeholder before task wiring is added."""
@@ -277,7 +263,7 @@ class AgentHarness:
             from archie_agent.app import _read_git_branch
 
             try:
-                await self._event_bus.broadcast(
+                await self._event_bus.emit(
                     StatusUpdated(id=str(ULID()), git_branch=_read_git_branch())
                 )
             except Exception:  # noqa: BLE001 — status refresh is best effort
@@ -286,17 +272,17 @@ class AgentHarness:
     async def _broadcast_storage_error(self, message: str) -> None:
         """Best-effort live notice when durable append fails."""
         try:
-            await self._event_bus.broadcast(
+            await self._event_bus.emit(
                 ErrorNotice(id=str(ULID()), kind="storage_error", message=message)
             )
         except Exception:  # noqa: BLE001 — storage error handling must not hang
             log.warning("Failed to broadcast storage error", exc_info=True)
 
-    async def _publish_root_terminal(self, event: PersistedEvent) -> None:
+    async def _publish_root_terminal(self, event: Event) -> None:
         """Publish a terminal event without allowing cancellation to duplicate it."""
         self._terminal_emitted = True
         try:
-            await asyncio.shield(self._event_bus.publish(event))
+            await asyncio.shield(self._event_bus.emit(event))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -307,7 +293,7 @@ class AgentHarness:
         """Persist one root terminal error after an unexpected turn failure."""
         try:
             try:
-                terminal, _ = self._event_factory.turn_error(
+                terminal = self._event_factory.turn_error(
                     turn=self._current_turn_index or self.session.turn_index or 1,
                     message=message,
                 )
@@ -318,7 +304,7 @@ class AgentHarness:
                     scope=None,
                     message=message,
                 )
-            await self._event_bus.publish(terminal)
+            await self._event_bus.emit(terminal)
             self._terminal_emitted = True
         except LogAppendError as exc:
             self._storage_failed = True
@@ -341,7 +327,7 @@ class AgentHarness:
         current_iteration = 0
 
         # Persist and enqueue the user message before provider streaming starts.
-        await self._event_bus.publish(
+        await self._event_bus.emit(
             UserMessage(
                 id=str(ULID()),
                 turn=turn_index,
@@ -406,24 +392,24 @@ class AgentHarness:
                     iter_text = ""
                     assistant_event_logged = False
                     current_iteration = event.index
-                    iteration, _ = self._event_factory.iteration_start(
+                    iteration = self._event_factory.iteration_start(
                         turn=turn_index,
                         iteration=event.index,
                     )
-                    await self._event_bus.publish(iteration)
+                    await self._event_bus.emit(iteration)
 
                 elif isinstance(event, TextDelta):
                     iter_text += event.text
-                    delta, _ = self._event_factory.text_delta(
+                    delta = self._event_factory.text_delta(
                         turn=turn_index,
                         iteration=current_iteration,
                         request_id=event.request_id or current_request_id,
                         text=event.text,
                     )
-                    await self._event_bus.broadcast(delta)
+                    await self._event_bus.emit(delta)
 
                 elif isinstance(event, RequestFinished):
-                    request, _ = self._event_factory.request(
+                    request = self._event_factory.request(
                         turn=turn_index,
                         iteration=current_iteration,
                         sent_at=event.context.sent_at,
@@ -436,7 +422,7 @@ class AgentHarness:
                     )
                     self._request_ids.append(request.id)
                     current_request_id = request.id
-                    await self._event_bus.publish(request)
+                    await self._event_bus.emit(request)
 
                 elif isinstance(event, Usage):
                     last_usage = event
@@ -449,13 +435,13 @@ class AgentHarness:
 
                 elif isinstance(event, ToolCall):
                     if iter_text and not assistant_event_logged:
-                        assistant, _ = self._event_factory.assistant_message(
+                        assistant = self._event_factory.assistant_message(
                             turn=turn_index,
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=False,
                         )
-                        await self._event_bus.publish(assistant)
+                        await self._event_bus.emit(assistant)
                         assistant_event_logged = True
                     # Accumulate for transcript reconstruction
                     iter_tool_uses.append(
@@ -465,7 +451,7 @@ class AgentHarness:
                             input=event.input,
                         )
                     )
-                    tool_call, _ = self._event_factory.tool_call(
+                    tool_call = self._event_factory.tool_call(
                         turn=turn_index,
                         iteration=current_iteration,
                         request_id=current_request_id,
@@ -473,7 +459,7 @@ class AgentHarness:
                         name=event.name,
                         input=event.input,
                     )
-                    await self._event_bus.publish(tool_call)
+                    await self._event_bus.emit(tool_call)
 
                 elif isinstance(event, ToolResult):
                     # Accumulate for transcript reconstruction
@@ -487,7 +473,7 @@ class AgentHarness:
                     duration_ms = event.duration_ms
                     result_lines = event.result_lines
                     result_bytes = event.result_bytes if event.content else 0
-                    tool_result, _ = self._event_factory.tool_result(
+                    tool_result = self._event_factory.tool_result(
                         turn=turn_index,
                         iteration=current_iteration,
                         request_id=current_request_id,
@@ -498,7 +484,7 @@ class AgentHarness:
                         result_bytes=result_bytes,
                         result_lines=result_lines,
                     )
-                    await self._event_bus.publish(tool_result)
+                    await self._event_bus.emit(tool_result)
 
                 elif isinstance(event, TurnComplete):
                     # Final iteration is text-only (stop_reason=end_turn); any
@@ -512,14 +498,14 @@ class AgentHarness:
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                         )
                     if iter_text and not assistant_event_logged:
-                        assistant, _ = self._event_factory.assistant_message(
+                        assistant = self._event_factory.assistant_message(
                             turn=turn_index,
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=False,
                         )
-                        await self._event_bus.publish(assistant)
-                    complete, _ = self._event_factory.turn_complete(
+                        await self._event_bus.emit(assistant)
+                    complete = self._event_factory.turn_complete(
                         turn=turn_index, stop_reason=event.stop_reason
                     )
                     await self._publish_root_terminal(complete)
@@ -528,13 +514,13 @@ class AgentHarness:
                     # Persist any final assistant text before flushing the
                     # iteration's tool context.
                     if iter_text and not assistant_event_logged:
-                        assistant, _ = self._event_factory.assistant_message(
+                        assistant = self._event_factory.assistant_message(
                             turn=turn_index,
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=True,
                         )
-                        await self._event_bus.publish(assistant)
+                        await self._event_bus.emit(assistant)
                     _flush_iteration()
                     if iter_text:
                         self.session.add_turn(
@@ -543,7 +529,7 @@ class AgentHarness:
                             turn_index=turn_index,
                             interrupted=True,
                         )
-                    error_event, _ = self._event_factory.turn_error(
+                    error_event = self._event_factory.turn_error(
                         turn=turn_index, message=event.error
                     )
                     await self._publish_root_terminal(error_event)
@@ -555,13 +541,13 @@ class AgentHarness:
                     # Persist any final assistant text before flushing the
                     # iteration's tool context.
                     if iter_text and not assistant_event_logged:
-                        assistant, _ = self._event_factory.assistant_message(
+                        assistant = self._event_factory.assistant_message(
                             turn=turn_index,
                             request_ids=self._request_ids.copy(),
                             content=iter_text,
                             interrupted=True,
                         )
-                        await self._event_bus.publish(assistant)
+                        await self._event_bus.emit(assistant)
                     # Flush the final (unterminated) iteration. The loop already
                     # appends "cancelled" repair results on interrupt, but those
                     # live only inside run_loop; reconstruct here from events.
@@ -574,7 +560,7 @@ class AgentHarness:
                             output_tokens=last_usage.output_tokens if last_usage else 0,
                             interrupted=True,
                         )
-                    interrupted, _ = self._event_factory.turn_interrupted(turn=turn_index)
+                    interrupted = self._event_factory.turn_interrupted(turn=turn_index)
                     await self._publish_root_terminal(interrupted)
                     self.session.display_entries.append(
                         DisplayEntry(role="interrupted", content="", turn_index=turn_index)
@@ -703,10 +689,6 @@ class AgentHarness:
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
 
-    async def _publish_serialized(self, data: str) -> None:
-        """Decode a child factory result and route it through the bus."""
-        event = decode_event(data)
-        if isinstance(event, PersistedEventTypes):
-            await self._event_bus.publish(event)
-        else:
-            await self._event_bus.broadcast(event)
+    async def _emit_event(self, event: CanonicalEvent) -> None:
+        """Submit a typed child event through the session event bus."""
+        await self._event_bus.emit(event)

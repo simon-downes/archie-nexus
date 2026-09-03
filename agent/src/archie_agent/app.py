@@ -12,24 +12,26 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from archie_shared.canonical_events import (
-    ErrorNotice,
-    Handshake,
-    ModelSwitch,
-    ShellCommand,
-    StatusUpdated,
-)
-from archie_shared.config import home_dir
-from archie_shared.events import (
-    PROTOCOL_VERSION,
+from archie_shared.commands import (
     InterruptCommand,
     MessageCommand,
     SwitchModelCommand,
-    deserialize_command,
+    decode_command,
+)
+from archie_shared.config import home_dir
+from archie_shared.events import (
+    ErrorNotice,
+    Handshake,
+    ModelSwitch,
+    SessionStarted,
+    ShellCommand,
+    StatusUpdated,
+    encode_event,
 )
 from archie_shared.models import get_model, load_models
+from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import load_nexus_config
-from archie_shared.session.log import read_event_lines
+from archie_shared.session.log import CursorNotFound, EventIdConflict, LogAppendError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -40,7 +42,6 @@ from ulid import ULID
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
-from archie_agent.session_bus import EventIdConflict, LogAppendError
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -123,6 +124,16 @@ async def lifespan(app):
         subagents=_config.agent.subagents,
     )
 
+    if not _agent.event_bus.log.read():
+        await _agent.event_bus.emit(
+            SessionStarted(
+                id=str(ULID()),
+                schema_version=2,
+                sent_at=datetime.now(UTC).isoformat(),
+                model_key=session.model_id,
+            )
+        )
+
     log.info(
         "Agent started",
         extra={
@@ -156,61 +167,49 @@ async def events(request: Request):
         return JSONResponse({"error": "no session"}, status_code=503)
     after = request.query_params.get("after")
     try:
-        items = read_event_lines(_agent.log_path)
-        if after is not None and after and not any(item["id"] == after for item in items):
-            return JSONResponse({"error": "cursor_not_found", "cursor": after}, status_code=409)
-        start = (
-            next((i + 1 for i, item in enumerate(items) if item["id"] == after), 0) if after else 0
-        )
-        body = "".join(item["line"] + "\n" for item in items[start:])
+        items = _agent.event_bus.log.read(after)
+        body = "".join(encode_event(event) + "\n" for event in items)
         return Response(body, media_type="application/x-ndjson")
+    except CursorNotFound:
+        return JSONResponse({"error": "cursor_not_found", "cursor": after}, status_code=409)
     except Exception as exc:
         log.warning("Failed to replay events", exc_info=True)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket) -> None:
-    """Handle a model switch request.
-
-    Guards against active turns, validates the model key, rebuilds the LLM
-    client and session state, then broadcasts confirmation.
-    """
+    """Handle a model switch request."""
     assert _agent is not None
     assert _catalog is not None
     assert _config is not None
 
-    # Guard: cannot switch during active turn
     if _agent.turn_active:
-        await _agent.event_bus.send_to(
-            websocket,
+        await _agent.event_bus.emit(
             ErrorNotice(
                 id=str(ULID()),
                 kind="switch_during_turn",
                 message="Cannot switch model during active turn",
             ),
+            target=websocket,
         )
         return
 
-    # Validate model key
     try:
         new_model = get_model(_catalog, command.model_key)
     except KeyError:
-        await _agent.event_bus.send_to(
-            websocket,
+        await _agent.event_bus.emit(
             ErrorNotice(
                 id=str(ULID()),
                 kind="unknown_model",
                 message=f"Unknown model: {command.model_key}",
             ),
+            target=websocket,
         )
         return
 
-    # Rebuild LLM client
     new_llm = create_llm_client(new_model, _config.global_.region)
-
-    # Publish first so a storage failure leaves runtime state unchanged.
     try:
-        await _agent.event_bus.publish(
+        await _agent.event_bus.emit(
             ModelSwitch(
                 id=str(ULID()),
                 model_key=command.model_key,
@@ -218,18 +217,17 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
             )
         )
     except LogAppendError as exc:
-        await _agent.event_bus.send_to(
-            websocket,
+        await _agent.event_bus.emit(
             ErrorNotice(
                 id=str(ULID()),
                 kind="storage_error",
                 message=str(exc),
             ),
+            target=websocket,
         )
         return
 
     _agent.switch_model(command.model_key, new_model, new_llm)
-
     log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
 
 
@@ -247,7 +245,7 @@ async def stream(websocket: WebSocket) -> None:
         return
 
     # Register and enqueue the connect sequence as one ordered operation.
-    await _agent.event_bus.add_client_with_events(
+    await _agent.event_bus.register_client(
         websocket,
         (
             Handshake(
@@ -264,7 +262,7 @@ async def stream(websocket: WebSocket) -> None:
         while True:
             raw = await websocket.receive_text()
             try:
-                command = deserialize_command(raw)
+                command = decode_command(raw)
             except (ValueError, KeyError) as e:
                 log.warning("Malformed WS message: %s", e)
                 continue
@@ -277,13 +275,13 @@ async def stream(websocket: WebSocket) -> None:
                     task.add_done_callback(lambda t: _active_tasks.discard(t))
                     _active_tasks.add(task)
                 else:
-                    await _agent.event_bus.send_to(
-                        websocket,
+                    await _agent.event_bus.emit(
                         ErrorNotice(
                             id=str(ULID()),
                             kind="turn_active",
                             message="Turn already active",
                         ),
+                        target=websocket,
                     )
             elif isinstance(command, InterruptCommand):
                 _agent.interrupt(command.target)
@@ -338,7 +336,7 @@ async def shell_log(request: Request) -> JSONResponse:
             exit_code=exit_code,
             output=output,
         )
-        await _agent.event_bus.publish(event)
+        await _agent.event_bus.emit(event)
         return JSONResponse({"ok": True})
     except EventIdConflict as e:
         return JSONResponse({"error": str(e)}, status_code=409)

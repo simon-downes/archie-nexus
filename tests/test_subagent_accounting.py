@@ -6,7 +6,7 @@ one llm_request per child request, and direct vs inclusive cost rollup by scope.
 
 from __future__ import annotations
 
-from archie_shared.canonical_events import LLMRequest, ToolCall
+from archie_shared.events import LLMRequest, ToolCall
 from archie_shared.session import scope_direct_costs, scope_inclusive_costs
 
 # ---------------------------------------------------------------------------

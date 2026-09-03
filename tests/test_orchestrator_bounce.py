@@ -170,7 +170,7 @@ async def test_tui_reconnect_deduplicates_history():
     /events?after=<id>; already-seen ids are deduplicated.
     """
     from archie_cli.tui.app import ArchieApp
-    from archie_shared.canonical_events import (
+    from archie_shared.events import (
         AssistantMessage,
         UserMessage,
         encode_event,

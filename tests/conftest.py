@@ -1,6 +1,6 @@
 """Shared pytest fixtures and helpers for canonical session event streams.
 
-These factories build canonical events (`archie_shared.canonical_events`) with
+These factories build canonical events (`archie_shared.events`) with
 sensible defaults so tests can construct scoped request/tool streams concisely.
 See the subagent scope contract in
 `shared/src/archie_shared/session/accounting.py`.
@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     AssistantMessage,
     IterationStart,
     LLMRequest,

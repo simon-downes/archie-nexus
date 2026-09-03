@@ -12,21 +12,28 @@ import inspect
 import logging
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
-from archie_shared.canonical_events import ErrorNotice, encode_event
-from archie_shared.canonical_events import TurnError as CanonicalTurnError
 from archie_shared.config import persona_dir
+from archie_shared.events import CanonicalEvent, ErrorNotice
+from archie_shared.events import TurnError as CanonicalTurnError
+from archie_shared.session.log import LogAppendError
 from archie_shared.types import ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
-from archie_agent.event_log import EventFactory, now_utc
-from archie_agent.events import (
+from archie_agent.event_factory import EventFactory, now_utc
+from archie_agent.exec.tool import create_registry, format_result, run_exec
+from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.llm import create_llm_client
+from archie_agent.loop import run_loop
+from archie_agent.loop_events import (
     IterationStart,
+    RequestContext,
+    RequestFinished,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -34,13 +41,8 @@ from archie_agent.events import (
     TurnError,
     TurnInterrupted,
 )
-from archie_agent.exec.tool import create_registry, format_result, run_exec
-from archie_agent.exec.tools._subprocess import kill_process_group
-from archie_agent.llm import create_llm_client
-from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import build_subagent_prompt
 from archie_agent.session import Session, Turn
-from archie_agent.session_bus import LogAppendError
 from archie_agent.skills import SkillEntry, create_skill_tool
 from archie_agent.tools import ToolRegistry, ToolSpec
 
@@ -280,7 +282,7 @@ def create_task_tool(
     active_model_key: str | Callable[[], str],
     region: str,
     log_path: Path,
-    broadcast: Any,
+    emit: Callable[[CanonicalEvent], Awaitable[None]],
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
     max_concurrent: int = 3,
@@ -308,10 +310,7 @@ def create_task_tool(
 
             async def _broadcast_child_error(kind: str, message: str) -> None:
                 try:
-                    await broadcast_raw(
-                        broadcast,
-                        encode_event(ErrorNotice(id=str(ULID()), kind=kind, message=message)),
-                    )
+                    await emit(ErrorNotice(id=str(ULID()), kind=kind, message=message))
                 except Exception:  # noqa: BLE001 — best effort only
                     log.warning("Failed to broadcast child %s", kind, exc_info=True)
 
@@ -319,11 +318,11 @@ def create_task_tool(
             storage_failed = False
             fallback_attempted = False
 
-            async def _publish_child_terminal(serialized: str) -> None:
+            async def _publish_child_terminal(event: CanonicalEvent) -> None:
                 nonlocal terminal_emitted
                 terminal_emitted = True
                 try:
-                    await asyncio.shield(broadcast_raw(broadcast, serialized))
+                    await asyncio.shield(emit(event))
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -337,29 +336,25 @@ def create_task_tool(
                 fallback_attempted = True
                 try:
                     if factory is None:
-                        serialized = encode_event(
-                            CanonicalTurnError(
+                        terminal = CanonicalTurnError(
+                            id=str(ULID()),
+                            turn=parent_turn,
+                            scope=launch_scope,
+                            message=message,
+                            subagent_index=index,
+                        )
+                    else:
+                        try:
+                            terminal = factory.turn_error(turn=parent_turn, message=message)
+                        except Exception:
+                            terminal = CanonicalTurnError(
                                 id=str(ULID()),
                                 turn=parent_turn,
                                 scope=launch_scope,
                                 message=message,
                                 subagent_index=index,
                             )
-                        )
-                    else:
-                        try:
-                            _, serialized = factory.turn_error(turn=parent_turn, message=message)
-                        except Exception:
-                            serialized = encode_event(
-                                CanonicalTurnError(
-                                    id=str(ULID()),
-                                    turn=parent_turn,
-                                    scope=launch_scope,
-                                    message=message,
-                                    subagent_index=index,
-                                )
-                            )
-                    await _publish_child_terminal(serialized)
+                    await _publish_child_terminal(terminal)
                 except LogAppendError as error:
                     storage_failed = True
                     await _broadcast_child_error("storage_error", str(error))
@@ -450,23 +445,23 @@ def create_task_tool(
                         iter_text = ""
                         assistant_event_logged = False
                         current_iteration = event.index
-                        _, serialized = factory.iteration_start(
+                        iteration = factory.iteration_start(
                             turn=parent_turn,
                             iteration=current_iteration,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(iteration)
                     elif isinstance(event, TextDelta):
                         text_parts.append(event.text)
                         iter_text += event.text
-                        delta, serialized = factory.text_delta(
+                        delta = factory.text_delta(
                             turn=parent_turn,
                             iteration=current_iteration,
                             request_id=event.request_id or current_request_id,
                             text=event.text,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(delta)
                     elif isinstance(event, RequestFinished):
-                        request, serialized = factory.request(
+                        request = factory.request(
                             turn=parent_turn,
                             iteration=current_iteration,
                             sent_at=event.context.sent_at,
@@ -479,18 +474,18 @@ def create_task_tool(
                         )
                         request_ids.append(request.id)
                         current_request_id = request.id
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(request)
                     elif isinstance(event, ToolCall):
                         if iter_text and not assistant_event_logged:
-                            _, serialized = factory.assistant_message(
+                            assistant = factory.assistant_message(
                                 turn=parent_turn,
                                 request_ids=request_ids.copy(),
                                 content=iter_text,
                                 interrupted=False,
                             )
-                            await broadcast_raw(broadcast, serialized)
+                            await emit(assistant)
                             assistant_event_logged = True
-                        _, serialized = factory.tool_call(
+                        tool_call = factory.tool_call(
                             turn=parent_turn,
                             iteration=current_iteration,
                             request_id=current_request_id,
@@ -498,9 +493,9 @@ def create_task_tool(
                             name=event.name,
                             input=event.input,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(tool_call)
                     elif isinstance(event, ToolResult):
-                        _, serialized = factory.tool_result(
+                        tool_result = factory.tool_result(
                             turn=parent_turn,
                             iteration=current_iteration,
                             request_id=current_request_id,
@@ -511,27 +506,27 @@ def create_task_tool(
                             result_bytes=event.result_bytes,
                             result_lines=event.result_lines,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(tool_result)
                     elif isinstance(event, TurnComplete):
                         if iter_text and not assistant_event_logged:
-                            _, serialized = factory.assistant_message(
+                            assistant = factory.assistant_message(
                                 turn=parent_turn,
                                 request_ids=request_ids.copy(),
                                 content=iter_text,
                                 interrupted=False,
                             )
-                            await broadcast_raw(broadcast, serialized)
-                        _, serialized = factory.turn_complete(
+                            await emit(assistant)
+                        complete = factory.turn_complete(
                             turn=parent_turn, stop_reason=event.stop_reason
                         )
-                        await _publish_child_terminal(serialized)
+                        await _publish_child_terminal(complete)
                     elif isinstance(event, TurnError):
-                        _, serialized = factory.turn_error(turn=parent_turn, message=event.error)
-                        await _publish_child_terminal(serialized)
+                        error_event = factory.turn_error(turn=parent_turn, message=event.error)
+                        await _publish_child_terminal(error_event)
                         return f"[{index}] {agent_name}: {warning}Error: {event.error}"
                     elif isinstance(event, TurnInterrupted):
-                        _, serialized = factory.turn_interrupted(turn=parent_turn)
-                        await _publish_child_terminal(serialized)
+                        interrupted = factory.turn_interrupted(turn=parent_turn)
+                        await _publish_child_terminal(interrupted)
                         return f"[{index}] {agent_name}: {warning}interrupted"
                 result = "".join(text_parts)
                 return f"[{index}] {agent_name}: {warning}{result}"
@@ -594,8 +589,3 @@ def create_task_tool(
         },
         handler=handler,
     )
-
-
-async def broadcast_raw(broadcast: Any, serialized: str) -> None:
-    """Broadcast canonical serialized data through the supplied callback."""
-    await broadcast(serialized)

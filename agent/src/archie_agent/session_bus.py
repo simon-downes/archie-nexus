@@ -7,20 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from archie_shared.canonical_events import PersistedEvent, PersistedEventTypes, encode_event
-from archie_shared.session.log import append_serialized_event, read_event_lines
+from archie_shared.events import Event, encode_event
+from archie_shared.session.log import SessionLog
 
 log = logging.getLogger(__name__)
-
-_PERSISTED_TYPES = PersistedEventTypes
-
-
-class LogAppendError(RuntimeError):
-    """The session log could not be updated."""
-
-
-class EventIdConflict(RuntimeError):  # noqa: N818
-    """An event id was reused with different serialized content."""
 
 
 class _ClientRegistry:
@@ -46,73 +36,55 @@ class _ClientRegistry:
 
 
 class SessionEventBus:
-    """The single ordered sink for persisted and live session events.
+    """The ordered sink for persisted and live session events."""
 
-    Persistence and queue admission happen under one short ordering lock. Network
-    writes happen in independent sender tasks, so a stalled client cannot delay
-    appends or delivery to other clients.
-    """
-
-    def __init__(self, path: Path, *, queue_size: int = 1024) -> None:
-        self.path = path
+    def __init__(self, session_log: SessionLog | Path, *, queue_size: int = 1024) -> None:
+        self.log = session_log if isinstance(session_log, SessionLog) else SessionLog(session_log)
+        self.path = self.log.path
         self.queue_size = queue_size
-        self._index: dict[str, str] = {item["id"]: item["line"] for item in read_event_lines(path)}
         self._clients: dict[Any, asyncio.Queue[str]] = {}
         self._senders: dict[Any, asyncio.Task[None]] = {}
         self._ordering = asyncio.Lock()
         self.clients = _ClientRegistry(self)
 
-    @property
-    def index(self) -> dict[str, str]:
-        """Expose a read-only-by-convention view for diagnostics and tests."""
-        return self._index
+    async def emit(self, event: Event, target: Any | None = None) -> bool:
+        """Append when declared persistent, then enqueue through one path."""
+        if not isinstance(event, Event):
+            raise TypeError(f"unsupported session event {type(event).__name__}")
+        if target is not None and event.persist:
+            raise TypeError("persisted events cannot be targeted")
 
-    def append(self, event: PersistedEvent) -> str:
-        """Persist one event without broadcasting it."""
-        self._require_persisted(event)
-        line = encode_event(event)
-        return self._append_line(event.id, line)[0]
-
-    async def publish(self, event: PersistedEvent) -> str:
-        """Persist, then enqueue one newly appended event to every client."""
-        self._require_persisted(event)
         async with self._ordering:
-            line, inserted = self._append_line(event.id, encode_event(event))
-            if inserted:
+            if event.persist:
+                inserted = self.log.append(event)
+                if not inserted:
+                    return False
+            line = encode_event(event)
+            if target is None:
                 self._enqueue_all(line)
-            await asyncio.sleep(0)
-            return line
-
-    async def broadcast(self, event: Any) -> None:
-        """Enqueue a live-only canonical event without appending it."""
-        if isinstance(event, _PERSISTED_TYPES):
-            raise TypeError(f"persisted event {type(event).__name__} must use publish")
-        async with self._ordering:
-            self._enqueue_all(encode_event(event))
+            else:
+                queue = self._clients.get(target)
+                if queue is not None:
+                    self._enqueue(target, queue, line)
         await asyncio.sleep(0)
+        return True
 
-    async def send_to(self, websocket: Any, event: Any) -> None:
-        """Enqueue a live-only event to one client in its existing order."""
-        if isinstance(event, _PERSISTED_TYPES):
-            raise TypeError(f"persisted event {type(event).__name__} must use publish")
+    async def register_client(self, websocket: Any, initial_events: tuple[Event, ...]) -> None:
+        """Atomically admit a client with validated live-only initial frames."""
+        if any(event.persist for event in initial_events):
+            raise TypeError("initial client events must be live-only")
         async with self._ordering:
-            queue = self._clients.get(websocket)
-            if queue is not None:
-                self._enqueue(websocket, queue, encode_event(event))
-
-    async def add_client_with_events(self, websocket: Any, events: tuple[Any, ...]) -> None:
-        """Register a client and enqueue its initial frames atomically."""
-        async with self._ordering:
-            self.add_client(websocket)
+            self._add_client(websocket)
             queue = self._clients[websocket]
-            for event in events:
-                if isinstance(event, _PERSISTED_TYPES):
-                    raise TypeError(f"persisted event {type(event).__name__} must use publish")
+            for event in initial_events:
                 self._enqueue(websocket, queue, encode_event(event))
         await asyncio.sleep(0)
 
     def add_client(self, websocket: Any) -> None:
         """Register a client and start its independent sender task."""
+        self._add_client(websocket)
+
+    def _add_client(self, websocket: Any) -> None:
         if websocket in self._clients:
             return
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=self.queue_size)
@@ -125,19 +97,6 @@ class SessionEventBus:
         task = self._senders.pop(websocket, None)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
-
-    def _append_line(self, event_id: str, line: str) -> tuple[str, bool]:
-        existing = self._index.get(event_id)
-        if existing is not None:
-            if existing == line:
-                return line, False
-            raise EventIdConflict(f"conflicting duplicate event id: {event_id}")
-        try:
-            append_serialized_event(self.path, line)
-        except OSError as exc:
-            raise LogAppendError(f"failed to append event {event_id}: {exc}") from exc
-        self._index[event_id] = line
-        return line, True
 
     def _enqueue_all(self, line: str) -> None:
         for websocket, queue in list(self._clients.items()):
@@ -169,9 +128,5 @@ class SessionEventBus:
             if websocket in self._clients:
                 self.discard_client(websocket)
 
-    @staticmethod
-    def _require_persisted(event: Any) -> None:
-        if not isinstance(event, _PERSISTED_TYPES):
-            raise TypeError(f"event {type(event).__name__} is live-only")
-        if not event.id:
-            raise ValueError("canonical events require a non-empty id")
+
+__all__ = ["SessionEventBus"]

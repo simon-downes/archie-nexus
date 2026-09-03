@@ -3,42 +3,36 @@
 import asyncio
 
 import pytest
-from archie_shared.canonical_events import ErrorNotice, ModelSwitch, decode_event, encode_event
-from archie_shared.events import (
-    SwitchModelCommand,
-    deserialize_command,
-    serialize_command,
-)
+from archie_shared.commands import SwitchModelCommand, decode_command, encode_command
+from archie_shared.events import ErrorNotice, ModelSwitch, decode_event, encode_event
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
 
 
 class TestSwitchModelCommand:
-    """Tests for SwitchModelCommand serialization."""
+    """Tests for strict flat SwitchModelCommand serialization."""
 
-    def test_to_json(self):
+    def test_encode_is_flat(self):
         cmd = SwitchModelCommand(model_key="bedrock-claude-haiku-4-5")
-        data = cmd.to_json()
-        assert data == {
-            "type": "switch_model",
-            "data": {"model_key": "bedrock-claude-haiku-4-5"},
-        }
+        assert encode_command(cmd) == (
+            '{"type":"switch_model","model_key":"bedrock-claude-haiku-4-5"}'
+        )
 
-    def test_from_json(self):
-        cmd = SwitchModelCommand.from_json({"model_key": "bedrock-claude-haiku-4-5"})
-        assert cmd.model_key == "bedrock-claude-haiku-4-5"
-
-    def test_serialize_round_trip(self):
-        cmd = SwitchModelCommand(model_key="bedrock-claude-sonnet-4-6")
-        raw = serialize_command(cmd)
-        result = deserialize_command(raw)
-        assert isinstance(result, SwitchModelCommand)
-        assert result.model_key == "bedrock-claude-sonnet-4-6"
-
-    def test_deserialize_from_json_string(self):
-        raw = '{"type": "switch_model", "data": {"model_key": "my-model"}}'
-        result = deserialize_command(raw)
+    def test_decode_round_trip(self):
+        result = decode_command('{"type":"switch_model","model_key":"my-model"}')
         assert isinstance(result, SwitchModelCommand)
         assert result.model_key == "my-model"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"type":"switch_model","model_key":"m","extra":true}',
+            '{"type":"unknown","value":"m"}',
+            '{"type":"switch_model","data":{"model_key":"m"}}',
+        ],
+    )
+    def test_decode_rejects_unknown_fields_tags_and_nested_envelopes(self, raw):
+        with pytest.raises((ValueError, TypeError)):
+            decode_command(raw)
 
 
 class TestModelSwitch:
@@ -166,7 +160,7 @@ class TestModelSwitchHandler:
         """A failed model-switch append does not mutate runtime model state."""
         harness, _ = _setup_app
         from archie_agent.app import _handle_model_switch
-        from archie_agent.session_bus import LogAppendError
+        from archie_shared.session.log import LogAppendError
 
         sent: list[str] = []
 
@@ -177,10 +171,10 @@ class TestModelSwitchHandler:
         ws = FakeWS()
         harness.event_bus.add_client(ws)
 
-        async def fail_publish(event):
+        def fail_append(event):
             raise LogAppendError("disk full")
 
-        monkeypatch.setattr(harness.event_bus, "publish", fail_publish)
+        monkeypatch.setattr(harness.event_bus.log, "append", fail_append)
         await _handle_model_switch(SwitchModelCommand(model_key="model-b"), ws)
         await asyncio.sleep(0)
 

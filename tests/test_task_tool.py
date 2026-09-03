@@ -6,6 +6,7 @@ from archie_agent.llm._types import Done, TextDelta, Usage
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Session
 from archie_agent.skills import SkillEntry
+from archie_shared.events import encode_event
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
 
 
@@ -31,8 +32,8 @@ async def _make_tool(tmp_path, monkeypatch, clients, agents=None, skills=None, m
     session = Session("parent", model, "session")
     broadcasts: list[str] = []
 
-    async def broadcast(data: str):
-        broadcasts.append(data)
+    async def emit(event):
+        broadcasts.append(encode_event(event))
 
     spec = create_task_tool(
         agent_catalog=agents or {"researcher": _entry(tmp_path)},
@@ -43,7 +44,7 @@ async def _make_tool(tmp_path, monkeypatch, clients, agents=None, skills=None, m
         active_model_key="parent",
         region="us-east-1",
         log_path=tmp_path / "session.jsonl",
-        broadcast=broadcast,
+        emit=emit,
         max_concurrent=max_concurrent,
     )
     return spec, broadcasts

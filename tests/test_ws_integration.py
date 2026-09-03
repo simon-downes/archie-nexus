@@ -75,12 +75,44 @@ def test_events_on_start_has_only_session_started(client):
     assert lines[0]["type"] == "session_started"
 
 
+def test_existing_session_does_not_duplicate_session_started(mock_env, mock_events):
+    """Startup against a valid log preserves its single session_started event."""
+    from pathlib import Path
+
+    from archie_shared.events import SessionStarted, encode_event
+
+    sessions_dir = Path(mock_env["ARCHIE_HOME_DIR"]) / "sessions"
+    sessions_dir.mkdir()
+    event = SessionStarted(
+        id="01J00000000000000000000001",
+        schema_version=2,
+        sent_at="now",
+        model_key="bedrock-claude-sonnet-4-6",
+    )
+    (sessions_dir / "test-session.jsonl").write_text(encode_event(event) + "\n")
+
+    with patch.dict(os.environ, mock_env):
+        mock_bedrock = _make_mock_bedrock_client(mock_events)
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
+            from archie_agent.app import app
+
+            with TestClient(app) as existing_client:
+                lines = [
+                    json.loads(line)
+                    for line in existing_client.get("/events").text.splitlines()
+                    if line
+                ]
+
+    assert [line["type"] for line in lines] == ["session_started"]
+    assert [line["id"] for line in lines] == [event.id]
+
+
 def _run_turn(client):
     """Drive one message turn to completion so the canonical log is populated."""
     with client.websocket_connect("/stream") as ws:
         ws.receive_text()  # handshake
-        ws.receive_text()  # status_updated
-        ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
+        ws.receive_text()  # session status
+        ws.send_text(json.dumps({"type": "message", "content": "hello"}))
         while True:
             if json.loads(ws.receive_text())["type"] == "turn_complete":
                 break
@@ -146,7 +178,7 @@ def test_websocket_message_and_events(client):
     with client.websocket_connect("/stream") as ws:
         json.loads(ws.receive_text())  # handshake
         json.loads(ws.receive_text())  # status_updated
-        ws.send_text(json.dumps({"type": "message", "data": {"content": "hello"}}))
+        ws.send_text(json.dumps({"type": "message", "content": "hello"}))
 
         events = []
         while True:
@@ -221,9 +253,7 @@ def test_websocket_tool_turn(mock_env, tmp_path):
                         ws.receive_text()
 
                         # Send message
-                        ws.send_text(
-                            json.dumps({"type": "message", "data": {"content": "what is 21*2"}})
-                        )
+                        ws.send_text(json.dumps({"type": "message", "content": "what is 21*2"}))
 
                         # Collect events until turn_complete
                         events = []
@@ -272,7 +302,7 @@ def test_concurrent_message_rejection_is_targeted(mock_env):
                 with client.websocket_connect("/stream") as first:
                     first.receive_text()
                     first.receive_text()
-                    first.send_text(json.dumps({"type": "message", "data": {"content": "first"}}))
+                    first.send_text(json.dumps({"type": "message", "content": "first"}))
                     first_types = []
                     while "text_delta" not in first_types:
                         first_types.append(json.loads(first.receive_text())["type"])
@@ -281,9 +311,7 @@ def test_concurrent_message_rejection_is_targeted(mock_env):
                     with client.websocket_connect("/stream") as second:
                         second.receive_text()
                         second.receive_text()
-                        second.send_text(
-                            json.dumps({"type": "message", "data": {"content": "second"}})
-                        )
+                        second.send_text(json.dumps({"type": "message", "content": "second"}))
                         rejection = json.loads(second.receive_text())
                         assert rejection["type"] == "error_notice"
                         assert rejection["kind"] == "turn_active"
@@ -311,7 +339,7 @@ def test_two_clients_receive_identical_completed_turn(client):
             second.receive_text()
             second.receive_text()
 
-            first.send_text(json.dumps({"type": "message", "data": {"content": "hello two"}}))
+            first.send_text(json.dumps({"type": "message", "content": "hello two"}))
 
             def drain(ws):
                 events = []

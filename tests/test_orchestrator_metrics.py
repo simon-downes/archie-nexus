@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from archie_orchestrator.metrics import MetricsWriter, reset_and_backfill
-from archie_shared.canonical_events import LLMRequest, encode_event
+from archie_shared.events import LLMRequest, encode_event
 
 # ---------------------------------------------------------------------------
 # Helpers

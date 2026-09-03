@@ -11,7 +11,7 @@ from pathlib import Path
 
 import msgspec
 
-from archie_shared.canonical_events import ShellCommand, decode_event, encode_event
+from archie_shared.events import ShellCommand, decode_event, encode_event
 
 log = logging.getLogger(__name__)
 

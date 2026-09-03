@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from archie_cli.cli import main
-from archie_shared.canonical_events import ShellCommand, decode_event
+from archie_shared.events import ShellCommand, decode_event
 from archie_shared.session.migrate import migrate_session_log
 from click.testing import CliRunner
 

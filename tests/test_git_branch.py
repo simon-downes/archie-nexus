@@ -1,6 +1,6 @@
 """Tests for canonical connect/status events and git branch discovery."""
 
-from archie_shared.canonical_events import Handshake, StatusUpdated, decode_event, encode_event
+from archie_shared.events import Handshake, StatusUpdated, decode_event, encode_event
 
 
 def test_handshake_contains_model_key_and_session_metadata():

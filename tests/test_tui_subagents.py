@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
-from archie_shared.canonical_events import LLMRequest, TextDelta, ToolCall, ToolResult, TurnComplete
+from archie_shared.events import LLMRequest, TextDelta, ToolCall, ToolResult, TurnComplete
 from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
 from rich.text import Text
 

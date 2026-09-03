@@ -1,15 +1,14 @@
 """archie-shared — shared types, events, and config for archie-nexus."""
 
-from archie_shared.config import ConfigError, home_dir, load_config, persona_dir
-from archie_shared.events import (
-    PROTOCOL_VERSION,
+from archie_shared.commands import (
     ClientCommand,
     InterruptCommand,
     MessageCommand,
     SwitchModelCommand,
-    deserialize_command,
-    serialize_command,
+    decode_command,
+    encode_command,
 )
+from archie_shared.config import ConfigError, home_dir, load_config, persona_dir
 from archie_shared.models import (
     BedrockOpenAIProvider,
     BedrockProvider,
@@ -22,6 +21,7 @@ from archie_shared.models import (
     load_models,
     provider_name,
 )
+from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import (
     AgentConfig,
     CliConfig,
@@ -63,7 +63,7 @@ __all__ = [
     "WebConfig",
     "__version__",
     "calculate_cost",
-    "deserialize_command",
+    "decode_command",
     "expand_workspace_root",
     "get_model",
     "get_profile",
@@ -73,5 +73,5 @@ __all__ = [
     "load_nexus_config",
     "persona_dir",
     "provider_name",
-    "serialize_command",
+    "encode_command",
 ]

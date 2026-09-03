@@ -1,85 +1,211 @@
-"""Client command protocol for the canonical session event stream."""
+"""Public server-to-client event schema for live delivery and session history."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+from typing import ClassVar, Literal
 
-# The canonical event schema is the only server-to-client protocol.
-PROTOCOL_VERSION = 2
+import msgspec
 
 
-@dataclass(frozen=True)
-class MessageCommand:
-    """Client sends a user message."""
+class Event(msgspec.Struct, forbid_unknown_fields=True):
+    """Base public event with a non-serialized persistence declaration."""
 
-    content: str
-
-    def to_json(self) -> dict:
-        return {"type": "message", "data": {"content": self.content}}
-
-    @classmethod
-    def from_json(cls, data: dict) -> MessageCommand:
-        return cls(content=data["content"])
+    persist: ClassVar[bool] = False
 
 
-@dataclass(frozen=True)
-class InterruptCommand:
-    """Client requests turn or targeted child cancellation."""
+class PersistedEvent(Event):
+    """Base for events that belong in durable session history."""
 
-    target: tuple[str, int] | None = None
-
-    def to_json(self) -> dict:
-        data: dict = {}
-        if self.target is not None:
-            data["scope"] = self.target[0]
-            data["subagent_index"] = self.target[1]
-        return {"type": "interrupt", "data": data}
-
-    @classmethod
-    def from_json(cls, data: dict) -> InterruptCommand:
-        scope = data.get("scope")
-        index = data.get("subagent_index")
-        if scope is None and index is None:
-            return cls()
-        if not isinstance(scope, str) or not isinstance(index, int) or isinstance(index, bool):
-            raise ValueError("interrupt target requires scope and integer subagent_index")
-        return cls(target=(scope, index))
+    persist: ClassVar[bool] = True
 
 
-@dataclass(frozen=True)
-class SwitchModelCommand:
-    """Client requests a model switch."""
-
+class SessionStarted(
+    PersistedEvent, tag="session_started", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    schema_version: int
+    sent_at: str
     model_key: str
 
-    def to_json(self) -> dict:
-        return {"type": "switch_model", "data": {"model_key": self.model_key}}
 
-    @classmethod
-    def from_json(cls, data: dict) -> SwitchModelCommand:
-        return cls(model_key=data["model_key"])
-
-
-type ClientCommand = MessageCommand | InterruptCommand | SwitchModelCommand
-
-_CLIENT_COMMAND_TYPES: dict[str, type] = {
-    "message": MessageCommand,
-    "interrupt": InterruptCommand,
-    "switch_model": SwitchModelCommand,
-}
+class UserMessage(PersistedEvent, tag="user_message", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    turn: int
+    scope: str | None
+    content: str
+    subagent_index: int | None = None
 
 
-def serialize_command(command: ClientCommand) -> str:
-    """Serialize one client command."""
-    return json.dumps(command.to_json())
+class IterationStart(
+    PersistedEvent, tag="iteration_start", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    subagent_index: int | None = None
 
 
-def deserialize_command(raw: str) -> ClientCommand:
-    """Deserialize one client command."""
-    msg = json.loads(raw)
-    cmd_type = msg["type"]
-    cls = _CLIENT_COMMAND_TYPES.get(cmd_type)
-    if cls is None:
-        raise ValueError(f"Unknown command type: {cmd_type}")
-    return cls.from_json(msg["data"])
+class TextDelta(Event, tag="text_delta", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    request_id: str
+    text: str
+    subagent_index: int | None = None
+
+
+class LLMRequest(PersistedEvent, tag="llm_request", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    scope: str | None
+    turn: int
+    iteration: int
+    model_key: str
+    sent_at: str
+    duration_ms: int
+    status: Literal["completed", "interrupted", "error", "no_usage"]
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    context_tokens: int
+    cost_usd: float
+    stop_reason: str | None = None
+    error: str | None = None
+    subagent_index: int | None = None
+
+
+class ToolCall(PersistedEvent, tag="tool_call", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    request_id: str
+    tool_use_id: str
+    name: str
+    input: dict[str, object]
+    subagent_index: int | None = None
+
+
+class ToolResult(PersistedEvent, tag="tool_result", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    request_id: str
+    tool_use_id: str
+    content: str
+    is_error: bool
+    duration_ms: int = 0
+    result_bytes: int = 0
+    result_lines: int = 0
+    subagent_index: int | None = None
+
+
+class AssistantMessage(
+    PersistedEvent, tag="assistant_message", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    scope: str | None
+    request_ids: list[str]
+    content: str
+    interrupted: bool
+    subagent_index: int | None = None
+
+
+class TurnComplete(
+    PersistedEvent, tag="turn_complete", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    scope: str | None
+    stop_reason: str
+    subagent_index: int | None = None
+
+
+class TurnError(PersistedEvent, tag="turn_error", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    turn: int
+    scope: str | None
+    message: str
+    subagent_index: int | None = None
+
+
+class TurnInterrupted(
+    PersistedEvent, tag="turn_interrupted", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    scope: str | None
+    subagent_index: int | None = None
+
+
+class ModelSwitch(PersistedEvent, tag="model_switch", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    model_key: str
+    sent_at: str
+
+
+class ShellCommand(
+    PersistedEvent, tag="shell_command", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    command: str
+    exit_code: int
+    output: str
+    turn: int | None = None
+    scope: str | None = None
+
+
+class Handshake(Event, tag="handshake", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    protocol_version: int
+    session_id: str
+    model_key: str
+
+
+class StatusUpdated(Event, tag="status_updated", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    git_branch: str
+
+
+class ErrorNotice(Event, tag="error_notice", tag_field="type", forbid_unknown_fields=True):
+    id: str
+    kind: str
+    message: str
+
+
+type SessionEvent = (
+    SessionStarted
+    | UserMessage
+    | IterationStart
+    | TextDelta
+    | LLMRequest
+    | ToolCall
+    | ToolResult
+    | AssistantMessage
+    | TurnComplete
+    | TurnError
+    | TurnInterrupted
+    | ModelSwitch
+    | ShellCommand
+    | Handshake
+    | StatusUpdated
+    | ErrorNotice
+)
+
+# Transitional alias retained while consumers move to the final name.
+CanonicalEvent = SessionEvent
+
+
+def encode_event(event: Event) -> str:
+    return msgspec.json.encode(event).decode("utf-8")
+
+
+def decode_event(raw: str | bytes, *, persisted: bool = False) -> SessionEvent:
+    event = msgspec.json.decode(raw, type=SessionEvent)
+    if persisted and not event.persist:
+        raise ValueError(f"event {type(event).__name__} is live-only")
+    return event

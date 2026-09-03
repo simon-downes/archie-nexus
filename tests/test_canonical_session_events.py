@@ -1,24 +1,25 @@
 import sqlite3
 
+import pytest
 from archie_orchestrator.metrics import MetricsWriter
-from archie_shared.canonical_events import (
+from archie_shared.events import (
     LLMRequest,
     SessionStarted,
     ToolResult,
     decode_event,
     encode_event,
 )
-from archie_shared.session.log import append_event, read_events
+from archie_shared.session.log import EventIdConflict, SessionLog
 
 
-def request(event_id="01J00000000000000000000000"):
+def request(event_id="01J00000000000000000000000", sent_at="2025-01-01T00:00:00+00:00"):
     return LLMRequest(
         id=event_id,
         scope=None,
         turn=2,
         iteration=1,
         model_key="m",
-        sent_at="2025-01-01T00:00:00+00:00",
+        sent_at=sent_at,
         duration_ms=12,
         status="completed",
         input_tokens=10,
@@ -32,16 +33,17 @@ def request(event_id="01J00000000000000000000000"):
 
 def test_canonical_round_trip_and_order(tmp_path):
     path = tmp_path / "session.jsonl"
-    append_event(
-        path,
+    session_log = SessionLog(path)
+    session_log.append(
         SessionStarted(
             id="01J00000000000000000000001", schema_version=2, sent_at="now", model_key="m"
-        ),
+        )
     )
     event = request()
-    line = append_event(path, event)
+    session_log.append(event)
+    line = encode_event(event)
     assert path.read_text().splitlines()[-1] == line
-    assert read_events(path)[1] == event
+    assert session_log.read()[1] == event
     assert decode_event(line, persisted=True) == event
 
 
@@ -61,15 +63,13 @@ def test_old_tool_result_without_metadata_decodes_with_defaults():
 def test_duplicate_events_are_idempotent_and_conflicts_rejected(tmp_path):
     path = tmp_path / "session.jsonl"
     event = request()
-    append_event(path, event)
-    append_event(path, event, encode_event(event))
+    session_log = SessionLog(path)
+    session_log.append(event)
+    assert session_log.append(event) is False
     assert len(path.read_text().splitlines()) == 1
-    try:
-        append_event(path, event, encode_event(request()) + " ")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("conflicting duplicate was accepted")
+    conflicting = request(sent_at="later")
+    with pytest.raises(EventIdConflict):
+        session_log.append(conflicting)
 
 
 def test_canonical_metrics_are_idempotent(tmp_path):

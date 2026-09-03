@@ -21,8 +21,9 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from archie_shared import canonical_events as ce
-from archie_shared.canonical_events import (
+from archie_shared import events as ce
+from archie_shared.commands import InterruptCommand, SwitchModelCommand
+from archie_shared.events import (
     IterationStart,
     LLMRequest,
     TextDelta,
@@ -33,8 +34,8 @@ from archie_shared.canonical_events import (
     TurnInterrupted,
     decode_event,
 )
-from archie_shared.events import PROTOCOL_VERSION, InterruptCommand, SwitchModelCommand
 from archie_shared.models import load_models
+from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.tool_summaries import (
     format_tool_activity,
     format_tool_complete,
@@ -299,7 +300,7 @@ class ArchieApp(App):
             if event_id in self._seen_event_ids:
                 return
             self._seen_event_ids.add(event_id)
-            if isinstance(event, ce.PersistedEventTypes):
+            if event.persist:
                 self._last_event_id = event_id
 
         if replay and isinstance(event, ce.AssistantMessage):
@@ -694,7 +695,11 @@ class ArchieApp(App):
         """Target-stop the selected child while leaving siblings active."""
         if self._active_child_key is not None:
             asyncio.create_task(
-                self._ws.send_command(InterruptCommand(target=self._active_child_key))
+                self._ws.send_command(
+                    InterruptCommand(
+                        scope=self._active_child_key[0], subagent_index=self._active_child_key[1]
+                    )
+                )
             )
 
     def _child(self, scope: str, index: int) -> ChildActivity:
