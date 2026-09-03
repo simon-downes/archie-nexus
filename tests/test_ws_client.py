@@ -25,6 +25,7 @@ class _FakeConnection:
         self._frames = list(frames)
         self._close_exc = close_exc
         self.closed = False
+        self.sent: list[str] = []
 
     def __aiter__(self):
         return self
@@ -35,6 +36,9 @@ class _FakeConnection:
         if self._close_exc is not None:
             raise self._close_exc
         raise StopAsyncIteration
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
 
     async def close(self) -> None:
         self.closed = True
@@ -52,10 +56,19 @@ def _closed(ok: bool) -> websockets.exceptions.ConnectionClosed:
 
 
 def _serialize_text_event() -> str:
-    """A minimal serialized TextDelta the deserializer accepts."""
-    from archie_shared.events import TextDelta, serialize_event
+    """A canonical live-only TextDelta frame."""
+    from archie_shared.events import TextDelta, encode_event
 
-    return serialize_event(TextDelta(text="hi", turn_index=1))
+    return encode_event(
+        TextDelta(
+            id="01J00000000000000000000001",
+            turn=1,
+            iteration=0,
+            scope=None,
+            request_id="request",
+            text="hi",
+        )
+    )
 
 
 async def test_receive_reraises_on_unexpected_close():
@@ -108,10 +121,44 @@ async def test_send_message_without_connection_raises():
         await client.send_message("hello")
 
 
-async def test_connected_property_reflects_state():
+async def test_send_message_uses_flat_command_wire_shape():
+    client = WSClient()
+    connection = _FakeConnection([], None)
+    client._ws = connection
+
+    await client.send_message("hello")
+
+    assert connection.sent == ['{"type":"message","content":"hello"}']
+
     client = WSClient()
     assert client.connected is False
     client._ws = _FakeConnection([], None)
     assert client.connected is True
     await client.disconnect()
     assert client.connected is False
+
+
+async def test_receive_decodes_tool_input_with_data_key():
+    from archie_shared.events import ToolCall, encode_event
+
+    client = WSClient()
+    client._ws = _FakeConnection(
+        [
+            encode_event(
+                ToolCall(
+                    id="01J00000000000000000000001",
+                    turn=1,
+                    iteration=0,
+                    scope="child",
+                    request_id="request",
+                    tool_use_id="tool",
+                    name="read",
+                    input={"data": {"path": "/tmp/file"}},
+                )
+            )
+        ],
+        None,
+    )
+
+    received = [event async for event in client.receive()]
+    assert received[0].input == {"data": {"path": "/tmp/file"}}

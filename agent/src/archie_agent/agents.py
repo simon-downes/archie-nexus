@@ -12,19 +12,28 @@ import inspect
 import logging
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 from archie_shared.config import persona_dir
+from archie_shared.events import ErrorNotice, SessionEvent
+from archie_shared.events import TurnError as CanonicalTurnError
+from archie_shared.session.log import LogAppendError
 from archie_shared.types import ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
-from archie_agent.event_log import EventFactory, now_utc
-from archie_agent.events import (
+from archie_agent.event_factory import EventFactory, now_utc
+from archie_agent.exec.tool import create_registry, format_result, run_exec
+from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.llm import create_llm_client
+from archie_agent.loop import run_loop
+from archie_agent.loop_events import (
     IterationStart,
+    RequestContext,
+    RequestFinished,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -32,10 +41,6 @@ from archie_agent.events import (
     TurnError,
     TurnInterrupted,
 )
-from archie_agent.exec.tool import create_registry, format_result, run_exec
-from archie_agent.exec.tools._subprocess import kill_process_group
-from archie_agent.llm import create_llm_client
-from archie_agent.loop import RequestContext, RequestFinished, run_loop
 from archie_agent.prompt import build_subagent_prompt
 from archie_agent.session import Session, Turn
 from archie_agent.skills import SkillEntry, create_skill_tool
@@ -160,6 +165,7 @@ def _optional_string(value: object, path: Path, field: str) -> str | None:
         return None
     return value
 
+
 class ChildDispatch:
     """Tool executor with process and pending state isolated to one child."""
 
@@ -237,6 +243,7 @@ class ChildDispatch:
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
 
+
 def _scoped_skills(
     catalog: dict[str, SkillEntry],
     names: list[str],
@@ -253,7 +260,9 @@ def _scoped_skills(
     return result
 
 
-def _resolve_model(entry: AgentEntry, catalog: dict[str, Any], active_model: Any) -> tuple[str, Any]:
+def _resolve_model(
+    entry: AgentEntry, catalog: dict[str, Any], active_model: Any
+) -> tuple[str, Any]:
     """Resolve an agent override as a catalog key, falling back to the active model."""
     if entry.model is None:
         return "", active_model
@@ -273,11 +282,12 @@ def create_task_tool(
     active_model_key: str | Callable[[], str],
     region: str,
     log_path: Path,
-    broadcast: Any,
+    emit: Callable[[SessionEvent], Awaitable[None]],
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
     max_concurrent: int = 3,
-    live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]] | None = None,
+    live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
+    | None = None,
 ) -> ToolSpec:
     """Create the root task tool; launch context is injected internally."""
     if max_concurrent <= 0:
@@ -292,24 +302,87 @@ def create_task_tool(
         semaphore: asyncio.Semaphore,
     ) -> str:
         async with semaphore:
-            agent_name = task.get("agent")
-            prompt = task.get("prompt")
-            if not isinstance(agent_name, str) or not isinstance(prompt, str) or not prompt.strip():
-                return f"[{index}] Error: task requires non-empty string agent and prompt"
-            entry = agent_catalog.get(agent_name)
+            terminal_emitted = False
+            raw_agent_name = task.get("agent") if isinstance(task, dict) else None
+            agent_name = raw_agent_name if isinstance(raw_agent_name, str) else "child"
+            prompt = task.get("prompt") if isinstance(task, dict) else None
             warning = ""
-            if entry is None:
-                available = ", ".join(sorted(agent_catalog)) or "(none)"
-                warning = (
-                    f"Warning: unknown agent '{agent_name}' (available: {available}); "
-                    "using default agent. "
-                )
-                log.warning("%s", warning.rstrip())
-                entry = DEFAULT_AGENT
+
+            async def _broadcast_child_error(kind: str, message: str) -> None:
+                try:
+                    await emit(ErrorNotice(id=str(ULID()), kind=kind, message=message))
+                except Exception:  # noqa: BLE001 — best effort only
+                    log.warning("Failed to broadcast child %s", kind, exc_info=True)
+
+            factory: EventFactory | None = None
+            storage_failed = False
+            fallback_attempted = False
+
+            async def _publish_child_terminal(event: SessionEvent) -> None:
+                nonlocal terminal_emitted
+                terminal_emitted = True
+                try:
+                    await asyncio.shield(emit(event))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    terminal_emitted = False
+                    raise
+
+            async def _publish_child_fallback(message: str) -> None:
+                nonlocal terminal_emitted, storage_failed, fallback_attempted
+                if terminal_emitted or storage_failed or fallback_attempted:
+                    return
+                fallback_attempted = True
+                try:
+                    if factory is None:
+                        terminal = CanonicalTurnError(
+                            id=str(ULID()),
+                            turn=parent_turn,
+                            scope=launch_scope,
+                            message=message,
+                            subagent_index=index,
+                        )
+                    else:
+                        try:
+                            terminal = factory.turn_error(turn=parent_turn, message=message)
+                        except Exception:
+                            terminal = CanonicalTurnError(
+                                id=str(ULID()),
+                                turn=parent_turn,
+                                scope=launch_scope,
+                                message=message,
+                                subagent_index=index,
+                            )
+                    await _publish_child_terminal(terminal)
+                except LogAppendError as error:
+                    storage_failed = True
+                    await _broadcast_child_error("storage_error", str(error))
+                except Exception:
+                    log.warning("Failed to publish child terminal event", exc_info=True)
 
             try:
+                if (
+                    not isinstance(task, dict)
+                    or not isinstance(task.get("agent"), str)
+                    or not isinstance(task.get("prompt"), str)
+                    or not task.get("prompt", "").strip()
+                ):
+                    raise ValueError("task requires non-empty string agent and prompt")
+                entry = agent_catalog.get(agent_name)
+                if entry is None:
+                    available = ", ".join(sorted(agent_catalog)) or "(none)"
+                    warning = (
+                        f"Warning: unknown agent '{agent_name}' (available: {available}); "
+                        "using default agent. "
+                    )
+                    log.warning("%s", warning.rstrip())
+                    entry = DEFAULT_AGENT
+
                 current_model = active_model() if callable(active_model) else active_model
-                current_model_key = active_model_key() if callable(active_model_key) else active_model_key
+                current_model_key = (
+                    active_model_key() if callable(active_model_key) else active_model_key
+                )
                 model_key, child_model = _resolve_model(entry, model_catalog, current_model)
                 if not model_key:
                     model_key = current_model_key
@@ -350,11 +423,13 @@ def create_task_tool(
                 text_parts: list[str] = []
                 iter_text = ""
                 assistant_event_logged = False
-                request_ids: list[str] = []
                 current_iteration = 0
                 current_request_id = ""
+
                 async for event in run_loop(
-                    messages=[Turn(role="user", content=[TextBlock(text=prompt)], turn_index=parent_turn)],
+                    messages=[
+                        Turn(role="user", content=[TextBlock(text=prompt)], turn_index=parent_turn)
+                    ],
                     system=child_prompt,
                     llm=child_llm,
                     interrupt=interrupt,
@@ -369,23 +444,25 @@ def create_task_tool(
                         iter_text = ""
                         assistant_event_logged = False
                         current_iteration = event.index
-                        _, serialized = factory.iteration_start(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
-                            index=current_iteration,
+                        iteration = factory.iteration_start(
+                            turn=parent_turn,
+                            iteration=current_iteration,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(iteration)
                     elif isinstance(event, TextDelta):
                         text_parts.append(event.text)
                         iter_text += event.text
-                        delta, serialized = factory.text_delta(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
-                            request_id=current_request_id,
+                        delta = factory.text_delta(
+                            turn=parent_turn,
+                            iteration=current_iteration,
+                            request_id=event.request_id or current_request_id,
                             text=event.text,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(delta)
                     elif isinstance(event, RequestFinished):
-                        request, serialized = factory.request(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                        request = factory.request(
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             sent_at=event.context.sent_at,
                             duration_ms=event.duration_ms,
                             status=event.status,
@@ -394,31 +471,32 @@ def create_task_tool(
                             error=event.error,
                             request_id=event.context.request_id,
                         )
-                        request_ids.append(request.id)
                         current_request_id = request.id
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(request)
                     elif isinstance(event, ToolCall):
                         if iter_text and not assistant_event_logged:
-                            _, serialized = factory.assistant_message(
+                            assistant = factory.assistant_message(
                                 turn=parent_turn,
-                                turn_iteration=f"{parent_turn}.{current_iteration}",
-                                request_ids=request_ids.copy(),
+                                iteration=current_iteration,
+                                request_id=current_request_id,
                                 content=iter_text,
                                 interrupted=False,
                             )
-                            await broadcast_raw(broadcast, serialized)
+                            await emit(assistant)
                             assistant_event_logged = True
-                        _, serialized = factory.tool_call(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                        tool_call = factory.tool_call(
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             request_id=current_request_id,
                             tool_use_id=event.tool_use_id,
                             name=event.name,
                             input=event.input,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(tool_call)
                     elif isinstance(event, ToolResult):
-                        _, serialized = factory.tool_result(
-                            turn_iteration=f"{parent_turn}.{current_iteration}",
+                        tool_result = factory.tool_result(
+                            turn=parent_turn,
+                            iteration=current_iteration,
                             request_id=current_request_id,
                             tool_use_id=event.tool_use_id,
                             content=event.content,
@@ -427,46 +505,82 @@ def create_task_tool(
                             result_bytes=event.result_bytes,
                             result_lines=event.result_lines,
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await emit(tool_result)
                     elif isinstance(event, TurnComplete):
                         if iter_text and not assistant_event_logged:
-                            _, serialized = factory.assistant_message(
+                            assistant = factory.assistant_message(
                                 turn=parent_turn,
-                                turn_iteration=f"{parent_turn}.{current_iteration}",
-                                request_ids=request_ids.copy(),
+                                iteration=current_iteration,
+                                request_id=current_request_id,
                                 content=iter_text,
                                 interrupted=False,
                             )
-                            await broadcast_raw(broadcast, serialized)
-                        _, serialized = factory.turn_complete(
+                            await emit(assistant)
+                        complete = factory.turn_complete(
                             turn=parent_turn, stop_reason=event.stop_reason
                         )
-                        await broadcast_raw(broadcast, serialized)
+                        await _publish_child_terminal(complete)
                     elif isinstance(event, TurnError):
-                        _, serialized = factory.turn_error(turn=parent_turn, message=event.error)
-                        await broadcast_raw(broadcast, serialized)
+                        if iter_text and not assistant_event_logged:
+                            assistant = factory.assistant_message(
+                                turn=parent_turn,
+                                iteration=current_iteration,
+                                request_id=current_request_id,
+                                content=iter_text,
+                                interrupted=True,
+                            )
+                            await emit(assistant)
+                        error_event = factory.turn_error(turn=parent_turn, message=event.error)
+                        await _publish_child_terminal(error_event)
                         return f"[{index}] {agent_name}: {warning}Error: {event.error}"
                     elif isinstance(event, TurnInterrupted):
-                        _, serialized = factory.turn_interrupted(turn=parent_turn)
-                        await broadcast_raw(broadcast, serialized)
+                        if iter_text and not assistant_event_logged:
+                            assistant = factory.assistant_message(
+                                turn=parent_turn,
+                                iteration=current_iteration,
+                                request_id=current_request_id,
+                                content=iter_text,
+                                interrupted=True,
+                            )
+                            await emit(assistant)
+                        interrupted = factory.turn_interrupted(turn=parent_turn)
+                        await _publish_child_terminal(interrupted)
                         return f"[{index}] {agent_name}: {warning}interrupted"
                 result = "".join(text_parts)
                 return f"[{index}] {agent_name}: {warning}{result}"
+            except LogAppendError as error:
+                storage_failed = True
+                await _broadcast_child_error("storage_error", str(error))
+                return f"[{index}] {agent_name}: {warning}{type(error).__name__}: {error}"
             except Exception as error:  # noqa: BLE001 - per-child isolation
                 log.exception("Child agent %s failed", agent_name)
+                await _publish_child_fallback(str(error))
                 return f"[{index}] {agent_name}: {warning}{type(error).__name__}: {error}"
             finally:
+                if not terminal_emitted and not storage_failed and not fallback_attempted:
+                    await _publish_child_fallback("Child ended without a terminal event")
                 if live_children is not None:
                     live_children.pop((launch_scope, index), None)
 
-    async def handler(tasks=None, _launch_scope: str | None = None, _parent_turn: int | None = None, **kwargs) -> str:
+    async def handler(
+        tasks=None, _launch_scope: str | None = None, _parent_turn: int | None = None, **kwargs
+    ) -> str:
         if not isinstance(tasks, list) or not tasks:
             return "Error: task requires one or more tasks"
         if not _launch_scope:
             return "Error: task launch context is missing"
         semaphore = asyncio.Semaphore(max_concurrent)
         results = await asyncio.gather(
-            *(run_child(item, index=index, launch_scope=_launch_scope, parent_turn=_parent_turn or session.turn_index, semaphore=semaphore) for index, item in enumerate(tasks)),
+            *(
+                run_child(
+                    item,
+                    index=index,
+                    launch_scope=_launch_scope,
+                    parent_turn=_parent_turn or session.turn_index,
+                    semaphore=semaphore,
+                )
+                for index, item in enumerate(tasks)
+            ),
         )
         return "\n".join(results)
 
@@ -493,8 +607,3 @@ def create_task_tool(
         },
         handler=handler,
     )
-
-
-async def broadcast_raw(broadcast: Any, serialized: str) -> None:
-    """Broadcast canonical serialized data through the supplied callback."""
-    await broadcast(serialized)

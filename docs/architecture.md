@@ -9,6 +9,7 @@ This document describes the implementation currently in the repository. Code and
 - [Host HTTP API](#host-http-api)
 - [Turn and data flow](#turn-and-data-flow)
 - [Event layers](#event-layers)
+- [Event specification](event-spec.md) — canonical event catalog, delivery class, and replay rules
 - [Logs, accounting, and metrics](#logs-accounting-and-metrics)
 - [Configuration, security, and ownership](#configuration-security-and-ownership)
 - [Change impact guide](#change-impact-guide)
@@ -20,7 +21,7 @@ Nexus has four Python workspace packages:
 - **CLI (`cli/`)** — host-side `archie` command, Textual TUI, authentication commands, and clients for the orchestrator.
 - **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, discovers sessions, proxies session HTTP/WebSocket traffic, serves the session page, and records aggregate LLM request metrics.
 - **Agent (`agent/`)** — container-side Starlette application. It owns one session, the agent loop, model client, tools, skills, subagents, and session event log.
-- **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, wire events/commands, canonical events, log replay, and accounting.
+- **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, and accounting.
 
 `persona/` is content rather than a package: prompts, agents, and skills are mounted into the container and loaded by the agent.
 
@@ -73,15 +74,14 @@ The orchestrator exposes these application routes:
 | `POST` | `/sessions` | start a session; body `{"workspace":"name"}` |
 | `DELETE` | `/sessions/{id}` | stop a session |
 | `GET` | `/sessions/{id}/status` | proxy agent status |
-| `GET` | `/sessions/{id}/events?after=<id>` | proxy canonical event replay |
-| `POST` | `/sessions/{id}/shell` | proxy direct-shell log entry |
+| `GET` | `/sessions/{id}/events?after=<id>` | proxy session history read |
 | `GET` | `/sessions/{id}/metrics` | metrics for one session |
 | `GET` | `/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
 | `POST` | `/credentials` | replace the host credentials file |
 | WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/static/*` | static assets for the session page |
 
-The agent service itself listens on port 8080 and provides `/status`, `/events`, `/shell`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
+The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
 
 ### Credential push security
 
@@ -93,76 +93,68 @@ A user message follows this path:
 
 1. The TUI sends a `message` command over the session WebSocket.
 2. The orchestrator relays it to the agent without interpreting the command.
-3. The agent persists the user/canonical turn records, runs the LLM/tool loop, and broadcasts live frames to connected clients.
-4. LLM provider streams become text, tool, usage, and terminal turn events. Tool calls may invoke native tools, the exec runner, or child agents through the `task` tool.
-5. The agent appends canonical records to the session JSONL log. The orchestrator observes broadcast `llm_request` frames and asynchronously writes them to SQLite metrics.
-6. The TUI renders live events. On connection or reconnect it uses the snapshot cursor and `/events` replay to reconcile persisted history, then resumes live streaming.
+3. The agent publishes canonical events through the session coordinator. The coordinator orders
+   them, persists persisted events before delivery, and broadcasts them to connected clients.
+4. LLM provider streams become canonical text, request, tool, and terminal events. Tool calls may
+   invoke native tools, the exec runner, or child agents through the `task` tool.
+5. The orchestrator observes canonical `llm_request` frames and asynchronously writes them to
+   SQLite metrics. The metrics writer is best-effort and does not block the event relay.
+6. The TUI applies live and stored events through one imperative `_apply_event(event, historical=...)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.
 
 The orchestrator WebSocket proxy is intended to be transparent: it forwards client text to the agent and agent text/binary frames back to the client. Metrics collection is best-effort and must not block or break the relay.
 
 ## Event layers
 
-### Canonical persisted events
+The public event union is the only server-to-client event contract for both live delivery and
+history reads. The complete catalog, field types, persisted/live-only classification, identity rules,
+and migration contract are in [Event specification](event-spec.md).
 
-Defined in `shared/src/archie_shared/canonical_events.py`, canonical events are flat tagged `msgspec` records. Persisted records are newline-delimited JSON in:
+Public events are flat tagged `msgspec` records defined in
+`shared/src/archie_shared/events.py`. Persisted records are newline-delimited JSON in:
 
 ```text
 <ARCHIE_HOME_DIR>/sessions/<session-id>.jsonl
 ```
 
-Each record has a generated ULID-like `id` in normal operation. The schema requires only a non-empty string; persistence rejects conflicting duplicate IDs and treats an identical retry as idempotent. Append order is the replay order. The persisted union currently includes:
+The persisted stream includes `session_started`, `user_message`, `iteration_start`, `llm_request`,
+`tool_call`, `tool_result`, `assistant_message`, `turn_complete`, `turn_error`, and
+`turn_interrupted`. The live-only set is exactly `handshake`, `session_status`, `text_delta`, and
+`error_notice`.
 
-- `session_started`
-- `user_message`
-- `iteration_start`
-- `llm_request`
-- `tool_call`
-- `tool_result`
-- `assistant_message`
-- `turn_complete`
-- `turn_error`
-- `turn_interrupted`
-- `model_switch`
-- `shell_command`
+`GET /events` returns ordered persisted NDJSON. Its optional `after` parameter is the client's last
+applied persisted event ID; live-only frames never advance that cursor. The TUI applies history
+and live frames through `_apply_event(event, historical=...)`, using the historical flag to select
+reconciliation behavior; both paths deduplicate by event ID and request identity.
 
-`text_delta` is part of the canonical type family for live streaming but is intentionally excluded from the persisted union. Persisted replay therefore reconstructs assistant content from `assistant_message`, not from token deltas.
+A connect sends one live-only `handshake` containing protocol and session identity, followed by
+one `session_status` frame carrying the current model and Git branch. There is no
+`session_snapshot` or `session_info` envelope and no parallel wire event schema.
+`PROTOCOL_VERSION` remains 2; clients and agents use this final contract together.
 
-`GET /events` returns ordered NDJSON. The optional `after` cursor is an event ID; a missing cursor returns a conflict rather than silently replaying from the beginning.
-
-The session log module still contains `MessageEntry`/`MessageMetadata` helpers for transition compatibility. Current canonical session persistence and accounting use the event helpers described above.
-
-### WebSocket wire protocol
-
-Defined in `shared/src/archie_shared/events.py`, protocol version 1 uses JSON envelopes:
-
-```json
-{"type":"<event_type>","turn_index":0,"data":{}}
-```
-
-Session-level frames omit `turn_index`. On connect, the agent sends `session_snapshot` followed by `session_info`. The snapshot contains the latest persisted event ID and disk-derived accounting totals; this lets a client replay from a known cursor. Client commands are `message`, `interrupt`, and `switch_model`.
-
-Wire event categories include iteration starts, text deltas, usage, tool calls/results, turn completion/error/interruption, model switches, status updates, and scoped child-agent activity. A raw canonical `llm_request` frame is also broadcast so accounting consumers can use the immutable request record.
-
-Do not treat all wire frames as durable. In particular, text deltas, connection snapshots, usage/status refreshes, and other presentation frames are live-only unless they correspond to a persisted canonical event. Conversely, persisted body events may not be broadcast as a live frame.
+The coordinator persists a persisted event before enqueueing it for broadcast. Live-only events are
+never appended. `text_delta` is intentionally excluded from history reads; assistant content is
+rebuilt from persisted `assistant_message` events, with partial text retained before an
+interruption or error. `llm_request` contains provider usage and immutable cost, so it is the sole
+accounting source for clients and the orchestrator metrics index.
 
 ## Logs, accounting, and metrics
 
 ### Canonical log rules
 
-- `append_event()` validates the serialized event and rejects conflicting duplicate IDs; identical duplicates are idempotent.
-- Replay preserves append order and skips malformed lines with a warning.
-- The user message is written before provider streaming; the assistant message is written after streaming completes.
-- `MessageMetadata` is compatibility/display metadata. It is not the authoritative accounting ledger.
+- `SessionLog.append()` validates canonical events and rejects conflicting duplicate IDs; identical duplicates are idempotent.
+- `SessionLog.read()` preserves append order and skips malformed or unrecognised records with a warning.
+- The user message is written before provider streaming; available assistant text is written before the matching terminal event, including partial text on interruption or error.
+- Legacy `MessageEntry` structures remain only in `session.migrate` for the one-shot host migration; direct `!` shell output is rendered only by the initiating TUI.
 
-Each `llm_request` contains the model key, status, sent time, duration, token categories (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`), context token count, and immutable `cost_usd`. Session totals are recomputed from these events on disk, so a newly attached client does not depend on the agent process’s in-memory state. Model switches do not reprice historical requests.
+Each `llm_request` contains the model key, status, sent time, duration, token categories (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`), context token count, and immutable `cost_usd`. Session totals are recomputed from these events on disk, so a newly attached client does not depend on the agent process’s in-memory state. Model changes are live-only status updates and do not reprice historical requests.
 
 ### Subagent scopes
 
-Root events use `scope=None`. A child’s scope is the launching `task` tool call’s `tool_use_id`; `subagent_index` identifies the child’s display slot. The parent of a scope is found through the launching tool call. `scope_direct_costs` sums requests in one scope; `scope_inclusive_costs` adds descendants with cycle protection. Request identity is `(scope, turn_iteration, request_id)`.
+Root events use `scope=None`. A child’s scope is the launching `task` tool call’s `tool_use_id`; `subagent_index` identifies the child’s display slot. The parent of a scope is found through the launching tool call. `scope_direct_costs` sums requests in one scope; `scope_inclusive_costs` adds descendants with cycle protection. Request identity is `(scope, subagent_index, turn, iteration, request_id)`.
 
 ### Orchestrator metrics
 
-The orchestrator writes only `llm_request` records to `<ARCHIE_HOME_DIR>/metrics.db`, table `requests`. Uniqueness is `(session_id, event_id)`, making ingestion idempotent. The writer uses a bounded asynchronous queue and a schema version; an incompatible existing database is archived as a `.legacy.<UTC>` file before a fresh schema is created. Metrics are an aggregate/indexed view, not a replacement for the session JSONL source of truth.
+The orchestrator writes only `llm_request` records to `<ARCHIE_HOME_DIR>/metrics.db`, table `requests`. Uniqueness is `(session_id, event_id)`, making ingestion idempotent. The writer uses a bounded asynchronous queue and a schema version; an incompatible existing database is archived as a `.legacy.<UTC>` file before a fresh schema is created. The host-only `archie migrate-sessions` command archives and resets the index, then backfills it from migrated logs. Metrics are an aggregate/indexed view, not a replacement for the session JSONL source of truth.
 
 ## Configuration, security, and ownership
 
@@ -191,8 +183,8 @@ The agent owns the session process, provider requests, tool execution, and canon
 
 ## Change impact guide
 
-- **Changing `shared/canonical_events.py`** affects persisted logs, replay, agent writes, orchestrator metrics, and clients. Add compatibility tests and update this document.
-- **Changing `shared/events.py`** affects the CLI/TUI, agent WebSocket handlers, proxy behavior, and protocol versioning.
+- **Changing `shared/events.py`** affects persisted logs, replay, agent writes, orchestrator metrics, and clients. Add compatibility tests, update [event-spec.md](event-spec.md), and update this document.
+- **Changing `shared/commands.py`** affects client commands, agent WebSocket dispatch, and protocol versioning.
 - **Changing mounts, ports, or lifecycle** affects `Dockerfile`, orchestrator lifecycle, readiness checks, security assumptions, and local setup instructions.
 - **Changing accounting** requires tests for model switches, interruptions/errors, duplicate ingestion, and nested scopes.
 - **Changing `persona/`** changes runtime prompts or capabilities without changing package APIs; review the resulting agent behavior and relevant skill/agent metadata.

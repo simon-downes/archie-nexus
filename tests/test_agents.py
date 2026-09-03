@@ -57,9 +57,7 @@ def test_discover_agents_skips_malformed_file(monkeypatch, tmp_path: Path, caplo
     assert "frontmatter" in caplog.text
 
 
-def test_discover_agents_duplicate_name_last_sorted_file_wins(
-    monkeypatch, tmp_path: Path, caplog
-):
+def test_discover_agents_duplicate_name_last_sorted_file_wins(monkeypatch, tmp_path: Path, caplog):
     agents = tmp_path / "agents"
     agents.mkdir()
     (agents / "a.md").write_text("---\nname: same\ndescription: A\n---\nA", encoding="utf-8")

@@ -14,7 +14,9 @@ def test_tool_activity_reuses_non_exec_pending_summary():
 
 
 def test_tool_duration_is_added_to_existing_metadata_parentheses():
-    summary = format_tool_complete("read", {"path": "example.py"}, "File: example.py (3 lines)\n", False, 50)
+    summary = format_tool_complete(
+        "read", {"path": "example.py"}, "File: example.py (3 lines)\n", False, 50
+    )
     assert "(3 lines, 50ms)" in summary
     assert ") (50ms)" not in summary
 
@@ -22,7 +24,7 @@ def test_tool_duration_is_added_to_existing_metadata_parentheses():
 def test_shell_error_summary_escapes_exit_marker_and_includes_lines():
     summary = format_tool_complete(
         "shell",
-        {"command": "echo \\\"Hello World\\\" && false"},
+        {"command": 'echo \\"Hello World\\" && false'},
         "[exit: 1]\nHello World",
         True,
         2,
@@ -35,7 +37,11 @@ def test_shell_error_summary_escapes_exit_marker_and_includes_lines():
 
 def test_skill_summary_reports_loaded_lines():
     summary = format_tool_complete(
-        "skill", {"name": "workflow-review"}, "Loaded skill 'workflow-review' into system prompt (42 lines).", False, 50
+        "skill",
+        {"name": "workflow-review"},
+        "Loaded skill 'workflow-review' into system prompt (42 lines).",
+        False,
+        50,
     )
     assert "workflow-review" in summary
     assert "(42 lines, 50ms)" in summary

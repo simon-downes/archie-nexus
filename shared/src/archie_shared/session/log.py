@@ -1,132 +1,118 @@
-"""Session log persistence — per-message JSONL schema and append writer.
+"""Stateful durable storage for persisted session events."""
 
-Each session produces one JSONL file at <ARCHIE_HOME_DIR>/sessions/{id}.jsonl.
-Each line is one message (user or assistant), encoded as a MessageEntry.
-
-The user message is persisted before LLM streaming starts (crash-safe).
-The assistant message is persisted after streaming completes.
-
-v2 schema — replaces the per-exchange SessionLogEntry from v1.
-Files are consumed directly off the host mount by editors/models.
-"""
+from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import msgspec
 
-from archie_shared.canonical_events import (
-    CanonicalEvent,
-    PersistedEvent,
-    decode_event,
-    encode_event,
-)
+from archie_shared.events import Event, LLMRequest, PersistedEvent, decode_event, encode_event
 
 log = logging.getLogger(__name__)
 
 
-class MessageMetadata(msgspec.Struct):
-    """Per-message metadata for assistant entries.
-
-    User entries have metadata=None. Assistant entries carry the model and
-    interruption state for that specific message. Token/cost accounting lives
-    in the canonical event log (llm_request events), not here.
-    """
-
-    model: str
-    backend: str | None = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    cost: float = 0.0
-    interrupted: bool = False
+class CursorNotFound(KeyError):  # noqa: N818
+    """The requested history cursor is not present in the session log."""
 
 
-class MessageEntry(msgspec.Struct):
-    """One JSONL line — a single message in the conversation.
-
-    Attributes:
-        id: Unique entry ID (ULID string).
-        when: ISO-8601 UTC timestamp.
-        role: Message role — "user" or "assistant" (later: "tool_result", "tool_call").
-        content: Message text content.
-        metadata: Token/cost metadata (None for user entries, populated for assistant).
-    """
-
-    id: str
-    when: str
-    role: str
-    content: str
-    metadata: MessageMetadata | None = None
+class EventIdConflict(RuntimeError):  # noqa: N818
+    """An event ID was reused with different canonical content."""
 
 
-def write_entry(path: Path, entry: MessageEntry) -> None:
-    """Append a legacy message entry (transition compatibility)."""
+class LogAppendError(RuntimeError):
+    """The session log could not be durably appended."""
+
+
+def _append_serialized_event(path: Path, line: str) -> None:
+    """Append one already-encoded line at the storage boundary."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
-        f.write(msgspec.json.encode(entry).decode() + "\n")
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line + "\n")
+        stream.flush()
 
 
-def append_event(path: Path, event: CanonicalEvent, serialized: str | None = None) -> str:
-    """Append a canonical event, returning the exact persisted JSON string."""
-    if not getattr(event, "id", ""):
-        raise ValueError("canonical events require a non-empty id")
-    line = serialized if serialized is not None else encode_event(event)
-    decoded = decode_event(line, persisted=True)
-    if decoded.id != event.id:
-        raise ValueError("serialized event id does not match event")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing = read_event_lines(path)
-    for old in existing:
-        if old.get("id") == event.id:
-            if old["line"] == line:
-                return line
-            raise ValueError(f"conflicting duplicate event id: {event.id}")
-    with path.open("a") as f:
-        f.write(line + "\n")
-    return line
+class SessionLog:
+    """Own one session log's valid events, ID index, and durable appends."""
 
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._events: list[PersistedEvent] = []
+        self._index: dict[str, str] = {}
+        self._scan()
 
-def read_event_lines(path: Path) -> list[dict[str, str]]:
-    """Read valid canonical lines in append order, skipping malformed records."""
-    result: list[dict[str, str]] = []
-    if not path.exists():
-        return result
-    for number, raw in enumerate(path.read_text().splitlines(), 1):
+    def _scan(self) -> None:
+        if not self.path.exists():
+            return
         try:
-            event = decode_event(raw, persisted=True)
-        except (ValueError, TypeError, msgspec.DecodeError) as exc:
-            log.warning("Skipping malformed canonical event line %d: %s", number, exc)
-            continue
-        result.append({"id": event.id, "line": raw})
-    return result
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise LogAppendError(f"failed to read session log {self.path}: {exc}") from exc
+
+        for number, raw in enumerate(lines, 1):
+            try:
+                event = decode_event(raw, persisted=True)
+                if not event.id:
+                    raise ValueError("canonical events require a non-empty id")
+                canonical = encode_event(event)
+            except (ValueError, TypeError, msgspec.DecodeError, msgspec.ValidationError) as exc:
+                log.warning(
+                    "Skipping invalid session log line %d in %s: %s", number, self.path, exc
+                )
+                continue
+
+            previous = self._index.get(event.id)
+            if previous is not None:
+                if previous == canonical:
+                    log.warning(
+                        "Skipping identical duplicate session log line %d in %s for event %s",
+                        number,
+                        self.path,
+                        event.id,
+                    )
+                    continue
+                raise EventIdConflict(f"conflicting duplicate event id: {event.id}")
+
+            self._events.append(event)
+            self._index[event.id] = canonical
+
+    def append(self, event: PersistedEvent) -> bool:
+        """Durably append a new persisted event, or return false for an identical retry."""
+        if not isinstance(event, Event) or not event.persist:
+            raise TypeError(f"event {type(event).__name__} is live-only")
+        if not event.id:
+            raise ValueError("canonical events require a non-empty id")
+
+        canonical = encode_event(event)
+        existing = self._index.get(event.id)
+        if existing is not None:
+            if existing == canonical:
+                return False
+            raise EventIdConflict(f"conflicting duplicate event id: {event.id}")
+
+        try:
+            _append_serialized_event(self.path, canonical)
+        except OSError as exc:
+            raise LogAppendError(f"failed to append event {event.id}: {exc}") from exc
+        self._events.append(event)
+        self._index[event.id] = canonical
+        return True
+
+    def read(self, after_id: str | None = None) -> list[PersistedEvent]:
+        """Return valid persisted events in append order after an optional cursor."""
+        if after_id:
+            for index, event in enumerate(self._events):
+                if event.id == after_id:
+                    return list(self._events[index + 1 :])
+            raise CursorNotFound(after_id)
+        return list(self._events)
 
 
-def read_events(path: Path, after_id: str | None = None) -> list[PersistedEvent]:
-    """Replay canonical events in JSONL order."""
-    lines = read_event_lines(path)
-    start = 0
-    if after_id is not None:
-        for index, item in enumerate(lines):
-            if item["id"] == after_id:
-                start = index + 1
-                break
-        else:
-            raise KeyError(after_id)
-    return [decode_event(item["line"], persisted=True) for item in lines[start:]]
-
-
-def session_accounting(path: Path) -> dict:
-    """Compute authoritative cumulative accounting from the persisted event log.
-
-    Returns the latest persisted event id (replay cursor, ``None`` if the log
-    is empty) and cumulative token/cost totals summed across all ``llm_request``
-    events. This is derived purely from disk, so it is correct for a freshly
-    attached client regardless of the agent process lifetime.
-    """
-    lines = read_event_lines(path)
-    latest_event_id = lines[-1]["id"] if lines else None
+def session_accounting(path: Path) -> dict[str, Any]:
+    """Compute token and cost totals from persisted request events."""
+    events = SessionLog(path).read()
+    latest_event_id = events[-1].id if events else None
     totals = {
         "total_cost": 0.0,
         "total_input_tokens": 0,
@@ -134,9 +120,8 @@ def session_accounting(path: Path) -> dict:
         "total_cache_read_tokens": 0,
         "total_cache_write_tokens": 0,
     }
-    for item in lines:
-        event = decode_event(item["line"], persisted=True)
-        if getattr(event, "type", None) != "llm_request":
+    for event in events:
+        if not isinstance(event, LLMRequest):
             continue
         totals["total_cost"] += event.cost_usd
         totals["total_input_tokens"] += event.input_tokens

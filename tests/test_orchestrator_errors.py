@@ -132,9 +132,7 @@ async def test_post_sessions_docker_error_returns_helpful_message():
             returncode=1,
         ),
     ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/sessions",
                 json={"workspace": "myproject"},
@@ -158,9 +156,7 @@ async def test_delete_session_docker_error_returns_500():
             ),
         ),
     ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete(f"/sessions/{session.session_id}")
 
     assert resp.status_code == 500
@@ -176,9 +172,7 @@ async def test_delete_session_docker_error_returns_500():
 async def test_delete_session_not_found_still_404():
     """DELETE /sessions/{id} for unknown session still returns 404."""
     with patch("archie_orchestrator.app.stop_session", side_effect=KeyError("no such session")):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete("/sessions/nonexistent-session-id")
 
     assert resp.status_code == 404
@@ -187,9 +181,7 @@ async def test_delete_session_not_found_still_404():
 @pytest.mark.asyncio
 async def test_post_sessions_missing_workspace_still_400():
     """POST /sessions with missing workspace → still 400."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/sessions", json={})
 
     assert resp.status_code == 400

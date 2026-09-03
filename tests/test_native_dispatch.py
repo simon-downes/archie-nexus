@@ -59,7 +59,7 @@ def _get_tool_results(ws: FakeWebSocket) -> list[dict]:
     for m in ws.messages:
         parsed = json.loads(m)
         if parsed.get("type") == "tool_result":
-            results.append(parsed["data"])
+            results.append(parsed)
     return results
 
 
@@ -91,7 +91,7 @@ async def test_native_read_dispatch(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("read hello.txt")
 
     # Find the tool_result event
@@ -134,7 +134,7 @@ async def test_native_write_dispatch(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("write a file")
 
     # The file should exist
@@ -173,7 +173,7 @@ async def test_native_shell_dispatch(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("run echo hi")
 
     results = _get_tool_results(ws)
@@ -196,11 +196,15 @@ async def test_native_shell_nonzero_exit_is_error(tmp_path, monkeypatch):
             Usage(input_tokens=100, output_tokens=50),
             Done(stop_reason="tool_use"),
         ],
-        [TextDelta(text="Handled."), Usage(input_tokens=200, output_tokens=60), Done(stop_reason="end_turn")],
+        [
+            TextDelta(text="Handled."),
+            Usage(input_tokens=200, output_tokens=60),
+            Done(stop_reason="end_turn"),
+        ],
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("run failing command")
 
     results = _get_tool_results(ws)
@@ -233,7 +237,7 @@ async def test_native_grep_dispatch(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("search for hello")
 
     results = _get_tool_results(ws)
@@ -271,7 +275,7 @@ async def test_native_glob_dispatch(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("list py files")
 
     results = _get_tool_results(ws)
@@ -309,7 +313,7 @@ async def test_native_web_search_dispatch(tmp_path):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     with patch("ddgs.DDGS", mock_ddgs):
         await harness.handle_message("search the web")
@@ -349,7 +353,7 @@ async def test_native_truncation_applied(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("read big.txt")
 
     results = _get_tool_results(ws)
@@ -388,7 +392,7 @@ async def test_str_result_is_noop_for_native(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("read test.txt")
 
     results = _get_tool_results(ws)
@@ -443,7 +447,7 @@ async def test_both_native_and_exec_paths(tmp_path, monkeypatch):
     harness._exec_python = sys.executable
     harness._exec_run_root = tmp_path / "runs"
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("test both paths")
 
     results = _get_tool_results(ws)
@@ -486,14 +490,14 @@ async def test_native_read_input_summary(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("read foo.py")
 
     # Wire tool_call carries raw input; client formats via shared formatter.
     tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    assert tool_calls[0]["data"]["input"] == {"path": "foo.py"}
-    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
+    assert tool_calls[0]["input"] == {"path": "foo.py"}
+    summary = format_tool_pending(tool_calls[0]["name"], tool_calls[0]["input"])
     assert "Read" in summary
     assert "foo.py" in summary
 
@@ -522,13 +526,13 @@ async def test_native_shell_input_summary(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("run a command")
 
     tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    assert tool_calls[0]["data"]["input"] == {"command": "echo test"}
-    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
+    assert tool_calls[0]["input"] == {"command": "echo test"}
+    summary = format_tool_pending(tool_calls[0]["name"], tool_calls[0]["input"])
     assert "Shell" in summary
     assert "echo test" in summary
 
@@ -558,12 +562,12 @@ async def test_native_grep_input_summary(tmp_path, monkeypatch):
     ]
     harness = _make_harness(tmp_path, responses)
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
     await harness.handle_message("search for hello")
 
     tool_calls = [json.loads(m) for m in ws.messages if json.loads(m).get("type") == "tool_call"]
     assert len(tool_calls) == 1
-    assert tool_calls[0]["data"]["input"] == {"pattern": "hello"}
-    summary = format_tool_pending(tool_calls[0]["data"]["name"], tool_calls[0]["data"]["input"])
+    assert tool_calls[0]["input"] == {"pattern": "hello"}
+    summary = format_tool_pending(tool_calls[0]["name"], tool_calls[0]["input"])
     assert "Grep" in summary
     assert "hello" in summary

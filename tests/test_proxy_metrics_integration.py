@@ -89,9 +89,9 @@ def test_markers_match_actual_json_dumps_output():
     assert '"type":"llm_request"' in compact_form
 
     for marker in _METRICS_MARKERS:
-        assert any(
-            marker in e for e in [json_form, compact_form]
-        ), f"Marker {marker!r} not found in any expected event"
+        assert any(marker in e for e in [json_form, compact_form]), (
+            f"Marker {marker!r} not found in any expected event"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -99,13 +99,14 @@ def test_markers_match_actual_json_dumps_output():
 # ---------------------------------------------------------------------------
 
 
-def _llm_request_frame(turn_iteration: str = "1.1", **overrides) -> str:
+def _llm_request_frame(turn: int = 1, iteration: int = 1, **overrides) -> str:
     """A canonical llm_request frame as it flows over the WebSocket."""
     event = {
         "type": "llm_request",
         "id": overrides.get("id", "evt-1"),
         "scope": None,
-        "turn_iteration": turn_iteration,
+        "turn": turn,
+        "iteration": iteration,
         "model_key": "bedrock-anthropic.claude-sonnet-4-6",
         "sent_at": "2026-07-01T10:00:00+00:00",
         "duration_ms": 1234,
@@ -148,14 +149,17 @@ def test_llm_request_frame_enqueued(tmp_path):
 def test_text_delta_frame_not_enqueued(tmp_path):
     """TextDelta frame (no metrics marker) → not enqueued."""
     session = _make_session()
-    text_msg = json.dumps({
-        "type": "text_delta",
-        "id": "t1",
-        "turn_iteration": "1.1",
-        "scope": None,
-        "request_id": "r1",
-        "text": "Hello",
-    })
+    text_msg = json.dumps(
+        {
+            "type": "text_delta",
+            "id": "t1",
+            "turn": 1,
+            "iteration": 1,
+            "scope": None,
+            "request_id": "r1",
+            "text": "Hello",
+        }
+    )
 
     from archie_orchestrator.metrics import MetricsWriter
 
@@ -210,8 +214,8 @@ def test_multiple_sessions_correct_session_ids(tmp_path):
         session_id=sid_b, container_name=f"archie-{sid_b}", port=32772, raw_docker_status="Up"
     )
 
-    usage_a = _llm_request_frame(turn_iteration="1.1", id="a1")
-    usage_b = _llm_request_frame(turn_iteration="2.1", id="b1")
+    usage_a = _llm_request_frame(turn=1, iteration=1, id="a1")
+    usage_b = _llm_request_frame(turn=2, iteration=1, id="b1")
 
     from archie_orchestrator.metrics import MetricsWriter
 
@@ -219,12 +223,16 @@ def test_multiple_sessions_correct_session_ids(tmp_path):
     app.state.metrics_writer = writer
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", side_effect=[
-            [session_a],  # first call for session A
-            [session_b],  # second call for session B
-        ]),
-        patch("archie_orchestrator.proxy.websockets.connect",
-              _make_ws_backend([])),  # placeholder — overridden per-session below
+        patch(
+            "archie_orchestrator.proxy.list_sessions",
+            side_effect=[
+                [session_a],  # first call for session A
+                [session_b],  # second call for session B
+            ],
+        ),
+        patch(
+            "archie_orchestrator.proxy.websockets.connect", _make_ws_backend([])
+        ),  # placeholder — overridden per-session below
     ):
         # Test session A
         with patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([usage_a])):

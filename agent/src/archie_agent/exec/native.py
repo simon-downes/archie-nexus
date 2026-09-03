@@ -64,7 +64,9 @@ def _schema_from_signature(fn: Callable) -> dict[str, Any]:
             continue
 
         if annotation is inspect.Parameter.empty:
-            log.warning("Parameter %s.%s has no type annotation — defaulting to string", fn.__name__, name)
+            log.warning(
+                "Parameter %s.%s has no type annotation — defaulting to string", fn.__name__, name
+            )
             json_type = "string"
         else:
             json_type, is_optional = _resolve_type(annotation)
@@ -265,14 +267,11 @@ def _native_handler(fn: Callable) -> Callable:
     """
 
     sig = inspect.signature(fn)
-    accepts_kwargs = any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+    accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     allowed = {
         name
         for name, p in sig.parameters.items()
-        if p.kind
-        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     }
 
     @wraps(fn)

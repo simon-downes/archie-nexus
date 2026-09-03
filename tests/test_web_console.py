@@ -41,9 +41,7 @@ def _make_session(
 @pytest.mark.asyncio
 async def test_static_css_served():
     """GET /static/style.css returns 200 with CSS content."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/static/style.css")
 
     assert resp.status_code == 200
@@ -57,9 +55,7 @@ async def test_static_css_served():
 @pytest.mark.asyncio
 async def test_static_css_contains_design_tokens():
     """style.css defines all required design token variables."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/static/style.css")
 
     css = resp.text
@@ -92,9 +88,7 @@ async def test_static_css_contains_design_tokens():
 async def test_get_root_returns_html():
     """GET / returns 200 with text/html content type."""
     with patch("archie_orchestrator.web.list_sessions", return_value=[]):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     assert resp.status_code == 200
@@ -110,9 +104,7 @@ async def test_sessions_page_shows_session_ids():
     ]
 
     with patch("archie_orchestrator.web.list_sessions", return_value=sessions):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     html = resp.text
@@ -132,9 +124,7 @@ async def test_sessions_page_shows_status():
     sessions = [_make_session(status="Up 10 minutes")]
 
     with patch("archie_orchestrator.web.list_sessions", return_value=sessions):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     assert "Up 10 minutes" in resp.text
@@ -149,9 +139,7 @@ async def test_sessions_page_shows_status():
 async def test_sessions_page_no_sessions_shows_empty_message():
     """GET / with no sessions → 'No running sessions' message."""
     with patch("archie_orchestrator.web.list_sessions", return_value=[]):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     assert resp.status_code == 200
@@ -167,9 +155,7 @@ async def test_sessions_page_no_sessions_shows_empty_message():
 async def test_page_contains_auto_refresh_meta():
     """GET / HTML includes <meta http-equiv='refresh'> for auto-refresh."""
     with patch("archie_orchestrator.web.list_sessions", return_value=[]):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     html = resp.text
@@ -186,9 +172,7 @@ async def test_page_contains_auto_refresh_meta():
 async def test_page_contains_uptime():
     """GET / HTML includes the uptime string in the meta element."""
     with patch("archie_orchestrator.web.list_sessions", return_value=[]):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     html = resp.text
@@ -206,9 +190,7 @@ async def test_page_contains_version():
         patch("archie_orchestrator.web.list_sessions", return_value=[]),
         patch("archie_orchestrator.web._get_version", return_value="1.2.3"),
     ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     assert "1.2.3" in resp.text
@@ -241,9 +223,7 @@ async def test_session_with_no_port_shows_dash():
     ]
 
     with patch("archie_orchestrator.web.list_sessions", return_value=sessions):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     # Jinja2 renders "—" (the em-dash fallback) for None ports
@@ -259,9 +239,7 @@ async def test_session_with_no_port_shows_dash():
 async def test_page_includes_base_template_structure():
     """GET / HTML includes base template elements (header, title)."""
     with patch("archie_orchestrator.web.list_sessions", return_value=[]):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     html = resp.text

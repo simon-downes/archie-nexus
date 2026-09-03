@@ -1,13 +1,7 @@
-"""Canonical event scope-field contract tests (029 M6).
+"""Canonical event scope and structured turn-field contract tests."""
 
-Validates that scope is present and round-trips on all scoped canonical events,
-and that a fake scoped event producer (representing a future subagent) yields a
-consistent scope chain.
-"""
-
-from __future__ import annotations
-
-from archie_shared.canonical_events import (
+from archie_shared import events as event_module
+from archie_shared.events import (
     AssistantMessage,
     IterationStart,
     LLMRequest,
@@ -24,19 +18,19 @@ def _roundtrip(event):
     return decode_event(encode_event(event))
 
 
-# ---------------------------------------------------------------------------
-# Scope fields present and round-trip on all scoped events
-# ---------------------------------------------------------------------------
+def test_transitional_canonical_event_alias_is_removed():
+    assert not hasattr(event_module, "CanonicalEvent")
 
 
 def test_scoped_events_roundtrip_with_none_scope():
     events = [
         UserMessage(id="u1", turn=1, scope=None, content="hi"),
-        IterationStart(id="i1", turn_iteration="1.1", scope=None, index=1),
-        TextDelta(id="t1", turn_iteration="1.1", scope=None, request_id="r1", text="x"),
+        IterationStart(id="i1", turn=1, iteration=1, scope=None),
+        TextDelta(id="t1", turn=1, iteration=1, scope=None, request_id="r1", text="x"),
         ToolCall(
             id="c1",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             scope=None,
             request_id="r1",
             tool_use_id="tu1",
@@ -45,7 +39,8 @@ def test_scoped_events_roundtrip_with_none_scope():
         ),
         ToolResult(
             id="tr1",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             scope=None,
             request_id="r1",
             tool_use_id="tu1",
@@ -55,36 +50,49 @@ def test_scoped_events_roundtrip_with_none_scope():
             result_bytes=2,
         ),
         AssistantMessage(
-            id="a1", turn=1, turn_iteration="1.1", scope=None, request_ids=["r1"], content="done", interrupted=False
+            id="a1",
+            turn=1,
+            iteration=1,
+            scope=None,
+            request_id="r1",
+            content="done",
+            interrupted=False,
         ),
     ]
     for ev in events:
-        assert _roundtrip(ev).scope is None
+        restored = _roundtrip(ev)
+        assert restored.scope is None
+        if isinstance(ev, (IterationStart, TextDelta, ToolCall, ToolResult)):
+            assert restored.turn == 1
+            assert restored.iteration == 1
 
 
-def test_legacy_assistant_message_without_iteration_roundtrips():
-    """Pre-iteration assistant events remain decodable for replay."""
+def test_assistant_message_has_singular_request_identity():
     raw = (
-        '{"type":"assistant_message","id":"a1","turn":1,"scope":null,'
-        '"request_ids":["r1"],"content":"legacy response","interrupted":false}'
+        '{"type":"assistant_message","id":"a1","turn":1,"iteration":1,"scope":null,'
+        '"request_id":"r1","content":"response","interrupted":false}'
     )
 
     event = decode_event(raw)
 
     assert isinstance(event, AssistantMessage)
-    assert event.content == "legacy response"
-    assert event.turn_iteration is None
+    assert event.content == "response"
+    assert event.request_id == "r1"
+    assert event.iteration == 1
+    assert not hasattr(event, "request_ids")
+    assert not hasattr(event, "turn_iteration")
 
 
 def test_scoped_events_roundtrip_with_child_scope():
     child = "tu-launch-123"
     events = [
         UserMessage(id="u1", turn=1, scope=child, content="hi"),
-        IterationStart(id="i1", turn_iteration="1.1", scope=child, index=1),
+        IterationStart(id="i1", turn=1, iteration=1, scope=child),
         LLMRequest(
             id="r1",
             scope=child,
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             model_key="m",
             sent_at="2026-07-01T10:00:00+00:00",
             duration_ms=1,
@@ -98,7 +106,8 @@ def test_scoped_events_roundtrip_with_child_scope():
         ),
         ToolCall(
             id="c1",
-            turn_iteration="1.1",
+            turn=1,
+            iteration=1,
             scope=child,
             request_id="r1",
             tool_use_id="tu2",
@@ -110,19 +119,12 @@ def test_scoped_events_roundtrip_with_child_scope():
         assert _roundtrip(ev).scope == child
 
 
-# ---------------------------------------------------------------------------
-# Fake scoped event producer (future subagent) — scope-chain consistency
-# ---------------------------------------------------------------------------
-
-
 def _fake_subagent_stream():
-    """Produce a canonical stream for root → child → nested-child.
-
-    Child scope == launching tool_use_id per the subagent scope contract.
-    """
+    """Produce a canonical stream for root → child → nested-child."""
     root_launch = ToolCall(
         id="c-root",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         scope=None,
         request_id="r-root",
         tool_use_id="child-a",
@@ -131,7 +133,8 @@ def _fake_subagent_stream():
     )
     child_launch = ToolCall(
         id="c-child",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         scope="child-a",
         request_id="r-child",
         tool_use_id="child-b",
@@ -141,7 +144,8 @@ def _fake_subagent_stream():
     root_req = LLMRequest(
         id="r-root",
         scope=None,
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         model_key="m",
         sent_at="2026-07-01T10:00:00+00:00",
         duration_ms=1,
@@ -156,7 +160,8 @@ def _fake_subagent_stream():
     child_req = LLMRequest(
         id="r-child",
         scope="child-a",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         model_key="m",
         sent_at="2026-07-01T10:00:01+00:00",
         duration_ms=1,
@@ -171,7 +176,8 @@ def _fake_subagent_stream():
     nested_req = LLMRequest(
         id="r-nested",
         scope="child-b",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         model_key="m",
         sent_at="2026-07-01T10:00:02+00:00",
         duration_ms=1,
@@ -189,22 +195,21 @@ def _fake_subagent_stream():
 def test_fake_subagent_scope_chain_reconstructable():
     events = [_roundtrip(e) for e in _fake_subagent_stream()]
 
-    # parent_of(child) reconstructed from the launching tool_call's scope
     parent_of = {e.tool_use_id: e.scope for e in events if isinstance(e, ToolCall)}
-    assert parent_of["child-a"] is None  # root launched child-a
-    assert parent_of["child-b"] == "child-a"  # child-a launched child-b
+    assert parent_of["child-a"] is None
+    assert parent_of["child-b"] == "child-a"
 
-    # request identity (scope, turn_iteration, request_id/id) is distinct per scope
     reqs = [e for e in events if isinstance(e, LLMRequest)]
-    keys = {(r.scope, r.turn_iteration, r.id) for r in reqs}
+    keys = {(r.scope, r.turn, r.iteration, r.id) for r in reqs}
     assert len(keys) == 3
 
 
-def test_two_children_same_turn_iteration_kept_distinct_by_scope():
+def test_two_children_same_turn_and_iteration_kept_distinct_by_scope():
     a = LLMRequest(
         id="r-a",
         scope="child-a",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         model_key="m",
         sent_at="t",
         duration_ms=1,
@@ -219,7 +224,8 @@ def test_two_children_same_turn_iteration_kept_distinct_by_scope():
     b = LLMRequest(
         id="r-b",
         scope="child-b",
-        turn_iteration="1.1",
+        turn=1,
+        iteration=1,
         model_key="m",
         sent_at="t",
         duration_ms=1,
@@ -231,5 +237,5 @@ def test_two_children_same_turn_iteration_kept_distinct_by_scope():
         context_tokens=1,
         cost_usd=0.02,
     )
-    keys = {(a.scope, a.turn_iteration), (b.scope, b.turn_iteration)}
+    keys = {(a.scope, a.turn, a.iteration), (b.scope, b.turn, b.iteration)}
     assert len(keys) == 2

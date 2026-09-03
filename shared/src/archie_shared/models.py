@@ -50,18 +50,88 @@ class ModelEntry(msgspec.Struct):
 
 
 DEFAULT_MODELS: dict[str, ModelEntry] = {
-    "bedrock-claude-fable-5": ModelEntry(name="Claude Fable 5", context=1_000_000, provider=BedrockProvider(model_id="eu.anthropic.claude-fable-5"), can_cache=True, cost=CostConfig(input=11.0, output=55.0, cache_read=1.10, cache_write=13.75)),
-    "bedrock-claude-sonnet-4-6": ModelEntry(name="Claude Sonnet 4.6", context=1_000_000, provider=BedrockProvider(model_id="eu.anthropic.claude-sonnet-4-6"), can_cache=True, cost=CostConfig(input=3.3, output=16.5, cache_read=0.33, cache_write=4.125)),
-    "bedrock-claude-haiku-4-5": ModelEntry(name="Claude Haiku", context=200_000, provider=BedrockProvider(model_id="eu.anthropic.claude-haiku-4-5-20251001-v1:0"), can_cache=True, cost=CostConfig(input=1.1, output=5.5, cache_read=0.11, cache_write=1.375)),
-    "bedrock-claude-opus-4-6": ModelEntry(name="Claude Opus 4.6", context=1_000_000, provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-6-v1"), can_cache=True, cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875)),
-    "bedrock-claude-opus-4-8": ModelEntry(name="Claude Opus 4.8", context=1_000_000, provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-8"), can_cache=True, cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875)),
-    "bedrock-openai-gpt-5-6-luna": ModelEntry(name="GPT-5.6 Luna", context=1_000_000, provider=BedrockOpenAIProvider(model_id="openai.gpt-5.6-luna", region="us-east-1"), can_cache=True, cost=CostConfig(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25)),
-    "bedrock-glm-5": ModelEntry(name="GLM 5", context=200_000, provider=BedrockProvider(model_id="zai.glm-5", region="eu-west-2"), max_output_tokens=128_000, cost=CostConfig(input=1.55, output=4.96)),
-    "bedrock-qwen3-coder-next": ModelEntry(name="Qwen3 Coder Next", context=256_000, provider=BedrockProvider(model_id="qwen.qwen3-coder-next", region="eu-west-2"), max_output_tokens=16_000, cost=CostConfig(input=0.60, output=1.44)),
-    "bedrock-qwen3-coder-480b": ModelEntry(name="Qwen3 Coder 480B A35B", context=128_000, provider=BedrockProvider(model_id="qwen.qwen3-coder-480b-a35b-v1:0", region="eu-west-2"), max_output_tokens=16_000, cost=CostConfig(input=1.225, output=4.8825)),
-    "bedrock-kimi-k2-5": ModelEntry(name="Kimi K2.5", context=256_000, provider=BedrockProvider(model_id="moonshotai.kimi-k2.5", region="eu-west-2"), max_output_tokens=16_000, cost=CostConfig(input=0.72, output=3.60)),
-    "ollama-qwen3-6-35b": ModelEntry(name="Qwen 3.6 35B", context=128_000, provider=OllamaProvider(model_id="qwen3.6:35b"), max_output_tokens=16_000),
-    "ollama-gemma4-31b": ModelEntry(name="Gemma 4 31B", context=128_000, provider=OllamaProvider(model_id="gemma4:31b"), max_output_tokens=16_000),
+    "bedrock-claude-fable-5": ModelEntry(
+        name="Claude Fable 5",
+        context=1_000_000,
+        provider=BedrockProvider(model_id="eu.anthropic.claude-fable-5"),
+        can_cache=True,
+        cost=CostConfig(input=11.0, output=55.0, cache_read=1.10, cache_write=13.75),
+    ),
+    "bedrock-claude-sonnet-4-6": ModelEntry(
+        name="Claude Sonnet 4.6",
+        context=1_000_000,
+        provider=BedrockProvider(model_id="eu.anthropic.claude-sonnet-4-6"),
+        can_cache=True,
+        cost=CostConfig(input=3.3, output=16.5, cache_read=0.33, cache_write=4.125),
+    ),
+    "bedrock-claude-haiku-4-5": ModelEntry(
+        name="Claude Haiku",
+        context=200_000,
+        provider=BedrockProvider(model_id="eu.anthropic.claude-haiku-4-5-20251001-v1:0"),
+        can_cache=True,
+        cost=CostConfig(input=1.1, output=5.5, cache_read=0.11, cache_write=1.375),
+    ),
+    "bedrock-claude-opus-4-6": ModelEntry(
+        name="Claude Opus 4.6",
+        context=1_000_000,
+        provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-6-v1"),
+        can_cache=True,
+        cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875),
+    ),
+    "bedrock-claude-opus-4-8": ModelEntry(
+        name="Claude Opus 4.8",
+        context=1_000_000,
+        provider=BedrockProvider(model_id="eu.anthropic.claude-opus-4-8"),
+        can_cache=True,
+        cost=CostConfig(input=5.5, output=27.5, cache_read=0.55, cache_write=6.875),
+    ),
+    "bedrock-openai-gpt-5-6-luna": ModelEntry(
+        name="GPT-5.6 Luna",
+        context=1_000_000,
+        provider=BedrockOpenAIProvider(model_id="openai.gpt-5.6-luna", region="us-east-1"),
+        can_cache=True,
+        cost=CostConfig(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25),
+    ),
+    "bedrock-glm-5": ModelEntry(
+        name="GLM 5",
+        context=200_000,
+        provider=BedrockProvider(model_id="zai.glm-5", region="eu-west-2"),
+        max_output_tokens=128_000,
+        cost=CostConfig(input=1.55, output=4.96),
+    ),
+    "bedrock-qwen3-coder-next": ModelEntry(
+        name="Qwen3 Coder Next",
+        context=256_000,
+        provider=BedrockProvider(model_id="qwen.qwen3-coder-next", region="eu-west-2"),
+        max_output_tokens=16_000,
+        cost=CostConfig(input=0.60, output=1.44),
+    ),
+    "bedrock-qwen3-coder-480b": ModelEntry(
+        name="Qwen3 Coder 480B A35B",
+        context=128_000,
+        provider=BedrockProvider(model_id="qwen.qwen3-coder-480b-a35b-v1:0", region="eu-west-2"),
+        max_output_tokens=16_000,
+        cost=CostConfig(input=1.225, output=4.8825),
+    ),
+    "bedrock-kimi-k2-5": ModelEntry(
+        name="Kimi K2.5",
+        context=256_000,
+        provider=BedrockProvider(model_id="moonshotai.kimi-k2.5", region="eu-west-2"),
+        max_output_tokens=16_000,
+        cost=CostConfig(input=0.72, output=3.60),
+    ),
+    "ollama-qwen3-6-35b": ModelEntry(
+        name="Qwen 3.6 35B",
+        context=128_000,
+        provider=OllamaProvider(model_id="qwen3.6:35b"),
+        max_output_tokens=16_000,
+    ),
+    "ollama-gemma4-31b": ModelEntry(
+        name="Gemma 4 31B",
+        context=128_000,
+        provider=OllamaProvider(model_id="gemma4:31b"),
+        max_output_tokens=16_000,
+    ),
 }
 
 
@@ -69,7 +139,12 @@ def _integer(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def sanitize_billable_usage(input_tokens: object, output_tokens: object, cache_read_tokens: object = 0, cache_write_tokens: object = 0) -> tuple[int, int, int, int]:
+def sanitize_billable_usage(
+    input_tokens: object,
+    output_tokens: object,
+    cache_read_tokens: object = 0,
+    cache_write_tokens: object = 0,
+) -> tuple[int, int, int, int]:
     """Sanitize already-normalized billable token categories."""
     input_count = _integer(input_tokens)
     output_count = _integer(output_tokens)
@@ -78,7 +153,12 @@ def sanitize_billable_usage(input_tokens: object, output_tokens: object, cache_r
     return input_count, output_count, cache_read, cache_write
 
 
-def normalize_responses_usage(raw_input_tokens: object, output_tokens: object, cached_tokens: object = 0, cache_write_tokens: object = 0) -> tuple[int, int, int, int]:
+def normalize_responses_usage(
+    raw_input_tokens: object,
+    output_tokens: object,
+    cached_tokens: object = 0,
+    cache_write_tokens: object = 0,
+) -> tuple[int, int, int, int]:
     """Convert Responses raw total input into billable categories."""
     raw_input, output, cached, written = sanitize_billable_usage(
         raw_input_tokens, output_tokens, cached_tokens, cache_write_tokens
@@ -107,7 +187,13 @@ def get_model(catalog: dict[str, ModelEntry], key: str) -> ModelEntry:
     return catalog[key]
 
 
-def calculate_cost(cost: CostConfig, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> float:
+def calculate_cost(
+    cost: CostConfig,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
     """Calculate cost from four billable token categories."""
     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = sanitize_billable_usage(
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens

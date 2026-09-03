@@ -52,13 +52,19 @@ def test_load_models_defaults_only(monkeypatch, tmp_path):
 
 def test_load_models_with_override(tmp_path):
     models_file = tmp_path / "models.yaml"
-    models_file.write_text("bedrock-claude-sonnet-4-6:\n  name: Custom Sonnet\n  context: 500000\n  provider:\n    type: bedrock\n    model_id: eu.anthropic.claude-sonnet-4-6\n  can_cache: true\n")
-    assert load_models(overrides_path=models_file)["bedrock-claude-sonnet-4-6"].name == "Custom Sonnet"
+    models_file.write_text(
+        "bedrock-claude-sonnet-4-6:\n  name: Custom Sonnet\n  context: 500000\n  provider:\n    type: bedrock\n    model_id: eu.anthropic.claude-sonnet-4-6\n  can_cache: true\n"
+    )
+    assert (
+        load_models(overrides_path=models_file)["bedrock-claude-sonnet-4-6"].name == "Custom Sonnet"
+    )
 
 
 def test_load_models_adds_new_key(tmp_path):
     models_file = tmp_path / "models.yaml"
-    models_file.write_text("bedrock-custom-model:\n  name: Custom Model\n  context: 64000\n  provider:\n    type: bedrock\n    model_id: custom.model-id\n    region: us-east-1\n")
+    models_file.write_text(
+        "bedrock-custom-model:\n  name: Custom Model\n  context: 64000\n  provider:\n    type: bedrock\n    model_id: custom.model-id\n    region: us-east-1\n"
+    )
     assert "bedrock-custom-model" in load_models(overrides_path=models_file)
 
 
@@ -68,7 +74,9 @@ def test_load_models_missing_file_no_error(tmp_path):
 
 def test_load_models_explicit_path(tmp_path):
     custom_path = tmp_path / "custom_models.yaml"
-    custom_path.write_text("ollama-custom:\n  name: Custom Ollama\n  context: 32000\n  provider:\n    type: ollama\n    model_id: custom:latest\n    endpoint: localhost:11434\n")
+    custom_path.write_text(
+        "ollama-custom:\n  name: Custom Ollama\n  context: 32000\n  provider:\n    type: ollama\n    model_id: custom:latest\n    endpoint: localhost:11434\n"
+    )
     assert "ollama-custom" in load_models(overrides_path=custom_path)
 
 
@@ -87,12 +95,20 @@ def test_get_model_not_found():
 
 def test_calculate_cost_basic():
     cost = CostConfig(input=3.0, output=15.0)
-    assert calculate_cost(cost, input_tokens=1_000_000, output_tokens=500_000) == pytest.approx(10.5)
+    assert calculate_cost(cost, input_tokens=1_000_000, output_tokens=500_000) == pytest.approx(
+        10.5
+    )
 
 
 def test_calculate_cost_with_billable_cache_categories():
     cost = CostConfig(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75)
-    result = calculate_cost(cost, input_tokens=100_000, output_tokens=50_000, cache_read_tokens=20_000, cache_write_tokens=10_000)
+    result = calculate_cost(
+        cost,
+        input_tokens=100_000,
+        output_tokens=50_000,
+        cache_read_tokens=20_000,
+        cache_write_tokens=10_000,
+    )
     expected = (100_000 * 3.0 + 50_000 * 15.0 + 20_000 * 0.3 + 10_000 * 3.75) / 1_000_000
     assert result == pytest.approx(expected)
 
@@ -109,7 +125,6 @@ def test_calculate_cost_zero():
 
 def test_calculate_cost_free_model():
     assert calculate_cost(CostConfig(), input_tokens=1_000_000, output_tokens=500_000) == 0.0
-
 
 
 def test_usage_sanitization_zeroes_negative_and_non_integer_values():

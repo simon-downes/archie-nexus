@@ -345,10 +345,7 @@ def auth_push(profile: str):
     if resp.status_code == 200:
         click.echo(f"✓ Credentials pushed to {profile} ({prof.host}:{prof.port})")
     else:
-        raise click.ClickException(
-            f"Push failed: HTTP {resp.status_code}\n"
-            f"{resp.text[:200]}"
-        )
+        raise click.ClickException(f"Push failed: HTTP {resp.status_code}\n{resp.text[:200]}")
 
 
 def _store_tokens(service: str, tokens: dict, provider: OAuthProvider) -> None:

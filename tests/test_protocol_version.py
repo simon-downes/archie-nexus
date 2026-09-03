@@ -2,7 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from archie_shared.events import PROTOCOL_VERSION, SessionInfo
+from archie_shared.events import Handshake
+from archie_shared.protocol import PROTOCOL_VERSION
 
 
 def _make_app():
@@ -15,12 +16,11 @@ def _make_app():
     )
 
 
-def _make_session_info(protocol_version: int) -> SessionInfo:
-    return SessionInfo(
+def _make_session_info(protocol_version: int) -> Handshake:
+    return Handshake(
+        id="01J00000000000000000000001",
         protocol_version=protocol_version,
-        model="Claude Sonnet 4.6",
         session_id="proj-01abc12345",
-        git_branch="main",
     )
 
 
@@ -35,7 +35,7 @@ def test_matching_version_no_warning():
     app.query_one = MagicMock(return_value=mock_status)
 
     event = _make_session_info(protocol_version=PROTOCOL_VERSION)
-    app._handle_event(event)
+    app._apply_event(event)
 
     assert not any("Protocol version" in e for e in errors)
 
@@ -50,7 +50,7 @@ def test_older_session_version_no_warning():
     event = _make_session_info(protocol_version=max(1, PROTOCOL_VERSION - 1))
     # Only meaningful if PROTOCOL_VERSION > 1; otherwise use current version
     if PROTOCOL_VERSION > 1:
-        app._handle_event(event)
+        app._apply_event(event)
         assert not any("Protocol version" in e for e in errors)
 
 
@@ -62,7 +62,7 @@ def test_newer_session_version_shows_warning():
     app.query_one = MagicMock(return_value=MagicMock())
 
     event = _make_session_info(protocol_version=PROTOCOL_VERSION + 1)
-    app._handle_event(event)
+    app._apply_event(event)
 
     assert len(errors) == 1
     assert "Protocol version" in errors[0]
@@ -79,6 +79,6 @@ def test_protocol_version_warning_does_not_disconnect():
 
     # Should not raise
     event = _make_session_info(protocol_version=PROTOCOL_VERSION + 99)
-    app._handle_event(event)
+    app._apply_event(event)
 
     app._show_client_error.assert_called_once()

@@ -102,7 +102,6 @@ def test_stream_closes_on_early_exit():
     mock_stream.close.assert_called_once()
 
 
-
 def test_stream_preserves_converse_cache_counts_separately_from_uncached_input():
     """Converse inputTokens is uncached and may be smaller than cache-read input."""
     mock_events = [

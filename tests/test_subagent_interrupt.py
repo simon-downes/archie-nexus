@@ -2,29 +2,30 @@ import asyncio
 import threading
 
 from archie_agent.harness import AgentHarness
-from archie_shared.events import InterruptCommand, deserialize_command, serialize_command
+from archie_shared.commands import InterruptCommand, decode_command, encode_command
 
 
 def test_targeted_interrupt_command_round_trip():
-    command = InterruptCommand(target=("task-use-1", 2))
+    command = InterruptCommand(scope="task-use-1", subagent_index=2)
 
-    decoded = deserialize_command(serialize_command(command))
+    decoded = decode_command(encode_command(command))
 
     assert decoded == command
+    assert encode_command(command) == '{"type":"interrupt","scope":"task-use-1","subagent_index":2}'
 
 
 def test_untargeted_interrupt_command_preserves_empty_shape():
     command = InterruptCommand()
 
-    assert command.to_json() == {"type": "interrupt", "data": {}}
-    assert deserialize_command(serialize_command(command)) == command
+    assert encode_command(command) == '{"type":"interrupt"}'
+    assert decode_command(encode_command(command)) == command
 
 
 def test_targeted_interrupt_rejects_partial_target():
     import pytest
 
     with pytest.raises(ValueError):
-        deserialize_command('{"type":"interrupt","data":{"scope":"task"}}')
+        decode_command('{"type":"interrupt","scope":"task"}')
 
 
 def test_harness_targeted_interrupt_signals_only_target(tmp_path):

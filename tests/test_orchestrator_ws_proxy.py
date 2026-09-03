@@ -47,9 +47,7 @@ def test_ws_stream_session_not_found(test_client):
         from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
 
         with pytest.raises(StarletteDisconnect) as exc_info:
-            with test_client.websocket_connect(
-                "/sessions/unknown-01abc12345/stream"
-            ):
+            with test_client.websocket_connect("/sessions/unknown-01abc12345/stream"):
                 pass
         assert exc_info.value.code == 4004
 

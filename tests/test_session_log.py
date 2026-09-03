@@ -1,7 +1,16 @@
 """Tests for session log persistence (log.py) — per-message schema."""
 
 import msgspec
-from archie_shared.session.log import MessageEntry, MessageMetadata, write_entry
+import pytest
+from archie_shared.events import SessionStarted, TextDelta, UserMessage, decode_event, encode_event
+from archie_shared.session.log import CursorNotFound, EventIdConflict, LogAppendError, SessionLog
+from archie_shared.session.migrate import MessageEntry, MessageMetadata
+
+
+def _write_legacy(path, entry):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
+        stream.write(msgspec.json.encode(entry).decode() + "\n")
 
 
 def test_write_user_entry(tmp_path):
@@ -13,7 +22,7 @@ def test_write_user_entry(tmp_path):
         role="user",
         content="hello",
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
     assert path.exists()
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 1
@@ -37,7 +46,7 @@ def test_write_assistant_entry(tmp_path):
             backend="bedrock",
         ),
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
 
     line = path.read_text().strip()
     decoded = msgspec.json.decode(line, type=MessageEntry)
@@ -61,7 +70,7 @@ def test_roundtrip_encode_decode(tmp_path):
             interrupted=True,
         ),
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
 
     line = path.read_text().strip()
     decoded = msgspec.json.decode(line, type=MessageEntry)
@@ -79,7 +88,7 @@ def test_append_multiple(tmp_path):
             content=f"message {i}",
             metadata=MessageMetadata(model="test") if i % 2 == 1 else None,
         )
-        write_entry(path, entry)
+        _write_legacy(path, entry)
 
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 3
@@ -114,10 +123,85 @@ def test_interrupted_empty_content(tmp_path):
         content="",
         metadata=MessageMetadata(model="test", interrupted=True),
     )
-    write_entry(path, entry)
+    _write_legacy(path, entry)
 
     line = path.read_text().strip()
     decoded = msgspec.json.decode(line, type=MessageEntry)
     assert decoded.content == ""
     assert decoded.metadata is not None
     assert decoded.metadata.interrupted is True
+
+
+def _session_started(event_id: str = "01J00000000000000000000001") -> SessionStarted:
+    return SessionStarted(id=event_id, schema_version=2, sent_at="now", model_key="m")
+
+
+def test_session_log_scans_canonical_events_and_skips_invalid_lines(tmp_path, caplog):
+    path = tmp_path / "session.jsonl"
+    event = _session_started()
+    canonical = encode_event(event)
+    path.write_text(
+        "not json\n"
+        + encode_event(
+            TextDelta(
+                id="01J00000000000000000000002",
+                turn=1,
+                iteration=0,
+                scope=None,
+                request_id="r",
+                text="live",
+            )
+        )
+        + "\n"
+        + canonical.replace(',"model_key"', ', "model_key"')
+        + "\n"
+    )
+
+    session_log = SessionLog(path)
+
+    assert session_log.read() == [event]
+    assert session_log.append(event) is False
+    assert "line 1" in caplog.text
+    assert "line 2" in caplog.text
+
+
+def test_session_log_rejects_conflicting_duplicate_ids(tmp_path):
+    path = tmp_path / "session.jsonl"
+    event = _session_started()
+    conflict = _session_started()
+    conflict = SessionStarted(id=event.id, schema_version=2, sent_at="later", model_key="m")
+    path.write_text(encode_event(event) + "\n" + encode_event(conflict) + "\n")
+
+    with pytest.raises(EventIdConflict):
+        SessionLog(path)
+
+
+def test_session_log_append_is_idempotent_and_cursor_keyed(tmp_path):
+    session_log = SessionLog(tmp_path / "session.jsonl")
+    first = _session_started()
+    second = UserMessage(id="01J00000000000000000000002", turn=1, scope=None, content="hello")
+
+    assert session_log.append(first) is True
+    assert session_log.append(first) is False
+    assert session_log.append(second) is True
+    assert session_log.read(after_id=first.id) == [second]
+    with pytest.raises(CursorNotFound):
+        session_log.read(after_id="01J00000000000000000000099")
+
+
+def test_session_log_rejects_live_events_and_distinguishes_append_failures(tmp_path, monkeypatch):
+    session_log = SessionLog(tmp_path / "session.jsonl")
+    live = TextDelta(
+        id="01J00000000000000000000001", turn=1, iteration=0, scope=None, request_id="r", text="x"
+    )
+    with pytest.raises(TypeError):
+        session_log.append(live)
+    with pytest.raises(ValueError, match="live-only"):
+        decode_event(encode_event(live), persisted=True)
+
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("archie_shared.session.log._append_serialized_event", fail)
+    with pytest.raises(LogAppendError, match="disk full"):
+        session_log.append(_session_started())

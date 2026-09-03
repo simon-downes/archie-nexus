@@ -38,7 +38,15 @@ class TurnStatus(Static):
     }
     """
 
-    def __init__(self, duration_s: float, input_tokens: int, cache_read: int, cache_write: int, output_tokens: int, cost: float) -> None:
+    def __init__(
+        self,
+        duration_s: float,
+        input_tokens: int,
+        cache_read: int,
+        cache_write: int,
+        output_tokens: int,
+        cost: float,
+    ) -> None:
         super().__init__()
         self._duration_s = duration_s
         self._input_tokens = input_tokens
@@ -49,7 +57,9 @@ class TurnStatus(Static):
 
     def compose(self) -> ComposeResult:
         duration = f"{self._duration_s:.0f}s"
-        input_tokens = " / ".join(_fmt_tokens(n) for n in (self._input_tokens, self._cache_read, self._cache_write))
+        input_tokens = " / ".join(
+            _fmt_tokens(n) for n in (self._input_tokens, self._cache_read, self._cache_write)
+        )
         output_tokens = _fmt_tokens(self._output_tokens)
         yield Static(
             Text.from_markup(
@@ -423,7 +433,12 @@ class ToolEntry(Widget):
         self.mount(child)
 
     def complete(
-        self, is_error: bool, duration_ms: int, result_lines: int, result_bytes: int, summary: str = ""
+        self,
+        is_error: bool,
+        duration_ms: int,
+        result_lines: int,
+        result_bytes: int,
+        summary: str = "",
     ) -> None:
         """Mark this tool entry as complete with metrics.
 
@@ -565,11 +580,18 @@ class Conversation(VerticalScroll):
         self.scroll_end(animate=False)
 
     def add_turn_status(
-        self, duration_s: float, input_tokens: int, cache_read: int, cache_write: int,
-        output_tokens: int, cost: float
+        self,
+        duration_s: float,
+        input_tokens: int,
+        cache_read: int,
+        cache_write: int,
+        output_tokens: int,
+        cost: float,
     ) -> None:
         """Add a client-only summary for a completed turn."""
-        self.mount(TurnStatus(duration_s, input_tokens, cache_read, cache_write, output_tokens, cost))
+        self.mount(
+            TurnStatus(duration_s, input_tokens, cache_read, cache_write, output_tokens, cost)
+        )
         self.scroll_if_at_bottom()
 
     def add_error(self, content: str) -> None:
@@ -587,10 +609,12 @@ class Conversation(VerticalScroll):
         self.mount(ClientErrorMessage(content))
         self.scroll_if_at_bottom()
 
-    def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> None:
+    def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> ShellOutput:
         """Add direct shell command output (! prefix, no LLM involvement)."""
-        self.mount(ShellOutput(command, output, exit_code))
+        widget = ShellOutput(command, output, exit_code)
+        self.mount(widget)
         self.scroll_if_at_bottom()
+        return widget
 
     def begin_iteration(self) -> IterationBlock:
         """Start a new iteration block for tool calls."""

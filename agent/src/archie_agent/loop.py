@@ -11,9 +11,14 @@ from typing import TYPE_CHECKING
 
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 
-from archie_agent.events import (
+from archie_agent.llm._types import Done, StreamEvent, ToolUseEvent, ToolUseStart
+from archie_agent.llm._types import TextDelta as LLMTextDelta
+from archie_agent.llm._types import Usage as LLMUsage
+from archie_agent.loop_events import (
     AgentEvent,
     IterationStart,
+    RequestContext,
+    RequestFinished,
     TextDelta,
     ToolCall,
     ToolResult,
@@ -22,9 +27,6 @@ from archie_agent.events import (
     TurnInterrupted,
     Usage,
 )
-from archie_agent.llm._types import Done, StreamEvent, ToolUseEvent, ToolUseStart
-from archie_agent.llm._types import TextDelta as LLMTextDelta
-from archie_agent.llm._types import Usage as LLMUsage
 from archie_agent.prompt import SystemPrompt
 
 if TYPE_CHECKING:
@@ -39,22 +41,6 @@ _DEFAULT_MAX_ITERATIONS = 100
 @dataclass
 class _WorkerError:
     msg: str
-
-
-@dataclass(frozen=True)
-class RequestContext:
-    request_id: str
-    sent_at: str
-
-
-@dataclass
-class RequestFinished:
-    context: RequestContext
-    duration_ms: int
-    status: str
-    usage: Usage | None
-    stop_reason: str | None
-    error: str | None
 
 
 @dataclass
@@ -202,6 +188,7 @@ async def run_loop(
             tool_config=tool_config,
             history_boundary=_latest_history_boundary(working_messages),
             result=result,
+            request_id=request_context.request_id,
         ):
             yield event
         if request_context_factory is not None:
@@ -298,6 +285,7 @@ async def _stream_once(
     tool_config: list[dict] | None,
     history_boundary: str | None,
     result: _RequestResult,
+    request_id: str,
 ) -> AsyncGenerator[AgentEvent]:
     """Stream one request while supporting older test doubles."""
     loop = asyncio.get_running_loop()
@@ -351,7 +339,7 @@ async def _stream_once(
                 break
             if isinstance(event, LLMTextDelta):
                 result.text_blocks.append(TextBlock(text=event.text))
-                yield TextDelta(text=event.text)
+                yield TextDelta(text=event.text, request_id=request_id)
             elif isinstance(event, ToolUseStart):
                 current_tool_use_id, current_tool_name = event.tool_use_id, event.name
             elif isinstance(event, ToolUseEvent):

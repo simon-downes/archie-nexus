@@ -1,25 +1,14 @@
 """archie-shared — shared types, events, and config for archie-nexus."""
 
-from archie_shared.config import ConfigError, home_dir, load_config, persona_dir
-from archie_shared.events import (
-    PROTOCOL_VERSION,
+from archie_shared.commands import (
     ClientCommand,
     InterruptCommand,
     MessageCommand,
-    ServerEvent,
-    SessionInfo,
-    TextDelta,
-    ToolCall,
-    ToolResult,
-    TurnComplete,
-    TurnError,
-    TurnInterrupted,
-    Usage,
-    deserialize_command,
-    deserialize_event,
-    serialize_command,
-    serialize_event,
+    SwitchModelCommand,
+    decode_command,
+    encode_command,
 )
+from archie_shared.config import ConfigError, home_dir, load_config, persona_dir
 from archie_shared.models import (
     BedrockOpenAIProvider,
     BedrockProvider,
@@ -32,6 +21,7 @@ from archie_shared.models import (
     load_models,
     provider_name,
 )
+from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import (
     AgentConfig,
     CliConfig,
@@ -66,23 +56,14 @@ __all__ = [
     "OrchestratorProfile",
     "PROTOCOL_VERSION",
     "ProviderConfig",
-    "ServerEvent",
-    "SessionInfo",
+    "SwitchModelCommand",
     "TextBlock",
-    "TextDelta",
-    "ToolCall",
-    "ToolResult",
     "ToolResultBlock",
     "ToolUseBlock",
-    "TurnComplete",
-    "TurnError",
-    "TurnInterrupted",
-    "Usage",
     "WebConfig",
     "__version__",
     "calculate_cost",
-    "deserialize_command",
-    "deserialize_event",
+    "decode_command",
     "expand_workspace_root",
     "get_model",
     "get_profile",
@@ -92,6 +73,5 @@ __all__ = [
     "load_nexus_config",
     "persona_dir",
     "provider_name",
-    "serialize_command",
-    "serialize_event",
+    "encode_command",
 ]

@@ -1,8 +1,4 @@
-"""Async WebSocket client wrapper for communicating with the agent.
-
-Connects to the agent's /stream endpoint and provides typed send/receive
-over the wire protocol defined in archie_shared.events.
-"""
+"""Async WebSocket client for the canonical session event stream."""
 
 from __future__ import annotations
 
@@ -10,15 +6,8 @@ import logging
 from collections.abc import AsyncGenerator
 
 import websockets
-from archie_shared.canonical_events import decode_event
-from archie_shared.events import (
-    ClientCommand,
-    InterruptCommand,
-    MessageCommand,
-    ServerEvent,
-    deserialize_event,
-    serialize_command,
-)
+from archie_shared.commands import ClientCommand, InterruptCommand, MessageCommand, encode_command
+from archie_shared.events import SessionEvent, decode_event
 from websockets import ClientConnection
 
 log = logging.getLogger(__name__)
@@ -36,13 +25,7 @@ class WSClient:
         return self._ws is not None
 
     async def connect(self, url: str) -> WSClient:
-        """Connect to the agent WebSocket endpoint.
-
-        Enables keepalive pings so a dropped connection is detected promptly
-        rather than silently going stale during a long turn.
-
-        Raises websockets.exceptions.WebSocketException on failure.
-        """
+        """Connect to the agent WebSocket endpoint with keepalive pings."""
         self._ws = await websockets.connect(
             url,
             ping_interval=20,
@@ -59,49 +42,31 @@ class WSClient:
 
     async def send_message(self, content: str) -> None:
         """Send a MessageCommand to the agent."""
-        if self._ws is None:
-            raise RuntimeError("Not connected")
-        cmd = MessageCommand(content=content)
-        await self._ws.send(serialize_command(cmd))
+        await self.send_command(MessageCommand(content=content))
 
     async def send_interrupt(self) -> None:
         """Send an InterruptCommand to the agent."""
-        if self._ws is None:
-            raise RuntimeError("Not connected")
-        cmd = InterruptCommand()
-        await self._ws.send(serialize_command(cmd))
+        await self.send_command(InterruptCommand())
 
     async def send_command(self, command: ClientCommand) -> None:
-        """Send any ClientCommand to the agent."""
+        """Send any client command."""
         if self._ws is None:
             raise RuntimeError("Not connected")
-        await self._ws.send(serialize_command(command))
+        await self._ws.send(encode_command(command))
 
-    async def receive(self) -> AsyncGenerator[ServerEvent]:
-        """Async generator yielding deserialized ServerEvent objects.
-
-        Yields events until the connection is closed. On an unexpected close
-        (keepalive timeout, network drop, server crash), re-raises
-        ``ConnectionClosed`` so the caller can surface it and reconnect. The
-        connection reference is cleared first so ``connected`` reflects reality.
-        """
+    async def receive(self) -> AsyncGenerator[SessionEvent]:
+        """Yield every server frame through the one canonical decoder."""
         if self._ws is None:
             raise RuntimeError("Not connected")
         try:
             async for raw in self._ws:
                 try:
                     payload = raw if isinstance(raw, str) else raw.decode()
-                    if payload.lstrip().startswith('{"type":"') and '"data"' not in payload:
-                        event = decode_event(payload)
-                    else:
-                        event = deserialize_event(payload)
-                    yield event
-                except (ValueError, KeyError) as e:
+                    yield decode_event(payload)
+                except (ValueError, KeyError, TypeError) as e:
                     log.warning("Malformed event from server: %s", e)
         except websockets.exceptions.ConnectionClosedOK:
-            # Clean close (e.g. we called disconnect) — terminate quietly.
             self._ws = None
         except websockets.exceptions.ConnectionClosed:
-            # Unexpected close — surface it so the app can reconnect.
             self._ws = None
             raise
