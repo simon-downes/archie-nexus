@@ -625,7 +625,7 @@ class ArchieApp(App):
                 return True
             text = self._transient_assistant_text.get(key, "") + event.text
             self._transient_assistant_text[key] = text
-            child.activity = text[-512:] or "Responding..."
+            child.activity = "Responding..."
         elif isinstance(event, ce.AssistantMessage):
             key = self._request_key(event)
             self._transient_assistant_text.pop(key, None)

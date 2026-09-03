@@ -699,7 +699,7 @@ def test_sibling_child_streams_finalize_independently():
     assert app._transient_assistant_text[one_key] == "one partial"
     assert app._child_activity[("task-1", 0)].lines == ["zero answer"]
     assert app._child_activity[("task-1", 1)].lines == []
-    assert app._child_activity[("task-1", 1)].activity == "one partial"
+    assert app._child_activity[("task-1", 1)].activity == "Responding..."
 
 
 @pytest.mark.parametrize("scope, subagent_index", [(None, None), ("task-1", 0)])

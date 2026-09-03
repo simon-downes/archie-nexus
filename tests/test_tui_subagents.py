@@ -220,5 +220,5 @@ def test_replay_scoped_event_routes_to_child_state():
     with patch.object(app, "_render_child"):
         app._apply_event(event)
 
-    assert app._child_activity[("task-1", 1)].activity == "replayed output"
+    assert app._child_activity[("task-1", 1)].activity == "Responding..."
     assert app._transient_assistant_text
