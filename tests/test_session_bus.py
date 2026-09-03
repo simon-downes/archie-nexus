@@ -5,8 +5,12 @@ import json
 
 import pytest
 from archie_agent.session_bus import SessionEventBus
-from archie_shared.events import SessionStarted, TextDelta, UserMessage
+from archie_shared.events import Event, SessionStarted, TextDelta, UserMessage
 from archie_shared.session.log import EventIdConflict, LogAppendError, SessionLog
+
+
+class UnencodableLiveEvent(Event):
+    payload: object
 
 
 class FakeWebSocket:
@@ -30,8 +34,8 @@ async def test_publish_order_matches_log_and_each_client(tmp_path):
     bus = SessionEventBus(tmp_path / "session.jsonl")
     first = FakeWebSocket()
     second = FakeWebSocket()
-    bus.add_client(first)
-    bus.add_client(second)
+    await bus.register_client(first, ())
+    await bus.register_client(second, ())
 
     events = [
         SessionStarted(
@@ -99,8 +103,8 @@ async def test_stalled_client_isolated_by_bounded_queue(tmp_path):
     bus = SessionEventBus(tmp_path / "session.jsonl", queue_size=2)
     stalled = FakeWebSocket(block=True)
     healthy = FakeWebSocket()
-    bus.add_client(stalled)
-    bus.add_client(healthy)
+    await bus.register_client(stalled, ())
+    await bus.register_client(healthy, ())
 
     for index in range(4):
         await bus.emit(
@@ -124,7 +128,7 @@ async def test_stalled_client_isolated_by_bounded_queue(tmp_path):
 async def test_concurrent_producers_share_one_append_and_delivery_order(tmp_path):
     bus = SessionEventBus(tmp_path / "session.jsonl")
     client = FakeWebSocket()
-    bus.add_client(client)
+    await bus.register_client(client, ())
 
     events = [
         UserMessage(
@@ -153,7 +157,7 @@ async def test_live_event_is_queued_without_persistence(tmp_path):
     path = tmp_path / "session.jsonl"
     bus = SessionEventBus(path)
     client = FakeWebSocket()
-    bus.add_client(client)
+    await bus.register_client(client, ())
 
     await bus.emit(
         TextDelta(
@@ -176,7 +180,7 @@ async def test_live_event_is_queued_without_persistence(tmp_path):
 async def test_identical_publish_retry_is_not_rebroadcast(tmp_path):
     bus = SessionEventBus(tmp_path / "session.jsonl")
     client = FakeWebSocket()
-    bus.add_client(client)
+    await bus.register_client(client, ())
     event = UserMessage(id="01J00000000000000000000001", turn=1, scope=None, content="hello")
 
     await bus.emit(event)
@@ -186,6 +190,18 @@ async def test_identical_publish_retry_is_not_rebroadcast(tmp_path):
     assert len((tmp_path / "session.jsonl").read_text().splitlines()) == 1
     assert len(client.messages) == 1
     bus.discard_client(client)
+
+
+@pytest.mark.asyncio
+async def test_register_client_encodes_before_mutating_client_state(tmp_path):
+    bus = SessionEventBus(tmp_path / "session.jsonl")
+    websocket = FakeWebSocket()
+
+    with pytest.raises(TypeError):
+        await bus.register_client(websocket, (UnencodableLiveEvent(payload=object()),))
+
+    assert websocket not in bus.clients
+    assert websocket not in bus._senders
 
 
 @pytest.mark.asyncio

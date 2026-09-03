@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from archie_shared.events import CanonicalEvent, ErrorNotice, Event, SessionStatus, UserMessage
+from archie_shared.events import ErrorNotice, Event, SessionEvent, SessionStatus, UserMessage
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.schemas import SubagentsConfig
 from archie_shared.session.log import LogAppendError, SessionLog
@@ -694,6 +694,6 @@ class AgentHarness:
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
 
-    async def _emit_event(self, event: CanonicalEvent) -> None:
+    async def _emit_event(self, event: SessionEvent) -> None:
         """Submit a typed child event through the session event bus."""
         await self._event_bus.emit(event)

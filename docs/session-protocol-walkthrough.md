@@ -39,7 +39,7 @@ The TUI is the client the user sees. It:
 - sends strict flat client commands;
 - receives live events over a WebSocket;
 - reads persisted history over HTTP;
-- applies history through `_render_canonical(event, replay=True)` and live events through `_apply_event()`, which dispatches into the same renderer;
+- applies history through `_apply_event(event, historical=True)` and live events through `_apply_event(event)`;
 - renders user messages, assistant text, tools, child agents, and errors;
 - keeps the last applied persisted event ID as its client replay cursor;
 - calculates displayed token and cost totals from `llm_request` events.
@@ -282,10 +282,10 @@ GET /sessions/<session-id>/events
 
 For a new session, the response normally contains only `session_started`. For an existing session,
 it contains the complete persisted history. Each NDJSON line is decoded through the same public
-event decoder used for live events and passed to `_render_canonical(event, replay=True)`.
+event decoder used for live events and passed to `_apply_event(event, historical=True)`.
 
 The TUI records every applied persisted event ID in a deduplication set. Its cursor advances only
-when the shared renderer accepts a persisted event; live-only events never advance it.
+when `_apply_event()` accepts a persisted event; live-only events never advance it.
 
 ### Step 5: apply the buffered live events
 
@@ -558,10 +558,10 @@ the turn's persisted event sequence.
 
 ## 10. How the TUI applies the events
 
-The TUI uses one imperative `_render_canonical()` path for events received from both live WebSocket
-delivery and HTTP history reads. Live `_apply_event()` dispatches into that renderer; history reads
-call it directly with `replay=True`. The TUI does not maintain a second reducer or a separate replay
-schema.
+The TUI uses one imperative `_apply_event(event, historical=...)` path for events received from
+both live WebSocket delivery and HTTP history reads. The historical flag selects whether the
+presentation state reconciles stored assistant content or transient live text. The TUI does not
+maintain a second reducer or a separate replay schema.
 
 ### User messages
 
@@ -712,8 +712,8 @@ After a lost connection, the TUI retries with backoff for up to roughly 30 secon
 2. Start buffering new live frames
 3. Receive a new handshake and session_status
 4. GET /events?after=<last-persisted-event-id>
-5. Apply missed persisted events in log order through _render_canonical(event, replay=True)
-6. Flush buffered live events through _apply_event(), deduplicated by event ID and request identity
+5. Apply missed persisted events in log order through _apply_event(event, historical=True)
+6. Flush buffered live events through _apply_event(event), deduplicated by event ID and request identity
 7. Resume direct live processing
 ```
 
@@ -953,8 +953,8 @@ The following rules are useful when reading logs, debugging the TUI, or changing
    `(scope, subagent_index, turn, iteration, request_id)`; there is no cumulative request-ID list.
 6. **The client replay cursor names only persisted events.** Never use a handshake, status, delta, or
    error-notice ID as `after=`.
-7. **One `_render_canonical()` path handles live and history events.** Live `_apply_event()`
-   dispatches into it; event-ID and request-key deduplication makes overlap safe.
+7. **One `_apply_event(event, historical=...)` path handles live and history events.** Event-ID and
+   request-key deduplication makes overlap safe.
 8. **`llm_request` is the accounting ledger.** Sum it by unique event ID; do not derive historical
    cost from current prices.
 9. **One accepted scope and turn means one terminal event.** Rejections are live notices, not
@@ -976,7 +976,7 @@ CONNECT
 TUI ──WebSocket──▶ orchestrator ──WebSocket──▶ agent
 agent ──handshake, session_status (live-only)──▶ TUI buffer
 TUI ──GET /events──▶ orchestrator ──GET /events──▶ agent
-agent ──persisted NDJSON history──▶ TUI _render_canonical(replay=true)
+agent ──persisted NDJSON history──▶ TUI _apply_event(historical=true)
 TUI ──flush deduplicated live buffer──▶ rendered session
 
 PROMPT

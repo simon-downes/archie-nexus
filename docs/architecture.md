@@ -99,7 +99,7 @@ A user message follows this path:
    invoke native tools, the exec runner, or child agents through the `task` tool.
 5. The orchestrator observes canonical `llm_request` frames and asynchronously writes them to
    SQLite metrics. The metrics writer is best-effort and does not block the event relay.
-6. The TUI applies live and stored events through one imperative `_render_canonical()` path; live `_apply_event()` dispatches into it. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.
+6. The TUI applies live and stored events through one imperative `_apply_event(event, historical=...)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.
 
 The orchestrator WebSocket proxy is intended to be transparent: it forwards client text to the agent and agent text/binary frames back to the client. Metrics collection is best-effort and must not block or break the relay.
 
@@ -123,8 +123,8 @@ The persisted stream includes `session_started`, `user_message`, `iteration_star
 
 `GET /events` returns ordered persisted NDJSON. Its optional `after` parameter is the client's last
 applied persisted event ID; live-only frames never advance that cursor. The TUI applies history
-frames through `_render_canonical(event, replay=True)` and live frames through `_apply_event()`,
-which delegates to the same renderer; both paths deduplicate by event ID and request identity.
+and live frames through `_apply_event(event, historical=...)`, using the historical flag to select
+reconciliation behavior; both paths deduplicate by event ID and request identity.
 
 A connect sends one live-only `handshake` containing protocol and session identity, followed by
 one `session_status` frame carrying the current model and Git branch. There is no

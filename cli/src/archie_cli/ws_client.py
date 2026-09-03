@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 
 import websockets
 from archie_shared.commands import ClientCommand, InterruptCommand, MessageCommand, encode_command
-from archie_shared.events import CanonicalEvent, decode_event
+from archie_shared.events import SessionEvent, decode_event
 from websockets import ClientConnection
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class WSClient:
             raise RuntimeError("Not connected")
         await self._ws.send(encode_command(command))
 
-    async def receive(self) -> AsyncGenerator[CanonicalEvent]:
+    async def receive(self) -> AsyncGenerator[SessionEvent]:
         """Yield every server frame through the one canonical decoder."""
         if self._ws is None:
             raise RuntimeError("Not connected")

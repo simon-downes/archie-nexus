@@ -14,13 +14,10 @@ log = logging.getLogger(__name__)
 
 
 class _ClientRegistry:
-    """Set-like compatibility view that registers clients with its owning bus."""
+    """Set-like view for client membership and explicit removal."""
 
     def __init__(self, bus: SessionEventBus) -> None:
         self._bus = bus
-
-    def add(self, websocket: Any) -> None:
-        self._bus.add_client(websocket)
 
     def discard(self, websocket: Any) -> None:
         self._bus.discard_client(websocket)
@@ -47,6 +44,11 @@ class SessionEventBus:
         self._ordering = asyncio.Lock()
         self.clients = _ClientRegistry(self)
 
+    def _encode_event(self, event: Event) -> str:
+        if not isinstance(event, Event):
+            raise TypeError(f"unsupported session event {type(event).__name__}")
+        return encode_event(event)
+
     async def emit(self, event: Event, target: Any | None = None) -> bool:
         """Append when declared persistent, then enqueue through one path."""
         if not isinstance(event, Event):
@@ -59,7 +61,7 @@ class SessionEventBus:
                 inserted = self.log.append(event)
                 if not inserted:
                     return False
-            line = encode_event(event)
+            line = self._encode_event(event)
             if target is None:
                 self._enqueue_all(line)
             else:
@@ -71,18 +73,22 @@ class SessionEventBus:
 
     async def register_client(self, websocket: Any, initial_events: tuple[Event, ...]) -> None:
         """Atomically admit a client with validated live-only initial frames."""
-        if any(event.persist for event in initial_events):
-            raise TypeError("initial client events must be live-only")
+        for event in initial_events:
+            if not isinstance(event, Event):
+                raise TypeError(f"unsupported session event {type(event).__name__}")
+            if event.persist:
+                raise TypeError("initial client events must be live-only")
+
+        # Complete encoding must succeed before client state is mutated. The same
+        # serialized queue path is used below under the ordering lock.
+        initial_lines = tuple(self._encode_event(event) for event in initial_events)
+
         async with self._ordering:
             self._add_client(websocket)
             queue = self._clients[websocket]
-            for event in initial_events:
-                self._enqueue(websocket, queue, encode_event(event))
+            for line in initial_lines:
+                self._enqueue(websocket, queue, line)
         await asyncio.sleep(0)
-
-    def add_client(self, websocket: Any) -> None:
-        """Register a client and start its independent sender task."""
-        self._add_client(websocket)
 
     def _add_client(self, websocket: Any) -> None:
         if websocket in self._clients:

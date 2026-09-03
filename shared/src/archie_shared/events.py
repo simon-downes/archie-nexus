@@ -178,9 +178,6 @@ type SessionEvent = (
     | ErrorNotice
 )
 
-# Transitional alias retained while consumers move to the final name.
-CanonicalEvent = SessionEvent
-
 
 def encode_event(event: Event) -> str:
     return msgspec.json.encode(event).decode("utf-8")

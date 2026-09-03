@@ -73,8 +73,8 @@ is not part of the schema.
 The coordinator persists an event before broadcasting it. Live-only events are enqueued
 without appending. The client advances its replay cursor only after applying a persisted
 event, so the cursor always names a logged event. On reconnect, the client replays
-`GET /events?after=<cursor>`, applies history through `_render_canonical(event, replay=True)`, then
-flushes buffered live events through `_apply_event()` and deduplicates by event ID and request
+`GET /events?after=<cursor>`, applies history through `_apply_event(event, historical=True)`, then
+flushes buffered live events through `_apply_event(event)` and deduplicates by event ID and request
 identity. `handshake` is followed by `session_status`; neither is a
 snapshot or accounting authority.
 

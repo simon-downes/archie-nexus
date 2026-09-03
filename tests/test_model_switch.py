@@ -168,7 +168,7 @@ class TestModelSwitchHandler:
                 sent.append(data)
 
         ws = FakeWS()
-        harness.event_bus.add_client(ws)
+        await harness.event_bus.register_client(ws, ())
 
         from archie_agent.app import _handle_model_switch
 
@@ -196,7 +196,7 @@ class TestModelSwitchHandler:
                 sent.append(data)
 
         ws = FakeWS()
-        harness.clients.add(ws)
+        await harness.event_bus.register_client(ws, ())
 
         from archie_agent.app import _handle_model_switch
 
@@ -224,7 +224,7 @@ class TestModelSwitchHandler:
                 sent.append(data)
 
         ws = FakeWS()
-        harness.event_bus.add_client(ws)
+        await harness.event_bus.register_client(ws, ())
 
         from archie_agent.app import _handle_model_switch
 
@@ -253,7 +253,7 @@ class TestModelSwitchHandler:
                 sent.append(data)
 
         ws = FakeWS()
-        harness.event_bus.add_client(ws)
+        await harness.event_bus.register_client(ws, ())
 
         from archie_agent.app import _handle_model_switch
 

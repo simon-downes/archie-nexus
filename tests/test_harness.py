@@ -138,7 +138,7 @@ async def test_normal_flow(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("Hi there")
 
@@ -201,7 +201,7 @@ async def test_interrupt_mid_stream(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     # Set interrupt shortly after start
     async def _interrupt_soon():
@@ -260,7 +260,7 @@ async def test_llm_error(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("hello")
 
@@ -287,7 +287,7 @@ async def test_turn_already_active(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     import asyncio
 
@@ -387,7 +387,7 @@ async def test_partial_text_before_error(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("hello")
 
@@ -497,7 +497,7 @@ async def test_tool_round_trip_persists_and_broadcasts(tmp_path):
     )
 
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     await harness.handle_message("run some code")
 
@@ -597,7 +597,7 @@ async def test_user_message_append_failure_clears_turn_and_notifies(tmp_path):
     """A user-message append failure emits only a live storage notice."""
     harness = _make_harness(tmp_path, responses=[])
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     def fail_append(event) -> bool:
         raise LogAppendError("disk full")
@@ -727,7 +727,7 @@ async def test_child_append_failure_notifies_without_terminal(tmp_path, monkeypa
     """A child append failure emits a live storage notice and no terminal."""
     harness = _make_harness(tmp_path, responses=[])
     ws = FakeWebSocket()
-    harness.clients.add(ws)
+    await harness.event_bus.register_client(ws, ())
 
     def fail_append(event) -> bool:
         raise LogAppendError("disk full")

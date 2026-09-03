@@ -250,7 +250,7 @@ class ArchieApp(App):
             except Exception as e:  # noqa: BLE001 — skip malformed replay lines
                 log.warning("Skipping malformed replay event: %s", e)
                 continue
-            self._render_canonical(event, replay=True)
+            self._apply_event(event, historical=True)
 
         return True
 
@@ -305,11 +305,11 @@ class ArchieApp(App):
         )
 
     def _render_canonical(self, event, *, replay: bool = False) -> None:
-        """Render one persisted canonical event, deduplicated by id.
+        """Render one event after application-path dispatch and deduplicate by id.
 
-        Replay path only: assistant text arrives as AssistantMessage (no
-        streaming deltas) and tool summaries are reconstructed client-side via
-        the shared formatters. Advances the replay cursor.
+        Historical events arrive with ``replay=True`` so assistant text and tool
+        summaries are reconstructed without streamed deltas. Live events use the
+        same renderer after ``_apply_event`` dispatch.
         """
         event_id = getattr(event, "id", None)
         if event_id is not None:
@@ -597,9 +597,9 @@ class ArchieApp(App):
         for event in self._event_buffer:
             self._apply_event(event)
 
-    def _apply_event(self, event) -> None:
+    def _apply_event(self, event, *, historical: bool = False) -> None:
         """Apply one live or historical event through the imperative UI path."""
-        self._render_canonical(event)
+        self._render_canonical(event, replay=historical)
 
     def _handle_scoped_event(self, event, *, replay: bool = False) -> bool:
         """Reduce one canonical/live child event into shared child state."""

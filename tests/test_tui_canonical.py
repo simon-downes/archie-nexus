@@ -135,8 +135,8 @@ def test_live_assistant_message_finalizes_stream_without_duplicate():
     )
 
     with patch.object(app, "query_one", return_value=conv):
-        app._render_canonical(text_delta)
-        app._render_canonical(assistant)
+        app._apply_event(text_delta)
+        app._apply_event(assistant)
 
     conv.finalise_streaming.assert_called_once()
     conv.add_assistant_message.assert_not_called()
@@ -155,7 +155,7 @@ def test_turn_error_notice_ends_pending_turn():
         return {"#conversation": conv, "#throbber": throbber, "#input": input_widget}[selector]
 
     with patch.object(app, "query_one", side_effect=query_one):
-        app._render_canonical(ErrorNotice(id="e1", kind="turn_error", message="provider failed"))
+        app._apply_event(ErrorNotice(id="e1", kind="turn_error", message="provider failed"))
 
     assert app._turn_active is False
     assert input_widget.disabled is False
@@ -167,7 +167,7 @@ def test_render_canonical_does_not_create_empty_iteration_block():
     app = _make_app()
     conv = MagicMock()
     with patch.object(app, "query_one", return_value=conv):
-        app._render_canonical(IterationStart(id="i1", turn=1, iteration=1, scope=None))
+        app._apply_event(IterationStart(id="i1", turn=1, iteration=1, scope=None))
 
     conv.begin_iteration.assert_not_called()
 
@@ -179,8 +179,8 @@ def test_render_canonical_reconstructs_tool_summary_client_side():
     conv = MagicMock()
     conv.begin_iteration.return_value = block
     with patch.object(app, "query_one", return_value=conv):
-        app._render_canonical(IterationStart(id="i1", turn=1, iteration=1, scope=None))
-        app._render_canonical(
+        app._apply_event(IterationStart(id="i1", turn=1, iteration=1, scope=None))
+        app._apply_event(
             ToolCall(
                 id="c1",
                 turn=1,
@@ -192,7 +192,7 @@ def test_render_canonical_reconstructs_tool_summary_client_side():
                 input={"path": "/etc/hosts"},
             )
         )
-        app._render_canonical(
+        app._apply_event(
             ToolResult(
                 id="r1e",
                 turn=1,
@@ -222,6 +222,26 @@ def test_render_canonical_reconstructs_tool_summary_client_side():
     assert complete_args[1] is False  # is_error
     # summary string is non-empty (reconstructed via shared formatter)
     assert complete_args[4]
+
+
+@pytest.mark.asyncio
+async def test_replay_dispatches_through_apply_event_as_historical(tmp_path):
+    """Stored events use the same public application entry point as live events."""
+    app = _make_app()
+    event = UserMessage(id="u1", turn=1, scope=None, content="hi")
+    response = MagicMock(status_code=200, text=encode_event(event) + "\n")
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+    mock_http.get = AsyncMock(return_value=response)
+
+    with (
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
+        patch.object(app, "_apply_event") as apply_event,
+    ):
+        assert await app._replay_events() is True
+
+    apply_event.assert_called_once_with(event, historical=True)
 
 
 @pytest.mark.asyncio
@@ -486,7 +506,7 @@ async def test_replay_child_assistant_message_reconstructs_child_output():
     )
 
     with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._render_canonical(event, replay=True)
+        app._apply_event(event, historical=True)
 
     assert "persisted child response" in app._child_activity[("task-1", 0)].lines
 
@@ -541,8 +561,8 @@ async def test_child_replay_replaces_live_child_deltas():
     )
 
     with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._render_canonical(live_delta)
-        app._render_canonical(durable, replay=True)
+        app._apply_event(live_delta)
+        app._apply_event(durable, historical=True)
 
     assert app._child_activity[("task-1", 0)].lines == ["partial response"]
 
@@ -581,9 +601,9 @@ def test_child_replay_preserves_durable_lines_across_requests():
     )
 
     with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._render_canonical(first_assistant, replay=True)
-        app._render_canonical(second_delta)
-        app._render_canonical(second_assistant, replay=True)
+        app._apply_event(first_assistant, historical=True)
+        app._apply_event(second_delta)
+        app._apply_event(second_assistant, historical=True)
 
     assert app._child_activity[("task-1", 0)].lines == ["first answer", "second answer"]
     assert "second partial" not in app._child_activity[("task-1", 0)].lines
@@ -622,9 +642,9 @@ def test_sibling_child_streams_finalize_independently():
     )
 
     with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._render_canonical(child_zero_delta)
-        app._render_canonical(child_one_delta)
-        app._render_canonical(child_zero_assistant)
+        app._apply_event(child_zero_delta)
+        app._apply_event(child_one_delta)
+        app._apply_event(child_zero_assistant)
 
     zero_key = app._request_key(child_zero_assistant)
     one_key = app._request_key(child_one_delta)
@@ -665,7 +685,7 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
         patch.object(app, "_render_child"),
         patch.object(app, "_update_child_modal"),
     ):
-        app._render_canonical(assistant, replay=True)
+        app._apply_event(assistant, historical=True)
         app._dispatch_buffered_events()
 
     key = app._request_key(assistant)

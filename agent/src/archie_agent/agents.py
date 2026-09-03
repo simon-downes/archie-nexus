@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 from archie_shared.config import persona_dir
-from archie_shared.events import CanonicalEvent, ErrorNotice
+from archie_shared.events import ErrorNotice, SessionEvent
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.session.log import LogAppendError
 from archie_shared.types import ToolResultBlock, ToolUseBlock
@@ -282,7 +282,7 @@ def create_task_tool(
     active_model_key: str | Callable[[], str],
     region: str,
     log_path: Path,
-    emit: Callable[[CanonicalEvent], Awaitable[None]],
+    emit: Callable[[SessionEvent], Awaitable[None]],
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
     max_concurrent: int = 3,
@@ -318,7 +318,7 @@ def create_task_tool(
             storage_failed = False
             fallback_attempted = False
 
-            async def _publish_child_terminal(event: CanonicalEvent) -> None:
+            async def _publish_child_terminal(event: SessionEvent) -> None:
                 nonlocal terminal_emitted
                 terminal_emitted = True
                 try:

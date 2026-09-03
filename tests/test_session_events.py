@@ -1,7 +1,6 @@
 """Canonical event scope and structured turn-field contract tests."""
 
-from __future__ import annotations
-
+from archie_shared import events as event_module
 from archie_shared.events import (
     AssistantMessage,
     IterationStart,
@@ -17,6 +16,10 @@ from archie_shared.events import (
 
 def _roundtrip(event):
     return decode_event(encode_event(event))
+
+
+def test_transitional_canonical_event_alias_is_removed():
+    assert not hasattr(event_module, "CanonicalEvent")
 
 
 def test_scoped_events_roundtrip_with_none_scope():
