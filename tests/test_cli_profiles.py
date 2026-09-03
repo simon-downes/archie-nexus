@@ -37,11 +37,7 @@ def _make_session(
 def _config_with_profile(tmp_path, profile_name: str, host: str, port: int = 7600) -> str:
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
-        f"orchestrator:\n"
-        f"  profiles:\n"
-        f"    {profile_name}:\n"
-        f"      host: {host}\n"
-        f"      port: {port}\n"
+        f"orchestrator:\n  profiles:\n    {profile_name}:\n      host: {host}\n      port: {port}\n"
     )
     return str(tmp_path)
 
@@ -69,7 +65,9 @@ def test_resolve_target_profile_prefix(monkeypatch, tmp_path):
     from archie_cli.cli import _resolve_target
     from archie_shared.schemas import load_nexus_config
 
-    monkeypatch.setenv("ARCHIE_HOME_DIR", _config_with_profile(tmp_path, "gpu-box", "10.0.0.1", 7601))
+    monkeypatch.setenv(
+        "ARCHIE_HOME_DIR", _config_with_profile(tmp_path, "gpu-box", "10.0.0.1", 7601)
+    )
     config = load_nexus_config()
     profile, value = _resolve_target("gpu-box/myproject", config)
     assert value == "myproject"
@@ -125,7 +123,9 @@ def test_start_with_profile_prefix_uses_correct_url(monkeypatch, tmp_path):
     """archie start gpu-box/myproject POSTs to the gpu-box orchestrator URL."""
     import httpx as real_httpx
 
-    monkeypatch.setenv("ARCHIE_HOME_DIR", _config_with_profile(tmp_path, "gpu-box", "10.0.0.1", 7601))
+    monkeypatch.setenv(
+        "ARCHIE_HOME_DIR", _config_with_profile(tmp_path, "gpu-box", "10.0.0.1", 7601)
+    )
 
     descriptor = _make_session()
     post_resp = MagicMock()
@@ -177,7 +177,9 @@ def test_ls_named_profile_queries_that_profile(monkeypatch, tmp_path):
     """archie ls gpu-box queries the gpu-box orchestrator."""
     import httpx as real_httpx
 
-    monkeypatch.setenv("ARCHIE_HOME_DIR", _config_with_profile(tmp_path, "gpu-box", "10.0.0.1", 7601))
+    monkeypatch.setenv(
+        "ARCHIE_HOME_DIR", _config_with_profile(tmp_path, "gpu-box", "10.0.0.1", 7601)
+    )
     sessions_resp = _session_response([_make_session()])
 
     with patch("archie_cli.cli.httpx") as mock_httpx:
@@ -305,4 +307,3 @@ def test_resolve_target_archie_host_malformed_port_raises(monkeypatch, tmp_path)
     config = load_nexus_config()
     with pytest.raises(click.ClickException, match="port must be an integer"):
         _resolve_target("myproject", config)
-

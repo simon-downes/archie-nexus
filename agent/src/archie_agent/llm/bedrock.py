@@ -154,7 +154,11 @@ class BedrockClient:
                     if current_block_type == "tool_use":
                         input_truncated = False
                         try:
-                            parsed_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
+                            parsed_input = (
+                                json.loads(current_tool_input_json)
+                                if current_tool_input_json
+                                else {}
+                            )
                         except json.JSONDecodeError:
                             log.warning(
                                 "Failed to parse tool args JSON for %s (likely max_tokens): %s",
@@ -249,9 +253,13 @@ class BedrockClient:
                 ):
                     log.warning("cachePoint not supported, disabling prompt caching")
                     self._cache_supported = False
-                    params["system"] = [b for b in params.get("system", []) if "cachePoint" not in b]
+                    params["system"] = [
+                        b for b in params.get("system", []) if "cachePoint" not in b
+                    ]
                     for msg in params.get("messages", []):
-                        msg["content"] = [b for b in msg.get("content", []) if "cachePoint" not in b]
+                        msg["content"] = [
+                            b for b in msg.get("content", []) if "cachePoint" not in b
+                        ]
                     return self.client.converse_stream(**params)
                 if self._try_refresh_credentials():
                     return self.client.converse_stream(**params)

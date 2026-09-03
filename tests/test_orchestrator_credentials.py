@@ -22,9 +22,7 @@ async def test_post_credentials_writes_file(tmp_path):
     yaml_content = b"bedrock:\n  aws_access_key_id: AKIA123\n"
 
     with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/credentials", content=yaml_content)
 
     assert resp.status_code == 200
@@ -45,9 +43,7 @@ async def test_post_credentials_overwrites_existing(tmp_path):
     cred_file.write_bytes(old_content)
 
     with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/credentials", content=new_content)
 
     assert resp.status_code == 200
@@ -58,9 +54,7 @@ async def test_post_credentials_overwrites_existing(tmp_path):
 async def test_post_credentials_permissions_0600(tmp_path):
     """POST /credentials sets 0600 permissions on the written file."""
     with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             await client.post("/credentials", content=b"key: value\n")
 
     cred_file = tmp_path / "credentials.yaml"
@@ -72,9 +66,7 @@ async def test_post_credentials_permissions_0600(tmp_path):
 async def test_post_credentials_empty_body_returns_400(tmp_path):
     """POST /credentials with empty body → 400."""
     with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/credentials", content=b"")
 
     assert resp.status_code == 400
@@ -91,9 +83,7 @@ async def test_post_credentials_not_logged(tmp_path, caplog):
         patch("archie_orchestrator.app.home_dir", return_value=tmp_path),
         caplog.at_level(logging.DEBUG),
     ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             await client.post("/credentials", content=secret_content)
 
     # The secret value should never appear in any log record

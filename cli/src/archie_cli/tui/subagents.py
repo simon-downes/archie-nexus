@@ -57,8 +57,10 @@ class SubagentActivity(Static):
 
     def render_text(self) -> Text:
         state = self.state
-        activity = state.error if state.status == "error" else (
-            "Completed" if state.status == "complete" else state.activity
+        activity = (
+            state.error
+            if state.status == "error"
+            else ("Completed" if state.status == "complete" else state.activity)
         )
         agent = _fmt_column(f"{state.agent} #{state.index}", _AGENT_COLUMN)
         context = _fmt_column(_fmt_tokens(state.context_tokens), _CONTEXT_COLUMN, align=">")

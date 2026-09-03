@@ -9,11 +9,7 @@ from click.testing import CliRunner
 def _config_with_profile(tmp_path, profile: str, host: str, port: int = 7600) -> None:
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
-        f"orchestrator:\n"
-        f"  profiles:\n"
-        f"    {profile}:\n"
-        f"      host: {host}\n"
-        f"      port: {port}\n"
+        f"orchestrator:\n  profiles:\n    {profile}:\n      host: {host}\n      port: {port}\n"
     )
 
 

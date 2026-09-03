@@ -110,9 +110,7 @@ def test_start_session_logs_info(tmp_path, caplog):
 
         start_session("myproject", config_patched)
 
-    assert any(
-        "Session started" in r.message and "myproject" in r.message for r in caplog.records
-    )
+    assert any("Session started" in r.message and "myproject" in r.message for r in caplog.records)
 
 
 def test_stop_session_logs_info(caplog):
@@ -155,9 +153,7 @@ async def test_startup_logs_discovered_sessions(caplog):
         async with lifespan(app):
             pass
 
-    assert any(
-        "Discovered" in r.message and "2" in r.message for r in caplog.records
-    )
+    assert any("Discovered" in r.message and "2" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

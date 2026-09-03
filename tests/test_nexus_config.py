@@ -132,11 +132,7 @@ def test_get_profile_named(tmp_path):
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
-        "orchestrator:\n"
-        "  profiles:\n"
-        "    gpu-box:\n"
-        "      host: 192.168.1.50\n"
-        "      port: 7601\n"
+        "orchestrator:\n  profiles:\n    gpu-box:\n      host: 192.168.1.50\n      port: 7601\n"
     )
     config = load_nexus_config(path=cfg)
     profile = get_profile(config.orchestrator, "gpu-box")
@@ -154,12 +150,7 @@ def test_get_profile_unknown_explicit_name_raises(tmp_path):
     from archie_shared.schemas import get_profile
 
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "orchestrator:\n"
-        "  profiles:\n"
-        "    other:\n"
-        "      host: 10.0.0.1\n"
-    )
+    cfg.write_text("orchestrator:\n  profiles:\n    other:\n      host: 10.0.0.1\n")
     config = load_nexus_config(path=cfg)
     with pytest.raises(KeyError):
         get_profile(config.orchestrator, "nonexistent")

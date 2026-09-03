@@ -25,7 +25,9 @@ class ModelProvider(Provider):
         for key in sorted(catalog):
             model = catalog[key]
             help_text = f"${model.cost.input:.2f}/${model.cost.output:.2f} per M tokens"
-            yield DiscoveryHit(f"Change Model → {model.name}", partial(self._switch, key), help=help_text)
+            yield DiscoveryHit(
+                f"Change Model → {model.name}", partial(self._switch, key), help=help_text
+            )
         yield DiscoveryHit("Quit", self._quit, help="Exit Archie")
 
     async def search(self, query: str) -> Hits:

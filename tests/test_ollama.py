@@ -18,8 +18,14 @@ def mock_ollama_client():
         yield client_instance
 
 
-def _make_chunk(content="", tool_calls=None, done=False, done_reason="stop",
-                prompt_eval_count=None, eval_count=None):
+def _make_chunk(
+    content="",
+    tool_calls=None,
+    done=False,
+    done_reason="stop",
+    prompt_eval_count=None,
+    eval_count=None,
+):
     """Create a mock chunk object mimicking ollama's response format."""
     chunk = MagicMock()
     chunk.message.content = content
@@ -38,11 +44,13 @@ class TestOllamaClientStream:
         """Text chunks are yielded as TextDelta events."""
         from archie_agent.llm.ollama import OllamaClient
 
-        mock_ollama_client.chat.return_value = iter([
-            _make_chunk(content="Hello"),
-            _make_chunk(content=" world"),
-            _make_chunk(done=True, prompt_eval_count=10, eval_count=5),
-        ])
+        mock_ollama_client.chat.return_value = iter(
+            [
+                _make_chunk(content="Hello"),
+                _make_chunk(content=" world"),
+                _make_chunk(done=True, prompt_eval_count=10, eval_count=5),
+            ]
+        )
 
         client = OllamaClient(model_id="test:latest", host="http://localhost:11434")
         messages = [Turn(role="user", content=[TextBlock(text="Hi")])]
@@ -71,10 +79,12 @@ class TestOllamaClientStream:
         tc.function.name = "read_file"
         tc.function.arguments = {"path": "/tmp/test.txt"}
 
-        mock_ollama_client.chat.return_value = iter([
-            _make_chunk(content="Let me read that."),
-            _make_chunk(tool_calls=[tc], done=True, prompt_eval_count=20, eval_count=15),
-        ])
+        mock_ollama_client.chat.return_value = iter(
+            [
+                _make_chunk(content="Let me read that."),
+                _make_chunk(tool_calls=[tc], done=True, prompt_eval_count=20, eval_count=15),
+            ]
+        )
 
         client = OllamaClient(model_id="test:latest", host="http://localhost:11434")
         messages = [Turn(role="user", content=[TextBlock(text="Read the file")])]
@@ -103,9 +113,11 @@ class TestOllamaClientStream:
         tc.function.name = "write_file"
         tc.function.arguments = "not a dict"  # malformed
 
-        mock_ollama_client.chat.return_value = iter([
-            _make_chunk(tool_calls=[tc], done=True, prompt_eval_count=5, eval_count=3),
-        ])
+        mock_ollama_client.chat.return_value = iter(
+            [
+                _make_chunk(tool_calls=[tc], done=True, prompt_eval_count=5, eval_count=3),
+            ]
+        )
 
         client = OllamaClient(model_id="test:latest", host="http://localhost:11434")
         messages = [Turn(role="user", content=[TextBlock(text="Write")])]
@@ -120,10 +132,12 @@ class TestOllamaClientStream:
         """done_reason='length' maps to stop_reason='max_tokens'."""
         from archie_agent.llm.ollama import OllamaClient
 
-        mock_ollama_client.chat.return_value = iter([
-            _make_chunk(content="truncated output"),
-            _make_chunk(done=True, done_reason="length", prompt_eval_count=100, eval_count=50),
-        ])
+        mock_ollama_client.chat.return_value = iter(
+            [
+                _make_chunk(content="truncated output"),
+                _make_chunk(done=True, done_reason="length", prompt_eval_count=100, eval_count=50),
+            ]
+        )
 
         client = OllamaClient(model_id="test:latest", host="http://localhost:11434")
         messages = [Turn(role="user", content=[TextBlock(text="Write an essay")])]
@@ -136,9 +150,11 @@ class TestOllamaClientStream:
         """None token counts on final chunk default to 0."""
         from archie_agent.llm.ollama import OllamaClient
 
-        mock_ollama_client.chat.return_value = iter([
-            _make_chunk(content="hi", done=True, prompt_eval_count=None, eval_count=None),
-        ])
+        mock_ollama_client.chat.return_value = iter(
+            [
+                _make_chunk(content="hi", done=True, prompt_eval_count=None, eval_count=None),
+            ]
+        )
 
         client = OllamaClient(model_id="test:latest", host="http://localhost:11434")
         messages = [Turn(role="user", content=[TextBlock(text="hi")])]
@@ -226,13 +242,19 @@ class TestMessageTranslation:
 
         turns = [
             Turn(role="user", content=[TextBlock(text="Read file")]),
-            Turn(role="assistant", content=[
-                TextBlock(text="Reading..."),
-                ToolUseBlock(tool_use_id="abc", name="read", input={"path": "/tmp"}),
-            ]),
-            Turn(role="user", content=[
-                ToolResultBlock(tool_use_id="abc", content="file contents", is_error=False),
-            ]),
+            Turn(
+                role="assistant",
+                content=[
+                    TextBlock(text="Reading..."),
+                    ToolUseBlock(tool_use_id="abc", name="read", input={"path": "/tmp"}),
+                ],
+            ),
+            Turn(
+                role="user",
+                content=[
+                    ToolResultBlock(tool_use_id="abc", content="file contents", is_error=False),
+                ],
+            ),
         ]
         messages = _turns_to_ollama_messages(turns, system="sys")
 
