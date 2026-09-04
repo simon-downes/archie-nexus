@@ -4,6 +4,29 @@
 - Needs an environment section to talk about Docker, can install system packages/tools if needed, key directories (workspace, brain, config, archie run time, session logs, etc)
 - Needs improvement brain.md to explain what the brain is and how to use it effectively
 
+# Skills
+
+move skills to into tool result
+
+add skills section to system prompt that tells model to treat skills as instructions and follow them
+https://chatgpt.com/c/6a99e634-0768-83eb-8c47-2b00d28d2c74
+
+# Credentials
+
+how to obtain/propagate credentials?
+orchestrator should store creds and pass to agents?
+
+needed before we can do agent-kit integration
+
+# Agent Kit Capabilities
+
+docs/saas-tooling.md
+
+need to define plans for each saas tool - rethink from first principals rather than straight copy, any gaps with current setup?
+use typed classes/dataclasses for things like jira issues? tool output is usually strings which is potentially less helpful in an exec type environment?
+
+
+
 ## Kiro Lite
 
 `uv run archie kiro`
@@ -69,8 +92,8 @@ Done:
 - Disable autoscroll - as output streams to the ui the container automatically scrolls to the end making it impossible to read historical entries if a turn is in progress - can we disable the auto-scroll when the scrollbar isn't already at the bottom?
 - Make the default model Luna
 - Show exact context window size in tokens next to % - need to make sure we calculate correctly (new input + cache read + cache write : is that applicable to all bedrock models we have in the catalog?)
+- We should time tool execution time and display in the summaries
+- Shell errors repeat the command before showing the output - unncessary given it's above as the input
 
 TODO:
-- We should time tool execution time and display in the summaries
 - Better shell formatting - reformat long chained commands so the && and || are followed by line breaks
-- Shell errors repeat the command before showing the output - unncessary given it's above as the input
