@@ -263,113 +263,109 @@ class TestListReferenceFiles:
 
 
 class TestSkillTool:
-    """Tests for create_skill_tool."""
+    """Tests for the current tool-result skill contract."""
 
     def _make_catalog(self, tmp_path) -> dict[str, SkillEntry]:
         path = _write_skill(tmp_path, "my-skill", VALID_SKILL)
-        # Add a reference file
         ref_dir = tmp_path / "my-skill" / "references"
         ref_dir.mkdir()
         (ref_dir / "guide.md").write_text("Reference content here.")
-        return {"test-skill": SkillEntry(name="test-skill", description="A test skill.", path=path)}
+        return {"test-skill": SkillEntry("test-skill", "A test skill.", path)}
 
     @pytest.mark.asyncio
-    async def test_load_skill(self, tmp_path):
+    async def test_load_skill_returns_exact_wrapped_body_and_tracks_key(self, tmp_path):
         catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
+        loaded: set[tuple[str, str]] = set()
         spec = create_skill_tool(catalog, loaded)
 
         result = await spec.handler(name="test-skill")
-        assert "Loaded skill 'test-skill'" in result
-        assert "(3 lines)" in result
-        assert len(loaded) == 1
-        assert loaded[0][0] == "test-skill"
-        assert "This is the body of the test skill." in loaded[0][1]
+        assert result.startswith(
+            "Skill 'test-skill' loaded. Follow the content inside the `<skill>` tag"
+        )
+        assert '<skill name="test-skill">' in result
+        assert "This is the body of the test skill." in result
+        assert ("test-skill", "__body__") in loaded
+        assert "system prompt" not in result
 
     @pytest.mark.asyncio
     async def test_load_lists_reference_files(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
+        spec = create_skill_tool(self._make_catalog(tmp_path), set())
         result = await spec.handler(name="test-skill")
-        assert "references/guide.md" in result
+        assert "Reference files available:" in result
+        assert "- references/guide.md" in result
 
     @pytest.mark.asyncio
-    async def test_already_loaded(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = [("test-skill", "body")]
-        spec = create_skill_tool(catalog, loaded)
-
-        result = await spec.handler(name="test-skill")
-        assert "already loaded" in result
-        assert len(loaded) == 1  # Not appended again
-
-    @pytest.mark.asyncio
-    async def test_unknown_skill(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
-        result = await spec.handler(name="nonexistent")
-        assert "unknown skill" in result.lower()
-        assert "test-skill" in result  # Shows available names
+    async def test_already_loaded_returns_manifest(self, tmp_path):
+        loaded = {("test-skill", "__body__"), ("test-skill", "references/guide.md")}
+        spec = create_skill_tool(self._make_catalog(tmp_path), loaded)
+        result = await spec.handler(name="test-skill", references=["references/guide.md"])
+        assert "already available in earlier tool results" in result
+        assert "- skill body" in result
+        assert "- references/guide.md" in result
+        assert "<skill" not in result
 
     @pytest.mark.asyncio
-    async def test_missing_name(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
-        result = await spec.handler(name="")
-        assert "missing" in result.lower()
-
-    @pytest.mark.asyncio
-    async def test_read_reference_file(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
-        result = await spec.handler(name="test-skill", file="references/guide.md")
-        assert result == "Reference content here."
+    async def test_reference_load_is_body_first_and_tagged(self, tmp_path):
+        spec = create_skill_tool(self._make_catalog(tmp_path), set())
+        result = await spec.handler(name="test-skill", references=["references/guide.md"])
+        assert result.index('<skill name="test-skill">') < result.index(
+            '<reference name="test-skill" file="references/guide.md">'
+        )
+        assert "Reference content here." in result
 
     @pytest.mark.asyncio
-    async def test_read_nonexistent_file(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
-        result = await spec.handler(name="test-skill", file="nope.md")
-        assert "not found" in result.lower()
-
-    @pytest.mark.asyncio
-    async def test_read_path_traversal_rejected(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
-        result = await spec.handler(name="test-skill", file="../../etc/passwd")
-        assert "outside" in result.lower()
+    async def test_reference_errors_are_atomic_and_aggregated(self, tmp_path):
+        loaded: set[tuple[str, str]] = set()
+        spec = create_skill_tool(self._make_catalog(tmp_path), loaded)
+        result = await spec.handler(name="test-skill", references=["nope.md", "missing.md"])
+        assert "nope.md" in result and "missing.md" in result
+        assert loaded == set()
 
     @pytest.mark.asyncio
-    async def test_read_binary_file(self, tmp_path):
+    async def test_reference_validation_and_binary_errors(self, tmp_path):
         catalog = self._make_catalog(tmp_path)
-        # Write a binary file in the skill dir
-        binary_path = tmp_path / "my-skill" / "binary.bin"
-        binary_path.write_bytes(b"\x00\x01\x02binary")
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
+        (tmp_path / "my-skill" / "binary.bin").write_bytes(b"\x00\x01")
+        spec = create_skill_tool(catalog, set())
+        result = await spec.handler(
+            name="test-skill", references=["../../etc/passwd", ""]
+        )
+        assert "../../etc/passwd" in result
+        assert "invalid reference" in result
+        binary_result = await spec.handler(name="test-skill", references=["binary.bin"])
+        assert "binary.bin" in binary_result
+        assert "binary" in binary_result.lower()
 
-        result = await spec.handler(name="test-skill", file="binary.bin")
-        assert "binary" in result.lower()
+    @pytest.mark.asyncio
+    async def test_duplicate_references_are_normalized(self, tmp_path):
+        loaded: set[tuple[str, str]] = set()
+        spec = create_skill_tool(self._make_catalog(tmp_path), loaded)
+        result = await spec.handler(
+            name="test-skill", references=["references/guide.md", "references/guide.md"]
+        )
+        assert result.count('<reference name="test-skill"') == 1
+        assert ("test-skill", "references/guide.md") in loaded
+
+    @pytest.mark.asyncio
+    async def test_unknown_and_missing_name(self, tmp_path):
+        spec = create_skill_tool(self._make_catalog(tmp_path), set())
+        assert "available" in (await spec.handler(name="nonexistent")).lower()
+        assert "missing" in (await spec.handler(name="")).lower()
+
+    @pytest.mark.asyncio
+    async def test_malformed_skill_does_not_mutate_state(self, tmp_path):
+        path = _write_skill(tmp_path, "bad", "---\nname: [broken\n---\nbody")
+        loaded: set[tuple[str, str]] = set()
+        spec = create_skill_tool({"bad": SkillEntry("bad", "Bad", path)}, loaded)
+        result = await spec.handler(name="bad")
+        assert "SKILL.md" in result or "malformed" in result
+        assert not loaded
 
     @pytest.mark.asyncio
     async def test_tool_spec_schema(self, tmp_path):
-        catalog = self._make_catalog(tmp_path)
-        loaded: list[tuple[str, str]] = []
-        spec = create_skill_tool(catalog, loaded)
-
+        spec = create_skill_tool(self._make_catalog(tmp_path), set())
         assert spec.name == "skill"
-        assert "name" in spec.schema["properties"]
-        assert "file" in spec.schema["properties"]
         assert spec.schema["required"] == ["name"]
+        assert "references" in spec.schema["properties"]
+        assert "file" not in spec.schema["properties"]
+        assert "check the listed reference files" in spec.description
+        assert "before applying guidance" in spec.schema["properties"]["references"]["description"]

@@ -382,20 +382,14 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
 
         case "skill":
             skill_name = input_dict.get("name", "")
-            file = input_dict.get("file")
-            if file:
-                return f"Skill {_hi(skill_name + '/' + file)}"
-            if "already loaded" in result:
-                return f"Skill {_hi(skill_name)} {_dim('(already loaded)')}"
-            for line in result.splitlines()[:2]:
-                if "(" in line and " lines)" in line:
-                    try:
-                        line_count = line.split("(", 1)[1].split(" lines)", 1)[0]
-                        int(line_count)
-                        return f"Skill {_hi(skill_name)} {_dim(f'({line_count} lines)')}"
-                    except (IndexError, ValueError):
-                        pass
-            return f"Skill {_hi(skill_name)}"
+            references = input_dict.get("references")
+            target = skill_name
+            if isinstance(references, list) and references:
+                target += "/" + ", ".join(str(reference) for reference in references)
+            if "already available in earlier tool results" in result:
+                return f"Skill {_hi(target)} {_dim('(already loaded)')}"
+            size = len(result.encode("utf-8"))
+            return f"Skill {_hi(target)} {_dim(f'({size} bytes)')}"
 
         case _:
             size = len(result)

@@ -1,8 +1,7 @@
 """Provider-neutral structured system prompt builder.
 
-The prompt has two logical sections: a static session prefix and a dynamic
-section containing loaded skill bodies. Providers can flatten the sections when
-their wire format does not support typed prompt blocks.
+The prompt has two logical sections: a static session prefix and an optional
+dynamic provider-specific section.
 """
 
 from __future__ import annotations
@@ -129,30 +128,13 @@ def _build_tools() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_skills_catalog(
-    catalog: dict[str, SkillEntry],
-    loaded_skills: list[tuple[str, str]] | None = None,
-) -> str:
-    """Build the constant skills catalog section.
-
-    ``loaded_skills`` remains accepted for compatibility with older callers,
-    but intentionally does not change the catalog text. Loaded bodies belong in
-    the dynamic section.
-    """
+def _build_skills_catalog(catalog: dict[str, SkillEntry]) -> str:
     lines = ["<skills>", "Available skills (use the `skill` tool to load):"]
     for name in sorted(catalog):
         entry = catalog[name]
         lines.append(f"- {name}: {entry.description}")
     lines.append("</skills>")
     return "\n".join(lines)
-
-
-def _build_loaded_skills(loaded_skills: list[tuple[str, str]]) -> str:
-    """Build the loaded skills section — each skill body in a tagged block."""
-    parts: list[str] = []
-    for name, body in loaded_skills:
-        parts.append(f'<skill name="{name}">\n{body}\n</skill>')
-    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +177,6 @@ def build_system_prompt_structured(
     workspace_dir: str = str(WORKSPACE),
     *,
     catalog: dict[str, SkillEntry] | None = None,
-    loaded_skills: list[tuple[str, str]] | None = None,
     agents_context: str | None = None,
     dynamic_content: str | None = None,
 ) -> SystemPrompt:
@@ -224,8 +205,6 @@ def build_system_prompt_structured(
         static_sections.append(project_context)
 
     dynamic_sections: list[str] = []
-    if loaded_skills:
-        dynamic_sections.append(_build_loaded_skills(loaded_skills))
     if dynamic_content:
         dynamic_sections.append(dynamic_content)
 
@@ -241,7 +220,6 @@ def build_subagent_prompt(
     workspace_dir: str = str(WORKSPACE),
     *,
     catalog: dict[str, SkillEntry] | None = None,
-    loaded_skills: list[tuple[str, str]] | None = None,
     agents_context: str | None = None,
 ) -> SystemPrompt:
     """Build a focused child prompt without the primary identity section.
@@ -265,10 +243,9 @@ def build_subagent_prompt(
     if project_context:
         static_sections.append(project_context)
 
-    dynamic_system = _build_loaded_skills(loaded_skills or [])
     return SystemPrompt(
         static_system=PromptSection("\n\n".join(section for section in static_sections if section)),
-        dynamic_system=PromptSection(dynamic_system) if dynamic_system else None,
+        dynamic_system=None,
     )
 
 
@@ -277,7 +254,6 @@ def build_system_prompt(
     workspace_dir: str = str(WORKSPACE),
     *,
     catalog: dict[str, SkillEntry] | None = None,
-    loaded_skills: list[tuple[str, str]] | None = None,
     agents_context: str | None = None,
 ) -> str:
     """Flatten the structured prompt for legacy string callers."""
@@ -285,6 +261,5 @@ def build_system_prompt(
         model_name,
         workspace_dir,
         catalog=catalog,
-        loaded_skills=loaded_skills,
         agents_context=agents_context,
     ).flatten()

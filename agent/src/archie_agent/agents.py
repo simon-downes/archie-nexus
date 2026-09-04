@@ -388,16 +388,15 @@ def create_task_tool(
                     model_key = current_model_key
                 child_llm = create_llm_client(child_model, region)
                 child_skills = _scoped_skills(skill_catalog, entry.skills, entry.name)
-                loaded_skills: list[tuple[str, str]] = []
+                loaded_content_keys: set[tuple[str, str]] = set()
                 child_prompt = build_subagent_prompt(
                     child_model.name,
                     entry.body,
                     catalog=child_skills or None,
-                    loaded_skills=loaded_skills,
                     agents_context="",
                 )
                 child_registry = create_registry()
-                child_registry.register(create_skill_tool(child_skills, loaded_skills))
+                child_registry.register(create_skill_tool(child_skills, loaded_content_keys))
                 # The child registry deliberately has no task registration.
                 dispatch = ChildDispatch(
                     child_registry,

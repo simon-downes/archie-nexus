@@ -4,7 +4,7 @@ from archie_agent.prompt import build_subagent_prompt
 from archie_agent.skills import SkillEntry
 
 
-def test_build_subagent_prompt_is_focused_and_structured():
+def test_build_subagent_prompt_is_focused_and_contains_catalog():
     catalog = {
         "python-style": SkillEntry(
             "python-style", "Python coding standards", Path("/fake/python/SKILL.md")
@@ -16,7 +16,6 @@ def test_build_subagent_prompt_is_focused_and_structured():
         "You are a research specialist.",
         workspace_dir="/workspace",
         catalog={"python-style": catalog["python-style"]},
-        loaded_skills=[("python-style", "Use type hints.")],
         agents_context="Project rules",
     )
 
@@ -25,6 +24,5 @@ def test_build_subagent_prompt_is_focused_and_structured():
     assert "Project rules" in prompt.static_system.text
     assert "python-style: Python coding standards" in prompt.static_system.text
     assert "terraform" not in prompt.static_system.text
-    assert prompt.dynamic_system is not None
-    assert "Use type hints." in prompt.dynamic_system.text
+    assert prompt.dynamic_system is None
     assert "child-model" not in prompt.flatten()
