@@ -35,17 +35,23 @@ def test_shell_error_summary_escapes_exit_marker_and_includes_lines():
     assert "Hello World" in summary
 
 
-def test_skill_summary_reports_loaded_lines():
+def test_skill_summary_reports_result_size_and_references():
+    result = (
+        "Skill 'workflow-review' loaded.\n\n"
+        '<skill name="workflow-review">\nbody\n</skill>\n\n'
+        '<reference name="workflow-review" file="references/guide.md">\nref\n</reference>'
+    )
     summary = format_tool_complete(
         "skill",
-        {"name": "workflow-review"},
-        "Loaded skill 'workflow-review' into system prompt (42 lines).",
+        {"name": "workflow-review", "references": ["references/guide.md"]},
+        result,
         False,
         50,
     )
     assert "workflow-review" in summary
-    assert "(42 lines, 50ms)" in summary
-    assert "loaded" not in summary
+    assert f"({len(result.encode('utf-8'))} bytes, 50ms)" in summary
+    assert "body" not in summary
+    assert "\nref\n" not in summary
 
 
 def test_edit_diff_uses_text_colours_and_line_markers():

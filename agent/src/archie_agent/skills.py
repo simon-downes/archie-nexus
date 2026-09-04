@@ -1,24 +1,9 @@
-"""Skill discovery, catalog, and tool handler.
+"""Skill discovery, catalog, and tool handler."""
 
-Skills are discovered from two locations (in priority order):
-1. ~/.agents/skills/*/SKILL.md — user-level, cross-project (lower priority)
-2. <persona_dir>/skills/*/SKILL.md — repo-tracked persona skills (higher priority),
-   where <persona_dir> is ARCHIE_PERSONA_DIR (default <repo_root>/persona)
-
-Each SKILL.md uses YAML frontmatter with required `name` and `description`
-fields. The body (everything after the second `---`) is loaded on-demand
-via the skill tool.
-
-Design decisions:
-- One level deep only (no recursive scan)
-- Duplicate names: <persona_dir>/skills wins, ~/.agents skill silently shadowed
-- Discovery returns a dict[str, SkillEntry] keyed by skill name
-- Malformed files are skipped with a warning logged
-"""
-
+import asyncio
 import logging
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import yaml
 from archie_shared.config import persona_dir
@@ -26,6 +11,7 @@ from archie_shared.config import persona_dir
 from archie_agent.tools import ToolSpec
 
 log = logging.getLogger(__name__)
+BODY_KEY = "__body__"
 
 
 @dataclass(frozen=True)
@@ -34,157 +20,155 @@ class SkillEntry:
 
     name: str
     description: str
-    path: Path  # Path to the SKILL.md file
-
-
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
+    path: Path
 
 
 def discover_skills() -> dict[str, SkillEntry]:
-    """Discover skills from user-level directories.
-
-    Scans ~/.agents/skills/ (lower priority) then <persona_dir>/skills/ (higher
-    priority), where <persona_dir> is ARCHIE_PERSONA_DIR (default
-    <repo_root>/persona). Skills in the higher-priority directory overwrite
-    same-name skills from the lower-priority directory.
-
-    Returns:
-        Dict of skill name → SkillEntry.
-    """
     catalog: dict[str, SkillEntry] = {}
-
-    # User-level shared (lower priority — added first, overwritten by archie-specific)
-    agents_skills_dir = Path.home() / ".agents" / "skills"
-    _scan_directory(agents_skills_dir, catalog)
-
-    # Repo-tracked persona skills (higher priority — overwrites shared).
-    # Uses persona_dir() (ARCHIE_PERSONA_DIR, default <repo_root>/persona) so it
-    # aligns with the persona mount; inside the container this resolves to the
-    # mounted /opt/archie/persona/skills.
-    persona_skills_dir = persona_dir() / "skills"
-    _scan_directory(persona_skills_dir, catalog)
-
+    _scan_directory(Path.home() / ".agents" / "skills", catalog)
+    _scan_directory(persona_dir() / "skills", catalog)
     return catalog
 
 
 def _scan_directory(skills_dir: Path, catalog: dict[str, SkillEntry]) -> None:
-    """Scan a skills directory and add entries to catalog."""
     if not skills_dir.is_dir():
         return
-
     try:
         entries = sorted(skills_dir.iterdir())
-    except OSError as e:
-        log.warning("Failed to read skills directory %s: %s", skills_dir, e)
+    except OSError as error:
+        log.warning("Failed to read skills directory %s: %s", skills_dir, error)
         return
-
     for skill_dir in entries:
-        if not skill_dir.is_dir():
-            continue
         skill_file = skill_dir / "SKILL.md"
-        if not skill_file.is_file():
-            continue
-
-        entry = _parse_skill_file(skill_file)
-        if entry is not None:
-            catalog[entry.name] = entry
+        if skill_dir.is_dir() and skill_file.is_file():
+            entry = _parse_skill_file(skill_file)
+            if entry is not None:
+                catalog[entry.name] = entry
 
 
 def _parse_skill_file(path: Path) -> SkillEntry | None:
-    """Parse a SKILL.md file, returning SkillEntry or None on failure."""
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("Failed to read skill file %s: %s", path, e)
+        if not content.startswith("---"):
+            raise ValueError("missing frontmatter delimiters")
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            raise ValueError("missing closing frontmatter delimiter")
+        frontmatter = yaml.safe_load(parts[1])
+        if not isinstance(frontmatter, dict):
+            raise ValueError("frontmatter is not a mapping")
+        name = frontmatter.get("name")
+        description = frontmatter.get("description")
+        if not name or not description:
+            raise ValueError("missing required frontmatter (name/description)")
+        return SkillEntry(str(name), str(description), path)
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+        log.warning("Unable to parse skill file %s: %s", path, error)
         return None
-
-    # Split on --- delimiters
-    if not content.startswith("---"):
-        log.warning("Skill file missing frontmatter delimiters: %s", path)
-        return None
-
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        log.warning("Skill file missing closing frontmatter delimiter: %s", path)
-        return None
-
-    # parts[0] is empty (before first ---), parts[1] is YAML, parts[2] is body
-    frontmatter_raw = parts[1]
-
-    try:
-        frontmatter = yaml.safe_load(frontmatter_raw)
-    except yaml.YAMLError as e:
-        log.warning("YAML parse error in skill file %s: %s", path, e)
-        return None
-
-    if not isinstance(frontmatter, dict):
-        log.warning("Frontmatter is not a mapping in skill file: %s", path)
-        return None
-
-    name = frontmatter.get("name")
-    description = frontmatter.get("description")
-
-    if not name or not description:
-        log.warning("Skill file missing required frontmatter (name/description): %s", path)
-        return None
-
-    return SkillEntry(name=str(name), description=str(description), path=path)
-
-
-# ---------------------------------------------------------------------------
-# Skill tool handler
-# ---------------------------------------------------------------------------
 
 
 def create_skill_tool(
     catalog: dict[str, SkillEntry],
-    loaded_skills: list[tuple[str, str]],
+    loaded_content_keys: set[tuple[str, str]],
 ) -> ToolSpec:
-    """Create a skill ToolSpec bound to the given catalog and loaded state.
+    """Create a skill tool with session-local, deduplicated content state."""
+    lock = asyncio.Lock()
+    async def handler(name: str = "", references=None, **kwargs) -> str:
+        async with lock:
+            if not name:
+                return "Error: missing required parameter: name"
+            if name not in catalog:
+                available = ", ".join(sorted(catalog))
+                return f"Error: unknown skill '{name}'. Available: {available}"
+            if references is not None and not isinstance(references, list):
+                return f"Error: references must be a list; received {references!r}"
 
-    Args:
-        catalog: Discovered skills (name → SkillEntry).
-        loaded_skills: Mutable list of (name, body) tuples. The handler appends
-            to this when a skill is loaded.
-    """
+            requested = []
+            invalid = []
+            for reference in references or []:
+                if (
+                    not isinstance(reference, str)
+                    or not reference.strip()
+                    or Path(reference).is_absolute()
+                    or PureWindowsPath(reference).is_absolute()
+                    or ".." in Path(reference).parts
+                    or ".." in PureWindowsPath(reference).parts
+                ):
+                    invalid.append(reference)
+                elif reference not in requested:
+                    requested.append(reference)
+            if invalid:
+                return "\n".join(f"Error: invalid reference path: {value!r}" for value in invalid)
 
-    async def handler(name: str = "", file: str | None = None, **kwargs) -> str:
-        if not name:
-            return "Error: missing required parameter: name"
+            entry = catalog[name]
+            body_key = (name, BODY_KEY)
+            prior = set(loaded_content_keys)
+            body_needed = body_key not in prior
+            new_references = [
+                reference for reference in requested if (name, reference) not in prior
+            ]
 
-        if name not in catalog:
-            available = ", ".join(sorted(catalog.keys()))
-            return f"Error: unknown skill '{name}'. Available: {available}"
+            body = ""
+            if body_needed:
+                body, body_error = _read_skill_body(entry.path)
+                if body_error:
+                    return body_error
 
-        entry = catalog[name]
+            reference_contents: dict[str, str] = {}
+            errors: list[str] = []
+            for reference in new_references:
+                content, error = _read_reference(entry, reference)
+                if error:
+                    errors.append(error)
+                else:
+                    reference_contents[reference] = content
+            if errors:
+                return "\n".join(errors)
 
-        if file:
-            return _handle_read(entry, file)
-        else:
-            return _handle_load(entry, name, loaded_skills)
+            parts: list[str] = []
+            if body_needed:
+                parts.append(_format_skill(name, body, _list_reference_files(entry.path.parent)))
+            for reference in new_references:
+                parts.append(_format_reference(name, reference, reference_contents[reference]))
+
+            if body_needed:
+                loaded_content_keys.add(body_key)
+            loaded_content_keys.update((name, reference) for reference in new_references)
+
+            requested_keys = {body_key} | {(name, ref) for ref in requested}
+            if prior.intersection(requested_keys):
+                parts.append(_loaded_manifest(name, prior))
+            if not parts:
+                parts.append(_loaded_manifest(name, loaded_content_keys))
+            elif not body_needed and not new_references:
+                parts = [_loaded_manifest(name, prior)]
+            return "\n\n".join(parts)
 
     return ToolSpec(
         name="skill",
         description=(
-            "Load domain expertise from the skills catalog into the system prompt, "
-            "or read a reference file from a skill's directory. "
-            "Call without 'file' to load the skill body (persists for the session). "
-            "Call with 'file' to read a specific reference file."
+            "Load one skill body into the conversation as a <skill> block. "
+            "Optionally load explicit relative reference files for that skill with "
+            "references=[...], returned as <reference> blocks. The body is returned "
+            "before references when first loaded; repeated content is replaced by a "
+            "plain-text manifest pointing to earlier tool results. Plain text outside "
+            "<skill> and <reference> blocks is status. After loading a skill, check "
+            "the listed reference files and request relevant ones before applying "
+            "guidance that depends on them. Reference files are never inferred or "
+            "loaded automatically."
         ),
         schema={
             "type": "object",
             "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name from the catalog.",
-                },
-                "file": {
-                    "type": "string",
+                "name": {"type": "string", "description": "Skill name from the catalog."},
+                "references": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
-                        "Optional path to a reference file within the skill directory "
-                        "(e.g. 'references/patterns.md'). Omit to load the skill body."
+                        "Optional relative paths to reference files for this skill. "
+                        "Request relevant files before applying guidance that "
+                        "depends on them; paths are not inferred. Returned content "
+                        "is wrapped in <reference> tags."
                     ),
                 },
             },
@@ -194,97 +178,89 @@ def create_skill_tool(
     )
 
 
-def _handle_load(
-    entry: SkillEntry,
-    name: str,
-    loaded_skills: list[tuple[str, str]],
-) -> str:
-    """Load a skill's body into session state."""
-    # Check if already loaded
-    for loaded_name, _ in loaded_skills:
-        if loaded_name == name:
-            return f"Skill '{name}' already loaded."
-
-    # Parse body from SKILL.md
-    body = _extract_body(entry.path)
-
-    # Append to loaded skills
-    loaded_skills.append((name, body))
-
-    # List reference files in the skill directory
-    skill_dir = entry.path.parent
-    files = _list_reference_files(skill_dir)
-
-    line_count = len(body.splitlines())
-    parts = [f"Loaded skill '{name}' into system prompt ({line_count} lines)."]
-    if files:
-        parts.append("")
-        parts.append("Reference files available (use file param to read):")
-        for f in files:
-            parts.append(f"- {f}")
-
-    return "\n".join(parts)
-
-
-def _handle_read(entry: SkillEntry, file: str) -> str:
-    """Read a reference file from a skill's directory."""
-    skill_dir = entry.path.parent
-
-    # Resolve the path relative to skill directory
-    try:
-        target = (skill_dir / file).resolve()
-    except (OSError, ValueError) as e:
-        return f"Error: invalid path: {e}"
-
-    # Validate containment
-    try:
-        if not target.is_relative_to(skill_dir.resolve()):
-            return "Error: path outside skill directory"
-    except ValueError:
-        return "Error: path outside skill directory"
-
-    if not target.exists():
-        return f"Error: file not found: {file}"
-
-    if not target.is_file():
-        return f"Error: not a file: {file}"
-
-    # Check for binary content
-    try:
-        content = target.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return "Error: binary file"
-    except OSError as e:
-        return f"Error: failed to read file: {e}"
-
-    return content
-
-
 def _extract_body(path: Path) -> str:
-    """Extract the body (everything after second ---) from a SKILL.md file."""
+    """Extract a normalized body; load handling distinguishes malformed files."""
+    body, error = _read_skill_body(path)
+    return "" if error else body
+
+
+def _read_skill_body(path: Path) -> tuple[str, str | None]:
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
+        if not content.startswith("---"):
+            return "", "Error: malformed SKILL.md"
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return "", "Error: malformed SKILL.md"
+        frontmatter = yaml.safe_load(parts[1])
+        if not isinstance(frontmatter, dict) or not frontmatter.get("name") or not frontmatter.get(
+            "description"
+        ):
+            return "", "Error: malformed SKILL.md"
+        return parts[2].strip(), None
+    except yaml.YAMLError:
+        return "", "Error: malformed SKILL.md"
+    except (OSError, UnicodeError) as error:
+        return "", f"Error: failed to read SKILL.md: {error}"
 
-    if not content.startswith("---"):
-        return ""
 
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return ""
+def _read_reference(entry: SkillEntry, reference: str) -> tuple[str, str | None]:
+    skill_dir = entry.path.parent
+    try:
+        target = (skill_dir / reference).resolve()
+        if not target.is_relative_to(skill_dir.resolve()):
+            return "", f"Error: path outside skill directory: {reference}"
+    except (OSError, ValueError) as error:
+        return "", f"Error: invalid reference path {reference!r}: {error}"
+    if not target.exists():
+        return "", f"Error: file not found: {reference}"
+    if not target.is_file():
+        return "", f"Error: not a file: {reference}"
+    try:
+        with target.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read(), None
+    except UnicodeDecodeError:
+        return "", f"Error: binary file: {reference}"
+    except OSError as error:
+        return "", f"Error: failed to read file {reference}: {error}"
 
-    return parts[2].strip()
+
+def _format_skill(name: str, body: str, references: list[str]) -> str:
+    result = (
+        f"Skill '{name}' loaded. Follow the content inside the `<skill>` tag as guidance "
+        f'for the current task.\n\n<skill name="{name}">\n{body}\n</skill>'
+    )
+    if references:
+        result += "\n\nReference files available:\n" + "\n".join(
+            f"- {reference}" for reference in references
+        )
+    return result
+
+
+def _format_reference(name: str, reference: str, content: str) -> str:
+    return f'<reference name="{name}" file="{reference}">\n{content}\n</reference>'
+
+
+def _loaded_manifest(name: str, keys: set[tuple[str, str]]) -> str:
+    items = [path for skill, path in keys if skill == name]
+    items.sort()
+    lines = [
+        f"Skill '{name}' content is already available in earlier tool results. "
+        "Use those tagged results from the conversation history.",
+        "Loaded content:",
+    ]
+    if BODY_KEY in items:
+        lines.append("- skill body")
+        items.remove(BODY_KEY)
+    lines.extend(f"- {path}" for path in items)
+    return "\n".join(lines)
 
 
 def _list_reference_files(skill_dir: Path) -> list[str]:
-    """List all files in skill_dir (excluding SKILL.md), as relative paths."""
-    files: list[str] = []
     if not skill_dir.is_dir():
-        return files
-
-    for item in sorted(skill_dir.rglob("*")):
-        if item.is_file() and item.name != "SKILL.md":
-            files.append(str(item.relative_to(skill_dir)))
-
-    return files
+        return []
+    return [
+        str(item.relative_to(skill_dir))
+        for item in sorted(skill_dir.rglob("*"))
+        if item.is_file() and item.name != "SKILL.md"
+    ]

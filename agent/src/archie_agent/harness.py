@@ -115,13 +115,13 @@ class AgentHarness:
         # Agent and skill catalogs are session-constant.
         self._agent_catalog: dict[str, AgentEntry] = discover_agents()
         self._skill_catalog = discover_skills()
-        self._loaded_skills: list[tuple[str, str]] = []
+        self._loaded_content_keys: set[tuple[str, str]] = set()
         # Project rules are session-constant. Loaded skill bodies remain dynamic.
         self._agents_context = read_agents_context()
 
         # Tool registry: exec + skill
         self._registry = create_registry()
-        skill_spec = create_skill_tool(self._skill_catalog, self._loaded_skills)
+        skill_spec = create_skill_tool(self._skill_catalog, self._loaded_content_keys)
         self._registry.register(skill_spec)
         self._current_turn_index = 0
         self._children: dict[tuple[str, int], tuple[threading.Event, asyncio.Event, callable]] = {}
@@ -185,7 +185,6 @@ class AgentHarness:
         return build_system_prompt_structured(
             self._model_name,
             catalog=self._skill_catalog if self._skill_catalog else None,
-            loaded_skills=self._loaded_skills if self._loaded_skills else None,
             agents_context=self._agents_context,
         )
 

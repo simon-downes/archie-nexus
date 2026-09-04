@@ -5,7 +5,6 @@ from pathlib import Path
 from archie_agent.prompt import (
     _build_environment,
     _build_identity,
-    _build_loaded_skills,
     _build_project_context,
     _build_skills_catalog,
     _build_tools,
@@ -119,45 +118,24 @@ def _make_catalog() -> dict[str, SkillEntry]:
 def test_build_skills_catalog_lists_skills():
     """Catalog section lists all skills with descriptions."""
     catalog = _make_catalog()
-    section = _build_skills_catalog(catalog, [])
+    section = _build_skills_catalog(catalog)
     assert "<skills>" in section
     assert "</skills>" in section
     assert "python-style: Python coding standards" in section
     assert "terraform: Terraform best practices" in section
 
 
-def test_build_skills_catalog_is_stable_when_loaded():
-    """Loaded skills do not mutate the constant catalog text."""
+def test_build_skills_catalog_is_stable():
+    """The catalog is constant and independent of loaded tool-result state."""
     catalog = _make_catalog()
-    assert _build_skills_catalog(catalog, [("python-style", "body content")]) == (
-        _build_skills_catalog(catalog, [])
-    )
+    assert _build_skills_catalog(catalog) == _build_skills_catalog(catalog)
 
 
 def test_build_skills_catalog_no_loaded():
     """No [loaded] markers when nothing is loaded."""
     catalog = _make_catalog()
-    section = _build_skills_catalog(catalog, [])
+    section = _build_skills_catalog(catalog)
     assert "[loaded]" not in section
-
-
-def test_build_loaded_skills_renders_bodies():
-    """Loaded skills are rendered in tagged blocks."""
-    loaded = [
-        ("python-style", "Use type hints everywhere."),
-        ("terraform", "Pin provider versions."),
-    ]
-    section = _build_loaded_skills(loaded)
-    assert '<skill name="python-style">' in section
-    assert "Use type hints everywhere." in section
-    assert '<skill name="terraform">' in section
-    assert "Pin provider versions." in section
-    assert "</skill>" in section
-
-
-def test_build_loaded_skills_empty():
-    """Empty loaded list produces empty string."""
-    assert _build_loaded_skills([]) == ""
 
 
 def test_build_system_prompt_with_catalog():
@@ -169,14 +147,12 @@ def test_build_system_prompt_with_catalog():
     assert "terraform" in prompt
 
 
-def test_build_system_prompt_with_loaded_skills():
-    """Prompt includes loaded skill bodies."""
+def test_build_system_prompt_with_catalog_has_no_loaded_body():
+    """The static catalog never renders mutable skill bodies."""
     catalog = _make_catalog()
-    loaded = [("python-style", "Use type hints everywhere.")]
-    prompt = build_system_prompt("test-model", catalog=catalog, loaded_skills=loaded)
-    assert '<skill name="python-style">' in prompt
-    assert "Use type hints everywhere." in prompt
-    assert "[loaded]" not in prompt
+    prompt = build_system_prompt("test-model", catalog=catalog)
+    assert "<skill name=\"python-style\">" not in prompt
+    assert "Use type hints everywhere." not in prompt
 
 
 def test_build_system_prompt_no_skills_section_without_catalog():
@@ -251,13 +227,12 @@ def test_build_system_prompt_omits_agents_md_when_absent(tmp_path):
     assert "<agents.md>" not in prompt
 
 
-def test_agents_md_after_skills_before_loaded_skills(tmp_path):
-    """<agents.md> renders after the skills catalog and before loaded skill bodies."""
+def test_agents_md_after_skills_catalog(tmp_path):
+    """Project context follows static skill guidance and the catalog."""
     (tmp_path / "AGENTS.md").write_text("Project context here.", encoding="utf-8")
     catalog = _make_catalog()
-    loaded = [("python-style", "Use type hints.")]
-    prompt = build_system_prompt("test-model", str(tmp_path), catalog=catalog, loaded_skills=loaded)
+    prompt = build_system_prompt("test-model", str(tmp_path), catalog=catalog)
     skills_pos = prompt.index("<skills>")
     agents_pos = prompt.index("<agents.md>")
-    loaded_pos = prompt.index('<skill name="python-style">')
-    assert skills_pos < agents_pos < loaded_pos
+    assert skills_pos < agents_pos
+    assert '<skill name="python-style">' not in prompt
