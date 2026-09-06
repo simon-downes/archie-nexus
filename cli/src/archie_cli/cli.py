@@ -306,8 +306,11 @@ def serve():
     host = profile.host
     port = profile.port
 
+    from archie_orchestrator import configure_logging
+
+    configure_logging()
     click.echo(f"Starting archie orchestrator on {host}:{port}")
-    uvicorn.run("archie_orchestrator.app:app", host=host, port=port)
+    uvicorn.run("archie_orchestrator.app:app", host=host, port=port, log_config=None)
 
 
 @main.command(name="migrate-sessions")
