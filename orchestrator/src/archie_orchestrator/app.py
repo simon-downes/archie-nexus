@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import msgspec
 from archie_shared.config import home_dir
 from archie_shared.schemas import load_nexus_config
@@ -29,6 +30,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
 from archie_orchestrator import configure_logging
+from archie_orchestrator.auth import AuthError, AuthService
 from archie_orchestrator.docker import DockerError, list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
 from archie_orchestrator.metrics import MetricsWriter
@@ -44,6 +46,19 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 log = logging.getLogger(__name__)
 
+
+class CallbackAccessFilter(logging.Filter):
+    """Prevent OAuth callback query parameters from entering access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "/auth/callback/" in str(record.msg):
+            return record.name != "uvicorn.access"
+        return True
+
+
+log.addFilter(CallbackAccessFilter())
+logging.getLogger("uvicorn.access").addFilter(CallbackAccessFilter())
+
 # ---------------------------------------------------------------------------
 # Lifespan — load config once at startup
 # ---------------------------------------------------------------------------
@@ -55,6 +70,7 @@ async def lifespan(app: Starlette):
     configure_logging()
     app.state.start_time = datetime.now(UTC)
     app.state.config = load_nexus_config()
+    app.state.auth_service = AuthService(app.state.config)
     # list_sessions() shells out to docker (blocking) — keep it off the loop.
     sessions = await asyncio.to_thread(list_sessions)
     log.info("Discovered %d running sessions", len(sessions))
@@ -304,51 +320,118 @@ async def get_session_metrics(request: Request) -> Response:
     return Response(msgspec.json.encode(result), media_type="application/json")
 
 
-async def push_credentials(request: Request) -> Response:
-    """POST /credentials — receive and atomically write credentials.yaml.
+async def auth_providers(request: Request) -> Response:
+    service = request.app.state.auth_service
+    return Response(msgspec.json.encode(service.providers()), media_type="application/json")
 
-    Body: raw YAML content of the credentials file.
-    Writes to ~/.nexus/credentials.yaml with 0600 permissions (atomic).
-    Credential contents are never logged.
-    """
-    import os as _os
-    import tempfile
 
-    body = await request.body()
-    if not body:
-        return JSONResponse({"error": "Empty credentials body"}, status_code=400)
-    # Enforce a reasonable cap — credentials.yaml should never be larger than this
-    _max_cred_size = 1 * 1024 * 1024  # 1 MiB
-    if len(body) > _max_cred_size:
-        return JSONResponse(
-            {"error": f"Credentials body too large (max {_max_cred_size} bytes)"},
-            status_code=413,
-        )
+async def auth_status(request: Request) -> Response:
+    service = request.app.state.auth_service
+    result = [service.status(name) for name in service.provider_names()]
+    return Response(msgspec.json.encode(result), media_type="application/json")
 
-    cred_path = home_dir() / "credentials.yaml"
-    cred_path.parent.mkdir(parents=True, exist_ok=True)
 
-    tmp_fd = tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=cred_path.parent,
-        prefix=".credentials-",
-        suffix=".tmp",
-        delete=False,
-    )
+async def auth_credential_put(request: Request) -> Response:
+    service = request.app.state.auth_service
+    name = request.path_params["provider"]
     try:
-        tmp_fd.write(body)
-        tmp_fd.close()
-        _os.chmod(tmp_fd.name, 0o600)
-        _os.replace(tmp_fd.name, cred_path)
-    except Exception:
-        try:
-            _os.unlink(tmp_fd.name)
-        except OSError:
-            pass
-        raise
+        status = service.replace_static(name, await request.body())
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    return Response(msgspec.json.encode(status), media_type="application/json")
 
-    log.info("Credentials received")
-    return JSONResponse({"status": "ok"})
+
+async def auth_login(request: Request) -> Response:
+    service = request.app.state.auth_service
+    provider = request.path_params["provider"]
+    origin = f"{request.url.scheme}://{request.url.netloc}"
+    try:
+        redirect_uri = service.redirect_uri(origin, provider)
+        flow, authorization_url = await service.start_login(provider, redirect_uri)
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    except (httpx.HTTPError, ValueError, TypeError):
+        return JSONResponse({"error": "OAuth provider unavailable"}, status_code=502)
+    from archie_shared.credentials.api import OAuthLoginResponse
+
+    return Response(
+        msgspec.json.encode(OAuthLoginResponse(flow.flow_id, authorization_url, redirect_uri)),
+        media_type="application/json",
+    )
+
+
+async def auth_refresh(request: Request) -> Response:
+    try:
+        result = await request.app.state.auth_service.refresh(request.path_params["provider"])
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    except (httpx.HTTPError, ValueError, TypeError):
+        return JSONResponse({"error": "OAuth provider unavailable"}, status_code=502)
+    return Response(msgspec.json.encode(result), media_type="application/json")
+
+
+async def auth_flow(request: Request) -> Response:
+    try:
+        result = request.app.state.auth_service.flow_status(request.path_params["flow_id"])
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    return Response(msgspec.json.encode(result), media_type="application/json")
+
+
+async def auth_callback(request: Request) -> Response:
+    service = request.app.state.auth_service
+    provider_name = request.path_params["provider"]
+    state = request.query_params.get("state")
+    try:
+        flow = service.find_flow(provider_name, state or "")
+    except AuthError:
+        return Response(
+            "<h1>Authentication failed</h1><p>Invalid or expired flow.</p>",
+            status_code=400, media_type="text/html",
+        )
+    expected_uri = service.redirect_uri(
+        f"{request.url.scheme}://{request.url.netloc}", provider_name
+    )
+    if flow.redirect_uri != expected_uri:
+        flow.status = "failed"
+        flow.error = "Callback URI mismatch"
+        return Response(
+            "<h1>Authentication failed</h1><p>Callback URI mismatch.</p>",
+            status_code=400, media_type="text/html",
+        )
+    if request.query_params.get("error") or not request.query_params.get("code"):
+        flow.status = "failed"
+        flow.error = "Provider authorization failed"
+        flow.expires_at = datetime.now(UTC) + service.flows.retention
+        return Response(
+            "<h1>Authentication failed</h1><p>Authorization was not completed.</p>",
+            status_code=400, media_type="text/html",
+        )
+    try:
+        flow.credential_status = await service.complete(flow, request.query_params["code"])
+    except (AuthError, httpx.HTTPError, ValueError, TypeError):
+        flow.status = "failed"
+        flow.error = "Token exchange failed"
+        flow.expires_at = datetime.now(UTC) + service.flows.retention
+        return Response(
+            "<h1>Authentication failed</h1><p>Token exchange failed.</p>",
+            status_code=502, media_type="text/html",
+        )
+    flow.status = "succeeded"
+    flow.expires_at = datetime.now(UTC) + service.flows.retention
+    return Response(
+        "<h1>Authentication successful</h1><p>You can close this window.</p>",
+        media_type="text/html",
+    )
+
+
+async def auth_credential_delete(request: Request) -> Response:
+    service = request.app.state.auth_service
+    try:
+        status = service.delete(request.path_params["provider"])
+    except AuthError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    return Response(msgspec.json.encode(status), media_type="application/json")
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +443,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     """Catch unexpected exceptions, log with origin, return 500."""
     tb = traceback.extract_tb(exc.__traceback__)
     origin = f"{tb[-1].filename}:{tb[-1].lineno}" if tb else "unknown"
-    log.error("Unhandled error: %s (at %s)", exc, origin)
+    log.error("Unhandled %s (at %s)", type(exc).__name__, origin)
     # Do not leak internal exception detail to the client.
     return JSONResponse(
         {"error": "Internal server error"},
@@ -384,7 +467,14 @@ app = Starlette(
         Route("/sessions/{session_id}/events", proxy_events, methods=["GET"]),
         Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
         Route("/metrics", get_metrics, methods=["GET"]),
-        Route("/credentials", push_credentials, methods=["POST"]),
+        Route("/auth/providers", auth_providers, methods=["GET"]),
+        Route("/auth/status", auth_status, methods=["GET"]),
+        Route("/auth/login/{provider}", auth_login, methods=["POST"]),
+        Route("/auth/refresh/{provider}", auth_refresh, methods=["POST"]),
+        Route("/auth/callback/{provider}", auth_callback, methods=["GET"]),
+        Route("/auth/flow/{flow_id}", auth_flow, methods=["GET"]),
+        Route("/auth/credential/{provider}", auth_credential_put, methods=["PUT"]),
+        Route("/auth/credential/{provider}", auth_credential_delete, methods=["DELETE"]),
         WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
         Mount("/static", app=StaticFiles(directory=str(_STATIC_DIR)), name="static"),
     ],

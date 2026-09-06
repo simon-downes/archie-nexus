@@ -5,6 +5,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 ## Start here
 
 - [Architecture](docs/architecture.md) — components, lifecycle, data flows, HTTP/WebSocket routes, event layers, logs, accounting, and security boundaries.
+- [Authentication and credentials](docs/auth-credentials.md) — provider configuration, credential storage, CLI workflows, OAuth, and agent access.
 - [Contributing](CONTRIBUTING.md) — development workflow, checks, and invariants for changing the system.
 - [Agent-session guidance](AGENTS.md) — short context and reading order for coding agents.
 

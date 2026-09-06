@@ -45,10 +45,11 @@ class GithubCredential(msgspec.Struct, forbid_unknown_fields=True):
 
 
 class ScalrCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Scalr API token + hostname."""
+    """Scalr API token, hostname, and account."""
 
     token: str | None = None
     hostname: str | None = None
+    account: str | None = None
 
 
 class JiraCredential(msgspec.Struct, forbid_unknown_fields=True):

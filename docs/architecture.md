@@ -77,16 +77,22 @@ The orchestrator exposes these application routes:
 | `GET` | `/sessions/{id}/events?after=<id>` | proxy session history read |
 | `GET` | `/sessions/{id}/metrics` | metrics for one session |
 | `GET` | `/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
-| `POST` | `/credentials` | replace the host credentials file |
+| `GET` | `/auth/providers` | typed, secret-free provider definitions |
+| `GET` | `/auth/status` | redacted credential status |
+| `PUT` | `/auth/credential/{provider}` | replace one static provider credential |
+| `DELETE` | `/auth/credential/{provider}` | remove one provider credential |
+| `POST` | `/auth/login/{provider}` | start orchestrator-owned OAuth |
+| `GET` | `/auth/callback/{provider}` | complete browser OAuth callback |
+| `GET` | `/auth/flow/{flow_id}` | query redacted OAuth flow status |
+| `POST` | `/auth/refresh/{provider}` | refresh OAuth credentials |
 | WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/static/*` | static assets for the session page |
 
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
 
-### Credential push security
+### Authentication API security
 
-`POST /credentials` accepts raw YAML, up to 1 MiB, and atomically replaces `<ARCHIE_HOME_DIR>/credentials.yaml` with mode `0600`. Credential contents are not logged. The endpoint has no authentication or authorization; it is intended for a trusted local/private network and must not be exposed on an untrusted network. In particular, binding `archie serve` to `0.0.0.0` or using a remote profile makes this endpoint a credential-write surface. Use transport/network access controls until an authenticated credential-push protocol exists.
-
+The orchestrator owns provider-scoped static credential updates and OAuth callbacks while retaining the shared `<ARCHIE_HOME_DIR>/credentials.yaml` store. Responses and logs are redacted; the store uses atomic writes and restrictive permissions. These routes have no client authentication and remain intended only for the trusted local deployment model. `bedrock` and `aws` are separate provider entries. See [Authentication and credentials](auth-credentials.md) for the complete provider, storage, CLI, OAuth, and agent-access contract.
 ## Turn and data flow
 
 A user message follows this path:
@@ -177,7 +183,7 @@ orchestrator:
       port: 7600
 ```
 
-Use `profile/value` CLI arguments to select a named orchestrator profile for workspace or session commands. `archie serve` binds to the configured default profile. Profiles with non-loopback hosts and the unauthenticated `/credentials` endpoint require private-network controls.
+Use `profile/value` CLI arguments to select a named orchestrator profile for workspace or session commands. `archie serve` binds to the configured default profile. Profiles with non-loopback hosts and these unauthenticated auth endpoints require private-network controls.
 
 The agent owns the session process, provider requests, tool execution, and canonical log. The orchestrator owns Docker/session lifecycle and the metrics index. The CLI owns presentation and user commands; it must consume server-provided accounting rather than reconstructing prices. Containers receive read-write access to the selected workspace, the configured home directory, and persona content, so agent code and tools can modify those host-backed locations.
 

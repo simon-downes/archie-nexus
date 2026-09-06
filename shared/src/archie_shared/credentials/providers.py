@@ -6,8 +6,10 @@ configuration needed for OAuth flows (endpoints, scopes, etc.).
 
 import msgspec
 
+from archie_shared.credentials.api import AuthProviderOverride
 
-class StaticProvider(msgspec.Struct):
+
+class StaticProvider(msgspec.Struct, forbid_unknown_fields=True):
     """A service that uses static credentials (tokens, API keys).
 
     Attributes:
@@ -19,10 +21,12 @@ class StaticProvider(msgspec.Struct):
 
     name: str
     fields: list[str]
+    env: dict[str, str] = msgspec.field(default_factory=dict)
+    set_env: bool = False
     can_refresh_noninteractive: bool = False
 
 
-class OAuthProvider(msgspec.Struct):
+class OAuthProvider(msgspec.Struct, forbid_unknown_fields=True):
     """A service that uses OAuth2 + PKCE for authentication.
 
     Attributes:
@@ -43,19 +47,48 @@ class OAuthProvider(msgspec.Struct):
     server_url: str | None = None
     authorization_endpoint: str | None = None
     token_endpoint: str | None = None
+    registration_endpoint: str | None = None
     scopes: list[str] | None = None
     token_path: str = "access_token"
     refresh_token_path: str = "refresh_token"
+    expires_in_path: str = "expires_in"
     extra_params: dict[str, str] | None = None
     can_refresh_noninteractive: bool = True
 
 
 # --- Provider registry ---
 
+def effective_provider(
+    name: str, override: "AuthProviderOverride | None" = None
+) -> StaticProvider | OAuthProvider:
+    """Return a code-defined provider with optional typed OAuth overrides."""
+    provider = PROVIDERS[name]
+    if override is None:
+        return provider
+    values = {field: getattr(provider, field) for field in provider.__struct_fields__}
+    for field in provider.__struct_fields__:
+        if hasattr(override, field):
+            value = getattr(override, field)
+            if value is not None:
+                values[field] = value
+    if isinstance(provider, StaticProvider):
+        if override.env is not None:
+            values["env"] = override.env
+        if override.set_env is not None:
+            values["set_env"] = override.set_env
+    return type(provider)(**values)
+
+
 PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
     "bedrock": StaticProvider(
         name="bedrock",
         fields=["aws_access_key_id", "aws_secret_access_key", "aws_session_token"],
+        env={
+            "aws_access_key_id": "AWS_ACCESS_KEY_ID",
+            "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "aws_session_token": "AWS_SESSION_TOKEN",
+        },
+        set_env=False,
         can_refresh_noninteractive=False,
     ),
     "linear": StaticProvider(
@@ -65,14 +98,28 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
     "github": StaticProvider(
         name="github",
         fields=["token"],
+        env={"token": "GH_TOKEN"},
+        set_env=True,
     ),
     "aws": StaticProvider(
         name="aws",
         fields=["access_key_id", "secret_access_key", "session_token"],
+        env={
+            "access_key_id": "AWS_ACCESS_KEY_ID",
+            "secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "session_token": "AWS_SESSION_TOKEN",
+        },
+        set_env=True,
     ),
     "scalr": StaticProvider(
         name="scalr",
-        fields=["token", "hostname"],
+        fields=["token", "hostname", "account"],
+        env={
+            "token": "SCALR_TOKEN",
+            "hostname": "SCALR_HOSTNAME",
+            "account": "SCALR_ACCOUNT",
+        },
+        set_env=True,
     ),
     "jira": StaticProvider(
         name="jira",
@@ -80,7 +127,7 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
     ),
     "notion": OAuthProvider(
         name="notion",
-        server_url="https://api.notion.com",
+        server_url="https://mcp.notion.com",
     ),
     "slack": OAuthProvider(
         name="slack",
@@ -88,6 +135,7 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
         token_endpoint="https://slack.com/api/oauth.v2.access",
         token_path="authed_user.access_token",
         refresh_token_path="authed_user.refresh_token",
+        expires_in_path="authed_user.expires_in",
         extra_params={
             "user_scope": (
                 "channels:history channels:read groups:history groups:read "
