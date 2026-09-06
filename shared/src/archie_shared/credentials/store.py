@@ -4,6 +4,7 @@ Store path: <ARCHIE_HOME_DIR>/credentials.yaml
 Format: YAML dict keyed by service name, each value is a flat field dict.
 """
 
+import fcntl
 import os
 import stat
 import sys
@@ -110,7 +111,7 @@ def get_credential[T](service: str, credential_type: type[T] | None = None) -> T
     if entry is None:
         return None
     if not isinstance(entry, dict):
-        return None
+        raise ValueError(f"Credential entry for '{service}' must be a mapping")
 
     if credential_type is None:
         if service not in CREDENTIAL_TYPES:
@@ -126,6 +127,36 @@ def get_credential[T](service: str, credential_type: type[T] | None = None) -> T
         raise ValueError(f"Validation error for '{service}' in {path}: {e}") from None
 
 
+def _update_store(update) -> None:
+    path = store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            data = load_store()
+            update(data)
+            save_store(data)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def replace_credential(service: str, fields: dict[str, str]) -> None:
+    """Replace one provider entry while preserving all other entries."""
+    def update(data: dict[str, dict]) -> None:
+        data[service] = dict(fields)
+
+    _update_store(update)
+
+
+def delete_credential(service: str) -> None:
+    """Delete one provider entry; missing entries are ignored."""
+    def update(data: dict[str, dict]) -> None:
+        data.pop(service, None)
+
+    _update_store(update)
+
+
 def set_credential(service: str, fields: dict[str, str | None]) -> None:
     """Set credential fields for a service (read-merge-write).
 
@@ -133,17 +164,13 @@ def set_credential(service: str, fields: dict[str, str | None]) -> None:
     None values remove the field from the entry.
     Unknown services are tolerated (preserved on write).
     """
-    store = load_store()
+    def update(store: dict[str, dict]) -> None:
+        if service not in store or not isinstance(store[service], dict):
+            store[service] = {}
+        for key, value in fields.items():
+            if value is None:
+                store[service].pop(key, None)
+            else:
+                store[service][key] = value
 
-    if service not in store:
-        store[service] = {}
-    elif not isinstance(store[service], dict):
-        store[service] = {}
-
-    for key, value in fields.items():
-        if value is None:
-            store[service].pop(key, None)
-        else:
-            store[service][key] = value
-
-    save_store(store)
+    _update_store(update)

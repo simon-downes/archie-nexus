@@ -11,6 +11,7 @@ from pathlib import Path
 import msgspec
 
 from archie_shared.config import home_dir, load_config
+from archie_shared.credentials.api import AuthConfig
 
 
 class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
@@ -52,6 +53,7 @@ class OrchestratorProfile(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
 
     host: str = "127.0.0.1"
     port: int = 7600
+    public_url: str | None = None
 
 
 class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
@@ -93,6 +95,7 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     agent: AgentConfig = msgspec.field(default_factory=AgentConfig)
     web: WebConfig = msgspec.field(default_factory=WebConfig)
     orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
+    auth: AuthConfig = msgspec.field(default_factory=AuthConfig)
 
 
 def load_nexus_config(path: Path | None = None) -> NexusConfig:

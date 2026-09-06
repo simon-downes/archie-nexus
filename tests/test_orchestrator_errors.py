@@ -80,8 +80,8 @@ def test_unhandled_exception_returns_500(caplog):
     # Internal exception detail must NOT leak to the client (logged only).
     assert "detail" not in body
     assert "something exploded" not in resp.text
-    assert any("Unhandled error" in r.message for r in caplog.records)
-    assert any("something exploded" in r.message for r in caplog.records)
+    assert any("Unhandled ValueError" in r.message for r in caplog.records)
+    assert all("something exploded" not in r.message for r in caplog.records)
 
 
 def test_second_request_succeeds_after_first_explodes():

@@ -56,3 +56,4 @@ def test_notion_uses_discovery():
     assert isinstance(notion, OAuthProvider)
     assert notion.server_url is not None
     assert notion.authorization_endpoint is None  # discovered at login time
+    assert notion.server_url == "https://mcp.notion.com"
