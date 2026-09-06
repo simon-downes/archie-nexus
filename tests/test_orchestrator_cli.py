@@ -162,6 +162,7 @@ def test_serve_invokes_uvicorn_with_config(monkeypatch, tmp_path):
         "archie_orchestrator.app:app",
         host="127.0.0.1",
         port=9900,
+        log_config=None,
     )
 
 
@@ -177,4 +178,5 @@ def test_serve_uses_default_port_when_no_config(monkeypatch, tmp_path):
         "archie_orchestrator.app:app",
         host="127.0.0.1",
         port=7600,
+        log_config=None,
     )

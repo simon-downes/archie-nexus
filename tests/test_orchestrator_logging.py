@@ -1,5 +1,6 @@
 """Tests for orchestrator operational logging."""
 
+import io
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -74,6 +75,27 @@ def test_configure_logging_debug_level(monkeypatch):
     finally:
         root.handlers = original_handlers
         monkeypatch.delenv("LOG_LEVEL", raising=False)
+
+
+def test_configure_logging_uses_utc_common_format(monkeypatch):
+    """Configured handlers use the shared UTC timestamp/category prefix."""
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    handler = logging.StreamHandler(io.StringIO())
+    root.handlers.clear()
+    root.addHandler(handler)
+    try:
+        configure_logging()
+        record = logging.LogRecord(
+            "archie_orchestrator.test", logging.INFO, __file__, 1, "hello", (), None
+        )
+        handler.emit(record)
+        assert handler.stream.getvalue().endswith(" INFO archie_orchestrator.test hello\\n")
+        assert handler.stream.getvalue()[:19].count("-") == 2
+        assert handler.stream.getvalue()[10] == " "
+    finally:
+        root.handlers = original_handlers
 
 
 # ---------------------------------------------------------------------------
