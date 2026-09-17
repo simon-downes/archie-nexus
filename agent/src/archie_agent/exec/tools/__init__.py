@@ -52,7 +52,15 @@ class FileTooLargeError(ToolError):
 _TOOLS: dict[str, object] = {}
 
 
-def tool(fn=None, *, guidelines=(), native: bool = True):
+def tool(
+    fn=None,
+    *,
+    guidelines=(),
+    native: bool = True,
+    exec_enabled: bool = True,
+    exec_docs: bool = True,
+    namespace: str | None = None,
+):
     """Decorator that registers an async function as an exec tool.
 
     Usage:
@@ -72,9 +80,19 @@ def tool(fn=None, *, guidelines=(), native: bool = True):
     """
 
     def decorator(f):
-        f._guidelines = guidelines
+        f._guidelines = guidelines or (
+            ("Use Jira only through the `jira` namespace and never provide credentials.",)
+            if namespace
+            else ()
+        )
         f._native = native
-        _TOOLS[f.__name__] = f
+        f._exec_enabled = exec_enabled
+        f._exec_docs = exec_docs
+        f._namespace = namespace
+        key = f"{namespace}.{f.__name__}" if namespace else f.__name__
+        if key in _TOOLS:
+            raise ValueError(f"Duplicate exec tool registration: {key}")
+        _TOOLS[key] = f
         return f
 
     if fn is not None:
@@ -90,9 +108,9 @@ def get_all_tools() -> dict:
     into the model code's namespace.
     """
     # Import submodules to trigger @tool registration
-    from archie_agent.exec.tools import brain, code, fs, shell, web  # noqa: F401
+    from archie_agent.exec.tools import brain, code, fs, jira, shell, web  # noqa: F401
 
-    return dict(_TOOLS)
+    return {key: value for key, value in _TOOLS.items() if getattr(value, "_exec_enabled", True)}
 
 
 def get_tool_guidelines() -> list[str]:

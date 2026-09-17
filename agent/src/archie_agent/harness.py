@@ -90,6 +90,7 @@ class AgentHarness:
         model_catalog: dict[str, "ModelEntry"] | None = None,
         region: str = "eu-west-1",
         subagents: SubagentsConfig | None = None,
+        tool_policy: dict | None = None,
     ) -> None:
         self.session = session
         self._llm = llm_client
@@ -98,6 +99,7 @@ class AgentHarness:
         self._model_catalog = model_catalog or {}
         self._region = region
         self._subagents = subagents or SubagentsConfig()
+        self._tool_policy = tool_policy or {}
         if self._subagents.max_concurrent <= 0:
             raise ValueError("agent.subagents.max_concurrent must be positive")
 
@@ -138,6 +140,7 @@ class AgentHarness:
                 emit=self._emit_event,
                 exec_python=self._exec_python,
                 exec_run_root=self._exec_run_root,
+                tool_policy=self._tool_policy,
                 max_concurrent=self._subagents.max_concurrent,
                 live_children=self._children,
             )
@@ -631,6 +634,7 @@ class AgentHarness:
                     kwargs["python"] = self._exec_python
                 if self._exec_run_root:
                     kwargs["run_root"] = self._exec_run_root
+                kwargs["policy_snapshot"] = self._tool_policy
                 envelope = await run_exec(source, **kwargs)
                 content = format_result(envelope)
                 is_error = not envelope.ok

@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -33,6 +34,7 @@ async def run_exec(
     run_root: Path = _RUNS_ROOT,
     python: str = PYTHON,
     on_start: Callable[[asyncio.subprocess.Process], Any] | None = None,
+    policy_snapshot: dict | None = None,
 ) -> Envelope:
     """Execute model-authored Python via the runner subprocess.
 
@@ -51,10 +53,13 @@ async def run_exec(
     run_dir = run_root / str(ULID())
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write model source
+    # Write model source and the explicit non-secret runner context.
     (run_dir / "main.py").write_text(source, encoding="utf-8")
+    if policy_snapshot is not None:
+        (run_dir / "context.json").write_text(json.dumps(policy_snapshot), encoding="utf-8")
 
-    # Spawn the runner subprocess
+    # Spawn the runner subprocess.
+    env = os.environ.copy()
     try:
         proc = await asyncio.create_subprocess_exec(
             python,
@@ -63,6 +68,7 @@ async def run_exec(
             str(run_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
     except OSError as e:
         return Envelope.error_envelope("RunnerCrash", f"Failed to spawn runner: {e}")
@@ -154,6 +160,8 @@ def _generate_tool_docs() -> str:
     for name in sorted(tools):
         fn = tools[name]
         sig = inspect.signature(fn)
+        if not getattr(fn, "_exec_docs", True) or getattr(fn, "_namespace", None):
+            continue
         doc = inspect.getdoc(fn) or ""
         first_line = doc.split("\n")[0].strip() if doc else ""
         lines.append(f"  {name}{sig} — {first_line}")
