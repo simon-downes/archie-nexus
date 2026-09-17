@@ -39,6 +39,7 @@ class AgentConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Agent-specific settings."""
 
     subagents: SubagentsConfig = msgspec.field(default_factory=SubagentsConfig)
+    turn_cost_limit: float = 50.0
 
 
 class CliConfig(msgspec.Struct, forbid_unknown_fields=True):

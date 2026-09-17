@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from archie_shared.events import ErrorNotice, Event, SessionEvent, SessionStatus, UserMessage
 from archie_shared.events import TurnError as CanonicalTurnError
+from archie_shared.models import calculate_cost
 from archie_shared.schemas import SubagentsConfig
 from archie_shared.session.log import LogAppendError, SessionLog
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
@@ -91,6 +92,7 @@ class AgentHarness:
         region: str = "eu-west-1",
         subagents: SubagentsConfig | None = None,
         tool_policy: dict | None = None,
+        turn_cost_limit: float = 50.0,
     ) -> None:
         self.session = session
         self._llm = llm_client
@@ -100,6 +102,9 @@ class AgentHarness:
         self._region = region
         self._subagents = subagents or SubagentsConfig()
         self._tool_policy = tool_policy or {}
+        self._turn_cost_limit = turn_cost_limit
+        if self._turn_cost_limit <= 0:
+            raise ValueError("agent.turn_cost_limit must be positive")
         if self._subagents.max_concurrent <= 0:
             raise ValueError("agent.subagents.max_concurrent must be positive")
 
@@ -141,6 +146,7 @@ class AgentHarness:
                 exec_python=self._exec_python,
                 exec_run_root=self._exec_run_root,
                 tool_policy=self._tool_policy,
+                turn_cost_limit=self._turn_cost_limit,
                 max_concurrent=self._subagents.max_concurrent,
                 live_children=self._children,
             )
@@ -384,6 +390,15 @@ class AgentHarness:
                 interrupt_async=self._interrupt_async,
                 tool_config=self._tool_config,
                 execute_tool=self._execute_tool,
+                max_iterations=None,
+                turn_cost_limit=self._turn_cost_limit,
+                request_cost_factory=lambda usage: calculate_cost(
+                    self.session.model.cost,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_write_tokens,
+                ),
                 request_context_factory=lambda: RequestContext(str(ULID()), now_utc()),
             )
 

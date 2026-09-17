@@ -166,12 +166,16 @@ async def run_loop(
     interrupt_async: asyncio.Event | None = None,
     tool_config: list[dict] | None = None,
     execute_tool: Callable[[ToolUseBlock], Awaitable[ToolResultBlock]] | None = None,
-    max_iterations: int = _DEFAULT_MAX_ITERATIONS,
+    max_iterations: int | None = _DEFAULT_MAX_ITERATIONS,
+    turn_cost_limit: float | None = None,
+    request_cost_factory: Callable[[Usage], float] | None = None,
     request_context_factory: Callable[[], RequestContext] | None = None,
 ) -> AsyncGenerator[AgentEvent | RequestFinished]:
     """Yield AgentEvents by streaming from the LLM client in a tool loop."""
     working_messages: list[Turn] = list(messages)
-    for iteration in range(max_iterations):
+    iteration = 0
+    turn_cost = 0.0
+    while max_iterations is None or iteration < max_iterations:
         yield IterationStart(index=iteration)
         result = _RequestResult()
         request_context = (
@@ -237,6 +241,11 @@ async def run_loop(
         has_tool_use = bool(result.tool_use_blocks)
         if result.usage is not None:
             yield result.usage
+            if request_cost_factory is not None:
+                turn_cost += request_cost_factory(result.usage)
+        if turn_cost_limit is not None and turn_cost >= turn_cost_limit:
+            yield TurnError(error="turn cost limit exceeded")
+            return
         if has_tool_use and result.stop_reason == "tool_use" and execute_tool:
             from archie_agent.session import Turn as TurnType
 
@@ -270,6 +279,7 @@ async def run_loop(
             if interrupt.is_set():
                 yield TurnInterrupted()
                 return
+            iteration += 1
             continue
         yield TurnComplete(stop_reason=result.stop_reason or "end_turn")
         return

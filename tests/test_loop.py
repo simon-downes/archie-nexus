@@ -44,6 +44,49 @@ async def _collect(gen) -> list:
 
 
 @pytest.mark.asyncio
+async def test_turn_cost_limit_stops_current_turn():
+    llm = FakeLLMClient(
+        responses=[
+            [Usage(input_tokens=1_000_000, output_tokens=0), Done(stop_reason="tool_use")],
+            [TextDelta(text="should not run"), Done(stop_reason="end_turn")],
+        ]
+    )
+    events = await _collect(
+        run_loop(
+            messages=_make_messages(),
+            system="test",
+            llm=llm,
+            interrupt=threading.Event(),
+            turn_cost_limit=1.0,
+            request_cost_factory=lambda usage: usage.input_tokens / 1_000_000,
+        )
+    )
+    assert isinstance(events[-1], TurnError)
+    assert events[-1].error == "turn cost limit exceeded"
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_turn_cost_resets_for_new_loop_invocation():
+    llm = FakeLLMClient(
+        responses=[
+            [Usage(input_tokens=1, output_tokens=0), Done(stop_reason="end_turn")],
+            [Usage(input_tokens=1, output_tokens=0), Done(stop_reason="end_turn")],
+        ]
+    )
+    kwargs = {
+        "messages": _make_messages(),
+        "system": "test",
+        "llm": llm,
+        "interrupt": threading.Event(),
+        "turn_cost_limit": 1.0,
+        "request_cost_factory": lambda usage: 0.5,
+    }
+    assert isinstance((await _collect(run_loop(**kwargs)))[-1], TurnComplete)
+    assert isinstance((await _collect(run_loop(**kwargs)))[-1], TurnComplete)
+
+
+@pytest.mark.asyncio
 async def test_normal_flow():
     """Text chunks, usage, and done are yielded in correct order."""
     llm = FakeLLMClient(
