@@ -83,8 +83,9 @@ def _build_namespace(calls: list[CallRecord], policy_snapshot: dict | None = Non
     try:
         import types as _types
 
+        from archie_shared.tool_policy import set_policy_snapshot
+
         from archie_agent.exec.tools import get_all_tools
-        from archie_agent.exec.tools.jira.policy import set_policy_snapshot
 
         set_policy_snapshot(policy_snapshot or {})
         service_namespaces: dict[str, object] = {}
@@ -219,10 +220,12 @@ def run(run_dir: Path) -> None:
         with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
             return_value = asyncio.run(main_fn())
     except Exception as e:
+        from archie_agent.exec.tools import ToolError
+
         error_info = ErrorInfo(
             type=type(e).__name__,
             message=str(e),
-            traceback=traceback.format_exc(),
+            traceback="" if isinstance(e, ToolError) else traceback.format_exc(),
         )
 
     # Serialise return value

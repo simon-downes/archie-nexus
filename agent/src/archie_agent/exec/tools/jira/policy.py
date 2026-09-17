@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any
 
-from archie_shared.tool_policy import resolve_provider_policy
+from archie_shared.tool_policy import current_policy_snapshot, resolve_provider_policy
 
 from archie_agent.exec.tools import ToolError
 
@@ -15,9 +15,6 @@ from .client import JiraPolicyError
 
 _PROJECT = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}$")
 _ISSUE = re.compile(r"^([A-Za-z][A-Za-z0-9_]{0,9})-([1-9][0-9]*)$")
-_POLICY: dict[str, Any] = {}
-
-
 class JiraValidationError(ToolError):
     pass
 
@@ -27,13 +24,16 @@ class JiraWritePolicyError(ToolError):
 
 
 def set_policy_snapshot(snapshot: dict[str, Any]) -> None:
-    global _POLICY
-    _POLICY = snapshot
+    """Compatibility shim; the runner now installs the shared context."""
+    from archie_shared.tool_policy import set_policy_snapshot as install_snapshot
+
+    install_snapshot(snapshot)
 
 
 def _snapshot() -> dict[str, Any]:
-    if _POLICY:
-        return _POLICY
+    snapshot = current_policy_snapshot()
+    if snapshot:
+        return snapshot
     try:
         return json.loads(os.environ.get("ARCHIE_TOOL_POLICY", "{}"))
     except (TypeError, ValueError):

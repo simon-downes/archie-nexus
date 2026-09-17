@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 from typing import Any
 
 import msgspec
@@ -31,6 +32,26 @@ class ToolsConfig(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
         return self.providers.get(provider, ProviderToolPolicy())
 
 
+_CURRENT_SNAPSHOT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "archie_tool_policy", default=None
+)
+
+
+def set_policy_snapshot(snapshot: dict[str, Any]) -> contextvars.Token:
+    """Install a detached invocation snapshot and return its reset token."""
+    return _CURRENT_SNAPSHOT.set(snapshot or {})
+
+
+def reset_policy_snapshot(token: contextvars.Token) -> None:
+    """Restore the previous invocation snapshot."""
+    _CURRENT_SNAPSHOT.reset(token)
+
+
+def current_policy_snapshot() -> dict[str, Any]:
+    """Return the current non-secret invocation snapshot."""
+    return _CURRENT_SNAPSHOT.get() or {}
+
+
 def policy_snapshot(config: ToolsConfig) -> dict[str, dict[str, dict[str, Any]]]:
     """Make a detached non-secret snapshot for an exec runner."""
     return {
@@ -45,8 +66,8 @@ def policy_snapshot(config: ToolsConfig) -> dict[str, dict[str, dict[str, Any]]]
 def resolve_provider_policy(
     snapshot: dict[str, Any] | None, provider: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Resolve a provider from a runner snapshot using safe defaults."""
-    entry = (snapshot or {}).get(provider) or {}
+    """Resolve a provider from an explicit or current runner snapshot."""
+    entry = (snapshot if snapshot is not None else current_policy_snapshot()).get(provider) or {}
     read = entry.get("read") or {}
     write = entry.get("write") or {}
     return (
