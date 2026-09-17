@@ -90,7 +90,21 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="openai.gpt-5.6-luna", region="us-east-1"),
         can_cache=True,
-        cost=CostConfig(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25),
+        cost=CostConfig(input=0.40, output=1.80, cache_read=0.04, cache_write=0.5),
+    ),
+    "bedrock-openai-gpt-5-6-terra": ModelEntry(
+        name="GPT-5.6 Terra",
+        context=1_000_000,
+        provider=BedrockOpenAIProvider(model_id="openai.gpt-5.6-terra", region="us-east-1"),
+        can_cache=True,
+        cost=CostConfig(input=4.40, output=19.80, cache_read=0.44, cache_write=5.50),
+    ),
+    "bedrock-openai-gpt-5-6-sol": ModelEntry(
+        name="GPT-5.6 Sol",
+        context=1_000_000,
+        provider=BedrockOpenAIProvider(model_id="openai.gpt-5.6-sol", region="us-east-1"),
+        can_cache=True,
+        cost=CostConfig(input=4.40, output=33.00, cache_read=0.88, cache_write=11.00),
     ),
     "bedrock-glm-5": ModelEntry(
         name="GLM 5",
