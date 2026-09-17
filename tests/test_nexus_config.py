@@ -16,6 +16,7 @@ def test_load_nexus_config_no_file_returns_defaults(monkeypatch, tmp_path):
     assert config.global_.model == "bedrock-openai-gpt-5-6-luna"
     assert config.global_.workspace_root == "~/dev"
     assert config.global_.region == "eu-west-1"
+    assert config.agent.turn_cost_limit == 50.0
 
 
 def test_load_nexus_config_empty_file(monkeypatch, tmp_path):
@@ -28,6 +29,13 @@ def test_load_nexus_config_empty_file(monkeypatch, tmp_path):
 
 
 # --- Tests: load_nexus_config with content ---
+
+
+def test_load_nexus_config_turn_cost_limit(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agent:\n  turn_cost_limit: 12.5\n")
+    config = load_nexus_config(path=cfg)
+    assert config.agent.turn_cost_limit == 12.5
 
 
 def test_load_nexus_config_full(tmp_path):

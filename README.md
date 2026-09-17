@@ -48,7 +48,7 @@ Build the image again after changing Dockerfile or dependency layers. Source for
 
 ## Configuration and data
 
-The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, and named `orchestrator.profiles`.
+The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), and named `orchestrator.profiles`.
 
 Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; aggregate request metrics are stored in `~/.nexus/metrics.db`. Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
 

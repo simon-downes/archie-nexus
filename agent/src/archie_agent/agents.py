@@ -21,6 +21,7 @@ import yaml
 from archie_shared.config import persona_dir
 from archie_shared.events import ErrorNotice, SessionEvent
 from archie_shared.events import TurnError as CanonicalTurnError
+from archie_shared.models import calculate_cost
 from archie_shared.session.log import LogAppendError
 from archie_shared.types import ToolResultBlock, ToolUseBlock
 from ulid import ULID
@@ -289,6 +290,7 @@ def create_task_tool(
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
     tool_policy: dict | None = None,
+    turn_cost_limit: float = 50.0,
     max_concurrent: int = 3,
     live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
     | None = None,
@@ -440,6 +442,15 @@ def create_task_tool(
                     interrupt_async=interrupt_async,
                     tool_config=child_registry.to_tool_config(),
                     execute_tool=dispatch.execute,
+                    max_iterations=None,
+                    turn_cost_limit=turn_cost_limit,
+                    request_cost_factory=lambda usage: calculate_cost(
+                        child_model.cost,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_write_tokens,
+                    ),
                     request_context_factory=lambda: RequestContext(
                         request_id=str(ULID()), sent_at=now_utc()
                     ),

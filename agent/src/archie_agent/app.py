@@ -122,6 +122,7 @@ async def lifespan(app):
         region=_config.global_.region,
         subagents=_config.agent.subagents,
         tool_policy=policy_snapshot(ToolsConfig(providers=_config.tools)),
+        turn_cost_limit=_config.agent.turn_cost_limit,
     )
 
     if not _agent.event_bus.log.read():
