@@ -124,7 +124,7 @@ Project status: planning; Jira spec drafted and awaiting approval. Jira implemen
 | Jira | `039-spec-jira-tooling.md` | planned |
 | Linear | — | not started |
 | Slack | — | not started |
-| Notion | — | not started |
+| Notion | `040-spec-notion-tooling.md` | planned |
 | Google Workspace | — | not started |
 
 ## Open decisions deferred to provider specs
