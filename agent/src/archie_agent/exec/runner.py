@@ -61,7 +61,7 @@ def _validate_contract(source: str) -> str | None:
     return "ContractError: source must define `async def main()`"
 
 
-def _build_namespace(calls: list[CallRecord]) -> dict:
+def _build_namespace(calls: list[CallRecord], policy_snapshot: dict | None = None) -> dict:
     """Build the namespace injected into model code.
 
     Imports exec tool functions and wraps each for audit logging.
@@ -81,12 +81,26 @@ def _build_namespace(calls: list[CallRecord]) -> dict:
     }
 
     try:
-        from archie_agent.exec.tools import get_all_tools
+        import types as _types
 
-        for name, func in get_all_tools().items():
-            namespace[name] = _wrap_for_audit(func, name, calls)
-    except ImportError:
-        pass  # Should not happen in normal operation
+        from archie_agent.exec.tools import get_all_tools
+        from archie_agent.exec.tools.jira.policy import set_policy_snapshot
+
+        set_policy_snapshot(policy_snapshot or {})
+        service_namespaces: dict[str, object] = {}
+        for key, func in get_all_tools().items():
+            name = key.rsplit(".", 1)[-1]
+            namespace_name = getattr(func, "_namespace", None)
+            wrapped = _wrap_for_audit(func, key, calls)
+            if namespace_name:
+                service = service_namespaces.setdefault(namespace_name, _types.SimpleNamespace())
+                setattr(service, name, wrapped)
+            else:
+                namespace[name] = wrapped
+        namespace.update(service_namespaces)
+        namespace["_tool_policy"] = policy_snapshot or {}
+    except ImportError as exc:
+        raise RuntimeError("Failed to load exec tools") from exc
 
     return namespace
 
@@ -150,7 +164,14 @@ def run(run_dir: Path) -> None:
 
     # Build namespace and compile
     calls: list[CallRecord] = []
-    namespace = _build_namespace(calls)
+    policy_snapshot = None
+    context_path = run_dir / "context.json"
+    if context_path.exists():
+        try:
+            policy_snapshot = json.loads(context_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            policy_snapshot = None
+    namespace = _build_namespace(calls, policy_snapshot)
 
     try:
         code = compile(source, str(source_path), "exec")

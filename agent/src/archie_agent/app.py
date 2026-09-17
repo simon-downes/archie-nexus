@@ -30,6 +30,7 @@ from archie_shared.models import get_model, load_models
 from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import load_nexus_config
 from archie_shared.session.log import CursorNotFound
+from archie_shared.tool_policy import ToolsConfig, policy_snapshot
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -120,6 +121,7 @@ async def lifespan(app):
         model_catalog=_catalog,
         region=_config.global_.region,
         subagents=_config.agent.subagents,
+        tool_policy=policy_snapshot(ToolsConfig(providers=_config.tools)),
     )
 
     if not _agent.event_bus.log.read():

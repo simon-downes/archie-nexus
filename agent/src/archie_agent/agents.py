@@ -175,10 +175,12 @@ class ChildDispatch:
         *,
         exec_python: str | None = None,
         exec_run_root: Path | None = None,
+        tool_policy: dict | None = None,
     ) -> None:
         self.registry = registry
         self.exec_python = exec_python
         self.exec_run_root = exec_run_root
+        self.tool_policy = tool_policy or {}
         self.active_proc: asyncio.subprocess.Process | None = None
         self.pending_tools: dict[str, object] = {}
 
@@ -199,6 +201,7 @@ class ChildDispatch:
                     kwargs["python"] = self.exec_python
                 if self.exec_run_root is not None:
                     kwargs["run_root"] = self.exec_run_root
+                kwargs["policy_snapshot"] = getattr(self, "tool_policy", {})
                 envelope = await run_exec(str(block.input.get("source", "")), **kwargs)
                 content = format_result(envelope)
                 is_error = not envelope.ok
@@ -285,6 +288,7 @@ def create_task_tool(
     emit: Callable[[SessionEvent], Awaitable[None]],
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
+    tool_policy: dict | None = None,
     max_concurrent: int = 3,
     live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
     | None = None,
@@ -402,6 +406,7 @@ def create_task_tool(
                     child_registry,
                     exec_python=exec_python,
                     exec_run_root=exec_run_root,
+                    tool_policy=tool_policy,
                 )
                 import threading
 

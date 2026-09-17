@@ -12,6 +12,7 @@ import msgspec
 
 from archie_shared.config import home_dir, load_config
 from archie_shared.credentials.api import AuthConfig
+from archie_shared.tool_policy import ProviderToolPolicy
 
 
 class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
@@ -96,6 +97,7 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     web: WebConfig = msgspec.field(default_factory=WebConfig)
     orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
     auth: AuthConfig = msgspec.field(default_factory=AuthConfig)
+    tools: dict[str, ProviderToolPolicy] = msgspec.field(default_factory=dict)
 
 
 def load_nexus_config(path: Path | None = None) -> NexusConfig:
