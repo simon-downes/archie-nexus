@@ -530,7 +530,21 @@ class ArchieApp(App):
         self._reconnecting = True
         asyncio.create_task(self._reconnect(close_code))
 
-    async def _reconnect(self, close_code: int | None = None) -> None:
+    async def _ensure_connected(self) -> bool:
+        """Ensure the stream is connected before sending a user command."""
+        if self._ws.connected:
+            return True
+
+        # A receive-loop-triggered reconnect may already be in progress. Wait
+        # for that attempt rather than starting a competing replay/receive loop.
+        if self._reconnecting:
+            while self._reconnecting and not self._shutting_down:
+                await asyncio.sleep(0.05)
+            return self._ws.connected
+
+        return await self._reconnect()
+
+    async def _reconnect(self, close_code: int | None = None) -> bool:
         """Reconnect to the agent with backoff and resync via canonical replay.
 
         Close-code handling:
@@ -545,7 +559,7 @@ class ArchieApp(App):
         if close_code == 4004:
             self._show_client_error("Session has ended. Relaunch to start a new session.")
             self._reconnecting = False
-            return
+            return False
 
         start = asyncio.get_event_loop().time()
         deadline = start + 30.0
@@ -591,9 +605,10 @@ class ArchieApp(App):
                 self._dispatch_buffered_events()
                 self._event_buffer = []
                 self.notify("Reconnected to agent")
-                return
+                return True
 
             self._show_client_error("Reconnect failed after 30s. Relaunch the client to continue.")
+            return False
         finally:
             self._reconnecting = False
 
@@ -766,8 +781,10 @@ class ArchieApp(App):
         asyncio.create_task(self._send_message(content))
 
     async def _send_message(self, content: str) -> None:
-        """Send a message to the agent via WebSocket."""
+        """Reconnect if needed, then send a message to the agent."""
         try:
+            if not await self._ensure_connected():
+                raise RuntimeError("Not connected")
             await self._ws.send_message(content)
         except Exception as e:
             self._show_client_error(f"Send failed: {e}")
