@@ -9,6 +9,7 @@ import websockets
 from archie_shared.commands import ClientCommand, InterruptCommand, MessageCommand, encode_command
 from archie_shared.events import SessionEvent, decode_event
 from websockets import ClientConnection
+from websockets.protocol import State
 
 log = logging.getLogger(__name__)
 
@@ -21,8 +22,11 @@ class WSClient:
 
     @property
     def connected(self) -> bool:
-        """True if a connection object is currently held (may still be closing)."""
-        return self._ws is not None
+        """True if a live connection object is currently held."""
+        if self._ws is None:
+            return False
+        state = getattr(self._ws, "state", None)
+        return state is None or state is State.OPEN
 
     async def connect(self, url: str) -> WSClient:
         """Connect to the agent WebSocket endpoint with keepalive pings."""
