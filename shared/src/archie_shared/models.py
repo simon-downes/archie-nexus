@@ -53,9 +53,9 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
     "bedrock-claude-fable-5": ModelEntry(
         name="Claude Fable 5",
         context=1_000_000,
-        provider=BedrockProvider(model_id="eu.anthropic.claude-fable-5"),
+        provider=BedrockProvider(model_id="global.anthropic.claude-fable-5"),
         can_cache=True,
-        cost=CostConfig(input=11.0, output=55.0, cache_read=1.10, cache_write=13.75),
+        cost=CostConfig(input=10.0, output=50.0, cache_read=0.25, cache_write=12.50),
     ),
     "bedrock-claude-sonnet-4-6": ModelEntry(
         name="Claude Sonnet 4.6",
