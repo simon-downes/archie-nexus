@@ -108,7 +108,16 @@ def get_all_tools() -> dict:
     into the model code's namespace.
     """
     # Import submodules to trigger @tool registration
-    from archie_agent.exec.tools import brain, code, fs, jira, notion, shell, web  # noqa: F401
+    from archie_agent.exec.tools import (  # noqa: F401
+        brain,
+        code,
+        fs,
+        jira,
+        notion,
+        shell,
+        slack,
+        web,
+    )
 
     return {key: value for key, value in _TOOLS.items() if getattr(value, "_exec_enabled", True)}
 
