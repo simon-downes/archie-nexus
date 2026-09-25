@@ -62,6 +62,7 @@ ErrorMessage {
 
 ShellOutput {
     border-left: thick transparent;
+    background: $surface-darken-1;
 }
 
 /* --- Focus styling: left border accent --- */

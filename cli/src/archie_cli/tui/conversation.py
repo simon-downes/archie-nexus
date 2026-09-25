@@ -336,10 +336,12 @@ class ShellOutput(Widget):
 
     def compose(self) -> ComposeResult:
         """Build the shell output with command header and output body."""
-        # Header: $ command (exit N) if non-zero
+        # Header: status bullet, then $ command (exit N) if non-zero.
+        status_colour = theme.ERROR if self._exit_code else theme.SUCCESS
         exit_suffix = f" [dim red](exit {self._exit_code})[/]" if self._exit_code else ""
         yield Static(
-            f"[bold {theme.MUTED}]$[/] [bold]{_esc(self._command)}[/]{exit_suffix}",
+            f"[bold {status_colour}]●[/] [bold {theme.MUTED}]$[/] "
+            f"[bold]{_esc(self._command)}[/]{exit_suffix}",
             classes="shell-header",
             markup=True,
         )
