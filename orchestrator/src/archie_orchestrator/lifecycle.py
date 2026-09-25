@@ -11,12 +11,14 @@ from pathlib import Path
 
 from archie_shared.config import home_dir
 from archie_shared.credentials.runtime import runtime_environment
+from archie_shared.events import UserMessage
 from archie_shared.schemas import NexusConfig, expand_workspace_root
 from archie_shared.session import (
     SessionDescriptor,
     container_name,
     generate_session_id,
 )
+from archie_shared.session.log import SessionLog
 
 from archie_orchestrator.docker import (
     CONTAINER_PORT,
@@ -33,6 +35,25 @@ from archie_orchestrator.docker import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 log = logging.getLogger(__name__)
+
+
+def _remove_empty_session_log(session_id: str) -> None:
+    """Remove a stopped session log that contains no submitted prompt."""
+    path = home_dir() / "sessions" / f"{session_id}.jsonl"
+    if not path.exists():
+        return
+    try:
+        raw_lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        events = SessionLog(path).read()
+    except Exception:  # noqa: BLE001 — preserve the log when inspection fails
+        log.warning("Could not inspect session log; preserving %s", path, exc_info=True)
+        return
+    if len(events) != len(raw_lines) or any(isinstance(event, UserMessage) for event in events):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        log.warning("Could not remove empty session log %s", path, exc_info=True)
 
 
 def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
@@ -173,4 +194,5 @@ def stop_session(session_id: str) -> None:
     if target is None:
         raise KeyError(f"No running session with ID '{session_id}'")
     stop_container(target.container_name)
+    _remove_empty_session_log(session_id)
     log.info("Session stopped: %s", session_id)
