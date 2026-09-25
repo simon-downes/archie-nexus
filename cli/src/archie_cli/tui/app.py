@@ -49,6 +49,7 @@ from archie_cli.tui import theme
 from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingMessage
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
+from archie_cli.tui.quit_screen import QuitScreen
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
 from archie_cli.tui.throbber import Throbber, ThrobberContainer
@@ -103,6 +104,7 @@ class ArchieApp(App):
         self._receive_task: asyncio.Task | None = None
         self._reconnecting: bool = False
         self._shutting_down: bool = False
+        self._quit_prompt_open: bool = False
         # Warn-once guard for protocol-version mismatch (avoids refire on reconnect)
         self._protocol_warned: bool = False
         # Canonical replay cursor: id of the latest event already rendered.
@@ -967,7 +969,28 @@ class ArchieApp(App):
                 self._last_esc_time = now
 
     async def action_quit(self) -> None:
-        """Graceful shutdown: disconnect WS and exit."""
+        """Prompt before leaving, optionally terminating the attached session."""
+        if self._shutting_down or self._quit_prompt_open:
+            return
+        self._quit_prompt_open = True
+        self.push_screen(QuitScreen(), self._finish_quit)
+
+    async def _finish_quit(self, terminate_session: bool | None) -> None:
+        """Complete quit after the confirmation screen has been answered."""
+        if terminate_session is None:
+            self._quit_prompt_open = False
+            return
+        self._quit_prompt_open = False
+        if terminate_session:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.delete(self._api_url, timeout=15.0)
+                if response.status_code not in {200, 404}:
+                    self._show_client_error(
+                        f"Failed to terminate session: {response.status_code}"
+                    )
+            except httpx.HTTPError as exc:
+                self._show_client_error(f"Failed to terminate session: {exc}")
         self._shutting_down = True
         if self._receive_task is not None:
             self._receive_task.cancel()
