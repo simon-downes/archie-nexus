@@ -105,6 +105,7 @@ class ArchieApp(App):
         self._reconnecting: bool = False
         self._shutting_down: bool = False
         self._quit_prompt_open: bool = False
+        self._editor_active: bool = False
         # Warn-once guard for protocol-version mismatch (avoids refire on reconnect)
         self._protocol_warned: bool = False
         # Canonical replay cursor: id of the latest event already rendered.
@@ -515,14 +516,16 @@ class ArchieApp(App):
         except Exception as e:
             log.warning("WS receive loop error: %s", e)
             if not self._shutting_down:
-                self._show_client_error(f"Connection lost: {e}")
+                if not self._editor_active:
+                    self._show_client_error(f"Connection lost: {e}")
                 close_code = getattr(getattr(e, "rcvd", None), "code", None)
                 self._schedule_reconnect(close_code)
             return
 
         # Generator ended without raising — connection closed underneath us.
         if not self._shutting_down:
-            self._show_client_error("Connection lost: the agent closed the stream.")
+            if not self._editor_active:
+                self._show_client_error("Connection lost: the agent closed the stream.")
             self._schedule_reconnect(None)
 
     def _schedule_reconnect(self, close_code: int | None = None) -> None:
@@ -559,7 +562,8 @@ class ArchieApp(App):
         Total retry window is 30s before giving up.
         """
         if close_code == 4004:
-            self._show_client_error("Session has ended. Relaunch to start a new session.")
+            if not self._editor_active:
+                self._show_client_error("Session has ended. Relaunch to start a new session.")
             self._reconnecting = False
             return False
 
@@ -572,7 +576,8 @@ class ArchieApp(App):
                     return
                 if asyncio.get_event_loop().time() + delay > deadline:
                     break
-                self.notify("Reconnecting...", timeout=delay)
+                if not self._editor_active:
+                    self.notify("Reconnecting...", timeout=delay)
                 await asyncio.sleep(delay)
                 try:
                     await self._ws.connect(self._ws_url)
@@ -606,7 +611,8 @@ class ArchieApp(App):
                 self._buffering = False
                 self._dispatch_buffered_events()
                 self._event_buffer = []
-                self.notify("Reconnected to agent")
+                if not self._editor_active:
+                    self.notify("Reconnected to agent")
                 return True
 
             self._show_client_error("Reconnect failed after 30s. Relaunch the client to continue.")
@@ -997,10 +1003,31 @@ class ArchieApp(App):
         await self._ws.disconnect()
         await super().action_quit()
 
+    async def _recover_after_editor(self) -> None:
+        """Restore the stream after returning from the blocking editor.
+
+        The editor blocks the event loop, so the WebSocket may still report OPEN
+        even though its keepalive has already expired. Force a fresh connection
+        instead of trusting that stale state.
+        """
+        try:
+            if self._reconnecting:
+                recovered = await self._ensure_connected()
+            else:
+                await self._ws.disconnect()
+                recovered = await self._reconnect()
+            if not recovered:
+                self._show_client_error("Unable to reconnect after closing the editor.")
+        except Exception as exc:  # noqa: BLE001 — surface recovery failures only
+            self._show_client_error(f"Unable to reconnect after closing the editor: {exc}")
+        finally:
+            self._editor_active = False
+
     def action_editor(self) -> None:
         """Open $EDITOR for message composition. Auto-submits on save."""
         if self._turn_active:
             return
+        self._editor_active = True
 
         editor = os.environ.get("EDITOR", "nano")
         inp = self.query_one("#input", MessageInput)
@@ -1045,6 +1072,7 @@ class ArchieApp(App):
                 os.unlink(tmp.name)
             except OSError:
                 pass
+            asyncio.create_task(self._recover_after_editor())
 
     def switch_model(self, model_key: str) -> None:
         """Send a model switch command to the agent (called by ModelProvider)."""
