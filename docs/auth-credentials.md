@@ -95,17 +95,35 @@ For example:
 - Slack uses nested token paths such as `authed_user.access_token` and requests `user_scope`.
 - Google requests offline access with consent.
 
-OAuth overrides are configured globally for the running orchestrator under `auth.providers` in `config.yaml`:
+OAuth overrides are configured globally for the running orchestrator under `auth.providers` in `config.yaml`. Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `auth.providers.google.client_id` is required before `nexus auth login google` can start:
 
 ```yaml
 auth:
   providers:
     google:
-      client_id: your-client-id
+      # Required: OAuth client ID from the Google Cloud OAuth client.
+      client_id: your-client-id.apps.googleusercontent.com
       authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth
       token_endpoint: https://oauth2.googleapis.com/token
       scopes:
         - https://www.googleapis.com/auth/gmail.readonly
+```
+
+To pin the callback origin explicitly, add:
+
+```yaml
+orchestrator:
+  profiles:
+    default:
+      host: 127.0.0.1
+      port: 7600
+      public_url: http://127.0.0.1:7600
+```
+
+The exact Google redirect URI is then:
+
+```text
+http://127.0.0.1:7600/auth/callback/google
 ```
 
 Supported override fields include OAuth client ID, endpoints, discovery server URL, scopes, token paths, expiry path, and authorization parameters. Client secrets are credential-store data, not public provider configuration.

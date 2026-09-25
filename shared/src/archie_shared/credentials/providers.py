@@ -58,6 +58,7 @@ class OAuthProvider(msgspec.Struct, forbid_unknown_fields=True):
 
 # --- Provider registry ---
 
+
 def effective_provider(
     name: str, override: "AuthProviderOverride | None" = None
 ) -> StaticProvider | OAuthProvider:
@@ -152,6 +153,9 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
             "https://www.googleapis.com/auth/calendar.readonly",
             "https://www.googleapis.com/auth/drive.readonly",
             "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/meetings.space.readonly",
+            "https://www.googleapis.com/auth/drive.meet.readonly",
         ],
         extra_params={"access_type": "offline", "prompt": "consent"},
     ),
