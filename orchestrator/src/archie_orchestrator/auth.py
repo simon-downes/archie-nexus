@@ -45,6 +45,23 @@ class ProviderUnavailableError(AuthError):
     status_code = 502
 
 
+def _oauth_error(response: httpx.Response, operation: str) -> str:
+    """Build a safe diagnostic from a provider OAuth error response."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        description = payload.get("error_description")
+        if isinstance(error, str) and error.strip():
+            detail = error.strip()
+            if isinstance(description, str) and description.strip():
+                detail += f": {description.strip()}"
+            return f"OAuth {operation} rejected by provider ({detail})"
+    return f"OAuth {operation} rejected by provider (HTTP {response.status_code})"
+
+
 @dataclass
 class AuthFlow:
     flow_id: str
@@ -73,13 +90,26 @@ class AuthFlowStore:
         self.flows = {key: value for key, value in self.flows.items() if value.expires_at > now}
 
     def add(
-        self, provider: str, verifier: str, redirect_uri: str, client_id: str,
-        token_endpoint: str, client_secret: str | None,
+        self,
+        provider: str,
+        verifier: str,
+        redirect_uri: str,
+        client_id: str,
+        token_endpoint: str,
+        client_secret: str | None,
     ) -> AuthFlow:
         now = datetime.now(UTC)
         flow = AuthFlow(
-            secrets.token_urlsafe(18), provider, secrets.token_urlsafe(32), verifier,
-            redirect_uri, client_id, token_endpoint, client_secret, now, now + self.login_timeout,
+            secrets.token_urlsafe(18),
+            provider,
+            secrets.token_urlsafe(32),
+            verifier,
+            redirect_uri,
+            client_id,
+            token_endpoint,
+            client_secret,
+            now,
+            now + self.login_timeout,
         )
         self.flows[flow.flow_id] = flow
         return flow
@@ -124,11 +154,14 @@ class AuthService:
     async def _register(self, endpoint: str, redirect_uri: str) -> dict:
         try:
             response = await self._request(
-                "POST", endpoint,
+                "POST",
+                endpoint,
                 json={
-                    "client_name": "Archie", "redirect_uris": [redirect_uri],
+                    "client_name": "Archie",
+                    "redirect_uris": [redirect_uri],
                     "grant_types": ["authorization_code", "refresh_token"],
-                    "response_types": ["code"], "token_endpoint_auth_method": "none",
+                    "response_types": ["code"],
+                    "token_endpoint_auth_method": "none",
                 },
             )
             response.raise_for_status()
@@ -151,19 +184,26 @@ class AuthService:
                     **({"client_secret": flow.client_secret} if flow.client_secret else {}),
                 },
             )
-            response.raise_for_status()
+            if getattr(response, "is_error", False):
+                raise AuthError(_oauth_error(response, "token exchange"))
             tokens = response.json()
+        except AuthError:
+            raise
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             raise ProviderUnavailableError("OAuth token exchange failed") from exc
         access = _nested(tokens, provider.token_path)
         if not access:
             raise AuthError("OAuth provider returned no access token")
         current = get_credential(flow.provider, CREDENTIAL_TYPES[flow.provider])
-        fields = {
-            key: getattr(current, key)
-            for key in current.__struct_fields__
-            if getattr(current, key) is not None
-        } if current else {}
+        fields = (
+            {
+                key: getattr(current, key)
+                for key in current.__struct_fields__
+                if getattr(current, key) is not None
+            }
+            if current
+            else {}
+        )
         fields.update({"access_token": access, "client_id": flow.client_id})
         refresh = _nested(tokens, provider.refresh_token_path)
         if refresh:
@@ -192,11 +232,17 @@ class AuthService:
         if not client_id or not token_endpoint:
             raise AuthError(f"Provider '{provider_name}' requires reauthentication")
         response = await self._request(
-            "POST", token_endpoint,
+            "POST",
+            token_endpoint,
             data={
-                "grant_type": "refresh_token", "refresh_token": refresh,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
                 "client_id": client_id,
-                **({"client_secret": credential.client_secret} if getattr(credential, "client_secret", None) else {}),
+                **(
+                    {"client_secret": credential.client_secret}
+                    if getattr(credential, "client_secret", None)
+                    else {}
+                ),
             },
         )
         response.raise_for_status()
@@ -230,7 +276,13 @@ class AuthService:
             credential = None
         metadata = {
             key: getattr(credential, key)
-            for key in ("authorization_endpoint", "token_endpoint", "registration_endpoint", "client_id", "client_secret")
+            for key in (
+                "authorization_endpoint",
+                "token_endpoint",
+                "registration_endpoint",
+                "client_id",
+                "client_secret",
+            )
             if credential is not None and getattr(credential, key, None) is not None
         }
         override = self.config.auth.providers.get(provider_name, AuthProviderOverride())
@@ -242,21 +294,31 @@ class AuthService:
         for key in endpoints:
             if getattr(override, key, None) is None and metadata.get(key):
                 endpoints[key] = metadata[key]
-        if (not endpoints["authorization_endpoint"] or not endpoints["token_endpoint"]) and provider.server_url:
+        if (
+            not endpoints["authorization_endpoint"] or not endpoints["token_endpoint"]
+        ) and provider.server_url:
             discovery = await self._discover(provider.server_url)
             for key in endpoints:
-                if getattr(override, key, None) is None and not metadata.get(key) and discovery.get(key):
+                if (
+                    getattr(override, key, None) is None
+                    and not metadata.get(key)
+                    and discovery.get(key)
+                ):
                     endpoints[key] = discovery[key]
             replace_credential(provider_name, {**metadata, **endpoints})
         if not endpoints["authorization_endpoint"] or not endpoints["token_endpoint"]:
-            raise AuthError(f"OAuth provider '{provider_name}' has incomplete endpoint configuration")
+            raise AuthError(
+                f"OAuth provider '{provider_name}' has incomplete endpoint configuration"
+            )
         client_id = override.client_id or metadata.get("client_id")
         client_secret = metadata.get("client_secret")
         if not client_id and endpoints["registration_endpoint"]:
             registration = await self._register(endpoints["registration_endpoint"], redirect_uri)
             client_id = registration.get("client_id")
             if not client_id:
-                raise AuthError(f"OAuth provider '{provider_name}' registration returned no client_id")
+                raise AuthError(
+                    f"OAuth provider '{provider_name}' registration returned no client_id"
+                )
             client_secret = registration.get("client_secret") or client_secret
             replace_credential(
                 provider_name,
@@ -271,12 +333,21 @@ class AuthService:
             raise AuthError(f"OAuth provider '{provider_name}' requires a configured client_id")
         verifier, challenge = generate_pkce()
         flow = self.flows.add(
-            provider_name, verifier, redirect_uri, client_id,
-            endpoints["token_endpoint"], client_secret,
+            provider_name,
+            verifier,
+            redirect_uri,
+            client_id,
+            endpoints["token_endpoint"],
+            client_secret,
         )
         return flow, build_auth_url(
-            endpoints["authorization_endpoint"], client_id, redirect_uri, flow.state, challenge,
-            scopes=provider.scopes, extra_params=provider.extra_params,
+            endpoints["authorization_endpoint"],
+            client_id,
+            redirect_uri,
+            flow.state,
+            challenge,
+            scopes=provider.scopes,
+            extra_params=provider.extra_params,
         )
 
     def flow_status(self, flow_id: str) -> OAuthFlowStatus:
@@ -285,8 +356,11 @@ class AuthService:
         if flow is None:
             raise AuthError("Unknown or expired OAuth flow")
         return OAuthFlowStatus(
-            flow_id, flow.provider, flow.status,
-            credential_status=flow.credential_status, error=flow.error,
+            flow_id,
+            flow.provider,
+            flow.status,
+            credential_status=flow.credential_status,
+            error=flow.error,
         )
 
     def find_flow(self, provider_name: str, state: str) -> AuthFlow:
@@ -325,17 +399,28 @@ class AuthService:
             else:
                 override = self.config.auth.providers.get(name, AuthProviderOverride())
                 credential = get_credential(name, CREDENTIAL_TYPES[name])
-                persisted = {
-                    key: getattr(credential, key, None)
-                    for key in ("authorization_endpoint", "token_endpoint", "registration_endpoint", "client_id")
-                } if credential else {}
+                persisted = (
+                    {
+                        key: getattr(credential, key, None)
+                        for key in (
+                            "authorization_endpoint",
+                            "token_endpoint",
+                            "registration_endpoint",
+                            "client_id",
+                        )
+                    }
+                    if credential
+                    else {}
+                )
                 result.append(
                     OAuthProviderResponse(
                         name=name,
                         server_url=provider.server_url,
-                        authorization_endpoint=provider.authorization_endpoint or persisted.get("authorization_endpoint"),
+                        authorization_endpoint=provider.authorization_endpoint
+                        or persisted.get("authorization_endpoint"),
                         token_endpoint=provider.token_endpoint or persisted.get("token_endpoint"),
-                        registration_endpoint=provider.registration_endpoint or persisted.get("registration_endpoint"),
+                        registration_endpoint=provider.registration_endpoint
+                        or persisted.get("registration_endpoint"),
                         scopes=provider.scopes or [],
                         token_path=provider.token_path,
                         refresh_token_path=provider.refresh_token_path,
@@ -354,7 +439,9 @@ class AuthService:
         try:
             credential = get_credential(name, CREDENTIAL_TYPES[name])
         except (ValueError, TypeError):
-            return CredentialStatus(name, auth_type, False, "needs_reauthentication", error="Invalid stored credential")
+            return CredentialStatus(
+                name, auth_type, False, "needs_reauthentication", error="Invalid stored credential"
+            )
         if credential is None:
             return CredentialStatus(name, auth_type, False, "missing")
         values = {field: getattr(credential, field) for field in credential.__struct_fields__}
@@ -363,7 +450,13 @@ class AuthService:
         if not configured:
             return CredentialStatus(name, auth_type, False, "missing")
         expires_at = values.get("expires_at")
-        state = "expired" if expires_at and _expired(expires_at) else "valid" if auth_type == "oauth" else "configured"
+        state = (
+            "expired"
+            if expires_at and _expired(expires_at)
+            else "valid"
+            if auth_type == "oauth"
+            else "configured"
+        )
         return CredentialStatus(name, auth_type, True, state, expires_at=expires_at)
 
     def replace_static(self, name: str, body: bytes) -> CredentialStatus:
@@ -400,6 +493,8 @@ def _expired(value: str) -> bool:
     from datetime import UTC, datetime, timedelta
 
     try:
-        return datetime.fromisoformat(value).astimezone(UTC) <= datetime.now(UTC) + timedelta(seconds=60)
+        return datetime.fromisoformat(value).astimezone(UTC) <= datetime.now(UTC) + timedelta(
+            seconds=60
+        )
     except ValueError:
         return True

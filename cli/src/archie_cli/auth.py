@@ -21,7 +21,6 @@ def auth():
     """Manage credentials for archie services."""
 
 
-
 def _orchestrator_url() -> str:
     from archie_shared.schemas import get_profile, load_nexus_config
 
@@ -31,6 +30,19 @@ def _orchestrator_url() -> str:
 
 def _is_secret_field(field: str) -> bool:
     return any(part in field.lower() for part in ("token", "secret", "password", "key"))
+
+
+def _response_error(response: httpx.Response) -> str:
+    """Return a safe, useful error from an orchestrator JSON error response."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return f"orchestrator returned HTTP {response.status_code}"
+    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+        detail = payload["error"].strip()
+        if detail:
+            return detail
+    return f"orchestrator returned HTTP {response.status_code}"
 
 
 def _set_static_from_login(service: str) -> None:
@@ -94,7 +106,9 @@ def _set_aws_from_chain(service: str) -> None:
         resolved = credentials.get_frozen_credentials()
         fields = {
             "access_key_id" if service == "aws" else "aws_access_key_id": resolved.access_key,
-            "secret_access_key" if service == "aws" else "aws_secret_access_key": resolved.secret_key,
+            "secret_access_key"
+            if service == "aws"
+            else "aws_secret_access_key": resolved.secret_key,
             "session_token" if service == "aws" else "aws_session_token": resolved.token,
         }
         identity = session.client("sts").get_caller_identity()
@@ -122,10 +136,21 @@ def login(service: str):
         response = httpx.post(f"{_orchestrator_url()}/auth/login/{service}", timeout=10)
         response.raise_for_status()
         data = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise click.ClickException("Could not start orchestrator OAuth login") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = _response_error(exc.response)
+        raise click.ClickException(f"Could not start OAuth login for {service}: {detail}") from exc
+    except (httpx.RequestError, ValueError, KeyError) as exc:
+        raise click.ClickException(
+            f"Could not start OAuth login for {service}: orchestrator unavailable or returned invalid data"
+        ) from exc
     from archie_shared.credentials.oauth import open_browser
 
+    redirect_uri = data.get("redirect_uri")
+    if not isinstance(redirect_uri, str) or not redirect_uri:
+        raise click.ClickException(
+            f"Could not start OAuth login for {service}: orchestrator omitted the callback URI"
+        )
+    click.echo(f"OAuth callback: {redirect_uri}", err=True)
     if not open_browser(data["authorization_url"]):
         click.echo(f"Open this URL in your browser:\n{data['authorization_url']}", err=True)
     click.echo("Waiting for authentication...", err=True)
@@ -170,5 +195,3 @@ def status():
     for item in statuses:
         expiry = f" (expires: {item['expires_at']})" if item.get("expires_at") else ""
         click.echo(f"{item['provider']} [{item['auth_type']}]: {item['state']}{expiry}")
-
-

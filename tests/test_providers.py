@@ -42,12 +42,20 @@ def test_slack_has_custom_token_paths():
     assert slack.refresh_token_path == "authed_user.refresh_token"
 
 
-def test_google_has_scopes():
-    """Google has required OAuth scopes configured."""
+def test_google_has_required_scopes():
+    """Google has the complete Workspace tooling OAuth scope set configured."""
     google = PROVIDERS["google"]
     assert isinstance(google, OAuthProvider)
     assert google.scopes is not None
-    assert len(google.scopes) >= 4
+    assert set(google.scopes) == {
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/meetings.space.readonly",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
+    }
 
 
 def test_notion_uses_discovery():

@@ -93,12 +93,12 @@ Each provider is one vertical project slice and one child spec. The child spec o
    - Boundary: To be sharpened after surveying page/database operations and resource scopes.
    - Primary decisions exercised: D1–D9, D11; D10 also applies to the slice.
    - Depends on: M1 shared foundation.
-5. **M5 — Google Workspace tooling (placeholder)**
-   - Boundary: To be sharpened after surveying Drive, Gmail, and Calendar capabilities and sensitive-data handling.
-   - Primary decisions exercised: D1–D9, D11; D10 also applies to the slice.
+5. **M5 — Google Workspace tooling**
+   - Boundary: Five child specs covering unified metadata discovery, Gmail, Calendar, Drive/Docs/Sheets/Slides, and Meet notes/transcripts/recording links. Public tools are prefixed by service (`mail_`, `calendar_`, `drive_`, `meet_`); only discovery is unprefixed as `search`.
+   - Primary decisions exercised: D1–D9, D11; D10 also applies to the slice. Google OAuth scope changes are manual and documented per child spec; no auth implementation spec is required.
    - Depends on: M1 shared foundation.
 
-Only M1 is currently promoted to a child spec. M2–M5 remain fog-of-war placeholders until their surveys produce concrete objectives and boundaries.
+Only M1 is currently promoted to a child spec. M2–M4 remain fog-of-war placeholders; M5 is decomposed into the five Google child specs below.
 
 ## Sequencing
 
@@ -125,7 +125,7 @@ Project status: planning; Jira spec drafted and awaiting approval. Jira implemen
 | Linear | — | not started |
 | Slack | — | not started |
 | Notion | `040-spec-notion-tooling.md` | planned |
-| Google Workspace | — | not started |
+| Google Workspace | `050`–`054` | planned |
 
 ## Open decisions deferred to provider specs
 

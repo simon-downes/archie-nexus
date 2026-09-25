@@ -12,6 +12,7 @@ Routes:
 """
 
 import asyncio
+import html
 import logging
 import sqlite3
 import traceback
@@ -387,7 +388,8 @@ async def auth_callback(request: Request) -> Response:
     except AuthError:
         return Response(
             "<h1>Authentication failed</h1><p>Invalid or expired flow.</p>",
-            status_code=400, media_type="text/html",
+            status_code=400,
+            media_type="text/html",
         )
     expected_uri = service.redirect_uri(
         f"{request.url.scheme}://{request.url.netloc}", provider_name
@@ -397,7 +399,8 @@ async def auth_callback(request: Request) -> Response:
         flow.error = "Callback URI mismatch"
         return Response(
             "<h1>Authentication failed</h1><p>Callback URI mismatch.</p>",
-            status_code=400, media_type="text/html",
+            status_code=400,
+            media_type="text/html",
         )
     if request.query_params.get("error") or not request.query_params.get("code"):
         flow.status = "failed"
@@ -405,17 +408,28 @@ async def auth_callback(request: Request) -> Response:
         flow.expires_at = datetime.now(UTC) + service.flows.retention
         return Response(
             "<h1>Authentication failed</h1><p>Authorization was not completed.</p>",
-            status_code=400, media_type="text/html",
+            status_code=400,
+            media_type="text/html",
         )
     try:
         flow.credential_status = await service.complete(flow, request.query_params["code"])
-    except (AuthError, httpx.HTTPError, ValueError, TypeError):
+    except AuthError as exc:
+        flow.status = "failed"
+        flow.error = str(exc)
+        flow.expires_at = datetime.now(UTC) + service.flows.retention
+        return Response(
+            f"<h1>Authentication failed</h1><p>{html.escape(str(exc))}</p>",
+            status_code=exc.status_code,
+            media_type="text/html",
+        )
+    except (httpx.HTTPError, ValueError, TypeError):
         flow.status = "failed"
         flow.error = "Token exchange failed"
         flow.expires_at = datetime.now(UTC) + service.flows.retention
         return Response(
             "<h1>Authentication failed</h1><p>Token exchange failed.</p>",
-            status_code=502, media_type="text/html",
+            status_code=502,
+            media_type="text/html",
         )
     flow.status = "succeeded"
     flow.expires_at = datetime.now(UTC) + service.flows.retention
