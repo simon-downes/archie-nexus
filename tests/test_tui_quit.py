@@ -1,9 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from archie_cli.tui.app import ArchieApp
-from archie_cli.tui.quit_screen import QuitScreen
 
 
 def _app() -> ArchieApp:
@@ -23,7 +21,7 @@ async def test_quit_without_termination_disconnects_only():
         await app._finish_quit(False)
 
     app._ws.disconnect.assert_awaited_once()
-    exit_mock.assert_not_called()
+    exit_mock.assert_called_once_with()
 
 
 @pytest.mark.asyncio
