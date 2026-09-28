@@ -36,6 +36,68 @@ def _get_version() -> str:
     return __version__
 
 
+def _auth_expiry(value: str | None) -> tuple[str, str]:
+    if not value:
+        return "—", "—"
+    try:
+        expiry = datetime.fromisoformat(value)
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
+        expiry = expiry.astimezone(UTC)
+    except (TypeError, ValueError):
+        return value, "unknown"
+    delta = expiry - datetime.now(UTC)
+    seconds = int(abs(delta.total_seconds()))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours and len(parts) < 2:
+        parts.append(f"{hours}h")
+    if minutes and len(parts) < 2:
+        parts.append(f"{minutes}m")
+    relative = " ".join(parts) or "<1m"
+    return expiry.strftime("%Y-%m-%d %H:%M:%S UTC"), (
+        f"in {relative}" if delta.total_seconds() >= 0 else f"{relative} ago"
+    )
+
+
+def _auth_status_data(request: Request) -> dict[str, list[dict]]:
+    service = request.app.state.auth_service
+    grouped: dict[str, list[dict]] = {"oauth": [], "static": []}
+    for name in service.provider_names():
+        status = service.status(name)
+        item = {
+            "provider": status.provider,
+            "state": status.state,
+            "configured": status.configured,
+            "error": status.error,
+        }
+        if status.auth_type == "oauth":
+            item["expires"], item["relative"] = _auth_expiry(status.expires_at)
+            item["can_refresh"] = status.configured
+        grouped[status.auth_type].append(item)
+    for items in grouped.values():
+        items.sort(key=lambda item: item["provider"].lower())
+    return grouped
+
+
+async def auth_status_page(request: Request) -> HTMLResponse:
+    """GET /auth/status in a browser — render redacted credential status."""
+    grouped = _auth_status_data(request)
+    return templates.TemplateResponse(
+        request,
+        "auth_status.html",
+        {
+            "grouped": grouped,
+            "uptime": _uptime(request.app.state.start_time),
+            "version": _get_version(),
+        },
+    )
+
+
 async def sessions_page(request: Request) -> HTMLResponse:
     """GET / — render the session list as HTML.
 
