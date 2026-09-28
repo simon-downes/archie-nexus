@@ -1,6 +1,7 @@
 import pytest
 from archie_orchestrator.auth import AuthError, AuthService
 from archie_shared.credentials.api import AuthConfig, AuthProviderOverride
+from archie_shared.credentials.store import replace_credential
 from archie_shared.schemas import NexusConfig
 
 
@@ -23,6 +24,19 @@ class FakeTransport:
         assert kwargs["data"]["code_verifier"]
         return FakeResponse(
             {"access_token": "access", "refresh_token": "refresh", "expires_in": 3600}
+        )
+
+
+class RefreshTransport:
+    async def request(self, method, url, **kwargs):
+        assert method == "POST"
+        assert kwargs["data"] == {
+            "grant_type": "refresh_token",
+            "refresh_token": "old-refresh",
+            "client_id": "client",
+        }
+        return FakeResponse(
+            {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
         )
 
 
@@ -68,3 +82,27 @@ async def test_login_callback_contract_persists_normalized_tokens(monkeypatch, t
     assert status.state == "valid"
     stored = (tmp_path / "credentials.yaml").read_text()
     assert "access" in stored and "refresh" in stored
+
+
+@pytest.mark.asyncio
+async def test_refresh_accepts_slack_top_level_token_response(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = NexusConfig(
+        auth=AuthConfig(providers={"slack": AuthProviderOverride(client_id="client")})
+    )
+    replace_credential(
+        "slack",
+        {
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "client_id": "client",
+        },
+    )
+    service = AuthService(config, transport=RefreshTransport())
+
+    status = await service.refresh("slack")
+
+    assert status.state == "valid"
+    stored = (tmp_path / "credentials.yaml").read_text()
+    assert "new-access" in stored
+    assert "new-refresh" in stored

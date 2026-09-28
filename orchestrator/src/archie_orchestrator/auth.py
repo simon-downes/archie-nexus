@@ -247,14 +247,16 @@ class AuthService:
         )
         response.raise_for_status()
         tokens = response.json()
-        access = _nested(tokens, provider.token_path)
+        access = _nested(tokens, provider.token_path) or tokens.get("access_token")
         if not access:
             raise AuthError("OAuth provider returned no access token")
         fields = {"access_token": access}
-        rotated = _nested(tokens, provider.refresh_token_path)
+        rotated = _nested(tokens, provider.refresh_token_path) or tokens.get("refresh_token")
         if rotated:
             fields["refresh_token"] = rotated
         expires = _nested(tokens, provider.expires_in_path)
+        if expires is None:
+            expires = tokens.get("expires_in")
         if expires is not None:
             fields["expires_at"] = (datetime.now(UTC) + timedelta(seconds=int(expires))).isoformat()
         current = {
