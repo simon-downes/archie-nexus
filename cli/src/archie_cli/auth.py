@@ -9,11 +9,14 @@ Commands:
 import json
 import os
 import sys
+from datetime import UTC, datetime
 
 import click
 import httpx
 from archie_shared.credentials import PROVIDERS
 from archie_shared.credentials.providers import StaticProvider, effective_provider
+from rich.console import Console
+from rich.table import Table
 
 
 @click.group()
@@ -183,6 +186,70 @@ def refresh(service: str):
     click.echo(f"✓ Refreshed {service} credentials.")
 
 
+def _status_style(state: str) -> str:
+    return {
+        "valid": "green",
+        "configured": "green",
+        "expired": "yellow",
+        "missing": "red",
+        "needs_reauthentication": "red",
+    }.get(state, "white")
+
+
+def _format_expiry(value: str | None) -> tuple[str, str]:
+    if not value:
+        return "—", "—"
+    try:
+        expiry = datetime.fromisoformat(value)
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
+        expiry = expiry.astimezone(UTC)
+    except (TypeError, ValueError):
+        return value, "unknown"
+
+    delta = expiry - datetime.now(UTC)
+    seconds = int(abs(delta.total_seconds()))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours and len(parts) < 2:
+        parts.append(f"{hours}h")
+    if minutes and len(parts) < 2:
+        parts.append(f"{minutes}m")
+    relative = " ".join(parts) or "<1m"
+    return expiry.strftime("%Y-%m-%d %H:%M:%S UTC"), (
+        f"in {relative}" if delta.total_seconds() >= 0 else f"{relative} ago"
+    )
+
+
+def _status_table(title: str, statuses: list[dict], *, oauth: bool) -> Table:
+    table = Table(
+        title=title,
+        title_style="bold cyan",
+        title_justify="left",
+        show_header=True,
+        header_style="bold",
+        box=None,
+        padding=(0, 1),
+    )
+    table.add_column("Provider", style="bold", justify="left")
+    table.add_column("State", justify="left")
+    if oauth:
+        table.add_column("Expires (UTC)", style="dim", justify="left")
+        table.add_column("Relative", style="dim", justify="left")
+    for item in sorted(statuses, key=lambda value: value["provider"].lower()):
+        state = item["state"]
+        row = [item["provider"], f"[{_status_style(state)}]{state}[/]"]
+        if oauth:
+            expiry, relative = _format_expiry(item.get("expires_at"))
+            row.extend((expiry, relative))
+        table.add_row(*row)
+    return table
+
+
 @auth.command()
 def status():
     """Show redacted credential status from the local orchestrator."""
@@ -192,6 +259,15 @@ def status():
         statuses = response.json()
     except httpx.HTTPError as exc:
         raise click.ClickException("Could not query credentials through orchestrator") from exc
-    for item in statuses:
-        expiry = f" (expires: {item['expires_at']})" if item.get("expires_at") else ""
-        click.echo(f"{item['provider']} [{item['auth_type']}]: {item['state']}{expiry}")
+
+    grouped = {
+        "oauth": [item for item in statuses if item.get("auth_type") == "oauth"],
+        "static": [item for item in statuses if item.get("auth_type") == "static"],
+    }
+    console = Console()
+    for index, (auth_type, items) in enumerate(grouped.items()):
+        if items:
+            if index:
+                console.print()
+            title = "OAuth" if auth_type == "oauth" else "Static"
+            console.print(_status_table(f"{title} credentials", items, oauth=auth_type == "oauth"))
