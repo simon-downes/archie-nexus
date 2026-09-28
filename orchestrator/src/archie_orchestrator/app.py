@@ -42,7 +42,7 @@ from archie_orchestrator.proxy import (
     proxy_status,
     proxy_stream,
 )
-from archie_orchestrator.web import sessions_page
+from archie_orchestrator.web import auth_status_page, sessions_page
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -479,6 +479,8 @@ app = Starlette(
     lifespan=lifespan,
     routes=[
         Route("/", sessions_page, methods=["GET"]),
+        Route("/auth/status", auth_status, methods=["GET"]),
+        Route("/ui/auth", auth_status_page, methods=["GET"]),
         Route("/health", health),
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),
@@ -488,7 +490,6 @@ app = Starlette(
         Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
         Route("/metrics", get_metrics, methods=["GET"]),
         Route("/auth/providers", auth_providers, methods=["GET"]),
-        Route("/auth/status", auth_status, methods=["GET"]),
         Route("/auth/login/{provider}", auth_login, methods=["POST"]),
         Route("/auth/refresh/{provider}", auth_refresh, methods=["POST"]),
         Route("/auth/callback/{provider}", auth_callback, methods=["GET"]),

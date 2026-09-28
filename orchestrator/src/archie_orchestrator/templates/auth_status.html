@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Authentication — Archie{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <h2>Authentication status</h2>
+    <a href="/auth/status" class="button secondary">Refresh page</a>
+</div>
+{% for auth_type, items in grouped.items() %}
+<section class="credential-group">
+    <h3>{{ "OAuth" if auth_type == "oauth" else "Static" }} credentials</h3>
+    {% if items %}
+    <table>
+        <thead>
+            <tr>
+                <th>Provider</th>
+                <th>State</th>
+                {% if auth_type == "oauth" %}<th>Expires (UTC)</th><th>Relative</th><th>Actions</th>{% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in items %}
+            <tr>
+                <td>{{ item.provider }}</td>
+                <td><span class="status status-{{ item.state }}">{{ item.state }}</span></td>
+                {% if auth_type == "oauth" %}
+                <td>{{ item.expires }}</td>
+                <td>{{ item.relative }}</td>
+                <td class="actions">
+                    {% if item.can_refresh %}<button class="button" data-action="refresh" data-provider="{{ item.provider }}">Refresh</button>{% endif %}
+                    <button class="button secondary" data-action="login" data-provider="{{ item.provider }}">Auth</button>
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p class="empty">No credentials.</p>{% endif %}
+</section>
+{% endfor %}
+<p id="auth-message" class="message" hidden></p>
+<script>
+const message = document.getElementById("auth-message");
+function showMessage(text, error = false) {
+    message.textContent = text;
+    message.hidden = false;
+    message.className = "message " + (error ? "error" : "success");
+}
+async function action(button) {
+    const provider = button.dataset.provider;
+    const action = button.dataset.action;
+    button.disabled = true;
+    try {
+        const response = await fetch(`/auth/${action}/${encodeURIComponent(provider)}`, {method: "POST"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Request failed");
+        if (action === "login") {
+            window.open(data.authorization_url, "_blank", "noopener");
+            showMessage(`Authorization started for ${provider}. Complete it in the new browser tab.`);
+        } else {
+            showMessage(`Refreshed ${provider} credentials.`);
+            setTimeout(() => window.location.reload(), 500);
+        }
+    } catch (error) {
+        showMessage(error.message, true);
+        button.disabled = false;
+    }
+}
+document.querySelectorAll("button[data-action]").forEach(button => {
+    button.addEventListener("click", () => action(button));
+});
+</script>
+{% endblock %}
