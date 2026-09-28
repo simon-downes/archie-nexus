@@ -32,6 +32,7 @@ from starlette.staticfiles import StaticFiles
 
 from archie_orchestrator import configure_logging
 from archie_orchestrator.auth import AuthError, AuthService
+from archie_orchestrator.credential_refresh import credential_refresh_loop
 from archie_orchestrator.docker import DockerError, list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
 from archie_orchestrator.metrics import MetricsWriter
@@ -91,13 +92,18 @@ async def lifespan(app: Starlette):
 
     metrics_task.add_done_callback(_log_metrics_task_done)
 
+    refresh_task = asyncio.create_task(credential_refresh_loop(app.state.auth_service))
+    refresh_task.add_done_callback(_log_metrics_task_done)
+
     yield
 
-    metrics_task.cancel()
-    try:
-        await metrics_task
-    except asyncio.CancelledError:
-        pass
+    for task in (metrics_task, refresh_task):
+        task.cancel()
+    for task in (metrics_task, refresh_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     active = get_active_ws_connections()
     log.info("Orchestrator stopping (%d active connections)", active)
