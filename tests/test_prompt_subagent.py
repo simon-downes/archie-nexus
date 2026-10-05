@@ -23,6 +23,6 @@ def test_build_subagent_prompt_is_focused_and_contains_catalog():
     assert "Archie" not in prompt.static_system.text
     assert "Project rules" in prompt.static_system.text
     assert "python-style: Python coding standards" in prompt.static_system.text
-    assert "terraform" not in prompt.static_system.text
+    assert "terraform: Terraform" not in prompt.static_system.text
     assert prompt.dynamic_system is None
     assert "child-model" not in prompt.flatten()

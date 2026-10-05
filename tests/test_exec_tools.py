@@ -332,6 +332,38 @@ async def test_shell_runs_in_workspace(workspace, tmp_path):
     assert str(tmp_path) in result
 
 
+async def test_shell_cwd_relative_to_workspace(workspace):
+    (workspace / "sub" / "deeper").mkdir(parents=True)
+    tools = get_all_tools()
+    result = await tools["shell"](command="pwd", cwd="sub/deeper")
+    assert result.splitlines()[-1] == str(workspace / "sub" / "deeper")
+
+
+async def test_shell_cwd_absolute(workspace, tmp_path_factory):
+    other = tmp_path_factory.mktemp("elsewhere")
+    tools = get_all_tools()
+    result = await tools["shell"](command="pwd", cwd=str(other))
+    assert result.splitlines()[-1] == str(other)
+
+
+async def test_shell_cwd_missing_raises(workspace):
+    from archie_agent.exec.tools import FileNotFoundError as ToolFileNotFoundError
+
+    tools = get_all_tools()
+    with pytest.raises(ToolFileNotFoundError, match="Working directory not found"):
+        await tools["shell"](command="pwd", cwd="does-not-exist")
+
+
+def test_shell_cwd_in_native_schema():
+    from archie_agent.exec.native import make_native_specs
+
+    spec = next(s for s in make_native_specs() if s.name == "shell")
+    props = spec.schema["properties"]
+    assert "cwd" in props
+    assert "on_start" not in props
+    assert "cwd" not in spec.schema.get("required", [])
+
+
 async def test_shell_falls_back_when_workspace_absent(monkeypatch):
     """shell() inherits CWD when /workspace is absent (host-side runs)."""
     from pathlib import Path

@@ -83,13 +83,13 @@ def _build_environment(model_name: str, workspace_dir: str) -> str:
     """Build environment context without model-specific cacheable content."""
     # ``model_name`` remains in the compatibility signature for callers that
     # supplied it, but the active model must not affect cacheable prompt text.
-    return f"""\
-## Environment
+    from archie_agent import environment
 
-- Workspace: {workspace_dir} (project root, mounted from host)
-- Exec interpreter: {PYTHON}
-- Container: isolated Docker (Debian), ephemeral — destroyed after session
-- All file paths are relative to {workspace_dir} unless absolute"""
+    try:
+        notes = _load_prompt("tool-notes.md")
+    except OSError:
+        notes = ""
+    return environment.render(environment.facts(), workspace_dir, notes, PYTHON)
 
 
 # ---------------------------------------------------------------------------

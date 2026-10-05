@@ -19,6 +19,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
+    chromium \
     openssh-client \
     gnupg \
     curl \
@@ -27,9 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     git \
     iputils-ping \
+    mariadb-client \
     nano \
     netcat-openbsd \
     pandoc \
+    poppler-utils \
+    postgresql-client \
+    redis-tools \
     ripgrep \
     shellcheck \
     sqlite3 \
@@ -53,9 +58,33 @@ RUN uv python install "$(cat /opt/archie/.python-version)" && \
     ln -s "$PYTHON_PATH/bin/python3" /usr/local/bin/python3 && \
     ln -s /usr/local/bin/python3 /usr/local/bin/python
 
+# --- Node.js (latest LTS; includes npm and npx) + agent-browser ---
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install --global agent-browser && \
+    node --version && npx --version && agent-browser --version && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install jq
 RUN curl -L "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${TARGETARCH}" \
         -o /usr/local/bin/jq && chmod +x /usr/local/bin/jq
+
+# --- Go (latest 1.27.x from go.dev; Debian ships an older release) ---
+# Pinned to the host's minor version. The archive is verified against the
+# SHA-256 published in the go.dev release index.
+ARG GO_MINOR=1.27
+RUN set -eux; \
+    GO_RELEASE=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" \
+        | jq -r --arg m "go${GO_MINOR}." --arg a "${TARGETARCH}" \
+            '[.[] | select(.stable and (.version | startswith($m)))][0] | .files[] | select(.os == "linux" and .arch == $a and .kind == "archive") | "\(.filename) \(.sha256)"'); \
+    GO_FILE=${GO_RELEASE% *}; GO_SHA=${GO_RELEASE#* }; \
+    test -n "${GO_FILE}" && test "${#GO_SHA}" -eq 64; \
+    curl -fsSL "https://go.dev/dl/${GO_FILE}" -o /tmp/go.tar.gz; \
+    echo "${GO_SHA}  /tmp/go.tar.gz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz; \
+    /usr/local/go/bin/go version
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # --- yq (YAML processor, like jq for YAML) ---
 RUN curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TARGETARCH}" \
@@ -90,7 +119,7 @@ RUN DIFFT_VERSION=$(curl -s https://api.github.com/repos/Wilfred/difftastic/rele
         amd64) DIFFT_ARCH="x86_64" ;; \
         arm64) DIFFT_ARCH="aarch64" ;; \
     esac && \
-    curl -L "https://github.com/Wilfred/difftastic/releases/download/${DIFFT_VERSION}/difft-${DIFFT_ARCH}-unknown-linux-gnu.tar.gz" \
+    curl -fsSL "https://github.com/Wilfred/difftastic/releases/download/${DIFFT_VERSION}/difft-${DIFFT_VERSION}-${DIFFT_ARCH}-unknown-linux-gnu.tar.gz" \
         -o /tmp/difft.tar.gz && \
     tar -xzf /tmp/difft.tar.gz -C /usr/local/bin && \
     chmod +x /usr/local/bin/difft && \
@@ -192,6 +221,12 @@ WORKDIR /workspace
 EXPOSE 8080
 
 USER ${USERNAME}
+
+# Use Debian's native Chromium build (Chrome for Testing has no Linux ARM64 build).
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Go module/build caches live in the user's home (GOPATH defaults to ~/go).
+ENV PATH="/home/${USERNAME}/go/bin:${PATH}"
 
 # Install the latest stable Kiro CLI non-interactively.
 # This mirrors the Linux path from https://cli.kiro.dev/install: select the
