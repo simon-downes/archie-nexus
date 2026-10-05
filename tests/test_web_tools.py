@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from archie_agent.exec.tools import ContentTypeError, get_all_tools, get_tool_guidelines
+from archie_agent.exec.tools import ContentTypeError, get_all_tools
 from archie_agent.exec.tools.web import (
     _extract_selective,
     _html_to_text,
@@ -28,20 +28,10 @@ class TestRegistration:
         tools = get_all_tools()
         assert "web_search" in tools
 
-    def test_web_fetch_has_guidelines(self):
+    def test_web_tools_are_native(self):
+        # Tool choice guidance lives in tools-strategy.md; no per-tool guideline needed.
         tools = get_all_tools()
-        assert hasattr(tools["web_fetch"], "_guidelines")
-        assert len(tools["web_fetch"]._guidelines) > 0
-
-    def test_web_search_has_guidelines(self):
-        tools = get_all_tools()
-        assert hasattr(tools["web_search"], "_guidelines")
-        assert len(tools["web_search"]._guidelines) > 0
-
-    def test_guidelines_included_in_aggregation(self):
-        guidelines = get_tool_guidelines()
-        assert any("web_fetch" in g for g in guidelines)
-        assert any("web_search" in g for g in guidelines)
+        assert tools["web_fetch"]._native and tools["web_search"]._native
 
 
 # ---------------------------------------------------------------------------

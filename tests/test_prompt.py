@@ -45,25 +45,21 @@ def test_build_tools_contains_strategy():
 
 
 def test_build_tools_contains_native_guidance():
-    """Tools section includes native-vs-exec guidance."""
+    """Tools section makes native tools the default and scopes exec to reduction."""
     tools = _build_tools()
-    assert "Native tools" in tools
+    assert "Native tools" in tools or "native tools" in tools
     assert "read" in tools
     assert "web_fetch" in tools
     assert "exec" in tools
-    # Should explain when to use exec vs native
-    assert "Chain" in tools or "chain" in tools or "multi-step" in tools
+    assert "parallel" in tools
+    assert "Don't use `exec`" in tools
 
 
 def test_build_tools_contains_guidelines():
-    """Tools section includes aggregated guidelines from exec tools."""
+    """Tools section includes de-duplicated tool guidelines."""
     tools = _build_tools()
     assert "### Guidelines" in tools
-    assert "read" in tools
-    assert "write" in tools
-    assert "edit" in tools
-    assert "glob" in tools
-    assert "shell" in tools
+    assert tools.count("never provide credentials") == 1
 
 
 def test_build_system_prompt_assembles_all_sections():

@@ -446,23 +446,28 @@ async def test_kill_process_group_kills_grandchild(workspace, tmp_path):
 # --- get_tool_guidelines ---
 
 
-def test_get_tool_guidelines_returns_all_tools():
-    """get_tool_guidelines returns guidelines from all registered tools."""
-    from archie_agent.exec.tools import get_all_tools, get_tool_guidelines
+def test_get_tool_guidelines_are_unique_and_meaningful():
+    """Guidelines are de-duplicated and only carry tool-specific advice."""
+    from archie_agent.exec.tools import get_tool_guidelines
 
     guidelines = get_tool_guidelines()
 
-    # Every registered tool should have at least one guideline
-    assert len(guidelines) >= len(get_all_tools())
-
-    # Check representative entries from each tool
+    assert len(guidelines) == len(set(guidelines))
     joined = "\n".join(guidelines)
-    assert "read" in joined
-    assert "write" in joined
-    assert "edit" in joined
-    assert "grep" in joined
-    assert "glob" in joined
-    assert "shell" in joined
+    assert "timeout" in joined  # shell
+    assert "brain_search" in joined
+    assert "jira" in joined
+    # Tool-choice rules live in tools-strategy.md, not per-tool guidelines.
+    assert "Use `read` to examine" not in joined
+
+
+def test_namespaced_tools_do_not_inherit_jira_guideline():
+    """Non-Jira namespaced tools carry no guideline unless they declare one."""
+    from archie_agent.exec.tools import get_all_tools
+
+    for name, fn in get_all_tools().items():
+        if getattr(fn, "_namespace", None) not in (None, "jira"):
+            assert not any("Jira" in g for g in fn._guidelines), name
 
 
 def test_get_tool_guidelines_deterministic_order():

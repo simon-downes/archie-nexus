@@ -80,11 +80,7 @@ def tool(
     """
 
     def decorator(f):
-        f._guidelines = guidelines or (
-            ("Use Jira only through the `jira` namespace and never provide credentials.",)
-            if namespace
-            else ()
-        )
+        f._guidelines = tuple(guidelines)
         f._native = native
         f._exec_enabled = exec_enabled
         f._exec_docs = exec_docs
@@ -128,17 +124,21 @@ def get_all_tools() -> dict:
 
 
 def get_tool_guidelines() -> list[str]:
-    """Collect _guidelines from all registered exec tool functions.
+    """Collect unique _guidelines from all registered exec tool functions.
 
-    Iterates tools in sorted name order for deterministic output.
+    Iterates tools in sorted name order for deterministic output; a guideline
+    shared by several tools appears once, at its first occurrence.
     Functions without a _guidelines attribute are silently skipped.
 
     Returns:
-        Flat list of guideline strings aggregated from all tools.
+        Flat, de-duplicated list of guideline strings.
     """
     guidelines: list[str] = []
+    seen: set[str] = set()
     for name in sorted(get_all_tools()):
         fn = _TOOLS[name]
         for g in getattr(fn, "_guidelines", ()):
-            guidelines.append(g)
+            if g not in seen:
+                seen.add(g)
+                guidelines.append(g)
     return guidelines

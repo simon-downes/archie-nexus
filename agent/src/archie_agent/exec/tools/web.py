@@ -13,7 +13,7 @@ import re
 from archie_agent.exec.tools import ContentTypeError, tool
 
 
-@tool(guidelines=("Use `web_fetch` to retrieve content from a URL.",))
+@tool
 async def web_fetch(url: str, mode: str = "selective", search_terms: str | None = None) -> str:
     """Fetch content from a web URL.
 
@@ -94,7 +94,7 @@ async def web_fetch(url: str, mode: str = "selective", search_terms: str | None 
     return header + text_content
 
 
-@tool(guidelines=("Use `web_search` to find information on the web.",))
+@tool
 async def web_search(query: str) -> str:
     """Search the web using DuckDuckGo.
 

@@ -20,6 +20,7 @@ import functools
 import inspect
 import io
 import json
+import os
 import signal
 import sys
 import time
@@ -173,6 +174,15 @@ def run(run_dir: Path) -> None:
         except (OSError, TypeError, ValueError):
             policy_snapshot = None
     namespace = _build_namespace(calls, policy_snapshot)
+
+    # Run model code from the workspace root so plain open()/Path resolve
+    # relative paths the same way the helpers do. Done here (not at spawn) so
+    # workspace files can't shadow modules imported by the runner itself.
+    from archie_agent.exec.tools._subprocess import _resolve_cwd
+
+    workspace = _resolve_cwd(None)
+    if workspace:
+        os.chdir(workspace)
 
     try:
         code = compile(source, str(source_path), "exec")

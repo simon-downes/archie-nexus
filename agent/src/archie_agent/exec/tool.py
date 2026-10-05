@@ -121,6 +121,9 @@ def format_result(envelope: Envelope) -> str:
         if envelope.return_value is not None:
             if envelope.return_repr:
                 parts.append(f"return (repr): {envelope.return_value}")
+            elif isinstance(envelope.return_value, str):
+                # Plain text avoids JSON-escaping newlines and quotes.
+                parts.append(envelope.return_value)
             else:
                 parts.append(
                     f"return: {json.dumps(envelope.return_value, ensure_ascii=False, default=str)}"
@@ -172,9 +175,15 @@ def _generate_tool_docs() -> str:
 def _build_exec_description() -> str:
     """Build the full exec tool description with auto-generated docs."""
     header = (
-        "Execute Python code inside the container. The source must define "
-        "`async def main()` which will be awaited. The return value, stdout, "
-        "stderr, and any exceptions are captured and returned.\n\n"
+        "Execute Python code inside the container to parse, filter, aggregate, or "
+        "loop over tool output and return only the reduced result. The source must "
+        "define `async def main()` which will be awaited. The return value, stdout, "
+        "stderr, and any exceptions are captured and returned; a returned `str` is "
+        "shown as plain text.\n\n"
+        "Not for single tool calls, batches of independent calls, or returning whole "
+        "files — call the native tools directly (in parallel when independent).\n\n"
+        "The working directory is the workspace root; helpers and plain `open()` "
+        "resolve relative paths the same way.\n\n"
         "Available functions in the exec namespace:\n"
     )
 
@@ -189,8 +198,15 @@ def _build_exec_description() -> str:
         "Example:\n"
         "```python\n"
         "async def main():\n"
-        '    results = await grep(pattern="TODO", include="*.py")\n'
-        "    return results\n"
+        '    hits = await grep(pattern=r"TODO", include="*.py")\n'
+        "    counts = {}\n"
+        '    for line in hits.splitlines():\n'
+        '        if line.endswith(":") and not line.startswith(" "):\n'
+        "            current = line[:-1]\n"
+        '        elif "|" in line:\n'
+        "            counts[current] = counts.get(current, 0) + 1\n"
+        "    top = sorted(counts.items(), key=lambda kv: -kv[1])[:10]\n"
+        '    return "\\n".join(f"{n:4} {f}" for f, n in top)\n'
         "```"
     )
 

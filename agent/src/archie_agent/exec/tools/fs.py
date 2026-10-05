@@ -69,7 +69,7 @@ def _resolve_path(path: str) -> Path:
     return (WORKSPACE / p).resolve()
 
 
-@tool(guidelines=("Use `read` to examine file contents.",))
+@tool
 async def read(
     path: str, offset: int | None = None, limit: int | None = None, raw: bool = False
 ) -> str:
@@ -145,7 +145,7 @@ async def read(
     return header + "\n\n" + "\n".join(numbered)
 
 
-@tool(guidelines=("Use `grep` to search file contents by regex pattern.",))
+@tool
 async def grep(pattern: str, include: str | None = None, path: str | None = None) -> str:
     """Search file contents using regex via ripgrep.
 
@@ -266,7 +266,7 @@ async def grep(pattern: str, include: str | None = None, path: str | None = None
     return "\n".join(output_lines)
 
 
-@tool(guidelines=("Use `glob` to find files by name pattern.",))
+@tool
 async def glob(pattern: str, path: str | None = None) -> str:
     """Find files matching a glob pattern within the workspace.
 
@@ -361,7 +361,7 @@ async def glob(pattern: str, path: str | None = None) -> str:
     return "\n".join(lines)
 
 
-@tool(guidelines=("Use `write` for new files or complete rewrites.",))
+@tool
 async def write(path: str, content: str) -> str:
     """Write content to a file, creating parent directories as needed.
 
@@ -387,11 +387,7 @@ async def write(path: str, content: str) -> str:
     return f"Written: {path} ({line_count} lines)"
 
 
-@tool(
-    guidelines=(
-        "Use `edit` to modify existing files — it shows a diff and is safer than a full rewrite.",
-    )
-)
+@tool
 async def edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
     """Apply a string replacement edit to a file.
 

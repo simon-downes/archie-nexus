@@ -22,7 +22,6 @@ from archie_agent.exec.tools._subprocess import run_shell
 
 @tool(
     guidelines=(
-        "Use `shell` for tests, builds, package commands, and git.",
         "Pass `timeout` (seconds) for commands that may hang; a timed-out command is killed "
         "and returned as an error so the turn always completes.",
     )

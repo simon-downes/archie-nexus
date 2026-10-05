@@ -62,6 +62,20 @@ async def test_run_exec_contract_error(run_root):
     assert envelope.error.type == "ContractError"
 
 
+async def test_run_exec_cwd_is_workspace_when_present(run_root):
+    """Model code runs from the workspace root so plain open() matches helpers."""
+    from pathlib import Path
+
+    envelope = await run_exec(
+        "import os\nasync def main():\n    return os.getcwd()\n",
+        run_root=run_root,
+        python=sys.executable,
+    )
+    assert envelope.ok is True
+    if Path("/workspace").is_dir():
+        assert envelope.return_value == "/workspace"
+
+
 async def test_run_exec_bad_python(run_root):
     """OSError on bad python path → RunnerCrash envelope."""
     envelope = await run_exec(
@@ -127,6 +141,18 @@ def test_format_result_truncation():
     assert "[…truncated]" in result
 
 
+def test_format_result_string_is_plain_text():
+    env = Envelope(ok=True, return_value='line "one"\nline two')
+    result = format_result(env)
+    assert result == 'line "one"\nline two'
+    assert "\\n" not in result
+
+
+def test_format_result_non_string_stays_json():
+    env = Envelope(ok=True, return_value=["a\nb"])
+    assert format_result(env) == 'return: ["a\\nb"]'
+
+
 # --- description auto-gen ---
 
 
@@ -139,6 +165,12 @@ def test_build_exec_description_contains_tools():
     assert "glob" in desc
     assert "shell" in desc
     assert "async def main()" in desc
+
+
+def test_build_exec_description_scopes_exec_to_reduction():
+    desc = _build_exec_description()
+    assert "Not for single tool calls" in desc
+    assert "workspace root" in desc
 
 
 # --- create_registry ---
