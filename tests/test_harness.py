@@ -34,7 +34,7 @@ from archie_shared.events import (
     UserMessage,
     decode_event,
 )
-from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 from archie_shared.session.log import EventIdConflict, LogAppendError
 
 
@@ -68,7 +68,7 @@ def _make_model() -> ModelEntry:
     return ModelEntry(
         name="Test Model",
         provider=BedrockProvider(model_id="test-model-id", region="us-east-1"),
-        cost=CostConfig(input=3.0, output=15.0),
+        cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
         context=200000,
         max_output_tokens=4096,
     )

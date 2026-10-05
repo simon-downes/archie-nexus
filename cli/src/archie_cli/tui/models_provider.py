@@ -7,6 +7,15 @@ from functools import partial
 from archie_shared.models import load_models
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
+
+def _cost_summary(model) -> str:
+    rate = next(
+        (rate for rate in model.cost.rates if rate.criteria == ("total_input", "min", 0)),
+        model.cost.rates[0],
+    )
+    tiered = " tiered" if len(model.cost.rates) > 1 else ""
+    return f"${rate.input:.2f}/${rate.output:.2f} per M tokens{tiered}"
+
 _catalog_cache: dict | None = None
 
 
@@ -24,7 +33,7 @@ class ModelProvider(Provider):
         catalog = _get_catalog()
         for key in sorted(catalog):
             model = catalog[key]
-            help_text = f"${model.cost.input:.2f}/${model.cost.output:.2f} per M tokens"
+            help_text = _cost_summary(model)
             yield DiscoveryHit(
                 f"Change Model → {model.name}", partial(self._switch, key), help=help_text
             )
@@ -42,7 +51,7 @@ class ModelProvider(Provider):
                     score,
                     matcher.highlight(label),
                     partial(self._switch, key),
-                    help=f"${model.cost.input:.2f}/${model.cost.output:.2f} per M tokens",
+                    help=_cost_summary(model),
                 )
         quit_score = matcher.match("Quit")
         if quit_score > 0:

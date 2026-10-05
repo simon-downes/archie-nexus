@@ -43,7 +43,7 @@ def test_load_nexus_config_full(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "global:\n"
-        "  model: bedrock-claude-opus-4-6\n"
+        "  model: bedrock-claude-sonnet-5-5\n"
         "  workspace_root: ~/projects\n"
         "  region: us-east-1\n"
         "cli: {}\n"
@@ -51,7 +51,7 @@ def test_load_nexus_config_full(tmp_path):
         "web: {}\n"
     )
     config = load_nexus_config(path=cfg)
-    assert config.global_.model == "bedrock-claude-opus-4-6"
+    assert config.global_.model == "bedrock-claude-sonnet-5-5"
     assert config.global_.workspace_root == "~/projects"
     assert config.global_.region == "us-east-1"
 

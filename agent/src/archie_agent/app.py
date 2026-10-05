@@ -90,7 +90,7 @@ async def lifespan(app):
     global _agent, _catalog, _config
 
     _config = load_nexus_config()
-    _catalog = load_models(home_dir() / "models.yaml")
+    _catalog = load_models()
     model = get_model(_catalog, _config.global_.model)
 
     llm_client = create_llm_client(model, _config.global_.region)

@@ -1,4 +1,4 @@
-"""OpenAI Responses API client for GPT-5.6 Luna on Amazon Bedrock."""
+"""OpenAI Responses API client for OpenAI models on Amazon Bedrock (bedrock-runtime)."""
 
 import copy
 import hashlib
@@ -34,6 +34,15 @@ from archie_agent.session import Turn
 log = logging.getLogger(__name__)
 _CACHE_OPTIONS = {"mode": "explicit", "ttl": "30m"}
 _MARKER = {"mode": "explicit"}
+
+
+def runtime_base_url(region: str) -> str:
+    """Return the bedrock-runtime OpenAI-compatible base URL.
+
+    bedrock-runtime accepts cross-Region inference profile IDs (``global.`` /
+    ``us.``); the SDK's default bedrock-mantle endpoint only accepts bare IDs.
+    """
+    return f"https://bedrock-runtime.{region}.amazonaws.com/openai/v1"
 
 
 class _StoredBedrockCredentialProvider(CredentialProvider):
@@ -262,6 +271,7 @@ class BedrockOpenAIClient:
         self._previous_conversation_fingerprint = None
         self.client = BedrockOpenAI(
             aws_region=region,
+            base_url=runtime_base_url(region),
             bedrock_token_provider=lambda: provide_token(
                 region=region, aws_credentials_provider=_StoredBedrockCredentialProvider()
             ),

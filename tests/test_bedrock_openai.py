@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock
 
 from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
-from archie_agent.llm.bedrock_openai import BedrockOpenAIClient, prompt_cache_key
+from archie_agent.llm.bedrock_openai import BedrockOpenAIClient, prompt_cache_key, runtime_base_url
 from archie_agent.prompt import PromptSection, SystemPrompt
 from archie_agent.session import Turn
 from archie_shared.types import TextBlock
@@ -271,3 +271,9 @@ def test_cache_validation_retries_without_metadata():
         for block in item.get("content", [])
     )
     assert client._cache_enabled is False
+
+
+def test_client_targets_bedrock_runtime_for_inference_profiles():
+    assert runtime_base_url("us-east-1") == "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+    client = BedrockOpenAIClient("global.openai.gpt-5.6-luna", "us-east-1")
+    assert str(client.client.base_url).rstrip("/") == "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"

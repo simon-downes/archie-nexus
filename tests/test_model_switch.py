@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from archie_shared.commands import SwitchModelCommand, decode_command, encode_command
 from archie_shared.events import ErrorNotice, SessionStatus, decode_event, encode_event
-from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 
 
 class TestSwitchModelCommand:
@@ -73,7 +73,7 @@ class TestModelSwitchHandler:
             name="Test Model A",
             context=200_000,
             provider=BedrockProvider(model_id="test-a-endpoint", region="us-east-1"),
-            cost=CostConfig(input=3.0, output=15.0),
+            cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
             max_output_tokens=4096,
             can_cache=True,
         )
@@ -81,7 +81,7 @@ class TestModelSwitchHandler:
             name="Test Model B",
             context=100_000,
             provider=BedrockProvider(model_id="test-b-endpoint"),
-            cost=CostConfig(input=1.0, output=5.0),
+            cost=CostConfig(rates=[Rate(input=1.0, output=5.0)]),
             max_output_tokens=8192,
             can_cache=False,
         )
@@ -321,13 +321,13 @@ class TestModelProvider:
                 name="Claude Haiku 4.5",
                 context=200_000,
                 provider=BedrockProvider(model_id="ep-haiku"),
-                cost=CostConfig(input=1.0, output=5.0),
+                cost=CostConfig(rates=[Rate(input=1.0, output=5.0)]),
             ),
             "model-sonnet": ModelEntry(
                 name="Claude Sonnet 4.6",
                 context=200_000,
                 provider=BedrockProvider(model_id="ep-sonnet"),
-                cost=CostConfig(input=3.0, output=15.0),
+                cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
             ),
         }
         monkeypatch.setattr("archie_cli.tui.models_provider._get_catalog", lambda: test_catalog)
@@ -362,7 +362,7 @@ class TestModelProvider:
                 name="Claude Sonnet 4.6",
                 context=200_000,
                 provider=BedrockProvider(model_id="ep"),
-                cost=CostConfig(input=3.0, output=15.0),
+                cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
             ),
         }
         monkeypatch.setattr("archie_cli.tui.models_provider._get_catalog", lambda: test_catalog)

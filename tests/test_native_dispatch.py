@@ -12,7 +12,7 @@ from archie_agent.harness import AgentHarness
 from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, Usage
 from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Session
-from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
 
 # --- Fixtures ---
@@ -22,7 +22,7 @@ def _make_model() -> ModelEntry:
     return ModelEntry(
         name="Test Model",
         provider=BedrockProvider(model_id="test-model-id", region="us-east-1"),
-        cost=CostConfig(input=3.0, output=15.0),
+        cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
         context=200000,
         max_output_tokens=4096,
     )

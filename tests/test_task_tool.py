@@ -7,7 +7,7 @@ from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.session import Session
 from archie_agent.skills import SkillEntry
 from archie_shared.events import encode_event
-from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 
 
 def _model() -> ModelEntry:
@@ -15,7 +15,7 @@ def _model() -> ModelEntry:
         name="Child model",
         context=10000,
         provider=BedrockProvider(model_id="child-model", region="us-east-1"),
-        cost=CostConfig(input=2.0, output=4.0),
+        cost=CostConfig(rates=[Rate(input=2.0, output=4.0)]),
     )
 
 

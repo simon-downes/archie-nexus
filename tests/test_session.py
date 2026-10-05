@@ -2,7 +2,7 @@
 
 import pytest
 from archie_agent.session import Session
-from archie_shared.models import BedrockProvider, CostConfig, ModelEntry
+from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 
 
 def _session(context: int = 1_000, threshold: float = 0.8) -> Session:
@@ -11,7 +11,7 @@ def _session(context: int = 1_000, threshold: float = 0.8) -> Session:
         context=context,
         context_warning_threshold=threshold,
         provider=BedrockProvider(model_id="test"),
-        cost=CostConfig(input=2.0, output=4.0, cache_read=0.5, cache_write=1.0),
+        cost=CostConfig(rates=[Rate(input=2.0, output=4.0, cache_read=0.5, cache_write=1.0)]),
     )
     return Session(model_id="test", model=model)
 
