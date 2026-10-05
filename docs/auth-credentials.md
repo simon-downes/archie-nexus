@@ -92,7 +92,11 @@ Provider behavior is defined in the shared provider registry. A provider descrip
 For example:
 
 - Notion discovers from `https://mcp.notion.com` and uses the RFC 9470/RFC 8414 metadata flow.
-- Slack uses nested token paths such as `authed_user.access_token` and requests `user_scope`.
+- Slack uses nested token paths such as `authed_user.access_token` and requests `user_scope`
+  covering every `slack.*` tool: conversation read/history for all four conversation types,
+  `users:read` + `users:read.email`, the granular `search:read.*` scopes, `reactions:read`,
+  `reactions:write`, and `chat:write`. Slack grants are additive — re-running
+  `archie auth login slack` adds newly requested scopes to the existing token.
 - Google requests offline access with consent.
 
 OAuth overrides are configured globally for the running orchestrator under `auth.providers` in `config.yaml`. Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `auth.providers.google.client_id` is required before `nexus auth login google` can start:

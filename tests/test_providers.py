@@ -42,6 +42,48 @@ def test_slack_has_custom_token_paths():
     assert slack.refresh_token_path == "authed_user.refresh_token"
 
 
+def test_slack_requests_scopes_for_every_tool():
+    """Slack user scopes cover each slack.* tool's API calls, including email."""
+    slack = PROVIDERS["slack"]
+    assert isinstance(slack, OAuthProvider)
+    scopes = slack.extra_params["user_scope"].split(" ")
+    assert len(scopes) == len(set(scopes))
+    assert set(scopes) == {
+        "channels:read",
+        "groups:read",
+        "im:read",
+        "mpim:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "users:read",
+        "users:read.email",
+        "search:read.public",
+        "search:read.private",
+        "search:read.im",
+        "search:read.mpim",
+        "search:read.files",
+        "search:read.users",
+        "reactions:read",
+        "reactions:write",
+        "chat:write",
+    }
+    # The legacy bundled scope is not used by assistant.search.context.
+    assert "search:read" not in scopes
+
+
+def test_slack_search_scopes_are_requested():
+    """Every scope the search tool can require is in the OAuth request."""
+    from archie_agent.exec.tools.slack.search import required_scopes
+
+    requested = set(PROVIDERS["slack"].extra_params["user_scope"].split(" "))
+    needed = required_scopes(
+        ["messages", "files", "users"], ["public_channel", "private_channel", "im", "mpim"]
+    )
+    assert set(needed) <= requested
+
+
 def test_google_has_required_scopes():
     """Google has the complete Workspace tooling OAuth scope set configured."""
     google = PROVIDERS["google"]

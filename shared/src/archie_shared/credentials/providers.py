@@ -138,9 +138,36 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
         refresh_token_path="authed_user.refresh_token",
         expires_in_path="authed_user.expires_in",
         extra_params={
-            "user_scope": (
-                "channels:history channels:read groups:history groups:read "
-                "users:read search:read im:history mpim:history"
+            # User-token scopes, one group per Slack API the slack.* tools call.
+            # Slack grants are additive: re-authorizing adds to an existing token.
+            "user_scope": " ".join(
+                (
+                    # conversations / name resolution: users.conversations (all types)
+                    "channels:read",
+                    "groups:read",
+                    "im:read",
+                    "mpim:read",
+                    # messages / thread: conversations.history, conversations.replies
+                    "channels:history",
+                    "groups:history",
+                    "im:history",
+                    "mpim:history",
+                    # users: users.list (email always requested)
+                    "users:read",
+                    "users:read.email",
+                    # search: assistant.search.context (granular search scopes)
+                    "search:read.public",
+                    "search:read.private",
+                    "search:read.im",
+                    "search:read.mpim",
+                    "search:read.files",
+                    "search:read.users",
+                    # reactions: reactions.get / react: reactions.add, reactions.remove
+                    "reactions:read",
+                    "reactions:write",
+                    # send_message: chat.postMessage
+                    "chat:write",
+                )
             ),
         },
     ),

@@ -224,7 +224,7 @@ Errors are sanitized and do not contain credentials, message bodies, or hidden d
 - `SlackPolicyError`: the Slack surface or target is denied/disabled. Do not bypass policy or retry unchanged.
 - `SlackConfigurationError`: credentials are missing or incomplete. Authenticate/configure Slack through Nexus.
 - `SlackAuthenticationError`: Slack rejected or expired authentication. Reauthenticate through the configured Slack login flow; do not retry unchanged.
-- `SlackReauthorizationRequiredError`: required OAuth capabilities are missing. Reauthorize with the requested capabilities; never replace or print the token.
+- `SlackReauthorizationRequiredError`: required OAuth capabilities are missing. Tell the user to run `archie auth login slack` on the host; it requests every scope the Slack tools need and adds them to the existing grant. Never replace or print the token.
 - `SlackNotFoundError`: the canonical target could not be resolved. Discover permitted IDs again; do not guess names or provider syntax.
 - `SlackResponseError`: Slack returned a malformed or rejected response. Do not automatically repeat a mutation.
 - `SlackPaginationError` / `SlackDeadlineError`: bounded enumeration did not complete. Do not assume a partial result is complete.
