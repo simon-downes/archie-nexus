@@ -88,6 +88,16 @@ class ToolCall(PersistedEvent, tag="tool_call", tag_field="type", forbid_unknown
     subagent_index: int | None = None
 
 
+class ToolResultImage(msgspec.Struct, forbid_unknown_fields=True):
+    """Metadata for an image returned in a tool result. Image bytes are never persisted."""
+
+    format: str
+    width: int
+    height: int
+    bytes: int
+    source: str = ""
+
+
 class ToolResult(PersistedEvent, tag="tool_result", tag_field="type", forbid_unknown_fields=True):
     id: str
     turn: int
@@ -101,6 +111,7 @@ class ToolResult(PersistedEvent, tag="tool_result", tag_field="type", forbid_unk
     result_bytes: int = 0
     result_lines: int = 0
     subagent_index: int | None = None
+    images: list[ToolResultImage] = msgspec.field(default_factory=list)
 
 
 class AssistantMessage(

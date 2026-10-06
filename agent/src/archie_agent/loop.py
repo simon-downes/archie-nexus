@@ -266,6 +266,7 @@ async def run_loop(
                     duration_ms=result_block.duration_ms,
                     result_lines=result_block.result_lines,
                     result_bytes=result_block.result_bytes,
+                    images=result_block.images,
                 )
             ordered_results = [
                 block

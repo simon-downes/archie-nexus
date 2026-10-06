@@ -13,11 +13,13 @@ from archie_shared.events import (
     TextDelta,
     ToolCall,
     ToolResult,
+    ToolResultImage,
     TurnComplete,
     TurnError,
     TurnInterrupted,
 )
 from archie_shared.models import ModelEntry, calculate_cost
+from archie_shared.types import ImageBlock
 from ulid import ULID
 
 from archie_agent.loop_events import Usage
@@ -146,6 +148,7 @@ class EventFactory:
         duration_ms: int,
         result_bytes: int,
         result_lines: int = 0,
+        images: tuple[ImageBlock, ...] = (),
     ) -> ToolResult:
         return ToolResult(
             id=str(ULID()),
@@ -160,6 +163,16 @@ class EventFactory:
             duration_ms=duration_ms,
             result_bytes=result_bytes,
             result_lines=result_lines,
+            images=[
+                ToolResultImage(
+                    format=i.format,
+                    width=i.width,
+                    height=i.height,
+                    bytes=len(i.data),
+                    source=i.source,
+                )
+                for i in images
+            ],
         )
 
     def assistant_message(

@@ -9,6 +9,7 @@ import ollama as _ollama
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
+from archie_agent.llm._images import text_with_image_note
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.prompt import SystemPrompt, flatten_system_prompt
 from archie_agent.session import Turn
@@ -31,8 +32,9 @@ def _turns_to_ollama_messages(turns: list[Turn], system: str) -> list[dict]:
                     text_parts.append(text)
                 case ToolUseBlock(tool_use_id=_, name=name, input=inp):
                     tool_calls.append({"function": {"name": name, "arguments": inp}})
-                case ToolResultBlock(tool_use_id=_, content=content, is_error=_):
-                    tool_results.append({"role": "tool", "content": content})
+                case ToolResultBlock():
+                    # Ollama integration is text-only: images are never sent.
+                    tool_results.append({"role": "tool", "content": text_with_image_note(block)})
         if turn.role == "assistant" and tool_calls:
             msg: dict = {"role": "assistant"}
             if text_parts:

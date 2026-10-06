@@ -103,6 +103,11 @@ A user message follows this path:
    them, persists persisted events before delivery, and broadcasts them to connected clients.
 4. LLM provider streams become canonical text, request, tool, and terminal events. Tool calls may
    invoke native tools, the exec runner, or child agents through the `task` tool.
+   Native `read` returns image files (PNG/JPEG/GIF/WebP) as image content, downscaled with
+   Pillow to at most 1568px on the long edge and ~1.2MP. Images ride on `ToolResultBlock.images`
+   in memory only; provider adapters send them when the model's catalog entry has `can_see`
+   (Converse `image` blocks; Responses `input_image` data URLs) and otherwise substitute a fixed
+   "image omitted" note. Ollama is always text-only. Inside exec, `read` returns the caption text.
 5. The orchestrator observes canonical `llm_request` frames and asynchronously writes them to
    SQLite metrics. The metrics writer is best-effort and does not block the event relay.
 6. The TUI applies live and stored events through one imperative `_apply_event(event, historical=...)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.

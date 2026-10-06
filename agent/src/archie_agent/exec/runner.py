@@ -116,13 +116,23 @@ def _wrap_for_audit(fn, name: str, calls: list[CallRecord]):
         t0 = time.time()
         ok = True
         try:
-            return await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)
         except Exception:
             ok = False
             raise
         finally:
             duration_ms = int((time.time() - t0) * 1000)
             calls.append(CallRecord(fn=name, args=args_summary, ms=duration_ms, ok=ok))
+        # Exec has no image channel: tools returning a ToolImage degrade to its
+        # text caption so model code keeps getting a str.
+        from archie_agent.exec.tools.images import ToolImage
+
+        if isinstance(result, ToolImage):
+            return (
+                f"{result.caption}\n[Image content is not available inside exec; "
+                "call the native `read` tool to view it.]"
+            )
+        return result
 
     return wrapper
 

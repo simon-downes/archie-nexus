@@ -23,12 +23,13 @@ from archie_shared.events import ErrorNotice, SessionEvent
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.models import calculate_cost
 from archie_shared.session.log import LogAppendError
-from archie_shared.types import ToolResultBlock, ToolUseBlock
+from archie_shared.types import ImageBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
 from archie_agent.event_factory import EventFactory, now_utc
 from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.exec.tools.images import ToolImage
 from archie_agent.llm import create_llm_client
 from archie_agent.loop import run_loop
 from archie_agent.loop_events import (
@@ -195,6 +196,7 @@ class ChildDispatch:
             )
 
         started = time.perf_counter()
+        images: tuple[ImageBlock, ...] = ()
         try:
             if block.name == "exec":
                 kwargs: dict[str, Any] = {"on_start": self.on_process_start}
@@ -210,7 +212,12 @@ class ChildDispatch:
                 kwargs = dict(block.input)
                 if "on_start" in inspect.signature(spec.handler).parameters:
                     kwargs["on_start"] = self.on_process_start
-                content = str(await spec.handler(**kwargs))
+                result = await spec.handler(**kwargs)
+                if isinstance(result, ToolImage):
+                    images = (result.image,)
+                    content = result.caption
+                else:
+                    content = str(result)
                 is_error = False
         except Exception as error:  # noqa: BLE001 - normalize tool failures
             content = f"{type(error).__name__}: {error}"
@@ -226,6 +233,7 @@ class ChildDispatch:
             duration_ms=duration_ms,
             result_lines=len(content.splitlines()),
             result_bytes=len(content.encode("utf-8")),
+            images=images,
         )
 
     def on_process_start(self, proc: asyncio.subprocess.Process) -> None:
@@ -519,6 +527,7 @@ def create_task_tool(
                             duration_ms=event.duration_ms,
                             result_bytes=event.result_bytes,
                             result_lines=event.result_lines,
+                            images=event.images,
                         )
                         await emit(tool_result)
                     elif isinstance(event, TurnComplete):

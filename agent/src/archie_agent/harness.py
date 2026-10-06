@@ -22,13 +22,14 @@ from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.models import calculate_cost
 from archie_shared.schemas import SubagentsConfig
 from archie_shared.session.log import LogAppendError, SessionLog
-from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
+from archie_shared.types import ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
 from archie_agent.agents import AgentEntry, create_task_tool, discover_agents
 from archie_agent.event_factory import EventFactory, now_utc
 from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.exec.tools.images import ToolImage
 from archie_agent.loop import run_loop
 from archie_agent.loop_events import (
     IterationStart,
@@ -487,6 +488,7 @@ class AgentHarness:
                             tool_use_id=event.tool_use_id,
                             content=event.content,
                             is_error=event.is_error,
+                            images=event.images,
                         )
                     )
                     duration_ms = event.duration_ms
@@ -502,6 +504,7 @@ class AgentHarness:
                         duration_ms=duration_ms,
                         result_bytes=result_bytes,
                         result_lines=result_lines,
+                        images=event.images,
                     )
                     await self._event_bus.emit(tool_result)
 
@@ -633,6 +636,7 @@ class AgentHarness:
             )
 
         started = time.perf_counter()
+        images: tuple[ImageBlock, ...] = ()
         try:
             if block.name == "task":
                 kwargs = dict(block.input)
@@ -661,7 +665,11 @@ class AgentHarness:
                 if "on_start" in inspect.signature(spec.handler).parameters:
                     kwargs["on_start"] = self._on_proc_start
                 result = await spec.handler(**kwargs)
-                content = str(result)
+                if isinstance(result, ToolImage):
+                    images = (result.image,)
+                    content = result.caption
+                else:
+                    content = str(result)
                 is_error = block.name == "shell" and _shell_result_is_error(content)
         except Exception as e:
             content = f"{type(e).__name__}: {e}"
@@ -677,6 +685,7 @@ class AgentHarness:
             duration_ms=duration_ms,
             result_lines=len(content.splitlines()),
             result_bytes=len(content.encode("utf-8")),
+            images=images,
         )
 
     def _on_proc_start(self, proc: asyncio.subprocess.Process) -> None:

@@ -10,6 +10,7 @@ import boto3
 from archie_shared.types import TextBlock, ToolResultBlock, ToolUseBlock
 from botocore.config import Config
 
+from archie_agent.llm._images import text_with_image_note
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.prompt import SystemPrompt, flatten_system_prompt
 from archie_agent.session import Turn
@@ -31,8 +32,12 @@ def _shape_tool_config_for_bedrock(neutral_config: list[dict]) -> list[dict]:
     ]
 
 
-def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
-    """Translate internal Turn objects to Bedrock's message format."""
+def _turns_to_bedrock_messages(turns: list[Turn], can_see: bool = False) -> list[dict]:
+    """Translate internal Turn objects to Bedrock's message format.
+
+    Tool-result images become Converse ``image`` blocks when the model can see;
+    otherwise the result text carries a note that image content was omitted.
+    """
     messages = []
     for turn in turns:
         content_blocks: list[dict[str, Any]] = []
@@ -45,12 +50,20 @@ def _turns_to_bedrock_messages(turns: list[Turn]) -> list[dict]:
                     content_blocks.append(
                         {"toolUse": {"toolUseId": tid, "name": name, "input": inp}}
                     )
-                case ToolResultBlock(tool_use_id=tid, content=content, is_error=is_error):
+                case ToolResultBlock(tool_use_id=tid, is_error=is_error):
+                    if can_see:
+                        result_content: list[dict[str, Any]] = [{"text": block.content or "empty"}]
+                        result_content.extend(
+                            {"image": {"format": image.format, "source": {"bytes": image.data}}}
+                            for image in block.images
+                        )
+                    else:
+                        result_content = [{"text": text_with_image_note(block) or "empty"}]
                     content_blocks.append(
                         {
                             "toolResult": {
                                 "toolUseId": tid,
-                                "content": [{"text": content or "empty"}],
+                                "content": result_content,
                                 "status": "error" if is_error else "success",
                             }
                         }
@@ -64,13 +77,19 @@ class BedrockClient:
     """Wrapper around Bedrock's converse_stream API."""
 
     def __init__(
-        self, model_id: str, region: str, max_output_tokens: int = 32_768, can_cache: bool = False
+        self,
+        model_id: str,
+        region: str,
+        max_output_tokens: int = 32_768,
+        can_cache: bool = False,
+        can_see: bool = False,
     ):
         self.model_id = model_id
         self._region = region
         self.max_output_tokens = max_output_tokens
         self.client = self._create_client(region)
         self._cache_supported: bool = can_cache
+        self.can_see = can_see
 
     def _create_client(self, region: str):
         """Create a boto3 client using Archie credentials or the default chain."""
@@ -102,7 +121,7 @@ class BedrockClient:
     ) -> Generator[StreamEvent]:
         """Send a conversation to Bedrock and yield response events."""
         del history_boundary
-        bedrock_messages = _turns_to_bedrock_messages(messages)
+        bedrock_messages = _turns_to_bedrock_messages(messages, getattr(self, "can_see", False))
         system_blocks: list[dict[str, Any]] = [{"text": flatten_system_prompt(system)}]
         if self._cache_supported:
             system_blocks.append({"cachePoint": {"type": "default"}})
@@ -220,7 +239,7 @@ class BedrockClient:
         del tool_config, history_boundary
         params = {
             "modelId": self.model_id,
-            "messages": _turns_to_bedrock_messages(messages),
+            "messages": _turns_to_bedrock_messages(messages, getattr(self, "can_see", False)),
             "system": [{"text": flatten_system_prompt(system)}],
         }
         for attempt in range(3):

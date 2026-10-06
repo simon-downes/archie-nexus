@@ -48,6 +48,7 @@ def create_llm_client(model: ModelEntry, default_region: str) -> LLMClient:
                 region=region or default_region,
                 max_output_tokens=model.max_output_tokens,
                 can_cache=model.can_cache,
+                can_see=model.can_see,
             )
         case BedrockOpenAIProvider(model_id=model_id, region=region):
             return BedrockOpenAIClient(
@@ -55,6 +56,7 @@ def create_llm_client(model: ModelEntry, default_region: str) -> LLMClient:
                 region=region or default_region,
                 max_output_tokens=model.max_output_tokens,
                 can_cache=model.can_cache,
+                can_see=model.can_see,
             )
         case OllamaProvider(model_id=model_id, endpoint=endpoint):
             from archie_agent.llm.ollama import OllamaClient

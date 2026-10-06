@@ -133,6 +133,8 @@ class ModelEntry(msgspec.Struct):
     context: int
     provider: ProviderConfig
     can_cache: bool = False
+    # Accepts image input (tool-result images). Per Bedrock model-card input modalities.
+    can_see: bool = False
     cost: CostConfig = msgspec.field(default_factory=CostConfig)
     max_output_tokens: int = 32_768
     context_warning_threshold: float = 0.8
@@ -146,6 +148,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-fable-5-1"),
         can_cache=True,
+        can_see=True,
         max_output_tokens=128_000,
         # Global price assumed at 10% below the published Geo/In-region rate (11/55/0.275/13.75);
         # AWS does not yet list a global row for Fable 5.1. Pending confirmation.
@@ -157,6 +160,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-sonnet-5-5"),
         can_cache=True,
+        can_see=True,
         max_output_tokens=128_000,
         cost=CostConfig(rates=[Rate(input=2.0, output=10.0, cache_read=0.20, cache_write=2.50)]),
     ),
@@ -166,6 +170,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-sonnet-4-6"),
         can_cache=True,
+        can_see=True,
         cost=CostConfig(rates=[Rate(input=3, output=15, cache_read=0.3, cache_write=3.75)]),
     ),
     # Model card: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html
@@ -174,6 +179,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=200_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-haiku-4-5-20251001-v1:0"),
         can_cache=True,
+        can_see=True,
         cost=CostConfig(rates=[Rate(input=1, output=5, cache_read=0.1, cache_write=1.25)]),
     ),
     # Model card: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html
@@ -182,6 +188,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-opus-5-5"),
         can_cache=True,
+        can_see=True,
         max_output_tokens=128_000,
         cost=CostConfig(rates=[Rate(input=4.0, output=20.0, cache_read=0.20, cache_write=5.0)]),
     ),
@@ -191,6 +198,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-5.6-luna", region="us-east-1"),
         can_cache=True,
+        can_see=True,
         cost=CostConfig(
             rates=[
                 Rate(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25, criteria=("total_input", "min", 0)),
@@ -204,6 +212,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-6-luna", region="us-east-1"),
         can_cache=True,
+        can_see=True,
         cost=CostConfig(
             rates=[
                 Rate(input=0.10, output=0.50, cache_read=0.01, cache_write=0.125, criteria=("total_input", "min", 0)),
@@ -218,6 +227,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-6.1-sol", region="us-east-1"),
         can_cache=True,
+        can_see=True,
         max_output_tokens=131_072,
         cost=CostConfig(
             rates=[
@@ -233,6 +243,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_050_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-5.6-terra", region="us-east-1"),
         can_cache=True,
+        can_see=True,
         max_output_tokens=128_000,
         cost=CostConfig(
             rates=[
@@ -271,6 +282,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.moonshotai.kimi-k3"),
         can_cache=True,
+        can_see=True,
         max_output_tokens=16_000,
         cost=CostConfig(rates=[Rate(input=3.0, output=15.0, cache_read=0.30, cache_write=3.75)]),
     ),

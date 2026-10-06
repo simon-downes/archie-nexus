@@ -27,6 +27,7 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
+from archie_agent.llm._images import data_url, text_with_image_note
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.prompt import SystemPrompt, flatten_system_prompt
 from archie_agent.session import Turn
@@ -70,8 +71,13 @@ def _prompt_sections(system: SystemPrompt | str) -> tuple[str, str | None]:
     return flatten_system_prompt(system), None
 
 
-def _turns_to_responses_input(turns: list[Turn]) -> list[dict[str, Any]]:
-    """Translate neutral turns to typed Responses input items."""
+def _turns_to_responses_input(turns: list[Turn], can_see: bool = False) -> list[dict[str, Any]]:
+    """Translate neutral turns to typed Responses input items.
+
+    Tool-result images become ``input_image`` data-URL parts of the
+    ``function_call_output`` when the model can see; otherwise the result text
+    carries a note that image content was omitted.
+    """
     items: list[dict[str, Any]] = []
     for turn in turns:
         text_parts: list[str] = []
@@ -90,13 +96,20 @@ def _turns_to_responses_input(turns: list[Turn]) -> list[dict[str, Any]]:
                             "arguments": json.dumps(inp),
                         }
                     )
-                case ToolResultBlock(tool_use_id=tid, content=content, is_error=is_error):
+                case ToolResultBlock(tool_use_id=tid, is_error=is_error):
+                    content = block.content if can_see else text_with_image_note(block)
                     output = f"Tool error: {content}" if is_error else content
+                    parts: list[dict[str, Any]] = [{"type": "input_text", "text": output}]
+                    if can_see:
+                        parts.extend(
+                            {"type": "input_image", "image_url": data_url(image), "detail": "auto"}
+                            for image in block.images
+                        )
                     results.append(
                         {
                             "type": "function_call_output",
                             "call_id": tid,
-                            "output": [{"type": "input_text", "text": output}],
+                            "output": parts,
                         }
                     )
         if text_parts:
@@ -262,11 +275,12 @@ def _response_usage(response: Response) -> Usage:
 class BedrockOpenAIClient:
     """LLM client for Bedrock models exposed through the Responses API."""
 
-    def __init__(self, model_id, region, max_output_tokens=32_768, can_cache=False):
+    def __init__(self, model_id, region, max_output_tokens=32_768, can_cache=False, can_see=False):
         self.model_id = model_id
         self._region = region
         self.max_output_tokens = max_output_tokens
         self.can_cache = can_cache
+        self.can_see = can_see
         self._cache_enabled = can_cache
         self._previous_conversation_fingerprint = None
         self.client = BedrockOpenAI(
@@ -281,7 +295,7 @@ class BedrockOpenAIClient:
     def _request_kwargs(self, messages, system, tool_config, stream, history_boundary):
         cache_enabled = getattr(self, "_cache_enabled", getattr(self, "can_cache", False))
         previous = getattr(self, "_previous_conversation_fingerprint", None)
-        items = _turns_to_responses_input(messages)
+        items = _turns_to_responses_input(messages, getattr(self, "can_see", False))
         if cache_enabled:
             items, fingerprint = _apply_conversation_boundary(items, previous, history_boundary)
             if fingerprint is not None:

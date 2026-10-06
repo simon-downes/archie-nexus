@@ -352,6 +352,7 @@ class TestProviderFactory:
                 region="us-west-2",
                 max_output_tokens=32_768,
                 can_cache=False,
+                can_see=False,
             )
 
     def test_bedrock_falls_back_to_default_region(self):
@@ -375,4 +376,5 @@ class TestProviderFactory:
                 region="eu-west-1",
                 max_output_tokens=32_768,
                 can_cache=False,
+                can_see=False,
             )

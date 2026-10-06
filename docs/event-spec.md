@@ -49,7 +49,7 @@ fields or targets a child with both `scope` and `subagent_index`; partial target
 | `text_delta` | live-only | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `text: string`, `subagent_index: int?` |
 | `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?` |
 | `tool_call` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `name: string`, `input: dict[string, object]`, `subagent_index: int?` |
-| `tool_result` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `content: string`, `is_error: bool`, `duration_ms: int`, `result_bytes: int`, `result_lines: int`, `subagent_index: int?` |
+| `tool_result` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `content: string`, `is_error: bool`, `duration_ms: int`, `result_bytes: int`, `result_lines: int`, `subagent_index: int?`, `images: list[{format: string, width: int, height: int, bytes: int, source: string}]` |
 | `assistant_message` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `content: string`, `interrupted: bool`, `subagent_index: int?` |
 | `turn_complete` | persisted | `turn: int`, `scope: string?`, `stop_reason: string`, `subagent_index: int?` |
 | `turn_error` | persisted | `turn: int`, `scope: string?`, `message: string`, `subagent_index: int?` |
@@ -97,3 +97,8 @@ declaring `session_started.schema_version == 2` are skipped. The command then ar
 and rebuilds `<ARCHIE_HOME_DIR>/metrics.db` from decoded migrated `llm_request` events.
 Metrics use integer `turn`/`iteration` columns and deduplicate by `(session_id, event_id)`;
 the session log remains the source of truth.
+
+`tool_result.images` was added after schema version 2 and defaults to an empty list, so
+earlier logs decode unchanged. It records metadata only for images returned by the native
+`read` tool (format, final dimensions, encoded size, source path). Image bytes are kept only
+in the agent's in-memory transcript and are never persisted or sent to clients.

@@ -6,6 +6,7 @@ These run INSIDE the container. All paths are relative to /workspace/
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 from pathlib import Path
@@ -20,6 +21,7 @@ from archie_agent.exec.tools import (
     tool,
 )
 from archie_agent.exec.tools._subprocess import run_exec
+from archie_agent.exec.tools.images import ToolImage, detect_image_format, load_image
 
 # The container's project mount point.
 WORKSPACE = Path("/workspace")
@@ -72,8 +74,8 @@ def _resolve_path(path: str) -> Path:
 @tool
 async def read(
     path: str, offset: int | None = None, limit: int | None = None, raw: bool = False
-) -> str:
-    """Read a file from the workspace.
+) -> str | ToolImage:
+    """Read a file from the workspace. Image files (PNG, JPEG, GIF, WebP) are returned as images.
 
     Args:
         path: File path (relative to /workspace/ or any visible absolute path).
@@ -83,11 +85,15 @@ async def read(
 
     Returns:
         File content with line numbers (e.g. "    1| content") unless raw=True.
+        For image files, an image (downscaled for model input) with a short
+        caption; offset/limit/raw are ignored. Inside exec only the caption is
+        returned — call the native `read` tool to view an image.
 
     Raises:
         PathValidationError: Path is empty or otherwise invalid.
         FileNotFoundError: File does not exist.
-        BinaryFileError: File is binary.
+        BinaryFileError: File is binary (and not a supported image).
+        ImageError: Image file could not be decoded or reduced to a sendable size.
     """
     resolved = _resolve_path(path)
 
@@ -97,14 +103,16 @@ async def read(
     if resolved.is_dir():
         raise FileNotFoundError(f"Path is a directory, not a file: {path}")
 
-    # Binary detection — check first 8KB for null bytes
+    # Binary detection — check first 8KB for null bytes; images are handled first.
     try:
         with resolved.open("rb") as f:
             chunk = f.read(8192)
-        if b"\x00" in chunk:
-            raise BinaryFileError(f"Binary file detected: {path}")
     except OSError as e:
         raise FileNotFoundError(f"Cannot read file: {e}") from e
+    if detect_image_format(chunk) is not None:
+        return await asyncio.to_thread(load_image, resolved, path)
+    if b"\x00" in chunk:
+        raise BinaryFileError(f"Binary file detected: {path}")
 
     try:
         text = resolved.read_text(encoding="utf-8", errors="replace")

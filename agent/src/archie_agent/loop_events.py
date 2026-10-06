@@ -7,6 +7,8 @@ behavior.
 
 from dataclasses import dataclass
 
+from archie_shared.types import ImageBlock
+
 
 @dataclass
 class IterationStart:
@@ -91,6 +93,7 @@ class ToolResult:
     duration_ms: int = 0
     result_lines: int = 0
     result_bytes: int = 0
+    images: tuple[ImageBlock, ...] = ()
 
 
 type AgentEvent = (

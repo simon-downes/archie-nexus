@@ -17,6 +17,7 @@ from typing import Any, Union, get_args, get_origin
 
 from archie_agent.exec.tool import _MAX_RESULT_CHARS
 from archie_agent.exec.tools import get_all_tools
+from archie_agent.exec.tools.images import ToolImage
 from archie_agent.tools import ToolSpec
 
 log = logging.getLogger(__name__)
@@ -275,13 +276,17 @@ def _native_handler(fn: Callable) -> Callable:
     }
 
     @wraps(fn)
-    async def wrapper(**kwargs) -> str:
+    async def wrapper(**kwargs) -> str | ToolImage:
         # Drop kwargs the tool doesn't declare (e.g. a model-hallucinated
         # `timeout=`) so an invalid arg becomes a no-op instead of a raw
         # TypeError from the tool function.
         if not accepts_kwargs:
             kwargs = {k: v for k, v in kwargs.items() if k in allowed}
         result = await fn(**kwargs)
+        # Image results pass through untouched; the harness splits them into
+        # caption text + image content.
+        if isinstance(result, ToolImage):
+            return result
         # Defensive: all tools should return str, but handle None gracefully
         if result is None:
             return ""
