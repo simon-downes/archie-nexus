@@ -1,5 +1,6 @@
 """Tests for archie ls and archie serve CLI commands (orchestrator integration)."""
 
+import socket
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -164,6 +165,26 @@ def test_serve_invokes_uvicorn_with_config(monkeypatch, tmp_path):
         port=9900,
         log_config=None,
     )
+
+
+def test_serve_rejects_occupied_port_before_logging(monkeypatch, tmp_path):
+    """An occupied port fails before configure_logging can rotate files."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "orchestrator:\n  profiles:\n    default:\n      port: 9901\n"
+    )
+
+    with (
+        socket.socket() as occupied,
+        patch("archie_orchestrator.configure_logging") as mock_logging,
+    ):
+        occupied.bind(("127.0.0.1", 9901))
+        runner = CliRunner()
+        result = runner.invoke(main, ["serve"])
+
+    assert result.exit_code != 0
+    assert "address already in use" in result.output
+    mock_logging.assert_not_called()
 
 
 def test_serve_uses_default_port_when_no_config(monkeypatch, tmp_path):

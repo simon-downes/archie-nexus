@@ -1,6 +1,7 @@
 """Archie CLI — orchestrator protocol client."""
 
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -305,6 +306,19 @@ def serve():
     profile = get_profile(cfg.orchestrator)
     host = profile.host
     port = profile.port
+
+    # Check availability before configuring logging: a failed second instance
+    # must not rotate the active orchestrator's logs. This is necessarily only
+    # a preflight check; Uvicorn performs the authoritative bind afterward.
+    try:
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, port))
+    except OSError as exc:
+        raise click.ClickException(
+            f"Cannot start orchestrator on {host}:{port}: address already in use"
+        ) from exc
 
     from archie_orchestrator import configure_logging
 
