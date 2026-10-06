@@ -1,5 +1,6 @@
+import httpx
 import pytest
-from archie_orchestrator.auth import AuthError, AuthService
+from archie_orchestrator.auth import AuthError, AuthService, ProviderUnavailableError
 from archie_shared.credentials.api import AuthConfig, AuthProviderOverride
 from archie_shared.credentials.store import replace_credential
 from archie_shared.schemas import NexusConfig
@@ -48,6 +49,14 @@ class FailingTokenTransport:
         )
 
 
+class FailingRefreshTransport:
+    def __init__(self, error):
+        self.error = error
+
+    async def request(self, method, url, **kwargs):
+        raise self.error
+
+
 @pytest.mark.asyncio
 async def test_google_login_requires_client_id(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
@@ -82,6 +91,41 @@ async def test_login_callback_contract_persists_normalized_tokens(monkeypatch, t
     assert status.state == "valid"
     stored = (tmp_path / "credentials.yaml").read_text()
     assert "access" in stored and "refresh" in stored
+
+
+@pytest.mark.asyncio
+async def test_refresh_converts_transport_failure_to_concise_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = NexusConfig(
+        auth=AuthConfig(providers={"slack": AuthProviderOverride(client_id="client")})
+    )
+    replace_credential(
+        "slack",
+        {"access_token": "old-access", "refresh_token": "old-refresh", "client_id": "client"},
+    )
+    service = AuthService(
+        config,
+        transport=FailingRefreshTransport(httpx.ConnectError("All connection attempts failed")),
+    )
+
+    with pytest.raises(ProviderUnavailableError, match="OAuth token refresh failed"):
+        await service.refresh("slack")
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_provider_error_message(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    config = NexusConfig(
+        auth=AuthConfig(providers={"slack": AuthProviderOverride(client_id="client")})
+    )
+    replace_credential(
+        "slack",
+        {"access_token": "old-access", "refresh_token": "old-refresh", "client_id": "client"},
+    )
+    service = AuthService(config, transport=FailingTokenTransport())
+
+    with pytest.raises(AuthError, match="invalid_client: The OAuth client is not valid"):
+        await service.refresh("slack")
 
 
 @pytest.mark.asyncio

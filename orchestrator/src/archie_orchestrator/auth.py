@@ -231,34 +231,48 @@ class AuthService:
         )
         if not client_id or not token_endpoint:
             raise AuthError(f"Provider '{provider_name}' requires reauthentication")
-        response = await self._request(
-            "POST",
-            token_endpoint,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "client_id": client_id,
-                **(
-                    {"client_secret": credential.client_secret}
-                    if getattr(credential, "client_secret", None)
-                    else {}
-                ),
-            },
-        )
-        response.raise_for_status()
-        tokens = response.json()
-        access = _nested(tokens, provider.token_path) or tokens.get("access_token")
-        if not access:
-            raise AuthError("OAuth provider returned no access token")
-        fields = {"access_token": access}
-        rotated = _nested(tokens, provider.refresh_token_path) or tokens.get("refresh_token")
-        if rotated:
-            fields["refresh_token"] = rotated
-        expires = _nested(tokens, provider.expires_in_path)
-        if expires is None:
-            expires = tokens.get("expires_in")
-        if expires is not None:
-            fields["expires_at"] = (datetime.now(UTC) + timedelta(seconds=int(expires))).isoformat()
+        try:
+            response = await self._request(
+                "POST",
+                token_endpoint,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": client_id,
+                    **(
+                        {"client_secret": credential.client_secret}
+                        if getattr(credential, "client_secret", None)
+                        else {}
+                    ),
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailableError("OAuth token refresh failed") from exc
+
+        if getattr(response, "is_error", False):
+            raise AuthError(_oauth_error(response, "token refresh"))
+        try:
+            tokens = response.json()
+            if not isinstance(tokens, dict):
+                raise TypeError("OAuth token response was not an object")
+            access = _nested(tokens, provider.token_path) or tokens.get("access_token")
+            if not access:
+                raise AuthError("OAuth provider returned no access token")
+            fields = {"access_token": access}
+            rotated = _nested(tokens, provider.refresh_token_path) or tokens.get("refresh_token")
+            if rotated:
+                fields["refresh_token"] = rotated
+            expires = _nested(tokens, provider.expires_in_path)
+            if expires is None:
+                expires = tokens.get("expires_in")
+            if expires is not None:
+                fields["expires_at"] = (
+                    datetime.now(UTC) + timedelta(seconds=int(expires))
+                ).isoformat()
+        except AuthError:
+            raise
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ProviderUnavailableError("OAuth token refresh returned an invalid response") from exc
         current = {
             key: getattr(credential, key)
             for key in credential.__struct_fields__

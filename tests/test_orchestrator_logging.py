@@ -91,7 +91,7 @@ def test_configure_logging_uses_utc_common_format(monkeypatch):
             "archie_orchestrator.test", logging.INFO, __file__, 1, "hello", (), None
         )
         handler.emit(record)
-        assert handler.stream.getvalue().endswith(" INFO archie_orchestrator.test hello\\n")
+        assert handler.stream.getvalue().endswith(" INFO archie_orchestrator.test hello\n")
         assert handler.stream.getvalue()[:19].count("-") == 2
         assert handler.stream.getvalue()[10] == " "
     finally:

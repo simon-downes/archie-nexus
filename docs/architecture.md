@@ -158,6 +158,15 @@ Each `llm_request` contains the model key, status, sent time, duration, token ca
 
 Root events use `scope=None`. A child’s scope is the launching `task` tool call’s `tool_use_id`; `subagent_index` identifies the child’s display slot. The parent of a scope is found through the launching tool call. `scope_direct_costs` sums requests in one scope; `scope_inclusive_costs` adds descendants with cycle protection. Request identity is `(scope, subagent_index, turn, iteration, request_id)`.
 
+### Orchestrator operational logs
+
+The host orchestrator writes coloured terminal output plus two files under `<ARCHIE_HOME_DIR>/logs/`:
+
+- `orchestrator.error.log` contains non-access application and Uvicorn logs.
+- `orchestrator.access.log` contains HTTP access logs from `uvicorn.access`.
+
+At startup, an existing file is moved to the matching `.1` path (one backup generation). Log level and service/logger name are colourised in terminal and file output. `LOG_LEVEL` controls the minimum level and defaults to `INFO`.
+
 ### Orchestrator metrics
 
 The orchestrator writes only `llm_request` records to `<ARCHIE_HOME_DIR>/metrics.db`, table `requests`. Uniqueness is `(session_id, event_id)`, making ingestion idempotent. The writer uses a bounded asynchronous queue and a schema version; an incompatible existing database is archived as a `.legacy.<UTC>` file before a fresh schema is created. The host-only `archie migrate-sessions` command archives and resets the index, then backfills it from migrated logs. Metrics are an aggregate/indexed view, not a replacement for the session JSONL source of truth.

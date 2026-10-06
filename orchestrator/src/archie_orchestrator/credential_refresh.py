@@ -58,9 +58,9 @@ async def refresh_expiring_credentials(
         try:
             await auth_service.refresh(name)
         except AuthError as exc:
-            log.warning("Could not refresh %s credentials: %s", name, exc)
-        except Exception:
-            log.exception("Unexpected error refreshing %s credentials", name)
+            log.error("Could not refresh %s credentials: %s", name, exc)
+        except Exception as exc:
+            log.error("Unexpected error refreshing %s credentials: %s", name, exc)
         else:
             log.info("Refreshed %s credentials successfully", name)
             refreshed.append(name)
