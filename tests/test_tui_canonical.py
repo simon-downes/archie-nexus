@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from archie_shared.events import (
     AssistantMessage,
+    ContextCompacted,
     ErrorNotice,
     Handshake,
     IterationStart,
@@ -186,6 +187,128 @@ def test_throbber_tracks_provider_request_lifecycle():
             )
         )
         assert throbber.display is False
+
+
+def test_compaction_request_counts_cost_without_context_update():
+    app = _make_app()
+    app._latest_context_tokens = 77
+    event = _llm_request("compact", 0.25, input_tokens=500)
+    event.purpose = "compaction"
+    with patch.object(app, "_update_accounting_status"):
+        app._accumulate_ledger(event)
+    assert app._cumulative_cost == pytest.approx(0.25)
+    assert app._latest_context_tokens == 77
+
+
+def test_context_compaction_updates_display_and_ends_manual_turn():
+    app = _make_app()
+    app._turn_active = True
+    conv = MagicMock()
+    with (
+        patch.object(app, "query_one", return_value=conv),
+        patch.object(app, "_update_accounting_status"),
+    ):
+        app._apply_event(
+            ContextCompacted(
+                id="c1",
+                turn=1,
+                iteration=0,
+                scope=None,
+                request_id="r1",
+                reason="manual",
+                summary="## Goal\nKeep going",
+                model_key="m",
+                tokens_before=1000,
+                tokens_after=120,
+                duration_ms=10,
+                debug="counts",
+            )
+        )
+    conv.add_compaction.assert_called_once_with("manual", 1000, 120, "## Goal\nKeep going")
+    assert app._latest_context_tokens == 120
+    assert app._turn_active is False
+
+
+def _compacted(reason="threshold", tokens_after=50_000, model_key="bedrock-openai-gpt-6-luna"):
+    return ContextCompacted(
+        id=f"c-{reason}",
+        turn=2,
+        iteration=0,
+        scope=None,
+        request_id="r-compact",
+        reason=reason,
+        summary="## Goal\nKeep going",
+        model_key=model_key,
+        tokens_before=150_000,
+        tokens_after=tokens_after,
+        duration_ms=10,
+        debug="counts",
+    )
+
+
+@pytest.mark.asyncio
+async def test_replayed_compaction_renders_after_prior_entries_with_session_window():
+    """Replay draws the marker in order and sizes context against the session model."""
+    app = _make_app()
+    conversation_request = _llm_request("l1", 0.1)
+    conversation_request.model_key = "bedrock-claude-haiku-4-5"
+    events = [
+        UserMessage(id="u1", turn=1, scope=None, content="hi"),
+        conversation_request,
+        _compacted(tokens_after=50_000),
+    ]
+    body = "".join(encode_event(e) + "\n" for e in events)
+    resp = MagicMock(status_code=200, text=body)
+    conv = MagicMock()
+    mock_http = AsyncMock()
+    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+    mock_http.__aexit__ = AsyncMock(return_value=False)
+    mock_http.get = AsyncMock(return_value=resp)
+
+    with (
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
+        patch.object(app, "query_one", return_value=conv),
+        patch.object(app, "_update_accounting_status"),
+    ):
+        await app._replay_events()
+
+    calls = [call[0] for call in conv.method_calls]
+    assert calls.index("add_user_message") < calls.index("add_compaction")
+    assert app._latest_context_tokens == 50_000
+    # Haiku's 200k window, not the compaction model's 1M window.
+    assert app._latest_context_pct == pytest.approx(25.0)
+
+
+def test_automatic_compaction_does_not_end_turn():
+    app = _make_app()
+    app._turn_active = True
+    conv = MagicMock()
+    with (
+        patch.object(app, "query_one", return_value=conv),
+        patch.object(app, "_update_accounting_status"),
+    ):
+        app._apply_event(_compacted(reason="cold_cache"))
+        app._apply_event(ErrorNotice(id="e-auto", kind="compaction_failed", message="failed"))
+    assert app._turn_active is True
+
+
+def test_manual_compaction_failure_ends_pending_turn():
+    app = _make_app()
+    app._turn_active = True
+    conv = MagicMock()
+    input_widget = MagicMock()
+    with patch.object(
+        app,
+        "query_one",
+        side_effect=lambda selector, _type=None: (
+            conv if selector == "#conversation" else input_widget
+        ),
+    ):
+        app._apply_event(
+            ErrorNotice(id="e-manual", kind="manual_compaction_failed", message="failed")
+        )
+    assert app._turn_active is False
+    assert input_widget.disabled is False
 
 
 def test_turn_error_notice_ends_pending_turn():

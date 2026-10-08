@@ -7,6 +7,7 @@ Config file location: <ARCHIE_HOME_DIR>/config.yaml
 """
 
 from pathlib import Path
+from typing import Annotated
 
 import msgspec
 
@@ -35,11 +36,21 @@ class SubagentsConfig(msgspec.Struct, forbid_unknown_fields=True):
     max_concurrent: int = 3
 
 
+class CompactionConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Settings controlling transcript compaction."""
+
+    model: str = "bedrock-openai-gpt-6-luna"
+    percent: Annotated[int, msgspec.Meta(ge=50, le=95)] = 80
+    tokens: Annotated[int, msgspec.Meta(ge=64_000)] | None = None
+    cold_cost_threshold: Annotated[float, msgspec.Meta(ge=0)] = 0.5
+
+
 class AgentConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Agent-specific settings."""
 
     subagents: SubagentsConfig = msgspec.field(default_factory=SubagentsConfig)
     turn_cost_limit: float = 50.0
+    compaction: CompactionConfig = msgspec.field(default_factory=CompactionConfig)
 
 
 class CliConfig(msgspec.Struct, forbid_unknown_fields=True):

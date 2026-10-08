@@ -31,6 +31,36 @@ def test_load_nexus_config_empty_file(monkeypatch, tmp_path):
 # --- Tests: load_nexus_config with content ---
 
 
+def test_compaction_defaults_and_custom_values(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "agent:\n  compaction:\n    model: compact\n    percent: 90\n    tokens: 70000\n    cold_cost_threshold: 1.25\n"
+    )
+    config = load_nexus_config(path=cfg)
+    assert config.agent.compaction.model == "compact"
+    assert config.agent.compaction.percent == 90
+    assert config.agent.compaction.tokens == 70000
+    assert config.agent.compaction.cold_cost_threshold == 1.25
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("percent", 49), ("percent", 96), ("tokens", 63999), ("cold_cost_threshold", -1)],
+)
+def test_compaction_ranges_rejected(tmp_path, field, value):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"agent:\n  compaction:\n    {field}: {value}\n")
+    with pytest.raises(ConfigError, match="Validation error"):
+        load_nexus_config(path=cfg)
+
+
+def test_compaction_unknown_field_rejected(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agent:\n  compaction:\n    typo: true\n")
+    with pytest.raises(ConfigError, match="Validation error"):
+        load_nexus_config(path=cfg)
+
+
 def test_load_nexus_config_turn_cost_limit(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("agent:\n  turn_cost_limit: 12.5\n")

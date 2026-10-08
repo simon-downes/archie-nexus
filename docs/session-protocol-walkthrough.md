@@ -159,11 +159,14 @@ The protocol has one public event union. The classification is declarative on ea
 
 | Class | Events | Meaning |
 | --- | --- | --- |
-| Persisted | `session_started`, `user_message`, `iteration_start`, `llm_request`, `assistant_message`, `tool_call`, `tool_result`, `turn_complete`, `turn_error`, `turn_interrupted` | Written to JSONL before live delivery; available to client replay and history reads |
+| Persisted | `session_started`, `user_message`, `iteration_start`, `llm_request`, `context_compacted`, `assistant_message`, `tool_call`, `tool_result`, `turn_complete`, `turn_error`, `turn_interrupted` | Written to JSONL before live delivery; available to client replay and history reads |
 | Live-only | `handshake`, `session_status`, `text_delta`, `error_notice` | Sent over the WebSocket but never written to JSONL |
 
 There is no parallel replay schema. A persisted event has the same shape whether the TUI receives
-it live over WebSocket or later from `GET /events`.
+it live over WebSocket or later from `GET /events`. When context compaction occurs, the agent persists
+`llm_request(purpose=compaction)` followed by `context_compacted`; the TUI renders the marker and
+summary in both live and replay paths. The replacement transcript is then one compacted user turn,
+with a subsequent user message merged into that turn.
 
 ## 4. Creating a new session
 

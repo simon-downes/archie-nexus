@@ -16,6 +16,7 @@ class Turn:
     input_tokens: int = 0
     output_tokens: int = 0
     interrupted: bool = False
+    compacted: bool = False
 
     @property
     def text(self) -> str:
@@ -79,6 +80,9 @@ class Session:
         output_tokens: int,
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
+        *,
+        model: ModelEntry | None = None,
+        update_context: bool = True,
     ) -> None:
         """Accumulate billable usage and derived total context input."""
         self.total_input_tokens += input_tokens
@@ -86,11 +90,16 @@ class Session:
         self.total_cache_read_tokens += cache_read_tokens
         self.total_cache_write_tokens += cache_write_tokens
         context_tokens = input_tokens + cache_read_tokens + cache_write_tokens
-        self._last_input_tokens = context_tokens
-        self.request_context_tokens.append(context_tokens)
+        if update_context:
+            self._last_input_tokens = context_tokens
+            self.request_context_tokens.append(context_tokens)
         self.request_costs.append(
             calculate_cost(
-                self.model.cost, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+                (model or self.model).cost,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             )
         )
 
@@ -104,6 +113,14 @@ class Session:
     ) -> Turn:
         """Record a turn in memory without writing to disk."""
         blocks = [TextBlock(text=content)] if isinstance(content, str) else content
+        if (
+            role == "user"
+            and self.turns
+            and self.turns[-1].role == "user"
+            and self.turns[-1].compacted
+        ):
+            self.turns[-1].content.extend(blocks)
+            return self.turns[-1]
         turn = Turn(
             role=role,
             content=blocks,

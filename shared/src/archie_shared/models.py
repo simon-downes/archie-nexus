@@ -138,6 +138,7 @@ class ModelEntry(msgspec.Struct):
     cost: CostConfig = msgspec.field(default_factory=CostConfig)
     max_output_tokens: int = 32_768
     context_warning_threshold: float = 0.8
+    cache_ttl_seconds: int | None = None
 
 
 DEFAULT_MODELS: dict[str, ModelEntry] = {
@@ -148,6 +149,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-fable-5-1"),
         can_cache=True,
+        cache_ttl_seconds=300,
         can_see=True,
         max_output_tokens=128_000,
         # Global price assumed at 10% below the published Geo/In-region rate (11/55/0.275/13.75);
@@ -160,6 +162,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-sonnet-5-5"),
         can_cache=True,
+        cache_ttl_seconds=300,
         can_see=True,
         max_output_tokens=128_000,
         cost=CostConfig(rates=[Rate(input=2.0, output=10.0, cache_read=0.20, cache_write=2.50)]),
@@ -170,6 +173,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-sonnet-4-6"),
         can_cache=True,
+        cache_ttl_seconds=300,
         can_see=True,
         cost=CostConfig(rates=[Rate(input=3, output=15, cache_read=0.3, cache_write=3.75)]),
     ),
@@ -179,6 +183,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=200_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-haiku-4-5-20251001-v1:0"),
         can_cache=True,
+        cache_ttl_seconds=300,
         can_see=True,
         cost=CostConfig(rates=[Rate(input=1, output=5, cache_read=0.1, cache_write=1.25)]),
     ),
@@ -188,6 +193,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.anthropic.claude-opus-5-5"),
         can_cache=True,
+        cache_ttl_seconds=300,
         can_see=True,
         max_output_tokens=128_000,
         cost=CostConfig(rates=[Rate(input=4.0, output=20.0, cache_read=0.20, cache_write=5.0)]),
@@ -198,11 +204,24 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-5.6-luna", region="us-east-1"),
         can_cache=True,
+        cache_ttl_seconds=1800,
         can_see=True,
         cost=CostConfig(
             rates=[
-                Rate(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25, criteria=("total_input", "min", 0)),
-                Rate(input=0.40, output=1.80, cache_read=0.04, cache_write=0.50, criteria=("total_input", "min", 272_001)),
+                Rate(
+                    input=0.20,
+                    output=1.20,
+                    cache_read=0.02,
+                    cache_write=0.25,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=0.40,
+                    output=1.80,
+                    cache_read=0.04,
+                    cache_write=0.50,
+                    criteria=("total_input", "min", 272_001),
+                ),
             ]
         ),
     ),
@@ -212,27 +231,52 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-6-luna", region="us-east-1"),
         can_cache=True,
+        cache_ttl_seconds=1800,
         can_see=True,
         cost=CostConfig(
             rates=[
-                Rate(input=0.10, output=0.50, cache_read=0.01, cache_write=0.125, criteria=("total_input", "min", 0)),
-                Rate(input=0.20, output=0.75, cache_read=0.02, cache_write=0.25, criteria=("total_input", "min", 272_001)),
+                Rate(
+                    input=0.10,
+                    output=0.50,
+                    cache_read=0.01,
+                    cache_write=0.125,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=0.20,
+                    output=0.75,
+                    cache_read=0.02,
+                    cache_write=0.25,
+                    criteria=("total_input", "min", 272_001),
+                ),
             ]
         ),
     ),
-
     # Model card: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-sol.html
     "bedrock-openai-gpt-6-1-sol": ModelEntry(
         name="GPT-6.1 Sol",
         context=1_000_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-6.1-sol", region="us-east-1"),
         can_cache=True,
+        cache_ttl_seconds=1800,
         can_see=True,
         max_output_tokens=131_072,
         cost=CostConfig(
             rates=[
-                Rate(input=2.00, output=10.00, cache_read=0.10, cache_write=2.50, criteria=("total_input", "min", 0)),
-                Rate(input=4.00, output=15.00, cache_read=0.20, cache_write=5.00, criteria=("total_input", "min", 272_001)),
+                Rate(
+                    input=2.00,
+                    output=10.00,
+                    cache_read=0.10,
+                    cache_write=2.50,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=4.00,
+                    output=15.00,
+                    cache_read=0.20,
+                    cache_write=5.00,
+                    criteria=("total_input", "min", 272_001),
+                ),
             ]
         ),
     ),
@@ -243,12 +287,25 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_050_000,
         provider=BedrockOpenAIProvider(model_id="global.openai.gpt-5.6-terra", region="us-east-1"),
         can_cache=True,
+        cache_ttl_seconds=1800,
         can_see=True,
         max_output_tokens=128_000,
         cost=CostConfig(
             rates=[
-                Rate(input=2.00, output=12.00, cache_read=0.20, cache_write=2.50, criteria=("total_input", "min", 0)),
-                Rate(input=4.00, output=18.00, cache_read=0.40, cache_write=5.00, criteria=("total_input", "min", 272_001)),
+                Rate(
+                    input=2.00,
+                    output=12.00,
+                    cache_read=0.20,
+                    cache_write=2.50,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=4.00,
+                    output=18.00,
+                    cache_read=0.40,
+                    cache_write=5.00,
+                    criteria=("total_input", "min", 272_001),
+                ),
             ]
         ),
     ),
@@ -282,6 +339,7 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         context=1_000_000,
         provider=BedrockProvider(model_id="global.moonshotai.kimi-k3"),
         can_cache=True,
+        cache_ttl_seconds=300,
         can_see=True,
         max_output_tokens=16_000,
         cost=CostConfig(rates=[Rate(input=3.0, output=15.0, cache_read=0.30, cache_write=3.75)]),

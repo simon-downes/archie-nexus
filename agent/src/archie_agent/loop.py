@@ -39,6 +39,12 @@ _DEFAULT_MAX_ITERATIONS = 100
 
 
 @dataclass
+class PreRequest:
+    messages: list["Turn"] | None = None
+    error: str | None = None
+
+
+@dataclass
 class _WorkerError:
     msg: str
 
@@ -170,6 +176,7 @@ async def run_loop(
     turn_cost_limit: float | None = None,
     request_cost_factory: Callable[[Usage], float] | None = None,
     request_context_factory: Callable[[], RequestContext] | None = None,
+    before_request: Callable[[list["Turn"], int], Awaitable[PreRequest | None]] | None = None,
 ) -> AsyncGenerator[AgentEvent | RequestFinished]:
     """Yield AgentEvents by streaming from the LLM client in a tool loop."""
     working_messages: list[Turn] = list(messages)
@@ -177,6 +184,19 @@ async def run_loop(
     turn_cost = 0.0
     while max_iterations is None or iteration < max_iterations:
         yield IterationStart(index=iteration)
+        if before_request is not None:
+            prepared = await before_request(working_messages, iteration)
+            if prepared is not None:
+                if prepared.error is not None:
+                    yield TurnError(error=prepared.error)
+                    return
+                if prepared.messages is not None:
+                    working_messages = list(prepared.messages)
+            if interrupt.is_set():
+                # An interrupt during pre-request work (e.g. compaction) must not
+                # be followed by a conversation request.
+                yield TurnInterrupted()
+                return
         result = _RequestResult()
         request_context = (
             request_context_factory()
@@ -184,7 +204,7 @@ async def run_loop(
             else RequestContext(request_id="", sent_at=datetime.now(UTC).isoformat())
         )
         started = datetime.now(UTC)
-        async for event in _stream_once(
+        async for event in stream_once(
             messages=working_messages,
             system=system,
             llm=llm,
@@ -287,7 +307,7 @@ async def run_loop(
     yield TurnError(error="max tool iterations")
 
 
-async def _stream_once(
+async def stream_once(
     *,
     messages: "list[Turn]",
     system: SystemPrompt | str,

@@ -8,6 +8,7 @@ Endpoints:
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -38,6 +39,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
+from archie_agent.compaction import is_compact_command
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
@@ -92,6 +94,9 @@ async def lifespan(app):
     _config = load_nexus_config()
     _catalog = load_models()
     model = get_model(_catalog, _config.global_.model)
+    if _config.agent.compaction.model not in _catalog:
+        log.error("Unknown compaction model: %s", _config.agent.compaction.model)
+        sys.exit(1)
 
     llm_client = create_llm_client(model, _config.global_.region)
 
@@ -101,8 +106,6 @@ async def lifespan(app):
             "ARCHIE_SESSION_ID is not set. "
             "This variable is injected by the host CLI at container start."
         )
-        import sys
-
         sys.exit(1)
 
     sessions_dir = home_dir() / "sessions"
@@ -123,6 +126,7 @@ async def lifespan(app):
         subagents=_config.agent.subagents,
         tool_policy=policy_snapshot(ToolsConfig(providers=_config.tools)),
         turn_cost_limit=_config.agent.turn_cost_limit,
+        compaction=_config.agent.compaction,
     )
 
     if not _agent.event_bus.log.read():
@@ -263,7 +267,11 @@ async def stream(websocket: WebSocket) -> None:
                 if _agent.try_begin_turn():
                     # Store task reference to prevent garbage collection.
                     # Task removes itself from the set on completion.
-                    task = asyncio.create_task(_agent.handle_message(command.content))
+                    task = asyncio.create_task(
+                        _agent.run_manual_compaction()
+                        if is_compact_command(command.content)
+                        else _agent.handle_message(command.content)
+                    )
                     task.add_done_callback(lambda t: _active_tasks.discard(t))
                     _active_tasks.add(task)
                 else:

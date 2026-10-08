@@ -17,20 +17,30 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from archie_shared.events import ErrorNotice, Event, SessionEvent, SessionStatus, UserMessage
+import msgspec
+from archie_shared.events import (
+    ContextCompacted,
+    ErrorNotice,
+    Event,
+    SessionEvent,
+    SessionStatus,
+    UserMessage,
+)
 from archie_shared.events import TurnError as CanonicalTurnError
-from archie_shared.models import calculate_cost
-from archie_shared.schemas import SubagentsConfig
+from archie_shared.models import DEFAULT_MODELS, calculate_cost
+from archie_shared.schemas import CompactionConfig, SubagentsConfig
 from archie_shared.session.log import LogAppendError, SessionLog
 from archie_shared.types import ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
 from archie_agent.agents import AgentEntry, create_task_tool, discover_agents
+from archie_agent.compaction import Compactor, build_replacement, effective_limit, estimate_tokens
 from archie_agent.event_factory import EventFactory, now_utc
 from archie_agent.exec.tool import create_registry, format_result, run_exec
 from archie_agent.exec.tools._subprocess import kill_process_group
 from archie_agent.exec.tools.images import ToolImage
-from archie_agent.loop import run_loop
+from archie_agent.llm import create_llm_client
+from archie_agent.loop import PreRequest, run_loop
 from archie_agent.loop_events import (
     IterationStart,
     RequestContext,
@@ -44,7 +54,7 @@ from archie_agent.loop_events import (
     Usage,
 )
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
-from archie_agent.session import DisplayEntry, Session
+from archie_agent.session import DisplayEntry, Session, Turn
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import create_skill_tool, discover_skills
 
@@ -94,6 +104,9 @@ class AgentHarness:
         subagents: SubagentsConfig | None = None,
         tool_policy: dict | None = None,
         turn_cost_limit: float = 50.0,
+        compaction: CompactionConfig | None = None,
+        compaction_llm: "LLMClient | None" = None,
+        clock=time.monotonic,
     ) -> None:
         self.session = session
         self._llm = llm_client
@@ -104,6 +117,31 @@ class AgentHarness:
         self._subagents = subagents or SubagentsConfig()
         self._tool_policy = tool_policy or {}
         self._turn_cost_limit = turn_cost_limit
+        self._baseline_context_tokens: int | None = None
+        self._baseline_turn_count = 0
+        self._compaction_failed_this_turn = False
+        self._clock = clock
+        self._last_request_finished: float | None = None
+        self._cache_cold = False
+        self._compaction_config = compaction or CompactionConfig()
+        self._compaction_model_key = self._compaction_config.model
+        # Startup validates the key (app.lifespan); never substitute the session
+        # model, which would mislabel compaction requests and their cost.
+        compaction_catalog = model_catalog if model_catalog is not None else DEFAULT_MODELS
+        if self._compaction_model_key not in compaction_catalog:
+            raise ValueError(f"Unknown compaction model: {self._compaction_model_key}")
+        self._compaction_model = compaction_catalog[self._compaction_model_key]
+        if compaction_llm is None:
+            self._compaction_llm = create_llm_client(
+                msgspec.structs.replace(
+                    self._compaction_model,
+                    can_cache=False,
+                    max_output_tokens=min(16_384, self._compaction_model.max_output_tokens),
+                ),
+                self._region,
+            )
+        else:
+            self._compaction_llm = compaction_llm
         if self._turn_cost_limit <= 0:
             raise ValueError("agent.turn_cost_limit must be positive")
         if self._subagents.max_concurrent <= 0:
@@ -214,6 +252,9 @@ class AgentHarness:
         self.session.model_id = model_key
         self.session.model = model
         self._event_factory = EventFactory(self.log_path, model_key, model)
+        self._baseline_context_tokens = None
+        self._baseline_turn_count = 0
+        self._cache_cold = True
 
     @property
     def log_path(self) -> Path:
@@ -281,6 +322,202 @@ class AgentHarness:
             except Exception:  # noqa: BLE001 — status refresh is best effort
                 log.warning("Failed to broadcast final turn status", exc_info=True)
 
+    def _output_reserve(self) -> int:
+        return min(self.session.model.max_output_tokens, 16_384)
+
+    def _estimate_context(self, turns: list, *, use_baseline: bool = True) -> int:
+        """Estimated input context tokens for ``turns``, excluding the output reserve."""
+        if use_baseline and self._baseline_context_tokens is not None:
+            new_turns = turns[self._baseline_turn_count :]
+            return self._baseline_context_tokens + estimate_tokens(None, None, new_turns)
+        return estimate_tokens(self._build_prompt(), self._tool_config, turns)
+
+    def _over_limit(self, context_tokens: int) -> bool:
+        limit = effective_limit(self.session.model, self._compaction_config)
+        return context_tokens + self._output_reserve() >= limit
+
+    async def _before_request(self, messages: list, iteration: int):
+        if self._compaction_failed_this_turn:
+            return None
+        estimate_source = "baseline" if self._baseline_context_tokens is not None else "heuristic"
+        estimate = self._estimate_context(messages)
+        threshold = self._over_limit(estimate)
+        cold = False
+        ttl = self.session.model.cache_ttl_seconds
+        if iteration == 0 and ttl is not None:
+            cold = self._cache_cold or (
+                self._last_request_finished is not None
+                and self._clock() - self._last_request_finished > ttl
+            )
+            rate = self.session.model.cost.get_rate(estimate, 0)
+            price = rate.cache_write or rate.input
+            cold = (
+                cold and estimate * price / 1_000_000 > self._compaction_config.cold_cost_threshold
+            )
+        reason = "cold_cache" if cold else "threshold" if threshold else None
+        if reason is None:
+            return None
+        source_messages = messages
+        pending = messages[-1].content if iteration == 0 else []
+        if iteration == 0 and messages and messages[-1].compacted:
+            # The new user message is the final block merged into the compacted
+            # turn; earlier blocks (framing, summary, any unanswered message from
+            # a failed turn) are history and get summarised.
+            compacted_turn = messages[-1]
+            source_messages = [Turn("user", compacted_turn.content[:-1], compacted=True)]
+            pending = compacted_turn.content[-1:]
+        elif iteration == 0:
+            source_messages = messages[:-1]
+        compacted = await self._compact(
+            source_messages,
+            reason=reason,
+            mode="start_of_turn" if iteration == 0 else "mid_turn",
+            pending=pending,
+            turn=self._current_turn_index,
+            iteration=iteration,
+            tokens_before=estimate,
+            estimate_source=estimate_source,
+            failure_kind="compaction_failed",
+        )
+        if compacted is None:
+            self._compaction_failed_this_turn = True
+            return None
+        replacement, tokens_after = compacted
+        if self._over_limit(tokens_after):
+            return PreRequest(error="context still exceeds compaction limit after compaction")
+        return PreRequest(messages=[replacement])
+
+    async def _compact(
+        self,
+        source: list[Turn],
+        *,
+        reason: str,
+        mode: str,
+        pending: list,
+        turn: int,
+        iteration: int,
+        tokens_before: int,
+        estimate_source: str,
+        failure_kind: str,
+    ) -> tuple[Turn, int] | None:
+        """Summarise ``source`` and replace the root transcript.
+
+        Shared by manual and automatic compaction. Emits the compaction
+        ``llm_request`` and either ``context_compacted`` or an ``ErrorNotice`` of
+        ``failure_kind``. Returns the replacement turn and its estimated context
+        tokens (excluding the output reserve), or ``None`` on failure, leaving
+        the transcript unchanged.
+        """
+        outcome = await Compactor(
+            self._compaction_model_key, self._compaction_model, self._compaction_llm
+        ).run(source, reason=reason, turn=turn, iteration=iteration, interrupt=self._interrupt)
+        if outcome.request_event is not None:
+            await self._event_bus.emit(outcome.request_event)
+            self.session.record_usage(
+                outcome.request_event.input_tokens,
+                outcome.request_event.output_tokens,
+                outcome.request_event.cache_read_tokens,
+                outcome.request_event.cache_write_tokens,
+                model=self._compaction_model,
+                update_context=False,
+            )
+        if not outcome.ok:
+            await self._event_bus.emit(
+                ErrorNotice(
+                    id=str(ULID()),
+                    kind=failure_kind,
+                    message=outcome.error or "Compaction failed",
+                )
+            )
+            return None
+        replacement = build_replacement(outcome.summary, mode, pending)
+        tokens_after = self._estimate_context([replacement], use_baseline=False)
+        stats = outcome.stats
+        debug = ";".join(
+            [
+                f"estimate_source={estimate_source}",
+                f"turns_in={len(source)}",
+                f"tool_results_kept={stats.tool_results_kept}",
+                f"tool_results_removed={stats.tool_results_removed}",
+                f"orphan_results={stats.orphan_results}",
+                f"rounds_dropped={stats.rounds_dropped}",
+            ]
+        )
+        await self._event_bus.emit(
+            ContextCompacted(
+                id=str(ULID()),
+                turn=turn,
+                iteration=iteration,
+                scope=None,
+                request_id=outcome.request_event.id if outcome.request_event else "",
+                reason=reason,
+                summary=outcome.summary,
+                model_key=self._compaction_model_key,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                duration_ms=outcome.duration_ms,
+                debug=debug,
+            )
+        )
+        self.session.turns = [replacement]
+        self._baseline_context_tokens = None
+        self._baseline_turn_count = 0
+        # The replacement prefix has never been cached, so the cold-cache check
+        # has nothing to compare against until the next conversation request.
+        self._cache_cold = False
+        self._last_request_finished = None
+        return replacement, tokens_after
+
+    async def run_manual_compaction(self) -> None:
+        """Compact the root transcript without creating a user turn."""
+        self._interrupt.clear()
+        self._loop = asyncio.get_running_loop()
+        self._interrupt_async = asyncio.Event()
+        try:
+            if not self.session.turns:
+                await self._event_bus.emit(
+                    ErrorNotice(
+                        id=str(ULID()),
+                        kind="manual_compaction_failed",
+                        message="Nothing to compact",
+                    )
+                )
+                return
+            estimate_source = (
+                "baseline" if self._baseline_context_tokens is not None else "heuristic"
+            )
+            await self._compact(
+                self.session.turns,
+                reason="manual",
+                mode="manual",
+                pending=[],
+                turn=self.session.turn_index,
+                iteration=0,
+                tokens_before=self._estimate_context(self.session.turns),
+                estimate_source=estimate_source,
+                failure_kind="manual_compaction_failed",
+            )
+        except LogAppendError as exc:
+            await self._broadcast_storage_error(str(exc))
+        except Exception as exc:  # noqa: BLE001 — manual failures return to idle
+            await self._event_bus.emit(
+                ErrorNotice(id=str(ULID()), kind="manual_compaction_failed", message=str(exc))
+            )
+        finally:
+            self._turn_active = False
+            try:
+                from archie_agent.app import _read_git_branch
+
+                await self._event_bus.emit(
+                    SessionStatus(
+                        id=str(ULID()),
+                        model_key=self.session.model_id,
+                        git_branch=_read_git_branch(),
+                    )
+                )
+            except Exception:  # noqa: BLE001 — status refresh is best effort
+                log.warning("Failed to broadcast final compaction status", exc_info=True)
+
     async def _broadcast_storage_error(self, message: str) -> None:
         """Best-effort live notice when durable append fails."""
         try:
@@ -327,6 +564,7 @@ class AgentHarness:
     async def _handle_message_body(self, content: str) -> None:
         """Process a message after stream admission has accepted its turn."""
         self._interrupt.clear()
+        self._compaction_failed_this_turn = False
         # Capture the running loop and (re)create the async interrupt bound to
         # it so interrupt() can wake the tool batch via call_soon_threadsafe.
         self._loop = asyncio.get_running_loop()
@@ -348,7 +586,12 @@ class AgentHarness:
         )
 
         # Add user message to in-memory transcript
-        self.session.add_turn(role="user", content=content, turn_index=turn_index)
+        merged = self.session.add_turn(role="user", content=content, turn_index=turn_index)
+        if merged.compacted:
+            # The message joined an existing compacted turn, which the baseline
+            # already counts, so turn-count slicing would miss the new text.
+            self._baseline_context_tokens = None
+            self._baseline_turn_count = 0
 
         # Run the pure loop and consume events
         last_usage: Usage | None = None
@@ -401,6 +644,7 @@ class AgentHarness:
                     usage.cache_write_tokens,
                 ),
                 request_context_factory=lambda: RequestContext(str(ULID()), now_utc()),
+                before_request=self._before_request,
             )
 
             async for event in gen:
@@ -442,6 +686,13 @@ class AgentHarness:
                     )
                     current_request_id = request.id
                     await self._event_bus.emit(request)
+                    if request.purpose == "conversation" and event.usage is not None:
+                        # Only a request the provider accounted for describes the
+                        # real context size and refreshes the prompt cache.
+                        self._baseline_context_tokens = request.context_tokens
+                        self._baseline_turn_count = len(self.session.turns)
+                        self._last_request_finished = self._clock()
+                        self._cache_cold = False
 
                 elif isinstance(event, Usage):
                     last_usage = event

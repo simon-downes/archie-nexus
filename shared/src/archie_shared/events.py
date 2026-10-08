@@ -74,6 +74,25 @@ class LLMRequest(PersistedEvent, tag="llm_request", tag_field="type", forbid_unk
     stop_reason: str | None = None
     error: str | None = None
     subagent_index: int | None = None
+    purpose: Literal["conversation", "compaction"] = "conversation"
+
+
+class ContextCompacted(
+    PersistedEvent, tag="context_compacted", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    request_id: str
+    reason: Literal["manual", "threshold", "cold_cache"]
+    summary: str
+    model_key: str
+    tokens_before: int
+    tokens_after: int
+    duration_ms: int
+    debug: str
+    subagent_index: int | None = None
 
 
 class ToolCall(PersistedEvent, tag="tool_call", tag_field="type", forbid_unknown_fields=True):
@@ -178,6 +197,7 @@ type SessionEvent = (
     | IterationStart
     | TextDelta
     | LLMRequest
+    | ContextCompacted
     | ToolCall
     | ToolResult
     | AssistantMessage

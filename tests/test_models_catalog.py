@@ -28,6 +28,15 @@ def test_default_models_all_have_required_fields():
         assert model.provider.model_id
 
 
+def test_cache_ttl_matches_cache_capability():
+    for model in DEFAULT_MODELS.values():
+        assert (model.cache_ttl_seconds is not None) == model.can_cache
+        if isinstance(model.provider, BedrockProvider) and model.can_cache:
+            assert model.cache_ttl_seconds == 300
+        elif isinstance(model.provider, BedrockOpenAIProvider) and model.can_cache:
+            assert model.cache_ttl_seconds == 1800
+
+
 def test_default_model_key_format():
     for key in DEFAULT_MODELS:
         assert key.startswith("bedrock-") or key.startswith("ollama-")
@@ -41,8 +50,20 @@ def test_gpt_56_luna_catalog_entry():
     assert model.context == 1_000_000
     assert model.can_cache
     assert model.cost.rates == [
-        Rate(input=0.20, output=1.20, cache_read=0.02, cache_write=0.25, criteria=("total_input", "min", 0)),
-        Rate(input=0.40, output=1.80, cache_read=0.04, cache_write=0.50, criteria=("total_input", "min", 272_001)),
+        Rate(
+            input=0.20,
+            output=1.20,
+            cache_read=0.02,
+            cache_write=0.25,
+            criteria=("total_input", "min", 0),
+        ),
+        Rate(
+            input=0.40,
+            output=1.80,
+            cache_read=0.04,
+            cache_write=0.50,
+            criteria=("total_input", "min", 272_001),
+        ),
     ]
 
 
@@ -79,9 +100,14 @@ def test_replacement_catalog_membership_and_metadata():
     assert DEFAULT_MODELS["bedrock-openai-gpt-5-6-terra"].context == 1_050_000
     assert DEFAULT_MODELS["bedrock-openai-gpt-5-6-terra"].max_output_tokens == 128_000
     assert DEFAULT_MODELS["bedrock-kimi-k3"].max_output_tokens == 16_000
-    assert all(DEFAULT_MODELS[key].max_output_tokens == 128_000 for key in (
-        "bedrock-claude-opus-5-5", "bedrock-claude-sonnet-5-5", "bedrock-claude-fable-5-1"
-    ))
+    assert all(
+        DEFAULT_MODELS[key].max_output_tokens == 128_000
+        for key in (
+            "bedrock-claude-opus-5-5",
+            "bedrock-claude-sonnet-5-5",
+            "bedrock-claude-fable-5-1",
+        )
+    )
 
 
 def test_provider_ids_use_best_available_inference_scope():
@@ -123,7 +149,9 @@ def test_openai_tiered_global_rates():
         "bedrock-openai-gpt-5-6-luna": _tiered((0.20, 1.20, 0.02, 0.25), (0.40, 1.80, 0.04, 0.50)),
         "bedrock-openai-gpt-6-luna": _tiered((0.10, 0.50, 0.01, 0.125), (0.20, 0.75, 0.02, 0.25)),
         "bedrock-openai-gpt-6-1-sol": _tiered((2.00, 10.00, 0.10, 2.50), (4.00, 15.00, 0.20, 5.00)),
-        "bedrock-openai-gpt-5-6-terra": _tiered((2.00, 12.00, 0.20, 2.50), (4.00, 18.00, 0.40, 5.00)),
+        "bedrock-openai-gpt-5-6-terra": _tiered(
+            (2.00, 12.00, 0.20, 2.50), (4.00, 18.00, 0.40, 5.00)
+        ),
     }
     for key, rates in expected.items():
         assert DEFAULT_MODELS[key].cost.rates == rates, key
@@ -155,7 +183,12 @@ def test_single_rate_global_prices():
     for key, values in expected.items():
         rates = DEFAULT_MODELS[key].cost.rates
         assert len(rates) == 1 and rates[0].criteria is None, key
-        assert (rates[0].input, rates[0].output, rates[0].cache_read, rates[0].cache_write) == values, key
+        assert (
+            rates[0].input,
+            rates[0].output,
+            rates[0].cache_read,
+            rates[0].cache_write,
+        ) == values, key
 
 
 def test_in_region_eu_west_2_prices():
@@ -205,7 +238,12 @@ def test_rate_configuration_rejects_invalid_values():
     with pytest.raises(ValueError, match="Unsupported rate criteria field"):
         CostConfig(rates=[Rate(criteria=("output", "min", 0))]).get_rate(0, 0)
     with pytest.raises(ValueError, match="Duplicate"):
-        CostConfig(rates=[Rate(criteria=("total_input", "min", 0)), Rate(criteria=("total_input", "min", 0))]).get_rate(0, 0)
+        CostConfig(
+            rates=[
+                Rate(criteria=("total_input", "min", 0)),
+                Rate(criteria=("total_input", "min", 0)),
+            ]
+        ).get_rate(0, 0)
     with pytest.raises(ValueError, match="no fallback"):
         CostConfig(rates=[Rate(criteria=("total_input", "min", 1))]).get_rate(0, 0)
 
@@ -243,8 +281,20 @@ def test_calculate_cost_zero():
 def test_calculate_cost_uses_selected_rate_for_all_categories():
     cost = CostConfig(
         rates=[
-            Rate(input=1.0, output=2.0, cache_read=3.0, cache_write=4.0, criteria=("total_input", "min", 0)),
-            Rate(input=10.0, output=20.0, cache_read=30.0, cache_write=40.0, criteria=("total_input", "min", 272_001)),
+            Rate(
+                input=1.0,
+                output=2.0,
+                cache_read=3.0,
+                cache_write=4.0,
+                criteria=("total_input", "min", 0),
+            ),
+            Rate(
+                input=10.0,
+                output=20.0,
+                cache_read=30.0,
+                cache_write=40.0,
+                criteria=("total_input", "min", 272_001),
+            ),
         ]
     )
     assert calculate_cost(cost, 200_000, 100_000, 72_001, 0) == pytest.approx(6.16003)

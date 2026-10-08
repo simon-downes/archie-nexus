@@ -59,6 +59,7 @@ class EventFactory:
         stop_reason: str | None = None,
         error: str | None = None,
         request_id: str | None = None,
+        purpose: Literal["conversation", "compaction"] = "conversation",
     ) -> LLMRequest:
         actual_usage = usage
         usage = usage or Usage(0, 0, 0, 0)
@@ -92,6 +93,7 @@ class EventFactory:
             cost_usd=round(cost, 6),
             stop_reason=stop_reason,
             error=error,
+            purpose=purpose,
         )
 
     def iteration_start(self, *, turn: int, iteration: int) -> IterationStart:

@@ -1,5 +1,6 @@
 """Integration tests for WebSocket endpoint with mocked Bedrock."""
 
+import asyncio
 import json
 import os
 import threading
@@ -374,3 +375,117 @@ def test_two_clients_receive_identical_completed_turn(client):
                 if event["type"] == "llm_request"
             )
             assert first_cost == second_cost
+
+
+# --- /compact dispatch ---
+
+
+def _drain_until(ws, types: set[str]) -> list[dict]:
+    events = []
+    while True:
+        event = json.loads(ws.receive_text())
+        events.append(event)
+        if event["type"] in types:
+            return events
+
+
+@pytest.fixture
+def compact_client(mock_env, mock_events):
+    """A TestClient whose conversation and compaction clients are both mocked."""
+    with patch.dict(os.environ, mock_env):
+        mock_bedrock = _make_mock_bedrock_client(mock_events)
+        with (
+            patch("archie_agent.app.create_llm_client", return_value=mock_bedrock),
+            patch("archie_agent.harness.create_llm_client", return_value=mock_bedrock),
+        ):
+            from archie_agent.app import app
+
+            with TestClient(app) as c:
+                yield c
+
+
+def test_compact_command_runs_manual_compaction(compact_client):
+    """/compact compacts the transcript instead of starting a user turn."""
+    client = compact_client
+    _run_turn(client)
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "/compact"}))
+        events = _drain_until(ws, {"context_compacted", "error_notice"})
+        events += _drain_until(ws, {"session_status"})
+
+    types = [event["type"] for event in events]
+    assert "user_message" not in types
+    assert "turn_complete" not in types
+    request = next(event for event in events if event["type"] == "llm_request")
+    assert request["purpose"] == "compaction"
+    compacted = next(event for event in events if event["type"] == "context_compacted")
+    assert compacted["reason"] == "manual"
+    assert compacted["request_id"] == request["id"]
+    assert not any(e["type"] == "user_message" and e["content"] == "/compact" for e in events)
+
+
+def test_compact_command_rejected_while_turn_active(mock_env):
+    """/compact during an active turn is rejected with a targeted turn_active notice."""
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def stream_fn(messages, system, tool_config=None, history_boundary=None):
+        calls.append(system)
+        started.set()
+        yield TextDelta(text="slow")
+        release.wait(timeout=2)
+        yield Usage(input_tokens=10, output_tokens=1)
+        yield Done(stop_reason="end_turn")
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.model_id = "eu.anthropic.claude-sonnet-4-6"
+    mock_bedrock.stream = stream_fn
+
+    with patch.dict(os.environ, mock_env):
+        with patch("archie_agent.app.create_llm_client", return_value=mock_bedrock):
+            with patch("archie_agent.harness.create_llm_client", return_value=mock_bedrock):
+                from archie_agent.app import app
+
+                with TestClient(app) as client:
+                    with client.websocket_connect("/stream") as ws:
+                        ws.receive_text()
+                        ws.receive_text()
+                        ws.send_text(json.dumps({"type": "message", "content": "first"}))
+                        _drain_until(ws, {"text_delta"})
+                        assert started.is_set()
+
+                        ws.send_text(json.dumps({"type": "message", "content": "/compact"}))
+                        rejection = json.loads(ws.receive_text())
+                        assert rejection["type"] == "error_notice"
+                        assert rejection["kind"] == "turn_active"
+
+                        release.set()
+                        events = _drain_until(ws, {"turn_complete"})
+
+    assert not any(event["type"] == "context_compacted" for event in events)
+    assert len(calls) == 1
+
+
+def test_startup_rejects_unknown_compaction_model(tmp_path):
+    """An unknown agent.compaction.model aborts startup instead of falling back."""
+    home_dir = tmp_path / "nexus_home"
+    home_dir.mkdir()
+    (home_dir / "config.yaml").write_text(
+        'global:\n  model: "bedrock-claude-sonnet-4-6"\n'
+        'agent:\n  compaction:\n    model: "no-such-model"\n'
+    )
+    env = {"ARCHIE_HOME_DIR": str(home_dir), "ARCHIE_SESSION_ID": "test-session"}
+    with patch.dict(os.environ, env):
+        with patch("archie_agent.app.create_llm_client", return_value=MagicMock()):
+            from archie_agent.app import app, lifespan
+
+            async def start():
+                async with lifespan(app):
+                    pass
+
+            with pytest.raises(SystemExit) as exc:
+                asyncio.run(start())
+    assert exc.value.code == 1

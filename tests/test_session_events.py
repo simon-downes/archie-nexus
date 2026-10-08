@@ -3,6 +3,7 @@
 from archie_shared import events as event_module
 from archie_shared.events import (
     AssistantMessage,
+    ContextCompacted,
     IterationStart,
     LLMRequest,
     TextDelta,
@@ -16,6 +17,29 @@ from archie_shared.events import (
 
 def _roundtrip(event):
     return decode_event(encode_event(event))
+
+
+def test_context_compacted_roundtrip():
+    event = ContextCompacted(
+        id="c1",
+        turn=1,
+        iteration=0,
+        scope=None,
+        request_id="r1",
+        reason="manual",
+        summary="## Goal\nTest",
+        model_key="compact",
+        tokens_before=100,
+        tokens_after=20,
+        duration_ms=5,
+        debug="counts",
+    )
+    assert _roundtrip(event) == event
+
+
+def test_old_llm_request_defaults_to_conversation():
+    raw = '{"type":"llm_request","id":"r1","scope":null,"turn":1,"iteration":0,"model_key":"m","sent_at":"now","duration_ms":1,"status":"completed","input_tokens":1,"output_tokens":1,"cache_read_tokens":0,"cache_write_tokens":0,"context_tokens":1,"cost_usd":0}'
+    assert decode_event(raw).purpose == "conversation"
 
 
 def test_transitional_canonical_event_alias_is_removed():

@@ -6,7 +6,7 @@ import threading
 import pytest
 from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.fake import FakeLLMClient
-from archie_agent.loop import run_loop
+from archie_agent.loop import PreRequest, run_loop
 from archie_agent.loop_events import (
     IterationStart,
     ToolCall,
@@ -230,6 +230,53 @@ async def test_worker_error():
     assert events[0] == IterationStart(index=0)
     assert isinstance(events[1], TurnError)
     assert "RuntimeError: Connection refused" in events[1].error
+
+
+@pytest.mark.asyncio
+async def test_before_request_error_ends_loop():
+    async def hook(messages, iteration):
+        return PreRequest(error="blocked")
+
+    events = [
+        event
+        async for event in run_loop(
+            messages=[],
+            system="system",
+            llm=FakeLLMClient([[]]),
+            interrupt=threading.Event(),
+            max_iterations=1,
+            before_request=hook,
+        )
+    ]
+    assert isinstance(events[-1], TurnError)
+    assert events[-1].error == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_before_request_replaces_messages_and_none_is_noop():
+    replacement = [Turn(role="user", content=[TextBlock(text="summary")])]
+    seen = []
+
+    async def hook(messages, iteration):
+        seen.append(iteration)
+        return PreRequest(messages=replacement) if iteration == 0 else None
+
+    llm = FakeLLMClient([[TextDelta(text="ok"), Done(stop_reason="end_turn")]])
+    messages = _make_messages()
+    events = await _collect(
+        run_loop(
+            messages=messages,
+            system="system",
+            llm=llm,
+            interrupt=threading.Event(),
+            before_request=hook,
+        )
+    )
+
+    assert seen == [0]
+    assert llm.calls[0]["messages"] == replacement
+    assert messages == _make_messages()
+    assert isinstance(events[-1], TurnComplete)
 
 
 @pytest.mark.asyncio

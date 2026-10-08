@@ -141,6 +141,7 @@ class ArchieApp(App):
         # Session state for local accumulation. Seeded from Handshake.accounting
         # on connect, then updated live from broadcast llm_request ledger events.
         self._session_id: str = ""
+        self._session_model_key: str = ""
         self._cumulative_input: int = 0
         self._cumulative_output: int = 0
         self._cumulative_cache_read: int = 0
@@ -333,7 +334,9 @@ class ArchieApp(App):
 
         conv = self.query_one("#conversation", Conversation)
 
-        if isinstance(event, ce.UserMessage):
+        if isinstance(event, ce.SessionStarted):
+            self._session_model_key = event.model_key
+        elif isinstance(event, ce.UserMessage):
             self._reset_turn_metrics()
             if event.content:
                 conv.add_user_message(event.content)
@@ -349,15 +352,32 @@ class ArchieApp(App):
                     "Some features may not work — consider updating the CLI."
                 )
         elif isinstance(event, ce.SessionStatus):
+            self._session_model_key = event.model_key
             status = self.query_one("#status", StatusBar)
             model = load_models().get(event.model_key)
             if model is not None:
                 status.model_name = model.name
                 status.supports_cache = model.can_cache
             status.git_branch = event.git_branch
+        elif isinstance(event, ce.ContextCompacted):
+            self._remove_throbber()
+            conv.add_compaction(
+                event.reason, event.tokens_before, event.tokens_after, event.summary
+            )
+            self._latest_context_tokens = event.tokens_after
+            self._latest_context_pct = self._estimate_context_pct(
+                event.tokens_after, self._session_model_key
+            )
+            self._update_accounting_status()
+            if event.reason == "manual":
+                self._end_turn()
         elif isinstance(event, ce.ErrorNotice):
             self._show_client_error(event.message)
-            if event.kind in {"turn_active", "turn_error", "storage_error"} and self._turn_active:
+            if (
+                event.kind
+                in {"turn_active", "turn_error", "storage_error", "manual_compaction_failed"}
+                and self._turn_active
+            ):
                 self._end_turn()
         elif isinstance(event, ce.TextDelta):
             key = self._request_key(event)
@@ -470,7 +490,10 @@ class ArchieApp(App):
         self._cumulative_output += event.output_tokens
         self._cumulative_cache_read += event.cache_read_tokens
         self._cumulative_cache_write += event.cache_write_tokens
-        if event.scope is None and event.subagent_index is None:
+        if event.scope is None and event.subagent_index is None and event.purpose != "compaction":
+            # Root conversation requests are persisted, so replay tracks model
+            # switches even though live-only session_status frames are absent.
+            self._session_model_key = event.model_key
             self._latest_context_tokens = event.context_tokens
             self._latest_context_pct = self._estimate_context_pct(
                 event.context_tokens, event.model_key
@@ -992,9 +1015,7 @@ class ArchieApp(App):
                 async with httpx.AsyncClient() as client:
                     response = await client.delete(self._api_url, timeout=15.0)
                 if response.status_code not in {200, 404}:
-                    self._show_client_error(
-                        f"Failed to terminate session: {response.status_code}"
-                    )
+                    self._show_client_error(f"Failed to terminate session: {response.status_code}")
             except httpx.HTTPError as exc:
                 self._show_client_error(f"Failed to terminate session: {exc}")
         self._shutting_down = True

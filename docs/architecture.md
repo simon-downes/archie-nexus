@@ -128,9 +128,17 @@ Public events are flat tagged `msgspec` records defined in
 ```
 
 The persisted stream includes `session_started`, `user_message`, `iteration_start`, `llm_request`,
-`tool_call`, `tool_result`, `assistant_message`, `turn_complete`, `turn_error`, and
-`turn_interrupted`. The live-only set is exactly `handshake`, `session_status`, `text_delta`, and
+`context_compacted`, `tool_call`, `tool_result`, `assistant_message`, `turn_complete`, `turn_error`,
+and `turn_interrupted`. The live-only set is exactly `handshake`, `session_status`, `text_delta`, and
 `error_notice`.
+
+Root turns may compact at iteration boundaries before a provider request. Manual `/compact` performs
+one dedicated no-tools summary request and replaces the in-memory root transcript with one compacted
+user turn; automatic threshold and cold-cache compactions use the same replacement. The session log
+remains append-only: the compaction `llm_request` is persisted first, followed by `context_compacted`,
+which contains the summary, reason, token estimates, and metadata-only debug information. Compaction
+requests use `purpose=compaction`, are priced at the configured compaction model, and contribute to
+session totals without changing the active conversation context display.
 
 `GET /events` returns ordered persisted NDJSON. Its optional `after` parameter is the client's last
 applied persisted event ID; live-only frames never advance that cursor. The TUI applies history
@@ -157,7 +165,7 @@ accounting source for clients and the orchestrator metrics index.
 - The user message is written before provider streaming; available assistant text is written before the matching terminal event, including partial text on interruption or error.
 - Legacy `MessageEntry` structures remain only in `session.migrate` for the one-shot host migration; direct `!` shell output is rendered only by the initiating TUI.
 
-Each `llm_request` contains the model key, status, sent time, duration, token categories (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`), context token count, and immutable `cost_usd`. Session totals are recomputed from these events on disk, so a newly attached client does not depend on the agent process’s in-memory state. Model changes are live-only status updates and do not reprice historical requests.
+Each `llm_request` contains the model key, status, sent time, duration, token categories (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`), context token count, immutable `cost_usd`, and `purpose` (`conversation` or `compaction`). Session totals are recomputed from these events on disk, so a newly attached client does not depend on the agent process’s in-memory state. Model changes are live-only status updates and do not reprice historical requests.
 
 ### Subagent scopes
 

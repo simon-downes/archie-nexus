@@ -553,6 +553,30 @@ class IterationBlock(Widget):
         return "\n\n".join(parts)
 
 
+class CompactionMarker(Widget):
+    """Inline marker and Markdown summary for a compacted context."""
+
+    DEFAULT_CSS = """
+    CompactionMarker {
+        margin: 0 0 1 0;
+        padding: 1 2;
+        height: auto;
+    }
+    CompactionMarker > Markdown {
+        margin: 1 0 0 0;
+    }
+    """
+
+    def __init__(self, reason: str, before: int, after: int, summary: str) -> None:
+        super().__init__()
+        self._header = f"Context compacted ({reason} · {before} → {after} tokens)"
+        self._summary = summary
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._header)
+        yield Markdown(self._summary)
+
+
 class Conversation(VerticalScroll):
     """Scrollable container for message blocks."""
 
@@ -574,6 +598,11 @@ class Conversation(VerticalScroll):
         """Scroll to the end while autoscroll is enabled."""
         if self._autoscroll:
             self.scroll_end(animate=False)
+
+    def add_compaction(self, reason: str, before: int, after: int, summary: str) -> None:
+        """Add a compaction marker and summary."""
+        self.mount(CompactionMarker(reason, before, after, summary))
+        self.scroll_if_at_bottom()
 
     def add_user_message(self, content: str) -> None:
         """Add a user message and scroll to show it."""
