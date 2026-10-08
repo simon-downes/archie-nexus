@@ -66,6 +66,7 @@ def test_arbitrary_nested_reserved_names_are_indexed(monkeypatch, tmp_path):
 def test_rebuild_excludes_root_infrastructure(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
     (tmp_path / "BRAIN.md").write_text(_entry("guidance"))
+    (tmp_path / "SOUL.md").write_text(_entry("soul"))
     (tmp_path / "real.md").write_text(_entry("real"))
     assert [record["path"] for record in rebuild_index()] == ["real.md"]
 

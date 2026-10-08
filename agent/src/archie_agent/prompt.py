@@ -69,9 +69,31 @@ def _load_prompt(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _load_brain_file(name: str) -> str:
+    """Load an optional user-owned guidance file from the brain root."""
+    try:
+        return (brain_root() / name).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as e:
+        if not isinstance(e, FileNotFoundError):
+            log.warning("Unable to load brain %s: %s", name, e)
+        return ""
+
+
 def _build_identity() -> str:
     """Load the identity section from persona/prompts/identity.md."""
     return _load_prompt("identity.md")
+
+
+def _build_soul() -> str:
+    """Build the soul section: persona framing + user-owned brain ``SOUL.md``.
+
+    Returns an empty string when ``SOUL.md`` is absent or empty so the framing
+    never references a file that is not present.
+    """
+    soul = _load_brain_file("SOUL.md")
+    if not soul:
+        return ""
+    return f"{_load_prompt('soul.md')}\n\n<soul.md>\n{soul}\n</soul.md>"
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +121,7 @@ def _build_environment(model_name: str, workspace_dir: str) -> str:
 
 def _build_brain_guidance() -> str:
     parts = [_load_prompt("brain.md")]
-    try:
-        user = (brain_root() / "BRAIN.md").read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError) as e:
-        if not isinstance(e, FileNotFoundError):
-            log.warning("Unable to load brain guidance: %s", e)
-        user = ""
+    user = _load_brain_file("BRAIN.md")
     if user:
         parts.append(user)
     return "\n\n".join(parts)
@@ -186,13 +203,19 @@ def build_system_prompt_structured(
     not appear in either section. When ``agents_context`` is omitted, the
     compatibility builder reads AGENTS.md for this call; the harness passes an
     explicit session snapshot instead.
+
+    Order: identity (core rules) → soul (voice) → environment → tools →
+    brain → skills → AGENTS.md. Who Archie is and how it speaks lead the
+    prompt; workspace-specific project context comes last.
     """
     static_sections = [
         _build_identity(),
+        _build_soul(),
         _build_environment(model_name, workspace_dir),
         _build_tools(),
         _build_brain_guidance(),
     ]
+    static_sections = [section for section in static_sections if section]
 
     if catalog:
         static_sections.append(_build_skills_catalog(catalog))
@@ -222,7 +245,10 @@ def build_subagent_prompt(
     catalog: dict[str, SkillEntry] | None = None,
     agents_context: str | None = None,
 ) -> SystemPrompt:
-    """Build a focused child prompt without the primary identity section.
+    """Build a focused child prompt without the primary identity or soul.
+
+    Children report to the parent agent, not the user, so ``SOUL.md`` voice
+    guidance is deliberately omitted.
 
     The returned structured prompt preserves the provider boundary introduced by
     the prompt-caching work: static content remains separate from dynamic loaded

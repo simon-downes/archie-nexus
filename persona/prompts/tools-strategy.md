@@ -97,7 +97,7 @@ commit.
   result with `isinstance(r, BaseException)`.
 - Return only what you need. A returned `str` is shown as plain text; other
   values are shown as JSON. Prefer returning a joined string over a dict of
-  large text values.
+  large text values. Use `print()` for debug output only.
 - Results come back as plain text or `return: <json>`, `return (repr): ...`,
   `stdout:`, `stderr:`, or `error: <Type>: <message>`.
 

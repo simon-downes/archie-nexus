@@ -17,7 +17,7 @@ import yaml
 from archie_shared.config import home_dir
 
 FRESHNESS_INTERVAL_SECONDS = 24 * 60 * 60
-_ROOT_EXCLUDED_NAMES = {"index.yaml", "BRAIN.md"}
+_ROOT_EXCLUDED_NAMES = {"index.yaml", "BRAIN.md", "SOUL.md"}
 _LOCK_NAME = ".brain.lock"
 _EXCLUDED_DIRS = {".git", ".hg", ".svn"}
 

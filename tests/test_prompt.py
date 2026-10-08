@@ -7,19 +7,70 @@ from archie_agent.prompt import (
     _build_identity,
     _build_project_context,
     _build_skills_catalog,
+    _build_soul,
     _build_tools,
+    build_subagent_prompt,
     build_system_prompt,
 )
 from archie_agent.skills import SkillEntry
 
 
 def test_identity_section_content():
-    """Identity section contains key personality traits."""
+    """Identity section holds the core Archie rules, not voice guidance."""
     identity = _build_identity()
-    assert "Archie" in identity
-    assert "concise" in identity
-    assert "tools proactively" in identity
-    assert "Do not re-read to verify" in identity
+    assert identity.startswith("You are Archie")
+    assert "Investigate before answering" in identity
+    assert "Progress updates" not in identity
+
+
+def test_soul_omitted_when_absent(monkeypatch, tmp_path):
+    """No brain SOUL.md → no soul section or framing in the prompt."""
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    assert _build_soul() == ""
+    assert "<soul.md>" not in build_system_prompt("test-model")
+
+
+def test_soul_omitted_when_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text("  \n\n", encoding="utf-8")
+    assert _build_soul() == ""
+
+
+def test_soul_follows_identity_and_precedes_environment(monkeypatch, tmp_path):
+    """Soul sits between core identity and the environment section."""
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text("Speak like a pirate.", encoding="utf-8")
+    prompt = build_system_prompt("test-model")
+    identity_pos = prompt.index("You are Archie")
+    soul_pos = prompt.index("<soul.md>\nSpeak like a pirate.\n</soul.md>")
+    env_pos = prompt.index("Docker")
+    assert identity_pos < soul_pos < env_pos
+    assert prompt.index("## Soul") < soul_pos
+
+
+def test_soul_refreshes_between_prompts(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text("Voice v1", encoding="utf-8")
+    first = build_system_prompt("test-model")
+    (tmp_path / "SOUL.md").write_text("Voice v2", encoding="utf-8")
+    second = build_system_prompt("test-model")
+    assert "Voice v1" in first
+    assert "Voice v2" in second
+
+
+def test_soul_unreadable_is_omitted(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    (tmp_path / "SOUL.md").write_bytes(b"\xff\xfe\xfa")
+    assert _build_soul() == ""
+
+
+def test_subagent_prompt_excludes_soul(monkeypatch, tmp_path):
+    """Children report to the parent, so they do not receive SOUL.md."""
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    (tmp_path / "SOUL.md").write_text("Speak like a pirate.", encoding="utf-8")
+    child = build_subagent_prompt("test-model", "You are a researcher.").flatten()
+    assert "Speak like a pirate." not in child
+    assert "<soul.md>" not in child
 
 
 def test_build_environment_contains_workspace_without_model():
@@ -147,7 +198,7 @@ def test_build_system_prompt_with_catalog_has_no_loaded_body():
     """The static catalog never renders mutable skill bodies."""
     catalog = _make_catalog()
     prompt = build_system_prompt("test-model", catalog=catalog)
-    assert "<skill name=\"python-style\">" not in prompt
+    assert '<skill name="python-style">' not in prompt
     assert "Use type hints everywhere." not in prompt
 
 
