@@ -295,6 +295,14 @@ class TestSkillTool:
         assert "- references/guide.md" in result
 
     @pytest.mark.asyncio
+    async def test_load_states_absolute_skill_directory(self, tmp_path):
+        spec = create_skill_tool(self._make_catalog(tmp_path), set())
+        result = await spec.handler(name="test-skill")
+        expected = (tmp_path / "my-skill").resolve()
+        assert f"Skill directory: {expected}\n" in result
+        assert result.index("Skill directory:") < result.index("<skill ")
+
+    @pytest.mark.asyncio
     async def test_already_loaded_returns_manifest(self, tmp_path):
         loaded = {("test-skill", "__body__"), ("test-skill", "references/guide.md")}
         spec = create_skill_tool(self._make_catalog(tmp_path), loaded)

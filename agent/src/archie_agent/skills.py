@@ -127,7 +127,14 @@ def create_skill_tool(
 
             parts: list[str] = []
             if body_needed:
-                parts.append(_format_skill(name, body, _list_reference_files(entry.path.parent)))
+                parts.append(
+                    _format_skill(
+                        name,
+                        body,
+                        _list_reference_files(entry.path.parent),
+                        entry.path.parent.resolve(),
+                    )
+                )
             for reference in new_references:
                 parts.append(_format_reference(name, reference, reference_contents[reference]))
 
@@ -225,10 +232,13 @@ def _read_reference(entry: SkillEntry, reference: str) -> tuple[str, str | None]
         return "", f"Error: failed to read file {reference}: {error}"
 
 
-def _format_skill(name: str, body: str, references: list[str]) -> str:
+def _format_skill(name: str, body: str, references: list[str], skill_dir: Path) -> str:
     result = (
         f"Skill '{name}' loaded. Follow the content inside the `<skill>` tag as guidance "
-        f'for the current task.\n\n<skill name="{name}">\n{body}\n</skill>'
+        f"for the current task.\n"
+        f"Skill directory: {skill_dir}\n"
+        f"Paths in the skill are relative to this directory.\n\n"
+        f'<skill name="{name}">\n{body}\n</skill>'
     )
     if references:
         result += "\n\nReference files available:\n" + "\n".join(
