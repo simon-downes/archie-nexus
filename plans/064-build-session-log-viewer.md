@@ -87,7 +87,7 @@ Codebase facts found at intake:
 | D21 | Existing pages | Leave `/` and `/ui/auth` styling unchanged; add a "Session logs" link in `base.html` | Restyle all pages with nimble.css | Not requested; `test_web_console.py` pins the existing design tokens | self |
 | D22 | Active sessions unavailable (`docker` missing: `list_sessions` raises `OSError`) | Show every row as inactive and a notice "Active status unavailable"; the live endpoint ends with a "not running" notice | Return 500 | The orchestrator may run where `docker` is absent (this container); history should still be browsable | self |
 | D23 | Session ID in URLs | Accept only `^[A-Za-z0-9][A-Za-z0-9._-]*$` and an existing `<id>.jsonl` directly under the sessions directory; else 404 | Path join without checks | Prevents path traversal through the `{session_id}` path parameter | self |
-| D24 | Content-Security-Policy on viewer pages | `default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'`; htmx indicator styles disabled via `htmx-config` meta (`includeIndicatorStyles: false`); Markdown images render as links (`<a href=…>image: alt</a>`) | No CSP; allowing `https:` images; `'unsafe-inline'` styles | Logs contain model and tool output; CSP blocks script injection even if escaping regresses. Loading remote images from logs on page open would contact arbitrary hosts. Inline styles are avoided by class rewrites (D14) | self |
+| D24 | Content-Security-Policy on viewer pages (revised, C2) | `default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`; htmx indicator styles disabled via `htmx-config` meta (`includeIndicatorStyles: false`); Markdown images render as links (`<a href=…>image: alt</a>`) | No CSP; allowing `https:` images; `'unsafe-inline'` styles | Logs contain model and tool output; CSP blocks script injection even if escaping regresses. `default-src` does not cover framing, `<base>` or form targets, so those are set explicitly. Loading remote images from logs on page open would contact arbitrary hosts. Inline styles are avoided by class rewrites (D14) | self |
 | D25 | Does the live relay feed the metrics writer? | No | Enqueue `llm_request` frames like `proxy_stream` | The viewer is read-only; the CLI's relay already records metrics and `requests` dedupes by `(session_id, event_id)` | self |
 
 ## Requirements
@@ -104,8 +104,8 @@ Codebase facts found at intake:
   - AC: when `list_sessions` raises `FileNotFoundError` (no `docker` binary), the page returns 200, no row is active, and "Active status unavailable" appears.
 - R4 MUST render at most 200 rows and say "Showing 200 of N" when more match.
   - AC: with 201 logs, 200 rows render and "Showing 200 of 201" appears.
-- R5 MUST keep rendering when a log is unreadable (`EventIdConflict`, `LogAppendError`) or contains invalid lines.
-  - AC: a log with one invalid line still renders a row with the valid events' usage; a log with conflicting duplicate IDs renders a row marked "unreadable".
+- R5 MUST keep rendering when a log is unreadable (`EventIdConflict`, `LogAppendError`, not valid UTF-8) or contains invalid lines. (revised, C2)
+  - AC: a log with one invalid line still renders a row with the valid events' usage; a log with conflicting duplicate IDs, or with bytes that are not UTF-8, renders a row marked "unreadable"; the detail page for either returns 200 with the error.
 
 **Search**
 
@@ -136,7 +136,7 @@ Codebase facts found at intake:
   - AC: each of those events produces a block with class `.compaction`, `.turn-error`, `.turn-interrupted`; a turn footer shows the turn's root cost.
 - R12 MUST nest subagent events (non-null `scope` and `subagent_index`) inside the launching `task` tool row, grouped per `subagent_index`.
   - AC: a `task` call with two children renders two `.subagent` groups inside `#tool-<tool_use_id>`; child assistant text is not rendered at the top level.
-- R13 MUST send the CSP header in D24 on `/ui/sessions` and `/ui/sessions/{id}`, and pages MUST work under it (no inline script or style).
+- R13 MUST send the CSP header in D24 (revised, C2) on `/ui/sessions` and `/ui/sessions/{id}`, and pages MUST work under it (no inline script or style).
   - AC: both responses carry the exact header; the templates contain no `<script>` without `src` and no `style=` attribute.
 
 **Live updates**
@@ -144,11 +144,12 @@ Codebase facts found at intake:
 - R14 MUST serve `GET /ui/sessions/{id}/live?after=<event_id>` as `text/event-stream` for an active session, relaying agent `/stream` events after the cursor as HTML fragments (`event: fragment`), each persisted event's ID as the SSE `id:`.
   - AC (fake agent WebSocket): with the log holding events e1–e3, `after=e2`, and the socket sending `handshake`, `session_status`, e3 again, e4, the stream contains fragments for e3 and e4 once each, and nothing for e1–e2.
   - AC: a `Last-Event-ID` header takes precedence over `after`.
+  - AC: all fragments caused by one event are one SSE message carrying that event's id; content containing `\r` cannot start a new SSE line, field or message. (C2)
 - R15 MUST stream assistant text live: `text_delta` appends to a streaming block, and the matching `assistant_message` replaces it with rendered Markdown.
   - AC: on a fresh builder with no deltas, `assistant_message` yields the rendered text appended to the turn and a `hx-swap-oob="delete"` element for its `stream-…` id.
   - AC: deltas "Hel", "lo" then `assistant_message` "Hello" produce, in order: one fragment appending a `.streaming` element with id `stream-…` containing "Hel" to the turn's items; one `hx-swap-oob="beforeend:#stream-…-text"` fragment containing "lo"; one `hx-swap-oob="outerHTML:#stream-…"` fragment whose content is the rendered Markdown block. (revised, C1)
 - R16 MUST end the stream with `event: end` and a "Session ended" notice when the agent socket closes, and with a "Session is not running" notice when the session is not active or the agent is unreachable.
-  - AC: each case's stream ends with `event: end` and the notice text, including when `list_sessions` raises `FileNotFoundError`.
+  - AC: each case's stream ends with `event: end` and the notice text, including when `list_sessions` raises `FileNotFoundError`, and when the log cannot be read ("This log could not be read"). (C2)
 - R17 MUST keep the viewer read-only: the relay never sends a frame to the agent socket.
   - AC: the fake agent socket records zero `send()` calls.
 - R18 MUST update the header usage during live updates, and show the live state in `#live-state`: "connecting" on page load, "live" after the SSE `open`, "ended" after `event: end`, "reconnecting" after an error.
@@ -318,6 +319,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ## Change log
 
+- C2 (review): Review fixes changed behaviour and structure — (a) each event's fragments go out as one SSE message with the event id (was one message per fragment, last one carrying the id), so reconnect cursors never split an event; (b) SSE data is split on CR, LF and CRLF; (c) a newly created subagent group is sent once, already holding its first item; (d) the first `text_delta` a builder sees, and an `assistant_message` with no local stream, emit a removal marker (`<template data-remove-id>`, applied by `live.js` before the swap) instead of htmx `hx-swap-oob="delete"`, which logs `htmx:oobErrorNoTarget` when the target is absent; (e) `read_events` in `session_index.py` also treats `UnicodeDecodeError` as unreadable, and the live relay ends with a notice on an unreadable log; (f) the detail page renders in a worker thread; (g) the relay queue is bounded at 1024 frames, matching the agent; (h) exec source previews are capped; (i) the CSP adds `frame-ancestors`, `base-uri`, `form-action`; (j) token/cost totals use a new `UsageTotals` in `shared/src/archie_shared/session/accounting.py`, which `session_accounting` now also uses; `proxy._resolve_session` was renamed `resolve_session`; number formatting is two Jinja filters (`tokens`, `usd`). Evidence: reviewer reproductions and the new regression tests. No scope change.
 - C1 (M4): `replace` fragments carry `hx-swap-oob="outerHTML:#<target_id>"` instead of bare `outerHTML` — a finished stream (`stream-…`) is replaced by a message node with a different id, so htmx's default id matching would miss it; R15/R18 ACs and tests assert the explicit selector. Fragments are built by `render_change` in `web.py` (Python wraps the node macros) rather than a separate Jinja macro, so the root-element `hx-swap-oob` injection lives in one place. Live-only `text_delta` fragments have no SSE `id`, so reconnect cursors are always persisted event ids. No scope change.
 ## Risks
 
@@ -329,6 +331,23 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 - Plan review: pass 1 ❌ (2 ❌, 6 ⚠️, 6 ℹ️). All 14 agreed and fixed: CSP vs table `style=` (class rewrite, D14/D24, R9 AC); idle ping cancelling the socket iterator (queue + reader task, M4); nimble.css scoped package name (D12); redundant `enable("table")`; `DockerError` never raised (R3, D22); D23 AC unreachable through routing (R8 AC); Pygments wrapper (M3); notices/count outside the swapped fragment (R7 `#results`); missing stream-node creation (R15, M4); D15 compound tags and class names; stale-cursor duplicate append (`event: reload`); `OSError` during live resolve (R16); M3 Verify threshold; remote images (D24).
 - Plan review: pass 2 ⚠️ (3 ⚠️, 3 ℹ️). All agreed and fixed: htmx history restore receiving the partial (R7: full page on `HX-History-Restore-Request`, `Vary`); `assistant_message` with no local stream node after reconnect (`remove` Change, R15 AC); live-state indicator AC (R18); stale error-table row; dependency task in M3; reader-task cleanup in M4. Stopped after two passes.
+
+- Code review: round 1, roles correctness, conventions, risk (risk ran: untrusted log content rendered to HTML, a path parameter mapped to a file, a new SSE endpoint opening a WebSocket). Agreed and fixed (C2), each with a regression test that failed first:
+  - ❌ first child event duplicated in live view (correctness) → fixed (c); `test_first_child_event_is_sent_once`.
+  - ❌/⚠️ bare `\r` ends SSE lines and can inject `id:`/`event:` (correctness, risk) → fixed (b); `test_carriage_returns_cannot_inject_sse_fields`; also observed in agent-browser with a CR-laden tool result.
+  - ⚠️ non-UTF-8 log returns 500 on list and detail (correctness) → fixed (e); `test_non_utf8_log_does_not_break_the_list`, `test_detail_non_utf8_log`.
+  - ⚠️ reconnect mid-stream duplicates the final message (correctness) → fixed (d); `test_resumed_stream_replaces_stale_block`; observed in agent-browser by killing the orchestrator mid-stream: reconnect resumed with the stored cursor, no duplicate ids.
+  - ⚠️ detail render blocks the event loop ~0.3 s on an 11 MB log (risk) → fixed (f); `test_detail_render_runs_off_the_event_loop`.
+  - ℹ️ unreadable log in the live relay reconnects forever (correctness, risk) → fixed (e); `test_unreadable_log_ends_stream`.
+  - ℹ️ loose `"b" in data` selector in a test (correctness) → fixed.
+  - ❓ split SSE messages per event (correctness) → answered by fixing: one message per event (a); `test_each_event_is_one_sse_message`.
+  - ℹ️ unbounded relay queue (risk) → fixed (g). ℹ️ uncapped exec source (risk) → fixed (h); `test_exec_source_is_capped`.
+  - ❓ missing `frame-ancestors`/`base-uri`/`form-action` (risk) → added (i); `test_csp_blocks_framing_and_base`.
+  - ℹ️ duplicated accounting loops (conventions) → fixed (j) with shared `UsageTotals`.
+  - ℹ️ exec label duplicates `format_tool_activity`; number formatting in two places; `__dict__` rebuild; lazy `session_index` undocumented; cross-module private import; missing docstrings (conventions) → all fixed.
+  - ❓ is `--pygments-css` a documented command (conventions) → yes: noted in the generated file header and enforced by `test_pygments_css_file_is_current`, whose failure message names the file; added to CONTRIBUTING (see Outcome).
+  - Rejected: none.
+- Round 2: not run. The ❌ findings were fixed with failing-first regression tests and re-observed in the browser, and the fixes are local to the code each ❌ cited.
 
 ## Outcome
 

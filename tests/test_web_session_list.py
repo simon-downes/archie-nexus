@@ -161,7 +161,8 @@ async def test_csp_header_and_assets(session_logs):
     assert resp.headers["content-security-policy"] == VIEWER_CSP
     assert VIEWER_CSP == (
         "default-src 'self'; img-src 'self' data:; style-src 'self'; "
-        "script-src 'self'; connect-src 'self'"
+        "script-src 'self'; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     )
     assert "/static/vendor/nimble.min.css" in resp.text
     assert "/static/vendor/htmx.min.js" in resp.text
@@ -282,3 +283,14 @@ async def test_full_page_vary_and_search_attributes(session_logs):
     assert 'hx-swap="outerHTML"' in form_input
     assert 'hx-push-url="true"' in form_input
     assert "delay:" in form_input
+
+
+@pytest.mark.asyncio
+async def test_non_utf8_log_does_not_break_the_list(session_logs):
+    w = session_logs
+    w.write("good-01kx5yc7g0", [w.user("fine")])
+    (w.dir / "bin-01kx77jkz8.jsonl").write_bytes(b"\xff\xfe{bad\n")
+    resp = await _get("/ui/sessions")
+    assert resp.status_code == 200
+    row = re.search(r'<tr[^>]*data-session-id="bin-01kx77jkz8".*?</tr>', resp.text, re.S)
+    assert row and "unreadable" in row.group(0)

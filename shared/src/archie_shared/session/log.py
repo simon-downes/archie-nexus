@@ -8,7 +8,8 @@ from typing import Any
 
 import msgspec
 
-from archie_shared.events import Event, LLMRequest, PersistedEvent, decode_event, encode_event
+from archie_shared.events import Event, PersistedEvent, decode_event, encode_event
+from archie_shared.session.accounting import UsageTotals
 
 log = logging.getLogger(__name__)
 
@@ -113,20 +114,12 @@ def session_accounting(path: Path) -> dict[str, Any]:
     """Compute token and cost totals from persisted request events."""
     events = SessionLog(path).read()
     latest_event_id = events[-1].id if events else None
+    usage = UsageTotals.of(events)
     totals = {
-        "total_cost": 0.0,
-        "total_input_tokens": 0,
-        "total_output_tokens": 0,
-        "total_cache_read_tokens": 0,
-        "total_cache_write_tokens": 0,
+        "total_cost": round(usage.cost_usd, 6),
+        "total_input_tokens": usage.input_tokens,
+        "total_output_tokens": usage.output_tokens,
+        "total_cache_read_tokens": usage.cache_read_tokens,
+        "total_cache_write_tokens": usage.cache_write_tokens,
     }
-    for event in events:
-        if not isinstance(event, LLMRequest):
-            continue
-        totals["total_cost"] += event.cost_usd
-        totals["total_input_tokens"] += event.input_tokens
-        totals["total_output_tokens"] += event.output_tokens
-        totals["total_cache_read_tokens"] += event.cache_read_tokens
-        totals["total_cache_write_tokens"] += event.cache_write_tokens
-    totals["total_cost"] = round(totals["total_cost"], 6)
     return {"latest_event_id": latest_event_id, **totals}

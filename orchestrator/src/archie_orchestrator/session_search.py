@@ -26,6 +26,8 @@ _FILTER_KEYS = ("before", "after", "workspace")
 
 @dataclass
 class Query:
+    """A parsed search; terms are lower-cased. ``notices`` explain ignored terms."""
+
     phrases: list[str] = field(default_factory=list)
     words: list[str] = field(default_factory=list)
     before: date | None = None
@@ -65,6 +67,7 @@ def _parse_date(value: str) -> date | None:
 
 
 def parse_query(text: str) -> Query:
+    """Parse the search box text into a :class:`Query` (syntax in the module docstring)."""
     query = Query()
     for raw, quoted in _tokens(text):
         token = raw.strip().lower()
@@ -91,6 +94,7 @@ def parse_query(text: str) -> Query:
 
 
 def matches(summary: SessionSummary, query: Query) -> bool:
+    """Return True when the session satisfies every term and filter in ``query``."""
     if query.workspace is not None and not summary.workspace.lower().startswith(query.workspace):
         return False
     if query.before is not None or query.after is not None:

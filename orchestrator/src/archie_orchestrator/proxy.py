@@ -46,7 +46,7 @@ def get_active_ws_connections() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_session(session_id: str) -> SessionDescriptor:
+def resolve_session(session_id: str) -> SessionDescriptor:
     """Find a running session by exact ID.
 
     Raises:
@@ -123,7 +123,7 @@ async def proxy_status(request: Request) -> Response:
     """GET /sessions/{session_id}/status — proxy to session /status."""
     session_id = request.path_params["session_id"]
     try:
-        session = _resolve_session(session_id)
+        session = resolve_session(session_id)
     except KeyError:
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
@@ -135,7 +135,7 @@ async def proxy_events(request: Request) -> Response:
     """Proxy canonical event replay, forwarding the cursor unchanged."""
     session_id = request.path_params["session_id"]
     try:
-        session = _resolve_session(session_id)
+        session = resolve_session(session_id)
     except KeyError:
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
@@ -155,7 +155,7 @@ async def proxy_stream(websocket: WebSocket) -> None:
     session_id = websocket.path_params["session_id"]
 
     try:
-        session = _resolve_session(session_id)
+        session = resolve_session(session_id)
     except KeyError:
         await websocket.close(code=4004, reason="Session not found")
         return

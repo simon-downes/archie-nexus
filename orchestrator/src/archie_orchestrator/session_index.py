@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from archie_shared.config import home_dir
 from archie_shared.events import AssistantMessage, LLMRequest, UserMessage
 from archie_shared.session import split_id
+from archie_shared.session.accounting import UsageTotals
 from archie_shared.session.log import EventIdConflict, LogAppendError, SessionLog
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,8 @@ def session_start(session_id: str) -> datetime | None:
 
 @dataclass(frozen=True)
 class SessionSummary:
+    """One row of the session list; see the plan's Data model for field meanings."""
+
     session_id: str
     workspace: str
     started_at: datetime | None
@@ -67,16 +70,11 @@ def summarize_events(session_id: str, events, *, mtime: float = 0.0) -> SessionS
     """Reduce canonical events to a summary (shared by the list and detail pages)."""
     workspace, _ = split_id(session_id)
     turns_by_model: dict[str, set[tuple]] = {}
-    totals = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
-    cost = 0.0
+    usage = UsageTotals()
     texts = [session_id, workspace]
     for event in events:
         if isinstance(event, LLMRequest):
-            totals["input"] += event.input_tokens
-            totals["cache_read"] += event.cache_read_tokens
-            totals["cache_write"] += event.cache_write_tokens
-            totals["output"] += event.output_tokens
-            cost += event.cost_usd
+            usage.add(event)
             if event.purpose == "conversation":
                 turns_by_model.setdefault(event.model_key, set()).add(
                     (event.scope, event.subagent_index, event.turn)
@@ -94,11 +92,11 @@ def summarize_events(session_id: str, events, *, mtime: float = 0.0) -> SessionS
         workspace=workspace,
         started_at=session_start(session_id),
         models=models,
-        input_tokens=totals["input"],
-        cache_read_tokens=totals["cache_read"],
-        cache_write_tokens=totals["cache_write"],
-        output_tokens=totals["output"],
-        cost_usd=round(cost, 6),
+        input_tokens=usage.input_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        output_tokens=usage.output_tokens,
+        cost_usd=round(usage.cost_usd, 6),
         search_text="\n".join(texts).lower(),
         mtime=mtime,
     )
@@ -111,17 +109,24 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+def read_events(path: Path) -> tuple[list, str | None]:
+    """Read a log's valid events, or ``([], reason)`` when the file cannot be read.
+
+    ``SessionLog`` skips invalid lines itself; this also covers conflicting
+    duplicate IDs and files that are not valid UTF-8.
+    """
+    try:
+        return SessionLog(path).read(), None
+    except (EventIdConflict, LogAppendError, UnicodeDecodeError) as exc:
+        log.warning("Unreadable session log %s: %s", path, exc)
+        return [], str(exc)
+
+
 def summarize_log(path: Path) -> SessionSummary:
     """Summarise one log file; an unreadable log yields a summary with ``error`` set."""
-    session_id = path.stem
-    mtime = _mtime(path)
-    try:
-        events = SessionLog(path).read()
-    except (EventIdConflict, LogAppendError) as exc:
-        log.warning("Unreadable session log %s: %s", path, exc)
-        empty = summarize_events(session_id, [], mtime=mtime)
-        return SessionSummary(**{**empty.__dict__, "error": str(exc)})
-    return summarize_events(session_id, events, mtime=mtime)
+    events, error = read_events(path)
+    summary = summarize_events(path.stem, events, mtime=_mtime(path))
+    return replace(summary, error=error) if error else summary
 
 
 def sort_key(summary: SessionSummary) -> tuple:

@@ -19,34 +19,39 @@ import websockets
 from archie_shared import __version__
 from archie_shared.events import ErrorNotice, Handshake, SessionStatus, decode_event
 from archie_shared.session import split_id
-from archie_shared.session.log import EventIdConflict, LogAppendError, SessionLog
+from archie_shared.session.accounting import UsageTotals
 from markupsafe import escape
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from archie_orchestrator.docker import list_sessions
-from archie_orchestrator.proxy import _resolve_session
+from archie_orchestrator.proxy import resolve_session
 from archie_orchestrator.session_index import (
     SessionIndex,
     SessionSummary,
+    read_events,
     sessions_dir,
     summarize_events,
 )
 from archie_orchestrator.session_search import matches, parse_query
-from archie_orchestrator.transcript import Change, TranscriptBuilder, Usage, build
+from archie_orchestrator.transcript import Change, TranscriptBuilder, build
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+templates.env.filters["tokens"] = lambda value: f"{value:,}"
+templates.env.filters["usd"] = lambda value: f"${value:.4f}"
 
 log = logging.getLogger(__name__)
 
 VIEWER_CSP = (
     "default-src 'self'; img-src 'self' data:; style-src 'self'; "
-    "script-src 'self'; connect-src 'self'"
+    "script-src 'self'; connect-src 'self'; "
+    "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 MAX_ROWS = 200
 PING_INTERVAL = 15.0
+LIVE_QUEUE_SIZE = 1024  # matches the agent's per-client queue (session_bus.py)
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -174,7 +179,14 @@ def _viewer_response(request: Request, name: str, context: dict, status_code: in
     return response
 
 
+def _render_viewer(name: str, context: dict) -> str:
+    """Render a viewer template to a string (safe to call from a worker thread)."""
+    return templates.get_template(name).render({"version": _get_version(), **context})
+
+
 def _session_index(request: Request) -> SessionIndex:
+    # Created on first use rather than in the lifespan so the viewer works in
+    # tests that drive the app without running startup.
     index = getattr(request.app.state, "session_index", None)
     if index is None:
         index = SessionIndex()
@@ -191,14 +203,6 @@ def _active_ids() -> set[str] | None:
         return None
 
 
-def _fmt_int(value: int) -> str:
-    return f"{value:,}"
-
-
-def _fmt_cost(value: float) -> str:
-    return f"${value:.4f}"
-
-
 def _fmt_started(summary: SessionSummary) -> str:
     if summary.started_at is None:
         return "—"
@@ -211,11 +215,11 @@ def _row(summary: SessionSummary, active: set[str]) -> dict:
         "workspace": summary.workspace,
         "started": _fmt_started(summary),
         "models": summary.models,
-        "input_tokens": _fmt_int(summary.input_tokens),
-        "cache_read_tokens": _fmt_int(summary.cache_read_tokens),
-        "cache_write_tokens": _fmt_int(summary.cache_write_tokens),
-        "output_tokens": _fmt_int(summary.output_tokens),
-        "cost": _fmt_cost(summary.cost_usd),
+        "input_tokens": summary.input_tokens,
+        "cache_read_tokens": summary.cache_read_tokens,
+        "cache_write_tokens": summary.cache_write_tokens,
+        "output_tokens": summary.output_tokens,
+        "cost_usd": summary.cost_usd,
         "active": summary.session_id in active,
         "error": summary.error,
     }
@@ -268,38 +272,41 @@ def _not_found(request: Request, session_id: str) -> HTMLResponse:
     )
 
 
-def _read_transcript(path: Path) -> tuple[TranscriptBuilder, SessionSummary, str | None]:
-    try:
-        events = SessionLog(path).read()
-        error = None
-    except (EventIdConflict, LogAppendError) as exc:
-        log.warning("Unreadable session log %s: %s", path, exc)
-        events, error = [], str(exc)
-    return build(events), summarize_events(path.stem, events), error
+def _render_detail(session_id: str, path: Path, active: bool) -> str:
+    """Read, build and render one transcript page. Runs in a worker thread."""
+    events, error = read_events(path)
+    builder = build(events)
+    summary = summarize_events(session_id, events)
+    return _render_viewer(
+        "viewer/detail.html",
+        {
+            "session_id": session_id,
+            "workspace": summary.workspace,
+            "started": _fmt_started(summary),
+            "models": summary.models,
+            "usage": builder.usage,
+            "turns": builder.turns,
+            "preamble": builder.preamble,
+            "last_event_id": builder.last_persisted_id,
+            "active": active,
+            "error": error,
+        },
+    )
 
 
 async def session_detail_page(request: Request) -> HTMLResponse:
-    """GET /ui/sessions/{session_id} — structured transcript of one session log."""
+    """GET /ui/sessions/{session_id} — structured transcript of one session log.
+
+    Markdown, highlighting and template rendering of a large log take a few
+    hundred milliseconds, so the whole render runs off the event loop.
+    """
     session_id = request.path_params["session_id"]
     path = session_log_path(session_id)
     if path is None:
         return _not_found(request, session_id)
-    (builder, summary, error), active = await asyncio.gather(
-        asyncio.to_thread(_read_transcript, path), asyncio.to_thread(_active_ids)
-    )
-    context = {
-        "session_id": session_id,
-        "workspace": summary.workspace,
-        "started": _fmt_started(summary),
-        "models": summary.models,
-        "usage": builder.usage if not error else Usage(),
-        "turns": builder.turns,
-        "preamble": builder.preamble,
-        "last_event_id": builder.last_persisted_id,
-        "active": session_id in (active or set()),
-        "error": error,
-    }
-    return _viewer_response(request, "viewer/detail.html", context)
+    active = session_id in (await asyncio.to_thread(_active_ids) or set())
+    body = await asyncio.to_thread(_render_detail, session_id, path, active)
+    return HTMLResponse(body, headers={"Content-Security-Policy": VIEWER_CSP})
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +336,9 @@ def render_change(change: Change) -> str:
         return f'<div hx-swap-oob="beforeend:#{change.parent_id}">{html}</div>'
     if change.kind == "replace":
         node = change.node
-        if getattr(node, "kind", None) == "turn":
+        if isinstance(node, UsageTotals):
+            html = str(nodes.usage(node))
+        elif node.kind == "turn":
             html = str(nodes.turn_footer(node))
         else:
             html = str(nodes.node(node))
@@ -337,14 +346,21 @@ def render_change(change: Change) -> str:
         return _with_oob(html, f"outerHTML:#{change.target_id}")
     if change.kind == "append_text":
         return f'<span hx-swap-oob="beforeend:#{change.target_id}">{escape(change.text)}</span>'
-    return f'<div id="{change.target_id}" hx-swap-oob="delete"></div>'
+    # Removed by live.js before the swap: an htmx OOB delete logs an error when
+    # the target is absent, which is the normal case here.
+    return f'<template data-remove-id="{change.target_id}"></template>'
+
+
+_SSE_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
 def _sse(event: str, data: str, event_id: str | None = None) -> str:
+    """Encode one SSE message. CR, LF and CRLF all end an SSE line, so data is
+    split on all three; content can never start a new field or message."""
     lines = [f"event: {event}"]
     if event_id:
         lines.append(f"id: {event_id}")
-    lines.extend(f"data: {line}" for line in data.split("\n"))
+    lines.extend(f"data: {line}" for line in _SSE_LINE_BREAK.split(data))
     return "\n".join(lines) + "\n\n"
 
 
@@ -352,18 +368,21 @@ def _live_notice(text: str) -> str:
     return f'<p class="chrome live-notice">{escape(text)}</p>'
 
 
-def _fragments_for(event, builder: TranscriptBuilder) -> list[str]:
+def _message_for(event, builder: TranscriptBuilder) -> str | None:
+    """All fragments one event causes, as a single SSE message.
+
+    Persisted events carry their id, so a reconnect cursor never splits an event.
+    """
     changes = builder.apply(event)
-    persisted_id = event.id if event.persist else None
-    return [
-        _sse("fragment", render_change(change), persisted_id if i == len(changes) - 1 else None)
-        for i, change in enumerate(changes)
-    ]
+    if not changes:
+        return None
+    html = "\n".join(render_change(change) for change in changes)
+    return _sse("fragment", html, event.id if event.persist else None)
 
 
 async def _resolve_live(session_id: str):
     try:
-        return await asyncio.to_thread(_resolve_session, session_id)
+        return await asyncio.to_thread(resolve_session, session_id)
     except (KeyError, ValueError, OSError) as exc:
         log.info("Live view: session %s not available: %s", session_id, exc)
         return None
@@ -380,7 +399,7 @@ async def _live_events(session_id: str, path: Path, cursor: str | None) -> Async
             f"ws://127.0.0.1:{session.port}/stream", open_timeout=10
         ) as backend:
             log.info("Live view connected: %s", session_id)
-            frames: asyncio.Queue = asyncio.Queue()
+            frames: asyncio.Queue = asyncio.Queue(maxsize=LIVE_QUEUE_SIZE)
             done = object()
 
             async def reader() -> None:
@@ -394,7 +413,10 @@ async def _live_events(session_id: str, path: Path, cursor: str | None) -> Async
             try:
                 # The agent appends to the log before broadcasting, so anything
                 # missing from this read arrives on the socket (deduped by id).
-                events = await asyncio.to_thread(lambda: SessionLog(path).read())
+                events, error = await asyncio.to_thread(read_events, path)
+                if error is not None:
+                    yield _sse("end", _live_notice(f"This log could not be read: {error}"))
+                    return
                 builder = TranscriptBuilder()
                 ids = [e.id for e in events]
                 if cursor is not None and cursor not in ids:
@@ -404,7 +426,8 @@ async def _live_events(session_id: str, path: Path, cursor: str | None) -> Async
                 for event in events[:start]:
                     builder.apply(event)
                 for event in events[start:]:
-                    for message in _fragments_for(event, builder):
+                    message = _message_for(event, builder)
+                    if message:
                         yield message
 
                 while True:
@@ -424,7 +447,8 @@ async def _live_events(session_id: str, path: Path, cursor: str | None) -> Async
                         continue
                     if isinstance(event, _LIVE_ONLY_STATUS):
                         continue
-                    for message in _fragments_for(event, builder):
+                    message = _message_for(event, builder)
+                    if message:
                         yield message
             finally:
                 task.cancel()

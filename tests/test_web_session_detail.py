@@ -353,3 +353,51 @@ async def test_detail_active_session_loads_live_client(session_logs):
     assert '<script src="/static/viewer/live.js" defer></script>' in html
     assert f'data-live-url="/ui/sessions/{SID}/live"' in html
     assert re.search(r'data-last-event-id="am\d+"', html)
+
+
+@pytest.mark.asyncio
+async def test_detail_non_utf8_log(session_logs):
+    (session_logs.dir / f"{SID}.jsonl").write_bytes(b"\xff\xfe{bad\n")
+    resp = await _get(f"/ui/sessions/{SID}")
+    assert resp.status_code == 200
+    assert "could not be read" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_exec_source_is_capped(session_logs):
+    w = session_logs
+    w.write(
+        SID, [w.user("x"), w.tool_call("exec", {"source": "a = 1\n" * 3000}, tool_use_id="t-exec")]
+    )
+    html = (await _get(f"/ui/sessions/{SID}")).text
+    row = re.search(r'<details[^>]*id="tool-t-exec".*?</details>', html, re.S).group(0)
+    assert "more characters" in row
+    assert row.count("a</span>") <= 8000 // 6 + 1
+
+
+@pytest.mark.asyncio
+async def test_detail_render_runs_off_the_event_loop(session_logs, monkeypatch):
+    import threading
+
+    from archie_orchestrator import transcript
+
+    w = session_logs
+    w.write(SID, [w.user("x"), w.assistant("hello")])
+    main = threading.main_thread()
+    threads = []
+    real = transcript.render_markdown
+
+    def spy(text):
+        threads.append(threading.current_thread())
+        return real(text)
+
+    monkeypatch.setattr(transcript, "render_markdown", spy)
+    resp = await _get(f"/ui/sessions/{SID}")
+    assert resp.status_code == 200
+    assert threads and all(t is not main for t in threads)
+
+
+def test_csp_blocks_framing_and_base():
+    assert "frame-ancestors 'none'" in VIEWER_CSP
+    assert "base-uri 'none'" in VIEWER_CSP
+    assert "form-action 'self'" in VIEWER_CSP

@@ -7,7 +7,6 @@
 {%- elif n.kind == "tool" %}{{ tool(n) }}
 {%- elif n.kind == "subagent" %}{{ subagent(n) }}
 {%- elif n.kind == "notice" %}{{ notice(n) }}
-{%- elif n.kind == "usage" %}{{ usage(n) }}
 {%- endif -%}
 {%- endmacro %}
 
@@ -25,12 +24,13 @@
 
 {% macro turn_footer(t) -%}
 <div class="chrome turn-foot" id="{{ t.footer_id }}">
-    {%- if t.requests %}
-    <span title="Root-scope requests in this turn">{{ t.requests }} request{{ "" if t.requests == 1 else "s" }}</span>
-    <span title="Input tokens">in {{ "{:,}".format(t.input_tokens) }}</span>
-    <span title="Cache read / write tokens">cache {{ "{:,}".format(t.cache_read_tokens) }} / {{ "{:,}".format(t.cache_write_tokens) }}</span>
-    <span title="Output tokens">out {{ "{:,}".format(t.output_tokens) }}</span>
-    <span class="cost">{{ "${:.4f}".format(t.cost_usd) }}</span>
+    {%- set u = t.usage %}
+    {%- if u.requests %}
+    <span title="Root-scope requests in this turn">{{ u.requests }} request{{ "" if u.requests == 1 else "s" }}</span>
+    <span title="Input tokens">in {{ u.input_tokens|tokens }}</span>
+    <span title="Cache read / write tokens">cache {{ u.cache_read_tokens|tokens }} / {{ u.cache_write_tokens|tokens }}</span>
+    <span title="Output tokens">out {{ u.output_tokens|tokens }}</span>
+    <span class="cost">{{ u.cost_usd|usd }}</span>
     {%- endif %}
     {%- if t.stop_reason %}<span class="dim">{{ t.stop_reason }}</span>{% endif -%}
 </div>
@@ -97,11 +97,10 @@
 
 {% macro usage(u) -%}
 <dl class="chrome usage" id="session-usage">
-    <div><dt>Input</dt><dd>{{ "{:,}".format(u.input_tokens) }}</dd></div>
-    <div><dt>Cache read</dt><dd>{{ "{:,}".format(u.cache_read_tokens) }}</dd></div>
-    <div><dt>Cache write</dt><dd>{{ "{:,}".format(u.cache_write_tokens) }}</dd></div>
-    <div><dt>Output</dt><dd>{{ "{:,}".format(u.output_tokens) }}</dd></div>
-    <div><dt>Cost</dt><dd class="cost">{{ "${:.4f}".format(u.cost_usd) }}</dd></div>
+    <div><dt>Input</dt><dd>{{ u.input_tokens|tokens }}</dd></div>
+    <div><dt>Cache read</dt><dd>{{ u.cache_read_tokens|tokens }}</dd></div>
+    <div><dt>Cache write</dt><dd>{{ u.cache_write_tokens|tokens }}</dd></div>
+    <div><dt>Output</dt><dd>{{ u.output_tokens|tokens }}</dd></div>
+    <div><dt>Cost</dt><dd class="cost">{{ u.cost_usd|usd }}</dd></div>
 </dl>
 {%- endmacro %}
-

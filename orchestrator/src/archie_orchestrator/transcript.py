@@ -34,7 +34,12 @@ from archie_shared.events import (
     TurnInterrupted,
     UserMessage,
 )
-from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
+from archie_shared.session.accounting import UsageTotals
+from archie_shared.tool_summaries import (
+    format_tool_activity,
+    format_tool_complete,
+    format_tool_pending,
+)
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 from pygments import highlight
@@ -154,6 +159,7 @@ _ID_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def dom_id(*parts: object) -> str:
+    """Join parts into an HTML id, replacing characters outside [A-Za-z0-9_-]."""
     return "-".join(_ID_UNSAFE.sub("_", str(p)) for p in parts if p is not None)
 
 
@@ -231,8 +237,7 @@ class ToolNode:
     def summary_html(self) -> Markup:
         if self.result is None:
             if self.name == "exec":
-                lines = len(str(self.input.get("source", "")).splitlines())
-                return markup_to_html(f"Exec [dim]({lines} lines)[/]")
+                return markup_to_html(format_tool_activity(self.name, self.input))
             return markup_to_html(format_tool_pending(self.name, self.input))
         summary = format_tool_complete(
             self.name, self.input, self.result, self.status == "error", self.duration_ms
@@ -254,10 +259,12 @@ class ToolNode:
     @property
     def input_html(self) -> Markup:
         if self.name == "exec" and isinstance(self.input.get("source"), str):
-            return Markup(highlight_code(self.input["source"], "python"))
-        text = json.dumps(self.input, indent=2, ensure_ascii=False, default=str)
-        shown, omitted = preview(text)
-        out = highlight_code(shown, "json")
+            shown, omitted = preview(self.input["source"])
+            out = highlight_code(shown, "python")
+        else:
+            text = json.dumps(self.input, indent=2, ensure_ascii=False, default=str)
+            shown, omitted = preview(text)
+            out = highlight_code(shown, "json")
         if omitted:
             out += f'<p class="omitted">… {omitted} more characters</p>'
         return Markup(out)
@@ -273,12 +280,7 @@ class TurnNode:
     number: int
     user: TextNode | None
     items: list = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    cost_usd: float = 0.0
-    requests: int = 0
+    usage: UsageTotals = field(default_factory=UsageTotals)  # root-scope requests only
     stop_reason: str | None = None
     kind: str = "turn"
 
@@ -289,16 +291,6 @@ class TurnNode:
     @property
     def footer_id(self) -> str:
         return f"{self.id}-footer"
-
-
-@dataclass
-class Usage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    cost_usd: float = 0.0
-    kind: str = "usage"
 
 
 @dataclass
@@ -330,10 +322,12 @@ def _compaction_reason(reason: str) -> str:
 
 
 class TranscriptBuilder:
+    """Reduce canonical events to transcript nodes, reporting DOM changes per event."""
+
     def __init__(self) -> None:
         self.turns: list[TurnNode] = []
         self.preamble: list = []  # items before the first user message
-        self.usage = Usage()
+        self.usage = UsageTotals()
         self.last_persisted_id: str | None = None
         self._tools: dict[str, ToolNode] = {}
         self._subagents: dict[tuple[str, int], SubagentNode] = {}
@@ -352,11 +346,12 @@ class TranscriptBuilder:
             return self.preamble, None
         return turn.items, turn.items_id
 
-    def _subagent(self, scope: str, index: int, changes: list[Change]) -> SubagentNode:
+    def _subagent(self, scope: str, index: int, changes: list[Change]) -> tuple[SubagentNode, bool]:
+        """Return the child group for (scope, index) and whether it was just created."""
         key = (scope, index)
         node = self._subagents.get(key)
         if node is not None:
-            return node
+            return node, False
         node = SubagentNode(id=dom_id("sub", scope, index), scope=scope, index=index)
         self._subagents[key] = node
         parent = self._tools.get(scope)
@@ -367,20 +362,24 @@ class TranscriptBuilder:
             items, parent_id = self._root_container()
             items.append(node)
             changes.append(Change("append", node, parent_id=parent_id))
-        return node
+        return node, True
 
-    def _container(self, event, changes: list[Change]) -> tuple[list, str | None]:
+    def _container(self, event, changes: list[Change]) -> tuple[list, str | None, bool]:
+        """Return (items, DOM id of items, whether the container was just created)."""
         scope = getattr(event, "scope", None)
         index = getattr(event, "subagent_index", None)
         if scope is not None and index is not None:
-            node = self._subagent(scope, index, changes)
-            return node.items, node.items_id
-        return self._root_container()
+            node, created = self._subagent(scope, index, changes)
+            return node.items, node.items_id, created
+        items, parent_id = self._root_container()
+        return items, parent_id, False
 
     def _add(self, event, node, changes: list[Change]) -> None:
-        items, parent_id = self._container(event, changes)
+        items, parent_id, created = self._container(event, changes)
         items.append(node)
-        changes.append(Change("append", node, parent_id=parent_id))
+        # A just-created group is sent whole, already holding this node.
+        if not created:
+            changes.append(Change("append", node, parent_id=parent_id))
 
     @staticmethod
     def _request_key(event) -> tuple:
@@ -425,6 +424,8 @@ class TranscriptBuilder:
             if stream is None:
                 stream = StreamNode(id=self._stream_id(key), text=event.text)
                 self._streams[key] = stream
+                # A reconnect starts a new builder mid-stream; drop the old partial block.
+                changes.append(Change("remove", target_id=stream.id))
                 self._add(event, stream, changes)
             else:
                 stream.text += event.text
@@ -438,7 +439,7 @@ class TranscriptBuilder:
             stream_id = self._stream_id(key)
             node = TextNode(dom_id("msg", event.id), "assistant", event.content, event.interrupted)
             visible = bool(event.content) or event.interrupted
-            items, _ = self._container(event, changes)
+            items, _, _ = self._container(event, changes)
             if stream is not None:
                 index = next((i for i, item in enumerate(items) if item is stream), None)
                 if visible and index is not None:
@@ -449,8 +450,8 @@ class TranscriptBuilder:
                         items.pop(index)
                     changes.append(Change("remove", target_id=stream_id))
             elif visible:
-                self._add(event, node, changes)
                 changes.append(Change("remove", target_id=stream_id))
+                self._add(event, node, changes)
             else:
                 changes.append(Change("remove", target_id=stream_id))
         elif isinstance(event, ToolCall):
@@ -482,20 +483,11 @@ class TranscriptBuilder:
                 node.duration_ms = event.duration_ms
                 changes.append(Change("replace", node, target_id=node.id))
         elif isinstance(event, LLMRequest):
-            self.usage.input_tokens += event.input_tokens
-            self.usage.output_tokens += event.output_tokens
-            self.usage.cache_read_tokens += event.cache_read_tokens
-            self.usage.cache_write_tokens += event.cache_write_tokens
-            self.usage.cost_usd += event.cost_usd
+            self.usage.add(event)
             changes.append(Change("replace", self.usage, target_id="session-usage"))
             turn = self._current_turn()
             if not child and turn is not None:
-                turn.input_tokens += event.input_tokens
-                turn.output_tokens += event.output_tokens
-                turn.cache_read_tokens += event.cache_read_tokens
-                turn.cache_write_tokens += event.cache_write_tokens
-                turn.cost_usd += event.cost_usd
-                turn.requests += 1
+                turn.usage.add(event)
                 changes.append(Change("replace", turn, target_id=turn.footer_id))
         elif isinstance(event, ContextCompacted):
             self._add(
@@ -549,6 +541,7 @@ class TranscriptBuilder:
 
 
 def build(events) -> TranscriptBuilder:
+    """Build a transcript from a complete event list (full-page rendering)."""
     builder = TranscriptBuilder()
     for event in events:
         builder.apply(event)

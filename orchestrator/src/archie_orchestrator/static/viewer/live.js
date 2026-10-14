@@ -36,7 +36,18 @@
     if (placeholder) {
       placeholder.remove();
     }
-    htmx.swap(transcript, html, { swapStyle: "beforeend" });
+    // Removal markers run first, so a fragment can clear an element and then
+    // append a new one with the same id.
+    var parsed = document.createElement("template");
+    parsed.innerHTML = html;
+    parsed.content.querySelectorAll("template[data-remove-id]").forEach(function (marker) {
+      var stale = document.getElementById(marker.dataset.removeId);
+      if (stale) {
+        stale.remove();
+      }
+      marker.remove();
+    });
+    htmx.swap(transcript, parsed.innerHTML, { swapStyle: "beforeend" });
   }
 
   function atBottom() {

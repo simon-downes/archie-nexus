@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -228,7 +229,7 @@ async def test_final_message_without_local_stream_clears_stale_block(session_log
     )
     text = "\n".join(m["data"] for m in _fragments(messages))
     assert "complete text" in text
-    assert '<div id="stream-1-1-r1" hx-swap-oob="delete"></div>' in text
+    assert '<template data-remove-id="stream-1-1-r1"></template>' in text
 
 
 @pytest.mark.asyncio
@@ -274,7 +275,7 @@ async def test_top_level_turn_is_plain_fragment(session_logs):
     _, messages = await _live(
         f"/ui/sessions/{SID}/live?after={first.id}", agent=FakeAgent(_frames(second))
     )
-    frag = next(m["data"] for m in _fragments(messages) if "b" in m["data"])
+    frag = next(m["data"] for m in _fragments(messages) if f'id="turn-{second.id}"' in m["data"])
     assert frag.lstrip().startswith('<section class="turn"')
     assert "hx-swap-oob" not in frag.split(">", 1)[0]
 
@@ -359,7 +360,102 @@ def test_live_js_uses_event_source_and_htmx_swap():
     js = LIVE_JS.read_text()
     assert "new EventSource" in js
     assert "htmx.swap" in js
+    assert "data-remove-id" in js
     for name in ("fragment", "end", "reload"):
         assert f'"{name}"' in js
     for state in ("connecting", "live", "ended", "reconnecting"):
         assert state in js
+
+
+def _ids_in(html: str) -> list[str]:
+    return re.findall(r'\bid="([^"]+)"', html)
+
+
+@pytest.mark.asyncio
+async def test_first_child_event_is_sent_once(session_logs):
+    w = session_logs
+    user = w.user("go")
+    call = w.tool_call("task", {"tasks": [{}]}, tool_use_id="tu-task")
+    w.write(SID, [user, call])
+    child = w.user("child prompt", scope="tu-task", index=0)
+    _, messages = await _live(
+        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
+    )
+    text = "\n".join(m["data"] for m in _fragments(messages))
+    assert text.count("child prompt") == 1
+    assert _ids_in(text).count(f"msg-{child.id}") == 1
+
+
+@pytest.mark.asyncio
+async def test_each_event_is_one_sse_message(session_logs):
+    """All fragments for one event share one SSE message, so a cursor covers all of them."""
+    w = session_logs
+    user = w.user("go")
+    call = w.tool_call("task", {"tasks": [{}]}, tool_use_id="tu-task")
+    w.write(SID, [user, call])
+    child = w.assistant("child says", scope="tu-task", index=0)
+    _, messages = await _live(
+        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
+    )
+    frags = _fragments(messages)
+    carrying = [m for m in frags if "child says" in m["data"] or "sub-tu-task-0" in m["data"]]
+    assert len(carrying) == 1
+    assert carrying[0]["id"] == child.id
+
+
+@pytest.mark.asyncio
+async def test_carriage_returns_cannot_inject_sse_fields(session_logs):
+    w = session_logs
+    user = w.user("go")
+    call = w.tool_call("shell", {"command": "x"}, tool_use_id="t1")
+    w.write(SID, [user, call])
+    result = w.tool_result("10%\rid: bogus\revent: reload\r\r\rdone\r\n", tool_use_id="t1")
+    resp, _ = await _live(
+        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(result))
+    )
+    # Parse as an EventSource does: CR, LF and CRLF all end a line.
+    fields = [line for line in re.split(r"\r\n|\r|\n", resp.text) if line]
+    assert "id: bogus" not in fields
+    assert "event: reload" not in fields
+    assert not any(f.startswith(("id: bogus", "event: reload")) for f in fields)
+    data = "\n".join(f[6:] for f in fields if f.startswith("data: "))
+    assert "done" in data and "</details>" in data
+
+
+@pytest.mark.asyncio
+async def test_resumed_stream_replaces_stale_block(session_logs):
+    """A reconnect mid-stream must not create a second element with the same stream id."""
+    w = session_logs
+    user = w.user("hi")
+    w.write(SID, [user])
+    delta = json.dumps(
+        {
+            "type": "text_delta",
+            "id": "d9",
+            "turn": 1,
+            "iteration": 1,
+            "scope": None,
+            "request_id": "r1",
+            "text": "more",
+        }
+    )
+    _, messages = await _live(
+        f"/ui/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(delta))
+    )
+    frag = next(m["data"] for m in _fragments(messages) if "more" in m["data"])
+    # The first delta a builder sees deletes any block left by an earlier
+    # connection, then appends a fresh one with the same id.
+    delete = '<template data-remove-id="stream-1-1-r1"></template>'
+    assert delete in frag
+    assert frag.index(delete) < frag.index('streaming" id="stream-1-1-r1"')
+
+
+@pytest.mark.asyncio
+async def test_unreadable_log_ends_stream(session_logs):
+    (session_logs.dir / f"{SID}.jsonl").write_text(
+        '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"a"}\n'
+        '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"b"}\n'
+    )
+    _, messages = await _live(f"/ui/sessions/{SID}/live", agent=FakeAgent(_frames()))
+    assert messages[-1]["event"] == "end"
+    assert "could not be read" in messages[-1]["data"]

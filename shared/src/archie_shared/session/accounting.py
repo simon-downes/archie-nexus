@@ -21,8 +21,38 @@ launching tool IDs:
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 from archie_shared.events import LLMRequest, ToolCall
+
+
+@dataclass
+class UsageTotals:
+    """Running token and cost totals folded from ``llm_request`` events."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: float = 0.0
+    requests: int = 0
+
+    def add(self, event: LLMRequest) -> None:
+        self.input_tokens += event.input_tokens
+        self.output_tokens += event.output_tokens
+        self.cache_read_tokens += event.cache_read_tokens
+        self.cache_write_tokens += event.cache_write_tokens
+        self.cost_usd += event.cost_usd
+        self.requests += 1
+
+    @classmethod
+    def of(cls, events) -> UsageTotals:
+        """Totals over every ``llm_request`` in ``events``."""
+        totals = cls()
+        for event in events:
+            if isinstance(event, LLMRequest):
+                totals.add(event)
+        return totals
 
 
 def _parent_map(events: list[LLMRequest | ToolCall]) -> dict[str, str | None]:
