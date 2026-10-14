@@ -22,6 +22,13 @@ CONTAINER_PORT = "8080"
 # Container-side username. Fixed at image build time (Dockerfile ARG USERNAME),
 # independent of the host user running the orchestrator.
 CONTAINER_USER = "archie"
+CONTAINER_HOME = f"/home/{CONTAINER_USER}"
+CONTAINER_NEXUS_HOME = f"{CONTAINER_HOME}/.nexus"
+CONTAINER_AGENTS_HOME = f"{CONTAINER_HOME}/.agents"
+CONTAINER_AGENT_DIR = "/opt/archie/agent"
+CONTAINER_SHARED_DIR = "/opt/archie/shared"
+CONTAINER_PERSONA_DIR = "/opt/archie/persona"
+CONTAINER_WORKSPACE_DIR = "/workspace"
 IMAGE_TAG = "archie:latest"
 
 log = logging.getLogger(__name__)

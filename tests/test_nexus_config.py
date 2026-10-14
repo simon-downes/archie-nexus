@@ -104,6 +104,14 @@ def test_load_nexus_config_partial_global_fields(tmp_path):
     assert config.global_.region == "ap-southeast-1"
 
 
+def test_load_nexus_config_mounts(tmp_path):
+    """Mount entries decode as source strings and source/destination pairs."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mounts:\n  - ~/.gitconfig*\n  - [~/.ssh/id_ed25519*, ~/.ssh:ro]\n")
+    config = load_nexus_config(path=cfg)
+    assert config.mounts == ("~/.gitconfig*", ("~/.ssh/id_ed25519*", "~/.ssh:ro"))
+
+
 # --- Tests: load_nexus_config error cases ---
 
 

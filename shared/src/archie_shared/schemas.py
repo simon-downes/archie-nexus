@@ -96,6 +96,9 @@ def get_profile(config: OrchestratorConfig, name: str = "default") -> Orchestrat
     raise KeyError(name)
 
 
+MountConfig = str | tuple[str, str]
+
+
 class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Top-level application configuration.
 
@@ -110,6 +113,7 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
     auth: AuthConfig = msgspec.field(default_factory=AuthConfig)
     tools: dict[str, ProviderToolPolicy] = msgspec.field(default_factory=dict)
+    mounts: tuple[MountConfig, ...] = ()
 
 
 def load_nexus_config(path: Path | None = None) -> NexusConfig:

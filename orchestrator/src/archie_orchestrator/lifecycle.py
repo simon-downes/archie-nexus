@@ -21,8 +21,13 @@ from archie_shared.session import (
 from archie_shared.session.log import SessionLog
 
 from archie_orchestrator.docker import (
+    CONTAINER_AGENT_DIR,
+    CONTAINER_AGENTS_HOME,
+    CONTAINER_NEXUS_HOME,
+    CONTAINER_PERSONA_DIR,
     CONTAINER_PORT,
-    CONTAINER_USER,
+    CONTAINER_SHARED_DIR,
+    CONTAINER_WORKSPACE_DIR,
     IMAGE_TAG,
     check_image,
     list_sessions,
@@ -30,6 +35,7 @@ from archie_orchestrator.docker import (
     stop_container,
     wait_for_ready,
 )
+from archie_orchestrator.mounts import resolve_mounts
 
 # orchestrator/src/archie_orchestrator/lifecycle.py → repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -107,10 +113,10 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     agents_dir = Path.home() / ".agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
-    # 5. Derive container-side paths from the fixed container username
-    #    (see CONTAINER_USER — not the host user running the orchestrator).
-    container_home = f"/home/{CONTAINER_USER}/.nexus"
-    container_agents = f"/home/{CONTAINER_USER}/.agents"
+    # 5. Use the fixed container-side paths from docker.py, independent of the
+    #    host user running the orchestrator.
+    container_home = CONTAINER_NEXUS_HOME
+    container_agents = CONTAINER_AGENTS_HOME
 
     # 6. Construct docker run command (mirrors cli.py start command)
     agent_dir = REPO_ROOT / "agent"
@@ -139,17 +145,18 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         *(["-e", f"ARCHIE_BRAIN_DIR={configured_brain}"] if configured_brain else []),
         *[arg for name, value in credential_env.items() for arg in ("-e", f"{name}={value}")],
         "-v",
-        f"{agent_dir}:/opt/archie/agent:rw",
+        f"{agent_dir}:{CONTAINER_AGENT_DIR}:rw",
         "-v",
-        f"{shared_dir}:/opt/archie/shared:ro",
+        f"{shared_dir}:{CONTAINER_SHARED_DIR}:ro",
         "-v",
-        f"{persona_dir_host}:{container_persona}:rw",
+        f"{persona_dir_host}:{CONTAINER_PERSONA_DIR}:rw",
         "-v",
-        f"{resolved}:/workspace:rw",
+        f"{resolved}:{CONTAINER_WORKSPACE_DIR}:rw",
         "-v",
         f"{nexus_home}:{container_home}:rw",
         "-v",
         f"{agents_dir}:{container_agents}:rw",
+        *[arg for mount in resolve_mounts(config.mounts) for arg in ("-v", mount)],
         "-w",
         "/workspace",
         IMAGE_TAG,

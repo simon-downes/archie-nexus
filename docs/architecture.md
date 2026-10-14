@@ -49,7 +49,9 @@ AWS Bedrock / Ollama / local workspace
 
 ### Container mounts
 
-The lifecycle code mounts:
+The complete configuration reference, including additional host bind mounts and wildcard
+examples, is in [Configuration](config.md). The lifecycle code mounts the following fixed
+paths; configured mounts are appended separately.
 
 | Host content | Container path | Purpose |
 | --- | --- | --- |

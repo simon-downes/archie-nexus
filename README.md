@@ -5,6 +5,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 ## Start here
 
 - [Architecture](docs/architecture.md) — components, lifecycle, data flows, HTTP/WebSocket routes, event layers, logs, accounting, and security boundaries.
+- [Configuration](docs/config.md) — application settings and host bind mounts, including wildcard Git and SSH mounts.
 - [Authentication and credentials](docs/auth-credentials.md) — provider configuration, credential storage, CLI workflows, OAuth, and agent access.
 - [Contributing](CONTRIBUTING.md) — development workflow, checks, and invariants for changing the system.
 - [Agent-session guidance](AGENTS.md) — short context and reading order for coding agents.
@@ -48,7 +49,7 @@ Build the image again after changing Dockerfile or dependency layers. Source for
 
 ## Configuration and data
 
-The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), and named `orchestrator.profiles`.
+The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), named `orchestrator.profiles`, and top-level `mounts` for host bind mounts. See [Configuration](docs/config.md) for the complete schema and mount examples.
 
 Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; aggregate request metrics are stored in `~/.nexus/metrics.db`. Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
 

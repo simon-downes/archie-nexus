@@ -68,6 +68,55 @@ def test_start_session_image_not_found(config, workspace):
     mock_run.assert_not_called()
 
 
+def test_start_session_missing_configured_mount_is_skipped(
+    config, workspace, tmp_path, monkeypatch
+):
+    """A missing optional configured mount does not prevent session startup."""
+    from archie_shared.schemas import NexusConfig
+
+    ws_name, _ = workspace
+    config = NexusConfig(global_=config.global_, mounts=(str(tmp_path / "missing"),))
+    captured_cmd = []
+    monkeypatch.setattr("archie_orchestrator.lifecycle.home_dir", lambda: tmp_path / ".nexus")
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch(
+            "archie_orchestrator.lifecycle.run_container",
+            side_effect=lambda c: captured_cmd.extend(c),
+        ),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
+    ):
+        descriptor = start_session(ws_name, config)
+
+    assert descriptor.port == 32771
+    assert str(tmp_path / "missing") not in captured_cmd
+
+
+def test_start_session_configured_mounts(config, workspace, tmp_path, monkeypatch):
+    """start_session appends configured mounts to the docker command."""
+    from archie_shared.schemas import NexusConfig
+
+    ws_name, _ = workspace
+    source = tmp_path / ".gitconfig"
+    source.write_text("")
+    config = NexusConfig(
+        global_=config.global_, mounts=((str(source), "/home/archie/.gitconfig:ro"),)
+    )
+    captured_cmd = []
+    monkeypatch.setattr("archie_orchestrator.lifecycle.home_dir", lambda: tmp_path / ".nexus")
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch(
+            "archie_orchestrator.lifecycle.run_container",
+            side_effect=lambda c: captured_cmd.extend(c),
+        ),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
+    ):
+        start_session(ws_name, config)
+
+    assert f"{source}:/home/archie/.gitconfig:ro" in captured_cmd
+
+
 def test_start_session_correct_docker_command(config, workspace, tmp_path):
     """start_session constructs the correct docker run command."""
     ws_name, ws_path = workspace
