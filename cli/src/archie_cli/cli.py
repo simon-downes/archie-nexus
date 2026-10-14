@@ -58,8 +58,8 @@ def build(no_cache: bool):
     # Container username is fixed to "archie" (matches Dockerfile ARG default and
     # orchestrator CONTAINER_USER) so mount targets under /home/archie always
     # resolve. UID is matched to the host user for file ownership on Linux bind
-    # mounts. (git's "dubious ownership" guard is handled separately in
-    # entrypoint.sh via safe.directory, since macOS mounts present as root.)
+    # mounts. (macOS mounts present as root, so git's "dubious ownership" guard
+    # needs safe.directory for /workspace in the user's mounted git config.)
     username = "archie"
     uid = str(os.getuid())
 
