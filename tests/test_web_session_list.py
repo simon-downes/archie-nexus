@@ -180,3 +180,105 @@ async def test_vendored_assets_served():
 async def test_console_links_to_session_logs():
     resp = await _get("/")
     assert 'href="/ui/sessions"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+
+def _search_fixture(w):
+    w.write("archie-01kx5yc7g0", [w.user("Fix the bug in the parser")])  # 2026-07-10
+    w.write(
+        "archie-01kx77jkz8",  # 2026-07-11 00:00:01
+        [
+            w.user("please fix a bug"),
+            w.tool_call("shell", {"command": "echo zebra"}, tool_use_id="t1"),
+            w.tool_result("zebra", tool_use_id="t1"),
+        ],
+    )
+    w.write("myarch-01m4mzkm00", [w.assistant("Fix the bug done")])  # 2026-10-11
+
+
+@pytest.mark.asyncio
+async def test_search_phrase(session_logs):
+    _search_fixture(session_logs)
+    resp = await _get('/ui/sessions?q="fix the bug"')
+    assert _row_ids(resp.text) == ["myarch-01m4mzkm00", "archie-01kx5yc7g0"]
+
+
+@pytest.mark.asyncio
+async def test_search_ignores_tool_output(session_logs):
+    _search_fixture(session_logs)
+    resp = await _get("/ui/sessions?q=zebra")
+    assert _row_ids(resp.text) == []
+    assert "No sessions match" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_search_matches_session_id(session_logs):
+    _search_fixture(session_logs)
+    resp = await _get("/ui/sessions?q=01kx77")
+    assert _row_ids(resp.text) == ["archie-01kx77jkz8"]
+
+
+@pytest.mark.asyncio
+async def test_search_dates_and_workspace(session_logs):
+    _search_fixture(session_logs)
+    after = await _get("/ui/sessions?q=after:2026-07-11")
+    before = await _get("/ui/sessions?q=before:2026-07-11")
+    ws = await _get("/ui/sessions?q=workspace:arch")
+    assert _row_ids(after.text) == ["myarch-01m4mzkm00", "archie-01kx77jkz8"]
+    assert _row_ids(before.text) == ["archie-01kx5yc7g0"]
+    assert _row_ids(ws.text) == ["archie-01kx77jkz8", "archie-01kx5yc7g0"]
+
+
+@pytest.mark.asyncio
+async def test_search_invalid_date_notice(session_logs):
+    _search_fixture(session_logs)
+    resp = await _get("/ui/sessions?q=before:2026-13-01")
+    assert len(_row_ids(resp.text)) == 3
+    assert "before:2026-13-01" in resp.text
+    assert 'value="before:2026-13-01"' in resp.text
+
+
+@pytest.mark.asyncio
+async def test_search_count_reflects_matches(session_logs):
+    _search_fixture(session_logs)
+    resp = await _get("/ui/sessions?q=workspace:archie")
+    assert "2 sessions" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_htmx_request_returns_results_fragment(session_logs):
+    _search_fixture(session_logs)
+    resp = await _get("/ui/sessions?q=before:2026-13-01", headers={"HX-Request": "true"})
+    body = resp.text.strip()
+    assert body.startswith('<section id="results"')
+    assert "<html" not in body
+    assert "before:2026-13-01" in body  # notice inside the swapped fragment
+    assert "3 sessions" in body
+    assert resp.headers["vary"] == "HX-Request, HX-History-Restore-Request"
+    assert resp.headers["content-security-policy"] == VIEWER_CSP
+
+
+@pytest.mark.asyncio
+async def test_history_restore_gets_full_page(session_logs):
+    resp = await _get(
+        "/ui/sessions?q=x",
+        headers={"HX-Request": "true", "HX-History-Restore-Request": "true"},
+    )
+    assert "<html" in resp.text
+    assert resp.headers["vary"] == "HX-Request, HX-History-Restore-Request"
+
+
+@pytest.mark.asyncio
+async def test_full_page_vary_and_search_attributes(session_logs):
+    resp = await _get("/ui/sessions")
+    assert resp.headers["vary"] == "HX-Request, HX-History-Restore-Request"
+    form_input = re.search(r'<input type="search"[^>]*>', resp.text, re.S).group(0)
+    assert 'hx-get="/ui/sessions"' in form_input
+    assert 'hx-target="#results"' in form_input
+    assert 'hx-swap="outerHTML"' in form_input
+    assert 'hx-push-url="true"' in form_input
+    assert "delay:" in form_input

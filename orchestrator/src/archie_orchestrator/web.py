@@ -20,6 +20,7 @@ from starlette.templating import Jinja2Templates
 
 from archie_orchestrator.docker import list_sessions
 from archie_orchestrator.session_index import SessionIndex, SessionSummary, sessions_dir
+from archie_orchestrator.session_search import matches, parse_query
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -205,17 +206,30 @@ def _row(summary: SessionSummary, active: set[str]) -> dict:
 
 
 async def session_list_page(request: Request) -> HTMLResponse:
-    """GET /ui/sessions — persisted session logs, newest first."""
+    """GET /ui/sessions — persisted session logs, newest first, filtered by ``q``.
+
+    An htmx request (``HX-Request``) gets only the ``#results`` fragment; htmx
+    history restores (``HX-History-Restore-Request``) get the full page.
+    """
     q = request.query_params.get("q", "")
+    query = parse_query(q)
     index = _session_index(request)
     summaries, active = await asyncio.gather(
         asyncio.to_thread(index.summaries, sessions_dir()),
         asyncio.to_thread(_active_ids),
     )
-    notices: list[str] = []
+    notices = list(query.notices)
     if active is None:
         notices.append("Active status unavailable: Docker could not be queried.")
         active = set()
-    rows = [_row(s, active) for s in summaries[:MAX_ROWS]]
-    context = {"q": q, "rows": rows, "total": len(summaries), "notices": notices}
-    return _viewer_response(request, "viewer/list.html", context)
+    matched = [s for s in summaries if matches(s, query)]
+    rows = [_row(s, active) for s in matched[:MAX_ROWS]]
+    context = {"q": q, "rows": rows, "total": len(matched), "notices": notices}
+    partial = (
+        request.headers.get("hx-request") == "true"
+        and request.headers.get("hx-history-restore-request") != "true"
+    )
+    template = "viewer/_results.html" if partial else "viewer/list.html"
+    response = _viewer_response(request, template, context)
+    response.headers["Vary"] = "HX-Request, HX-History-Restore-Request"
+    return response
