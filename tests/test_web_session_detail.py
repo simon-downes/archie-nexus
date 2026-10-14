@@ -206,7 +206,7 @@ async def test_detail_tool_rows(session_logs):
     html = (await _get(f"/ui/sessions/{SID}")).text
 
     err = re.search(r'<details[^>]*id="tool-t-err".*?</details>', html, re.S).group(0)
-    assert 'class="tool error"' in err
+    assert 'class="tool is-error"' in err
     assert '<span class="b">ls /nope</span>' in err
     assert "1.5s" in err
     assert "ls: cannot access" in err
@@ -216,7 +216,7 @@ async def test_detail_tool_rows(session_logs):
     assert "… 2000 more characters" in big
 
     pending = re.search(r'<details[^>]*id="tool-t-pending".*?</details>', html, re.S).group(0)
-    assert 'class="tool pending"' in pending
+    assert 'class="tool is-pending"' in pending
 
 
 @pytest.mark.asyncio
@@ -225,7 +225,7 @@ async def test_detail_orphan_tool_result(session_logs):
     w.write(SID, [w.user("x"), w.tool_result("orphan output", tool_use_id="t-x", is_error=True)])
     html = (await _get(f"/ui/sessions/{SID}")).text
     row = re.search(r'<details[^>]*id="tool-t-x".*?</details>', html, re.S).group(0)
-    assert 'class="tool error"' in row and "orphan output" in row
+    assert 'class="tool is-error"' in row and "orphan output" in row
 
 
 @pytest.mark.asyncio

@@ -262,7 +262,7 @@ async def test_tool_result_replaces_row_and_children_nest(session_logs):
     sub = next(f for f in frags if 'id="sub-tu-task-0"' in f and 'class="subagent"' in f)
     assert 'hx-swap-oob="beforeend:#tool-tu-task-children"' in sub
     row = next(f for f in frags if 'hx-swap-oob="outerHTML:#tool-tu-task"' in f)
-    assert 'class="tool ok"' in row
+    assert 'class="tool is-ok"' in row
     assert "child says" in row  # replacing the row keeps its nested children
 
 

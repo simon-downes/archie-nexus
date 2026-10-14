@@ -418,12 +418,12 @@ body.viewer {
     color: var(--v-ok);
 }
 
-.viewer .tool.error > summary .tool-status::before {
+.viewer .tool.is-error > summary .tool-status::before {
     content: "✗";
     color: var(--v-err);
 }
 
-.viewer .tool.pending > summary .tool-status::before {
+.viewer .tool.is-pending > summary .tool-status::before {
     content: "…";
     color: var(--v-warn);
 }

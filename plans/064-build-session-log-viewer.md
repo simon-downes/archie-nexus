@@ -130,7 +130,7 @@ Codebase facts found at intake:
   - AC: a link `[x](javascript:alert(1))` does not produce an `href="javascript:`.
   - AC: a right-aligned table column renders `class="align-right"` and the response has no `style=` attribute; `![x](https://e.test/a.png)` renders a link to that URL and no `<img`.
 - R10 MUST render each tool call as one row with its formatted summary (`format_tool_pending`/`format_tool_complete`), status (pending, ok, error), duration, and an expandable body with the input and the result preview (D19).
-  - AC: a `shell` call with `is_error=true` renders a `.tool.error` row whose summary contains `ls` in a `.b` span.
+  - AC: a `shell` call with `is_error=true` renders a `.tool.is-error` row whose summary contains `ls` in a `.b` span.
   - AC: a 10,000-character result renders 8,000 characters and "… 2000 more characters".
 - R11 MUST render compaction (`context_compacted`, `compaction_complete`), `turn_error`, `turn_interrupted`, and per-turn usage (root `llm_request` totals for that turn).
   - AC: each of those events produces a block with class `.compaction`, `.turn-error`, `.turn-interrupted`; a turn footer shows the turn's root cost.
