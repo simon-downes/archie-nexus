@@ -1,0 +1,34 @@
+{% extends "viewer/base.html" %}
+{% import "viewer/_nodes.html" as n %}
+{% block title %}{{ session_id }}{% endblock %}
+{% block styles %}<link rel="stylesheet" href="/static/viewer/pygments.css">{% endblock %}
+{% block scripts %}{% if active %}<script src="/static/viewer/live.js" defer></script>{% endif %}{% endblock %}
+{% block content %}
+<section class="chrome session-head">
+    <p class="crumbs"><a href="/ui/sessions">Session logs</a> /</p>
+    <h1 class="session-id">{{ session_id }}
+        {%- if active %} <span class="live" id="live-wrap"><span class="dot"></span><span id="live-state">connecting</span></span>{% endif %}</h1>
+    <p class="facts">
+        <span><span class="dim">workspace</span> <span class="workspace">{{ workspace }}</span></span>
+        <span><span class="dim">started</span> {{ started }} UTC</span>
+        {%- if models %}
+        <span><span class="dim">models</span> {% for key, turns in models %}<span class="model">{{ key }} <span class="n">×{{ turns }}</span></span>{% endfor %}</span>
+        {%- endif %}
+    </p>
+    {{ n.usage(usage) }}
+</section>
+
+{% if error %}
+<p class="notice">This log could not be read: {{ error }}</p>
+{% endif %}
+
+<div id="transcript" class="transcript"
+     data-last-event-id="{{ last_event_id or '' }}"
+     {%- if active %} data-live-url="/ui/sessions/{{ session_id }}/live"{% endif %}>
+    {%- for item in preamble %}{{ n.node(item) }}{% endfor %}
+    {%- for turn in turns %}{{ n.turn(turn) }}{% endfor %}
+    {%- if not turns and not preamble and not error %}
+    <p class="empty chrome" id="no-messages">No messages in this session yet.</p>
+    {%- endif %}
+</div>
+{% endblock %}

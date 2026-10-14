@@ -9,18 +9,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from archie_shared import __version__
 from archie_shared.session import split_id
+from archie_shared.session.log import EventIdConflict, LogAppendError, SessionLog
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
 
 from archie_orchestrator.docker import list_sessions
-from archie_orchestrator.session_index import SessionIndex, SessionSummary, sessions_dir
+from archie_orchestrator.session_index import (
+    SessionIndex,
+    SessionSummary,
+    sessions_dir,
+    summarize_events,
+)
 from archie_orchestrator.session_search import matches, parse_query
+from archie_orchestrator.transcript import TranscriptBuilder, Usage, build
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -32,6 +40,7 @@ VIEWER_CSP = (
     "script-src 'self'; connect-src 'self'"
 )
 MAX_ROWS = 200
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _uptime(start_time: datetime) -> str:
@@ -233,3 +242,54 @@ async def session_list_page(request: Request) -> HTMLResponse:
     response = _viewer_response(request, template, context)
     response.headers["Vary"] = "HX-Request, HX-History-Restore-Request"
     return response
+
+
+def session_log_path(session_id: str) -> Path | None:
+    """Return the log path for a well-formed ID whose file exists, else None."""
+    if not _SESSION_ID.match(session_id):
+        return None
+    directory = sessions_dir()
+    path = directory / f"{session_id}.jsonl"
+    if path.parent != directory or not path.is_file():
+        return None
+    return path
+
+
+def _not_found(request: Request, session_id: str) -> HTMLResponse:
+    return _viewer_response(
+        request, "viewer/not_found.html", {"session_id": session_id}, status_code=404
+    )
+
+
+def _read_transcript(path: Path) -> tuple[TranscriptBuilder, SessionSummary, str | None]:
+    try:
+        events = SessionLog(path).read()
+        error = None
+    except (EventIdConflict, LogAppendError) as exc:
+        log.warning("Unreadable session log %s: %s", path, exc)
+        events, error = [], str(exc)
+    return build(events), summarize_events(path.stem, events), error
+
+
+async def session_detail_page(request: Request) -> HTMLResponse:
+    """GET /ui/sessions/{session_id} — structured transcript of one session log."""
+    session_id = request.path_params["session_id"]
+    path = session_log_path(session_id)
+    if path is None:
+        return _not_found(request, session_id)
+    (builder, summary, error), active = await asyncio.gather(
+        asyncio.to_thread(_read_transcript, path), asyncio.to_thread(_active_ids)
+    )
+    context = {
+        "session_id": session_id,
+        "workspace": summary.workspace,
+        "started": _fmt_started(summary),
+        "models": summary.models,
+        "usage": builder.usage if not error else Usage(),
+        "turns": builder.turns,
+        "preamble": builder.preamble,
+        "last_event_id": builder.last_persisted_id,
+        "active": session_id in (active or set()),
+        "error": error,
+    }
+    return _viewer_response(request, "viewer/detail.html", context)

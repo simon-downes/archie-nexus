@@ -259,7 +259,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 - **Verify:** `uv run pytest tests/test_session_index.py tests/test_web_session_list.py` passes; `uv run pytest tests/test_web_console.py` still passes.
 - **Outcome:** Built `session_index.py` (`SessionSummary`, `summarize_log`, `summarize_events`, `SessionIndex`, `session_start`, `sessions_dir`), vendored assets with `LICENSES.md` (SHA-256 recorded), `viewer/base.html`, `list.html`, `_results.html`, `viewer.css`, `session_list_page` + route, and a "Session logs" link in `base.html`. Tests: a `session_logs` fixture in `tests/conftest.py`; `uv run pytest tests/test_session_index.py tests/test_web_session_list.py tests/test_web_console.py` → 33 passed. Against the 216 local logs: cold request 0.91 s, warm 0.01 s, 200 rows, "Showing 200 of 216"; checked in agent-browser. `uvicorn` startup needs a `docker` binary (existing `lifespan` calls `list_sessions` without catching `FileNotFoundError`); a stub `docker` on PATH was used for the browser check, and this was left unchanged (out of scope).
 
-### [ ] M2 — Search
+### [x] M2 — Search
 
 - **Approach:** Hand-written tokenizer in `session_search.py` (scan for `"`, whitespace, `key:value`); dates with `date.fromisoformat` restricted to `YYYY-MM-DD` by regex. `matches` checks `search_text` substrings and start date per D8. Search input in `list.html` uses the htmx attributes from R7.
 - **Test seam:** `parse_query()` / `matches()` and `GET /ui/sessions?q=…`.
@@ -274,7 +274,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
   - Tests for R6 and R7.
 - **Deliverable:** typing in the search box filters the table.
 - **Verify:** `uv run pytest tests/test_session_search.py tests/test_web_session_list.py` passes.
-- **Outcome:**
+- **Outcome:** Built `session_search.py` (`Query`, `parse_query`, `matches`) and wired `q`, notices, the `#results` partial, history-restore full page, and `Vary` into `session_list_page`. `uv run pytest tests/test_session_search.py tests/test_web_session_list.py` → 32 passed. In agent-browser against local logs: typing `workspace:tillo after:2026-10-01` swapped in 4 rows and pushed `?q=…`; `before:2026-1` showed the notice; focus stayed in the input; no console errors under the CSP.
 
 ### [ ] M3 — Transcript page
 
