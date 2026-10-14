@@ -3,6 +3,8 @@
 from archie_shared import events as event_module
 from archie_shared.events import (
     AssistantMessage,
+    CompactionComplete,
+    CompactionStart,
     ContextCompacted,
     IterationStart,
     LLMRequest,
@@ -17,6 +19,38 @@ from archie_shared.events import (
 
 def _roundtrip(event):
     return decode_event(encode_event(event))
+
+
+def test_compaction_lifecycle_roundtrip():
+    start = CompactionStart(
+        id="cs1",
+        turn=1,
+        iteration=0,
+        scope=None,
+        request_id="r1",
+        reason="cold_cache",
+        tokens_before=123457,
+        estimated_next_request_cost_usd=2.54,
+        model_key="compact",
+        sent_at="now",
+    )
+    complete = CompactionComplete(
+        id="cc1",
+        turn=1,
+        iteration=0,
+        scope=None,
+        request_id="r1",
+        reason="cold_cache",
+        status="success",
+        tokens_before=123457,
+        tokens_after=4563,
+        cost_saved_usd=2.54,
+        duration_ms=123,
+        error=None,
+        summary="summary",
+    )
+    assert _roundtrip(start) == start
+    assert _roundtrip(complete) == complete
 
 
 def test_context_compacted_roundtrip():

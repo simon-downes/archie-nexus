@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from archie_shared.events import (
     AssistantMessage,
+    CompactionComplete,
+    CompactionStart,
     ContextCompacted,
     ErrorNotice,
     Handshake,
@@ -198,6 +200,196 @@ def test_compaction_request_counts_cost_without_context_update():
         app._accumulate_ledger(event)
     assert app._cumulative_cost == pytest.approx(0.25)
     assert app._latest_context_tokens == 77
+
+
+def _compaction_start(reason="cold_cache", estimate=2.54, request_id="r1"):
+    return CompactionStart(
+        id=f"cs-{request_id}",
+        turn=1,
+        iteration=0,
+        scope=None,
+        request_id=request_id,
+        reason=reason,
+        tokens_before=123457,
+        estimated_next_request_cost_usd=estimate,
+        model_key="m",
+        sent_at="now",
+    )
+
+
+def _compaction_complete(
+    reason="cold_cache",
+    status="success",
+    *,
+    request_id="r1",
+    tokens_after=4563,
+    cost_saved=0.61,
+    estimate=2.54,
+    error=None,
+):
+    return CompactionComplete(
+        id=f"cc-{request_id}",
+        turn=1,
+        iteration=0,
+        scope=None,
+        request_id=request_id,
+        reason=reason,
+        status=status,
+        tokens_before=123457,
+        tokens_after=tokens_after,
+        cost_saved_usd=cost_saved,
+        duration_ms=123,
+        error=error,
+        summary="summary" if status == "success" else None,
+        estimated_next_request_cost_usd=estimate,
+    )
+
+
+class _ConversationHost:
+    """A mounted Conversation driven through the app reducer."""
+
+    def __init__(self) -> None:
+        from archie_cli.tui.conversation import Conversation
+        from textual.app import App
+
+        class Host(App):
+            def compose(self):
+                yield Conversation(id="conversation")
+
+        self.host = Host()
+        self.app = _make_app()
+
+    async def run(self, events, *, turn_active=False):
+        from archie_cli.tui.conversation import CompactionEntry, Conversation
+
+        async with self.host.run_test() as pilot:
+            conv = self.host.query_one(Conversation)
+            others = MagicMock()
+            self.app._turn_active = turn_active
+            with (
+                patch.object(
+                    self.app,
+                    "query_one",
+                    side_effect=lambda selector, _type=None: (
+                        conv if selector == "#conversation" else others
+                    ),
+                ),
+                patch.object(self.app, "_update_accounting_status"),
+                patch.object(self.app, "_estimate_context_pct", return_value=1.0),
+            ):
+                headers = []
+                for event in events:
+                    self.app._apply_event(event)
+                    await pilot.pause()
+                    headers.append([_header_text(entry) for entry in conv.query(CompactionEntry)])
+            return headers, others
+
+
+def _header_text(entry) -> str:
+    from textual.widgets import Static
+
+    return str(entry.query_one(".tool-header", Static).render())
+
+
+async def test_cold_cache_compaction_renders_pending_then_success():
+    host = _ConversationHost()
+    headers, _ = await host.run([_compaction_start(), _compaction_complete()])
+    assert headers == [
+        ["○ Compaction threshold cold cache (123457 tokens)"],
+        ["● Compaction threshold cold cache (123457 → 4563, $2.54, 123ms)"],
+    ]
+
+
+async def test_threshold_compaction_displays_cost_saved():
+    host = _ConversationHost()
+    headers, _ = await host.run(
+        [
+            _compaction_start("threshold", None),
+            _compaction_complete("threshold", estimate=None, cost_saved=0.61),
+        ]
+    )
+    assert headers[-1] == ["● Compaction threshold tokens (123457 → 4563, $0.61, 123ms)"]
+
+
+async def test_cold_cache_compaction_failure_renders_error():
+    host = _ConversationHost()
+    headers, _ = await host.run(
+        [
+            _compaction_start(),
+            _compaction_complete(
+                status="failure", tokens_after=None, cost_saved=0.0, error="provider [down]"
+            ),
+        ]
+    )
+    assert headers[-1] == [
+        "● Compaction threshold cold cache (123457 tokens, 123ms) Failed: provider [down]"
+    ]
+
+
+async def test_compaction_status_colours_match_tool_entries():
+    from archie_cli.tui import theme
+
+    host = _ConversationHost()
+    events = [
+        _compaction_start(request_id="ok"),
+        _compaction_complete(request_id="ok"),
+        _compaction_start("threshold", None, request_id="bad"),
+        _compaction_complete(
+            "threshold", "interrupted", request_id="bad", tokens_after=None, error=None
+        ),
+    ]
+    from archie_cli.tui.conversation import CompactionEntry, Conversation
+    from textual.widgets import Static
+
+    async with host.host.run_test() as pilot:
+        conv = host.host.query_one(Conversation)
+        with (
+            patch.object(
+                host.app,
+                "query_one",
+                side_effect=lambda selector, _type=None: (
+                    conv if selector == "#conversation" else MagicMock()
+                ),
+            ),
+            patch.object(host.app, "_update_accounting_status"),
+            patch.object(host.app, "_estimate_context_pct", return_value=1.0),
+        ):
+            host.app._apply_event(events[0])
+            await pilot.pause()
+            pending = conv.query(CompactionEntry).first().query_one(".tool-header", Static)
+            assert theme.PRIMARY.lower() in str(pending.content).lower()
+            for event in events[1:]:
+                host.app._apply_event(event)
+            await pilot.pause()
+            ok, bad = [e.query_one(".tool-header", Static) for e in conv.query(CompactionEntry)]
+            assert theme.SUCCESS.lower() in str(ok.content).lower()
+            assert theme.ERROR.lower() in str(bad.content).lower()
+            assert str(bad.render()).endswith("Failed: Compaction interrupted")
+
+
+async def test_unmatched_completion_mounts_terminal_entry():
+    host = _ConversationHost()
+    headers, _ = await host.run([_compaction_complete()])
+    assert headers == [["● Compaction threshold cold cache (123457 → 4563, $2.54, 123ms)"]]
+
+
+async def test_automatic_compaction_restores_throbber():
+    host = _ConversationHost()
+    with patch.object(host.app, "_show_throbber") as show:
+        await host.run(
+            [_compaction_start(), _compaction_complete()],
+            turn_active=True,
+        )
+    show.assert_called_once()
+    assert host.app._turn_active is True
+
+
+async def test_replay_reset_clears_pending_compactions():
+    app = _make_app()
+    app._pending_compactions["r1"] = MagicMock()
+    with patch.object(app, "query_one", return_value=MagicMock()):
+        await app._reset_replay_state()
+    assert app._pending_compactions == {}
 
 
 def test_context_compaction_updates_display_and_ends_manual_turn():
@@ -529,7 +721,7 @@ async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
             [
                 Handshake(
                     id="h1",
-                    protocol_version=2,
+                    protocol_version=3,
                     session_id="session-1",
                 ),
                 SessionStatus(id="s1", model_key="m", git_branch="main"),

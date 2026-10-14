@@ -77,6 +77,43 @@ class LLMRequest(PersistedEvent, tag="llm_request", tag_field="type", forbid_unk
     purpose: Literal["conversation", "compaction"] = "conversation"
 
 
+class CompactionStart(
+    PersistedEvent, tag="compaction_start", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    request_id: str
+    reason: Literal["manual", "threshold", "cold_cache"]
+    tokens_before: int
+    estimated_next_request_cost_usd: float | None
+    model_key: str
+    sent_at: str
+    subagent_index: int | None = None
+
+
+class CompactionComplete(
+    PersistedEvent, tag="compaction_complete", tag_field="type", forbid_unknown_fields=True
+):
+    id: str
+    turn: int
+    iteration: int
+    scope: str | None
+    request_id: str
+    reason: Literal["manual", "threshold", "cold_cache"]
+    status: Literal["success", "failure", "interrupted"]
+    tokens_before: int
+    tokens_after: int | None
+    cost_saved_usd: float
+    duration_ms: int
+    error: str | None
+    summary: str | None
+    debug: str = ""
+    subagent_index: int | None = None
+    estimated_next_request_cost_usd: float | None = None
+
+
 class ContextCompacted(
     PersistedEvent, tag="context_compacted", tag_field="type", forbid_unknown_fields=True
 ):
@@ -197,6 +234,8 @@ type SessionEvent = (
     | IterationStart
     | TextDelta
     | LLMRequest
+    | CompactionStart
+    | CompactionComplete
     | ContextCompacted
     | ToolCall
     | ToolResult

@@ -48,6 +48,7 @@ class CompactionOutcome:
     duration_ms: int
     stats: TranscriptStats
     error: str | None = None
+    interrupted: bool = False
 
 
 def is_compact_command(text: str) -> bool:
@@ -257,6 +258,7 @@ class Compactor:
         turn: int,
         iteration: int,
         interrupt: threading.Event,
+        request_id: str | None = None,
     ) -> CompactionOutcome:
         started = time.monotonic()
         _, stats = build_transcript(turns)
@@ -272,7 +274,7 @@ class Compactor:
             )
         transcript, stats = build_transcript(fitted)
         stats = TranscriptStats(**{**stats.__dict__, "rounds_dropped": dropped})
-        request_id = str(ULID())
+        request_id = request_id or str(ULID())
         sent_at = now_utc()
         result = _RequestResult()
         try:
@@ -324,6 +326,7 @@ class Compactor:
                     request.duration_ms,
                     stats,
                     result.error_msg or "Compaction interrupted",
+                    interrupted=result.interrupted and not result.failed,
                 )
             if not summary:
                 return CompactionOutcome(

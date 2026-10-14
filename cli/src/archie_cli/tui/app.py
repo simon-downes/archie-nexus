@@ -46,7 +46,12 @@ from textual.binding import Binding
 from textual.widgets import Footer
 
 from archie_cli.tui import theme
-from archie_cli.tui.conversation import Conversation, IterationBlock, StreamingMessage
+from archie_cli.tui.conversation import (
+    CompactionEntry,
+    Conversation,
+    IterationBlock,
+    StreamingMessage,
+)
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.quit_screen import QuitScreen
@@ -131,6 +136,7 @@ class ArchieApp(App):
         self._last_esc_time: float = 0.0
         # tool_use_id -> (name, input) for client-side result formatting
         self._pending_tool_inputs: dict[str, tuple[str, dict]] = {}
+        self._pending_compactions: dict[str, CompactionEntry] = {}
         self._child_activity: dict[tuple[str, int], ChildActivity] = {}
         self._child_pending_tools: dict[tuple[str, int, str], tuple[str, dict]] = {}
         self._parent_task_inputs: dict[str, list[dict]] = {}
@@ -280,6 +286,7 @@ class ArchieApp(App):
         self._stream_text = ""
         self._iteration_block = None
         self._pending_tool_inputs.clear()
+        self._pending_compactions.clear()
         self._child_activity.clear()
         self._child_pending_tools.clear()
         self._parent_task_inputs.clear()
@@ -359,6 +366,38 @@ class ArchieApp(App):
                 status.model_name = model.name
                 status.supports_cache = model.can_cache
             status.git_branch = event.git_branch
+        elif isinstance(event, ce.CompactionStart):
+            self._remove_throbber()
+            entry = conv.begin_compaction(
+                self._format_compaction_reason(event.reason), event.tokens_before
+            )
+            self._pending_compactions[event.request_id] = entry
+        elif isinstance(event, ce.CompactionComplete):
+            entry = self._pending_compactions.pop(event.request_id, None)
+            if entry is None:
+                entry = conv.begin_compaction(
+                    self._format_compaction_reason(event.reason), event.tokens_before
+                )
+            error = event.error
+            if event.status != "success" and error is None:
+                error = f"Compaction {event.status}"
+            display_cost = (
+                event.estimated_next_request_cost_usd
+                if event.estimated_next_request_cost_usd is not None
+                else event.cost_saved_usd
+            )
+            entry.complete(event.tokens_after, display_cost, event.duration_ms, error)
+            if event.tokens_after is not None:
+                self._latest_context_tokens = event.tokens_after
+                self._latest_context_pct = self._estimate_context_pct(
+                    event.tokens_after, self._session_model_key
+                )
+                self._update_accounting_status()
+            if event.reason == "manual":
+                self._end_turn()
+            else:
+                # The conversation request that follows is outstanding again.
+                self._show_throbber()
         elif isinstance(event, ce.ContextCompacted):
             self._remove_throbber()
             conv.add_compaction(
@@ -500,6 +539,13 @@ class ArchieApp(App):
             )
         self._cumulative_cost += event.cost_usd
         self._update_accounting_status()
+
+    @staticmethod
+    def _format_compaction_reason(reason: str) -> str:
+        """Display label for a compaction trigger."""
+        return {"threshold": "threshold tokens", "cold_cache": "threshold cold cache"}.get(
+            reason, reason
+        )
 
     def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
         """Calculate context usage from a persisted request."""

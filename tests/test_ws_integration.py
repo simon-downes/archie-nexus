@@ -163,7 +163,7 @@ def test_websocket_handshake_on_connect(client):
     with client.websocket_connect("/stream") as ws:
         handshake = json.loads(ws.receive_text())
         assert handshake["type"] == "handshake"
-        assert handshake["protocol_version"] == 2
+        assert handshake["protocol_version"] == 3
         assert "model_key" not in handshake
         assert handshake["session_id"] == "test-session"
         assert handshake["id"]
@@ -412,7 +412,7 @@ def test_compact_command_runs_manual_compaction(compact_client):
         ws.receive_text()
         ws.receive_text()
         ws.send_text(json.dumps({"type": "message", "content": "/compact"}))
-        events = _drain_until(ws, {"context_compacted", "error_notice"})
+        events = _drain_until(ws, {"compaction_complete", "error_notice"})
         events += _drain_until(ws, {"session_status"})
 
     types = [event["type"] for event in events]
@@ -420,7 +420,7 @@ def test_compact_command_runs_manual_compaction(compact_client):
     assert "turn_complete" not in types
     request = next(event for event in events if event["type"] == "llm_request")
     assert request["purpose"] == "compaction"
-    compacted = next(event for event in events if event["type"] == "context_compacted")
+    compacted = next(event for event in events if event["type"] == "compaction_complete")
     assert compacted["reason"] == "manual"
     assert compacted["request_id"] == request["id"]
     assert not any(e["type"] == "user_message" and e["content"] == "/compact" for e in events)

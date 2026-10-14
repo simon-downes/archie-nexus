@@ -7,7 +7,8 @@ from archie_agent.llm.fake import FakeLLMClient
 from archie_agent.loop import PreRequest
 from archie_agent.session import Session, Turn
 from archie_shared.events import (
-    ContextCompacted,
+    CompactionComplete,
+    CompactionStart,
     ErrorNotice,
     IterationStart,
     LLMRequest,
@@ -111,8 +112,6 @@ def _sequence(events) -> list[str]:
     for event in events:
         if isinstance(event, LLMRequest):
             names.append(f"llm_request:{event.purpose}")
-        elif isinstance(event, ContextCompacted):
-            names.append(f"context_compacted:{event.reason}")
         else:
             names.append(type(event).__name__)
     return names
@@ -145,10 +144,16 @@ async def test_manual_compaction_persists_order_and_replaces_transcript(tmp_path
     events = _events(harness)
     assert len(compaction.calls) == 1
     assert compaction.calls[0]["tool_config"] is None
-    assert _sequence(events) == ["llm_request:compaction", "context_compacted:manual"]
+    assert _sequence(events) == [
+        "CompactionStart",
+        "llm_request:compaction",
+        "CompactionComplete",
+    ]
     request = _of(events, LLMRequest)[0]
     assert request.model_key == "bedrock-openai-gpt-6-luna"
-    assert _of(events, ContextCompacted)[0].request_id == request.id
+    assert _of(events, CompactionComplete)[0].request_id == request.id
+    assert _of(events, CompactionComplete)[0].status == "success"
+    assert _of(events, CompactionComplete)[0].error is None
     assert len(session.turns) == 1
     assert session.turns[0].compacted
     assert session.total_cost > 0
@@ -201,9 +206,16 @@ async def test_manual_provider_failure_records_request_and_keeps_transcript(tmp_
     harness.event_bus.emit = emit
     await harness.run_manual_compaction()
 
-    assert [notice.kind for notice in notices] == ["manual_compaction_failed"]
-    assert _of(_events(harness), LLMRequest)[0].status == "error"
-    assert not _of(_events(harness), ContextCompacted)
+    assert notices == []
+    events = _events(harness)
+    request = _of(events, LLMRequest)[0]
+    assert request.status == "error"
+    (complete,) = _of(events, CompactionComplete)
+    assert complete.status == "failure"
+    assert complete.error == "RuntimeError: provider down"
+    assert complete.request_id == request.id == _of(events, CompactionStart)[0].request_id
+    assert complete.tokens_after is None
+    assert complete.summary is None
     assert not harness.session.turns[0].compacted
 
 
@@ -214,8 +226,34 @@ async def test_manual_empty_summary_fails_without_replacing(tmp_path):
     await harness.run_manual_compaction()
 
     assert _of(_events(harness), LLMRequest)[0].purpose == "compaction"
-    assert not _of(_events(harness), ContextCompacted)
+    (complete,) = _of(_events(harness), CompactionComplete)
+    assert complete.status == "failure"
+    assert complete.error == "Compaction returned an empty summary"
     assert _texts(harness.session.turns[0]) == ["hello"]
+
+
+async def test_manual_preflight_failure_persists_pair_without_request(tmp_path):
+    harness, _, compaction = _harness(tmp_path, [])
+    harness._compaction_model = ModelEntry(
+        name="Tiny",
+        context=30_000,
+        provider=BedrockProvider(model_id="tiny"),
+        cost=CostConfig(rates=[Rate(input=0.1, output=0.5)]),
+        max_output_tokens=1000,
+    )
+    harness.session.add_turn("user", "old")
+    harness.session.add_turn("user", "x" * 40_000)
+
+    await harness.run_manual_compaction()
+
+    events = _events(harness)
+    assert _sequence(events) == ["CompactionStart", "CompactionComplete"]
+    assert not compaction.calls
+    start, complete = events
+    assert complete.request_id == start.request_id
+    assert complete.status == "failure"
+    assert complete.error == "Transcript is too large to compact"
+    assert not any(turn.compacted for turn in harness.session.turns)
 
 
 async def test_manual_storage_error_uses_storage_notice(tmp_path, monkeypatch):
@@ -263,7 +301,7 @@ async def test_manual_compaction_tokens_after_ignores_stale_baseline(tmp_path):
 
     await harness.run_manual_compaction()
 
-    compacted = _of(_events(harness), ContextCompacted)[0]
+    compacted = _of(_events(harness), CompactionComplete)[0]
     assert compacted.tokens_before > 90_000
     assert compacted.tokens_after < 20_000
 
@@ -278,7 +316,7 @@ async def test_below_limit_does_not_compact(tmp_path):
     await harness.handle_message("second")
 
     assert not compaction.calls
-    assert not _of(_events(harness), ContextCompacted)
+    assert not _of(_events(harness), CompactionComplete)
 
 
 async def test_over_limit_at_turn_start_compacts_and_keeps_user_message(tmp_path):
@@ -294,13 +332,14 @@ async def test_over_limit_at_turn_start_compacts_and_keeps_user_message(tmp_path
     assert _sequence(second_turn) == [
         "UserMessage",
         "IterationStart",
+        "CompactionStart",
         "llm_request:compaction",
-        "context_compacted:threshold",
+        "CompactionComplete",
         "llm_request:conversation",
         "AssistantMessage",
         "TurnComplete",
     ]
-    compacted = _of(events, ContextCompacted)[0]
+    compacted = _of(events, CompactionComplete)[0]
     assert compacted.tokens_before > 150_000
     assert compacted.tokens_after < 50_000
     # The summarised transcript excludes the pending message ...
@@ -322,7 +361,7 @@ async def test_over_limit_mid_turn_uses_continuation(tmp_path):
     await harness.handle_message("do work")
 
     events = _events(harness)
-    compacted = _of(events, ContextCompacted)
+    compacted = _of(events, CompactionComplete)
     assert [(c.reason, c.iteration) for c in compacted] == [("threshold", 1)]
     sent = llm.calls[1]["messages"]
     assert len(sent) == 1
@@ -339,7 +378,7 @@ async def test_two_compactions_in_one_turn(tmp_path):
 
     await harness.handle_message("do work")
 
-    compacted = _of(_events(harness), ContextCompacted)
+    compacted = _of(_events(harness), CompactionComplete)
     assert [c.iteration for c in compacted] == [1, 2]
     assert len(compaction.calls) == 2
     # The second compaction merges the first summary.
@@ -410,7 +449,7 @@ async def test_still_over_limit_after_compaction_ends_turn_with_error(tmp_path):
     await harness.handle_message("second")
 
     events = _events(harness)
-    assert _of(events, ContextCompacted)
+    assert _of(events, CompactionComplete)
     errors = _of(events, TurnError)
     assert errors and "still exceeds" in errors[-1].message
     assert len(llm.calls) == 1
@@ -434,7 +473,8 @@ async def test_failed_auto_compaction_notices_once_and_continues(tmp_path):
     await harness.handle_message("first")
     await harness.handle_message("second")
 
-    assert notices == ["compaction_failed"]
+    assert notices == []
+    assert [c.status for c in _of(_events(harness), CompactionComplete)] == ["failure"]
     assert len(harness._compaction_llm.calls) == 1
     assert len(llm.calls) == 3
     assert _of(_events(harness), TurnComplete)[-1].turn == 2
@@ -515,8 +555,33 @@ async def test_cold_past_ttl_above_threshold_compacts(tmp_path):
     clock.now += 301
     await harness.handle_message("second")
 
-    compacted = _of(_events(harness), ContextCompacted)
+    compacted = _of(_events(harness), CompactionComplete)
     assert [(c.reason, c.iteration) for c in compacted] == [("cold_cache", 0)]
+
+
+async def test_cold_cache_start_carries_next_request_estimate(tmp_path):
+    harness, _, clock = _cold_harness(tmp_path)
+    await harness.handle_message("first")
+    clock.now += 301
+    await harness.handle_message("second")
+
+    (start,) = _of(_events(harness), CompactionStart)
+    (complete,) = _of(_events(harness), CompactionComplete)
+    # The session model writes cache at $6.25/M; this is the decision estimate.
+    expected = start.tokens_before * 6.25 / 1_000_000
+    assert expected > 0.5
+    assert start.estimated_next_request_cost_usd == pytest.approx(expected)
+    assert complete.estimated_next_request_cost_usd == pytest.approx(expected)
+
+
+async def test_threshold_start_has_no_next_request_estimate(tmp_path):
+    harness, _, _ = _harness(tmp_path, [_reply(150_000), _reply(500)], [_summary()])
+    await harness.handle_message("first")
+    await harness.handle_message("second")
+
+    (start,) = _of(_events(harness), CompactionStart)
+    assert start.reason == "threshold"
+    assert start.estimated_next_request_cost_usd is None
 
 
 async def test_cold_check_skipped_after_iteration_zero(tmp_path):
@@ -538,7 +603,7 @@ async def test_cold_after_model_switch_compacts(tmp_path):
     harness.session.turns[0].content.append(TextBlock("x" * 400_000))
     await harness.handle_message("second")
 
-    assert [c.reason for c in _of(_events(harness), ContextCompacted)] == ["cold_cache"]
+    assert [c.reason for c in _of(_events(harness), CompactionComplete)] == ["cold_cache"]
 
 
 async def test_cold_never_triggers_for_non_caching_model(tmp_path):
@@ -568,7 +633,7 @@ async def test_cold_and_threshold_reason_is_cold_cache(tmp_path):
     clock.now += 301
     await harness.handle_message("second")
 
-    assert [c.reason for c in _of(_events(harness), ContextCompacted)] == ["cold_cache"]
+    assert [c.reason for c in _of(_events(harness), CompactionComplete)] == ["cold_cache"]
 
 
 async def test_iteration_start_precedes_compaction(tmp_path):
@@ -578,10 +643,11 @@ async def test_iteration_start_precedes_compaction(tmp_path):
 
     second = [e for e in _events(harness) if getattr(e, "turn", None) == 2]
     start = next(i for i, e in enumerate(second) if isinstance(e, IterationStart))
-    assert _sequence(second)[start : start + 4] == [
+    assert _sequence(second)[start : start + 5] == [
         "IterationStart",
+        "CompactionStart",
         "llm_request:compaction",
-        "context_compacted:threshold",
+        "CompactionComplete",
         "llm_request:conversation",
     ]
 
@@ -622,13 +688,15 @@ async def test_interrupt_during_auto_compaction_skips_conversation_request(tmp_p
     assert _sequence(second) == [
         "UserMessage",
         "IterationStart",
+        "CompactionStart",
         "llm_request:compaction",
+        "CompactionComplete",
         "TurnInterrupted",
     ]
     assert _of(second, LLMRequest)[0].status == "interrupted"
     assert client.calls == 1
     assert len(llm.calls) == 1
-    assert not _of(_events(harness), ContextCompacted)
+    assert [c.status for c in _of(_events(harness), CompactionComplete)] == ["interrupted"]
     # The transcript is unchanged apart from the new user message.
     assert harness.session.turns[: len(before)] == before
     assert not any(turn.compacted for turn in harness.session.turns)
@@ -652,9 +720,11 @@ async def test_interrupt_during_manual_compaction_keeps_transcript(tmp_path):
     harness.event_bus.emit = emit
     await harness.run_manual_compaction()
 
-    assert notices == ["manual_compaction_failed"]
+    assert notices == []
     assert _of(_events(harness), LLMRequest)[0].status == "interrupted"
-    assert not _of(_events(harness), ContextCompacted)
+    (complete,) = _of(_events(harness), CompactionComplete)
+    assert complete.status == "interrupted"
+    assert complete.error == "Compaction interrupted"
     assert _texts(harness.session.turns[0]) == ["hello"]
     assert harness.turn_active is False
 
@@ -682,7 +752,7 @@ async def test_compaction_debug_metadata(tmp_path, manual):
     else:
         await harness.handle_message("second")
 
-    debug = _of(_events(harness), ContextCompacted)[0].debug
+    debug = _of(_events(harness), CompactionComplete)[0].debug
     fields = dict(part.split("=", 1) for part in debug.split(";"))
     assert set(fields) == {
         "estimate_source",
@@ -707,7 +777,7 @@ async def test_manual_compaction_resets_cold_cache_state(tmp_path):
     assert harness._cache_cold is False
     assert harness._last_request_finished is None
     await harness.handle_message("second")
-    assert [c.reason for c in _of(_events(harness), ContextCompacted)] == ["manual"]
+    assert [c.reason for c in _of(_events(harness), CompactionComplete)] == ["manual"]
 
 
 async def test_manual_tokens_before_measured_before_compaction(tmp_path):
@@ -717,7 +787,7 @@ async def test_manual_tokens_before_measured_before_compaction(tmp_path):
 
     await harness.run_manual_compaction()
 
-    assert _of(_events(harness), ContextCompacted)[0].tokens_before == expected
+    assert _of(_events(harness), CompactionComplete)[0].tokens_before == expected
 
 
 async def test_tokens_after_excludes_output_reserve(tmp_path):
@@ -726,7 +796,7 @@ async def test_tokens_after_excludes_output_reserve(tmp_path):
 
     await harness.run_manual_compaction()
 
-    compacted = _of(_events(harness), ContextCompacted)[0]
+    compacted = _of(_events(harness), CompactionComplete)[0]
     replacement = harness.session.turns[0]
     from archie_agent.compaction import estimate_tokens
 

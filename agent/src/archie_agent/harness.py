@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING
 
 import msgspec
 from archie_shared.events import (
-    ContextCompacted,
+    CompactionComplete,
+    CompactionStart,
     ErrorNotice,
     Event,
     SessionEvent,
@@ -339,21 +340,22 @@ class AgentHarness:
     async def _before_request(self, messages: list, iteration: int):
         if self._compaction_failed_this_turn:
             return None
-        estimate_source = "baseline" if self._baseline_context_tokens is not None else "heuristic"
         estimate = self._estimate_context(messages)
         threshold = self._over_limit(estimate)
         cold = False
+        estimated_next_request_cost_usd = None
         ttl = self.session.model.cache_ttl_seconds
         if iteration == 0 and ttl is not None:
-            cold = self._cache_cold or (
+            cache_expired = self._cache_cold or (
                 self._last_request_finished is not None
                 and self._clock() - self._last_request_finished > ttl
             )
             rate = self.session.model.cost.get_rate(estimate, 0)
             price = rate.cache_write or rate.input
-            cold = (
-                cold and estimate * price / 1_000_000 > self._compaction_config.cold_cost_threshold
-            )
+            next_request_cost = estimate * price / 1_000_000
+            cold = cache_expired and next_request_cost > self._compaction_config.cold_cost_threshold
+            if cold:
+                estimated_next_request_cost_usd = next_request_cost
         reason = "cold_cache" if cold else "threshold" if threshold else None
         if reason is None:
             return None
@@ -376,8 +378,7 @@ class AgentHarness:
             turn=self._current_turn_index,
             iteration=iteration,
             tokens_before=estimate,
-            estimate_source=estimate_source,
-            failure_kind="compaction_failed",
+            estimated_next_request_cost_usd=estimated_next_request_cost_usd,
         )
         if compacted is None:
             self._compaction_failed_this_turn = True
@@ -397,20 +398,43 @@ class AgentHarness:
         turn: int,
         iteration: int,
         tokens_before: int,
-        estimate_source: str,
-        failure_kind: str,
+        estimated_next_request_cost_usd: float | None,
     ) -> tuple[Turn, int] | None:
         """Summarise ``source`` and replace the root transcript.
 
-        Shared by manual and automatic compaction. Emits the compaction
-        ``llm_request`` and either ``context_compacted`` or an ``ErrorNotice`` of
-        ``failure_kind``. Returns the replacement turn and its estimated context
-        tokens (excluding the output reserve), or ``None`` on failure, leaving
-        the transcript unchanged.
+        Shared by manual and automatic compaction. Emits ``compaction_start``, the
+        compaction ``llm_request`` when the provider was reached, and one
+        ``compaction_complete`` carrying the success, failure or interruption.
+        Returns the replacement turn and its estimated context tokens (excluding
+        the output reserve), or ``None`` on failure, leaving the transcript
+        unchanged.
         """
+        request_id = str(ULID())
+        started_at = now_utc()
+        await self._event_bus.emit(
+            CompactionStart(
+                id=str(ULID()),
+                turn=turn,
+                iteration=iteration,
+                scope=None,
+                request_id=request_id,
+                reason=reason,
+                tokens_before=tokens_before,
+                estimated_next_request_cost_usd=estimated_next_request_cost_usd,
+                model_key=self._compaction_model_key,
+                sent_at=started_at,
+            )
+        )
         outcome = await Compactor(
             self._compaction_model_key, self._compaction_model, self._compaction_llm
-        ).run(source, reason=reason, turn=turn, iteration=iteration, interrupt=self._interrupt)
+        ).run(
+            source,
+            reason=reason,
+            turn=turn,
+            iteration=iteration,
+            interrupt=self._interrupt,
+            request_id=request_id,
+        )
         if outcome.request_event is not None:
             await self._event_bus.emit(outcome.request_event)
             self.session.record_usage(
@@ -422,11 +446,24 @@ class AgentHarness:
                 update_context=False,
             )
         if not outcome.ok:
+            error = outcome.error or "Compaction failed"
             await self._event_bus.emit(
-                ErrorNotice(
+                CompactionComplete(
                     id=str(ULID()),
-                    kind=failure_kind,
-                    message=outcome.error or "Compaction failed",
+                    turn=turn,
+                    iteration=iteration,
+                    scope=None,
+                    request_id=request_id,
+                    reason=reason,
+                    status="interrupted" if outcome.interrupted else "failure",
+                    tokens_before=tokens_before,
+                    tokens_after=None,
+                    cost_saved_usd=0.0,
+                    duration_ms=outcome.duration_ms,
+                    error=error,
+                    summary=None,
+                    debug="",
+                    estimated_next_request_cost_usd=estimated_next_request_cost_usd,
                 )
             )
             return None
@@ -435,7 +472,7 @@ class AgentHarness:
         stats = outcome.stats
         debug = ";".join(
             [
-                f"estimate_source={estimate_source}",
+                f"estimate_source={'baseline' if self._baseline_context_tokens is not None else 'heuristic'}",
                 f"turns_in={len(source)}",
                 f"tool_results_kept={stats.tool_results_kept}",
                 f"tool_results_removed={stats.tool_results_removed}",
@@ -443,20 +480,25 @@ class AgentHarness:
                 f"rounds_dropped={stats.rounds_dropped}",
             ]
         )
+        saved_rate = self.session.model.cost.get_rate(tokens_before, 0).input
+        cost_saved_usd = max(0.0, (tokens_before - tokens_after) * saved_rate / 1_000_000)
         await self._event_bus.emit(
-            ContextCompacted(
+            CompactionComplete(
                 id=str(ULID()),
                 turn=turn,
                 iteration=iteration,
                 scope=None,
-                request_id=outcome.request_event.id if outcome.request_event else "",
+                request_id=request_id,
                 reason=reason,
-                summary=outcome.summary,
-                model_key=self._compaction_model_key,
+                status="success",
                 tokens_before=tokens_before,
                 tokens_after=tokens_after,
+                cost_saved_usd=cost_saved_usd,
                 duration_ms=outcome.duration_ms,
+                error=None,
+                summary=outcome.summary,
                 debug=debug,
+                estimated_next_request_cost_usd=estimated_next_request_cost_usd,
             )
         )
         self.session.turns = [replacement]
@@ -483,9 +525,6 @@ class AgentHarness:
                     )
                 )
                 return
-            estimate_source = (
-                "baseline" if self._baseline_context_tokens is not None else "heuristic"
-            )
             await self._compact(
                 self.session.turns,
                 reason="manual",
@@ -494,8 +533,7 @@ class AgentHarness:
                 turn=self.session.turn_index,
                 iteration=0,
                 tokens_before=self._estimate_context(self.session.turns),
-                estimate_source=estimate_source,
-                failure_kind="manual_compaction_failed",
+                estimated_next_request_cost_usd=None,
             )
         except LogAppendError as exc:
             await self._broadcast_storage_error(str(exc))

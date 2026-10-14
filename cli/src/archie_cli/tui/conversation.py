@@ -19,6 +19,8 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
+from textual.markup import escape
 from textual.reactive import reactive
 from textual.timer import Timer
 from textual.widget import Widget
@@ -553,6 +555,50 @@ class IterationBlock(Widget):
         return "\n\n".join(parts)
 
 
+class CompactionEntry(Widget):
+    """A compaction operation with the same pending/terminal indicator as tools."""
+
+    DEFAULT_CSS = """
+    CompactionEntry {
+        height: auto;
+        margin: 0;
+        padding: 0 2;
+    }
+    CompactionEntry > .tool-header {
+        height: auto;
+    }
+    """
+
+    def __init__(self, reason: str, before: int) -> None:
+        super().__init__()
+        self._reason = reason
+        self._before = before
+        self._markup = f"[bold {theme.PRIMARY}]○[/] Compaction {escape(reason)} ({before} tokens)"
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._markup, classes="tool-header", markup=True)
+
+    def complete(
+        self, after: int | None, display_cost: float, duration_ms: int, error: str | None
+    ) -> None:
+        """Replace the pending header with the terminal success or failure line.
+
+        The terminal markup is kept on the entry so a header composed after this
+        call (an entry mounted and completed in the same tick) still shows it.
+        """
+        colour = theme.ERROR if error else theme.SUCCESS
+        reason = escape(self._reason)
+        if error:
+            text = f"Compaction {reason} ({self._before} tokens, {duration_ms}ms) Failed: {escape(error)}"
+        else:
+            text = f"Compaction {reason} ({self._before} → {after}, ${display_cost:.2f}, {duration_ms}ms)"
+        self._markup = f"[bold {colour}]●[/] {text}"
+        try:
+            self.query_one(".tool-header", Static).update(self._markup)
+        except NoMatches:
+            pass  # compose() renders self._markup once mounted
+
+
 class CompactionMarker(Widget):
     """Inline marker and Markdown summary for a compacted context."""
 
@@ -600,9 +646,16 @@ class Conversation(VerticalScroll):
             self.scroll_end(animate=False)
 
     def add_compaction(self, reason: str, before: int, after: int, summary: str) -> None:
-        """Add a compaction marker and summary."""
+        """Add a legacy compaction marker for historical logs."""
         self.mount(CompactionMarker(reason, before, after, summary))
         self.scroll_if_at_bottom()
+
+    def begin_compaction(self, reason: str, before: int) -> CompactionEntry:
+        """Add a pending compaction operation."""
+        entry = CompactionEntry(reason, before)
+        self.mount(entry)
+        self.scroll_if_at_bottom()
+        return entry
 
     def add_user_message(self, content: str) -> None:
         """Add a user message and scroll to show it."""
