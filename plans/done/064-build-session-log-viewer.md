@@ -324,6 +324,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 - C1 (M4): `replace` fragments carry `hx-swap-oob="outerHTML:#<target_id>"` instead of bare `outerHTML` — a finished stream (`stream-…`) is replaced by a message node with a different id, so htmx's default id matching would miss it; R15/R18 ACs and tests assert the explicit selector. Fragments are built by `render_change` in `web.py` (Python wraps the node macros) rather than a separate Jinja macro, so the root-element `hx-swap-oob` injection lives in one place. Live-only `text_delta` fragments have no SSE `id`, so reconnect cursors are always persisted event ids. No scope change.
 ## Risks
 
+- The GitHub token cannot upload PR image attachments (HTTP 403), so the draft PR was not opened and the screenshots are not attached.
 - The orchestrator cannot start sessions in this container (no Docker), so live updates are tested against a fake agent socket and, for browser evidence, a stand-in agent; a real agent session is not verified.
 - htmx `htmx.swap()` processing of `hx-swap-oob` inside SSE-delivered content is confirmed from the 2.0.11 source but must be observed in a browser (agent-browser) during review.
 - Local historical logs contain lines the current schema rejects; those events are silently missing from transcripts (existing `SessionLog` behaviour).
@@ -372,6 +373,7 @@ Verification (all run in the worktree):
 
 Not verified: a real agent container (Docker is not available here), so the relay was exercised against a stand-in agent that follows the `/stream` contract, not the real agent; dark mode was not looked at; browsers other than headless Chromium.
 
-PR: pending
+PR: not created — `pr.py open` pushed the branch, then `gh pr create` failed uploading the first screenshot attachment: "HTTP 403: Resource not accessible by personal access token" (uploads.github.com/user-attachments). No pull request was created.
+CI: none (no PR)
 
 ## Follow-ups
