@@ -10,17 +10,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import msgspec
+import websockets
 from archie_shared import __version__
+from archie_shared.events import ErrorNotice, Handshake, SessionStatus, decode_event
 from archie_shared.session import split_id
 from archie_shared.session.log import EventIdConflict, LogAppendError, SessionLog
+from markupsafe import escape
 from starlette.requests import Request
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from archie_orchestrator.docker import list_sessions
+from archie_orchestrator.proxy import _resolve_session
 from archie_orchestrator.session_index import (
     SessionIndex,
     SessionSummary,
@@ -28,7 +34,7 @@ from archie_orchestrator.session_index import (
     summarize_events,
 )
 from archie_orchestrator.session_search import matches, parse_query
-from archie_orchestrator.transcript import TranscriptBuilder, Usage, build
+from archie_orchestrator.transcript import Change, TranscriptBuilder, Usage, build
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -40,6 +46,7 @@ VIEWER_CSP = (
     "script-src 'self'; connect-src 'self'"
 )
 MAX_ROWS = 200
+PING_INTERVAL = 15.0
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -293,3 +300,155 @@ async def session_detail_page(request: Request) -> HTMLResponse:
         "error": error,
     }
     return _viewer_response(request, "viewer/detail.html", context)
+
+
+# ---------------------------------------------------------------------------
+# Live updates (SSE relay of the agent /stream WebSocket)
+# ---------------------------------------------------------------------------
+
+_OOB_ROOT = re.compile(r"^(\s*<[a-zA-Z][a-zA-Z0-9]*)")
+_LIVE_ONLY_STATUS = (Handshake, SessionStatus, ErrorNotice)
+
+
+def _nodes_module():
+    return templates.env.get_template("viewer/_nodes.html").module
+
+
+def _with_oob(fragment: str, value: str) -> str:
+    """Add ``hx-swap-oob`` to the root element of a rendered node."""
+    return _OOB_ROOT.sub(lambda m: f'{m.group(1)} hx-swap-oob="{value}"', fragment, count=1)
+
+
+def render_change(change: Change) -> str:
+    """Render one transcript Change as an htmx fragment for live.js."""
+    nodes = _nodes_module()
+    if change.kind == "append":
+        html = str(nodes.node(change.node))
+        if change.parent_id is None:
+            return html  # live.js appends it to #transcript
+        return f'<div hx-swap-oob="beforeend:#{change.parent_id}">{html}</div>'
+    if change.kind == "replace":
+        node = change.node
+        if getattr(node, "kind", None) == "turn":
+            html = str(nodes.turn_footer(node))
+        else:
+            html = str(nodes.node(node))
+        # Explicit selector: a finished stream is replaced by a node with a new id.
+        return _with_oob(html, f"outerHTML:#{change.target_id}")
+    if change.kind == "append_text":
+        return f'<span hx-swap-oob="beforeend:#{change.target_id}">{escape(change.text)}</span>'
+    return f'<div id="{change.target_id}" hx-swap-oob="delete"></div>'
+
+
+def _sse(event: str, data: str, event_id: str | None = None) -> str:
+    lines = [f"event: {event}"]
+    if event_id:
+        lines.append(f"id: {event_id}")
+    lines.extend(f"data: {line}" for line in data.split("\n"))
+    return "\n".join(lines) + "\n\n"
+
+
+def _live_notice(text: str) -> str:
+    return f'<p class="chrome live-notice">{escape(text)}</p>'
+
+
+def _fragments_for(event, builder: TranscriptBuilder) -> list[str]:
+    changes = builder.apply(event)
+    persisted_id = event.id if event.persist else None
+    return [
+        _sse("fragment", render_change(change), persisted_id if i == len(changes) - 1 else None)
+        for i, change in enumerate(changes)
+    ]
+
+
+async def _resolve_live(session_id: str):
+    try:
+        return await asyncio.to_thread(_resolve_session, session_id)
+    except (KeyError, ValueError, OSError) as exc:
+        log.info("Live view: session %s not available: %s", session_id, exc)
+        return None
+
+
+async def _live_events(session_id: str, path: Path, cursor: str | None) -> AsyncIterator[str]:
+    session = await _resolve_live(session_id)
+    if session is None:
+        yield _sse("end", _live_notice("Session is not running."))
+        return
+
+    try:
+        async with websockets.connect(
+            f"ws://127.0.0.1:{session.port}/stream", open_timeout=10
+        ) as backend:
+            log.info("Live view connected: %s", session_id)
+            frames: asyncio.Queue = asyncio.Queue()
+            done = object()
+
+            async def reader() -> None:
+                try:
+                    async for frame in backend:
+                        await frames.put(frame)
+                finally:
+                    await frames.put(done)
+
+            task = asyncio.create_task(reader())
+            try:
+                # The agent appends to the log before broadcasting, so anything
+                # missing from this read arrives on the socket (deduped by id).
+                events = await asyncio.to_thread(lambda: SessionLog(path).read())
+                builder = TranscriptBuilder()
+                ids = [e.id for e in events]
+                if cursor is not None and cursor not in ids:
+                    yield _sse("reload", "")
+                    return
+                start = ids.index(cursor) + 1 if cursor is not None else 0
+                for event in events[:start]:
+                    builder.apply(event)
+                for event in events[start:]:
+                    for message in _fragments_for(event, builder):
+                        yield message
+
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(frames.get(), PING_INTERVAL)
+                    except TimeoutError:
+                        yield ": ping\n\n"
+                        continue
+                    if frame is done:
+                        break
+                    if not isinstance(frame, str):
+                        continue
+                    try:
+                        event = decode_event(frame)
+                    except (msgspec.DecodeError, msgspec.ValidationError, ValueError) as exc:
+                        log.warning("Live view: skipping undecodable frame: %s", exc)
+                        continue
+                    if isinstance(event, _LIVE_ONLY_STATUS):
+                        continue
+                    for message in _fragments_for(event, builder):
+                        yield message
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - socket teardown
+                    pass
+    except (ConnectionRefusedError, OSError, websockets.InvalidHandshake) as exc:
+        log.warning("Live view: agent unreachable for %s: %s", session_id, exc)
+        yield _sse("end", _live_notice("Session is not running."))
+        return
+    log.info("Live view disconnected: %s", session_id)
+    yield _sse("end", _live_notice("Session ended."))
+
+
+async def session_live(request: Request):
+    """GET /ui/sessions/{session_id}/live — server-sent transcript fragments."""
+    session_id = request.path_params["session_id"]
+    path = session_log_path(session_id)
+    if path is None:
+        return _not_found(request, session_id)
+    cursor = request.headers.get("last-event-id") or request.query_params.get("after") or None
+    return StreamingResponse(
+        _live_events(session_id, path, cursor),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -71,6 +71,10 @@ The orchestrator exposes these application routes:
 | Method | Route | Role |
 | --- | --- | --- |
 | `GET` | `/` | session web page |
+| `GET` | `/ui/auth` | credential status web page |
+| `GET` | `/ui/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search |
+| `GET` | `/ui/sessions/{id}` | session log viewer: transcript of one log |
+| `GET` | `/ui/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
 | `GET` | `/health` | orchestrator liveness (`{"status":"ok"}`) |
 | `GET` | `/sessions` | list running sessions |
 | `POST` | `/sessions` | start a session; body `{"workspace":"name"}` |
@@ -88,9 +92,11 @@ The orchestrator exposes these application routes:
 | `GET` | `/auth/flow/{flow_id}` | query redacted OAuth flow status |
 | `POST` | `/auth/refresh/{provider}` | refresh OAuth credentials |
 | WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
-| `GET` | `/static/*` | static assets for the session page |
+| `GET` | `/static/*` | static assets for the web pages (vendored nimble.css and htmx under `/static/vendor/`) |
 
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
+
+The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/ui/sessions/{id}/live` opens the agent `/stream` WebSocket, never sends on it, and does not feed the metrics writer. The viewer pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
 
 ### Authentication API security
 

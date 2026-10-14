@@ -396,6 +396,7 @@ body.viewer {
     gap: 0.6rem;
     align-items: baseline;
     padding: 0.3rem 0.6rem;
+    margin: 0;
     font-family: var(--v-mono);
     font-size: 0.8rem;
     font-weight: 400;
