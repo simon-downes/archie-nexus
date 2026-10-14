@@ -1,6 +1,6 @@
 # 064 — Session log viewer
 
-Status: planning
+Status: implementing
 Branch: build-it/064-session-log-viewer (base: main @ 02bfe1c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/064-session-log-viewer
 Updated: 2026-10-14
@@ -75,19 +75,19 @@ Codebase facts found at intake:
 | D9  | `workspace:` matching | Case-insensitive: workspace equals the value or starts with it | Substring; exact only | User asked for "prefix-or-name"; equality is a special case of prefix, kept explicit for clarity | self |
 | D10 | Search combination | All terms AND; words and phrases are case-insensitive substrings; unknown `key:value` is a word; an unclosed quote runs to the end | OR semantics; error on unknown keys | Narrowing search is what one box with filters implies; never erroring keeps typing-as-you-search usable | self |
 | D11 | Invalid date in `before:`/`after:` | Ignore that term and show a notice naming it | Return no rows; HTTP 400 | Search fires on every keystroke (`2026-1` is a normal intermediate state) | self |
-| D12 | Front-end assets | Vendor `nimble.min.css` 0.24.1 and `htmx.min.js` 2.0.11 under `static/vendor/` with their MIT/0BSD licence texts | CDN links; htmx SSE extension | The orchestrator is a local tool that may run offline; no build step. The SSE extension's reconnect opens a new `EventSource` that loses `Last-Event-ID`, which would duplicate appended fragments | self |
+| D12 | Front-end assets | Vendor `https://cdn.jsdelivr.net/npm/@leftium/nimble.css@0.24.1/dist/nimble.min.css` (MIT) and `https://cdn.jsdelivr.net/npm/htmx.org@2.0.11/dist/htmx.min.js` (0BSD) under `static/vendor/`, with licence texts from each package's `LICENSE` | CDN links; htmx SSE extension | The orchestrator is a local tool that may run offline; no build step. The SSE extension's reconnect opens a new `EventSource` that loses `Last-Event-ID`, which would duplicate appended fragments | self |
 | D13 | Live client | `static/viewer/live.js` (~60 lines): native `EventSource`, applies each fragment with `htmx.swap()`, reconnects with `?after=<lastEventId>` | htmx-ext-sse | Same reason as D12; `htmx.swap` processes `hx-swap-oob` so the server controls placement | self |
-| D14 | Markdown rendering | `markdown-it-py` preset `js-default` (raw HTML escaped, `javascript:` links rejected) + Pygments `HtmlFormatter` for fenced code | mistune; client-side marked.js | Both libraries are already in `uv.lock` (via rich/textual); server rendering keeps page and live fragments identical | self |
-| D15 | Tool summary markup (Rich syntax from `tool_summaries.py`) | Own ~40-line parser in `transcript.py` for the subset used (`[bold]`, `[dim]`, `[italic]`, `[red]`, hex colours, `[/]`, `\[`/`\]` escapes) mapped to CSS classes | Add `rich` to the orchestrator and use `Text.from_markup` | `rich` leaves `\]` in plain text (observed: `'ls [a\\]'`), and classes keep colours themable for dark mode | self |
+| D14 | Markdown rendering | `markdown-it-py` preset `js-default` (raw HTML escaped, `javascript:` links rejected, tables on) + Pygments `HtmlFormatter(nowrap=True)` for fenced code; renderer overrides turn table `style="text-align:X"` into `class="align-X"` and images into links (see D24) | mistune; client-side marked.js | Both libraries are already in `uv.lock` (via rich/textual); server rendering keeps page and live fragments identical | self |
+| D15 | Tool summary markup (Rich syntax from `tool_summaries.py`) | Own ~40-line parser in `transcript.py`: an open tag is whitespace-separated styles (e.g. `[dim italic]`, `[#676767 italic]`), `[/]` closes the innermost, `\[`/`\]` are literal brackets. Style→class: `bold`→`b`, `dim`→`dim`, `italic`→`i`, `red` and `#ff6d67`→`err`, `#67c26d`→`ok`, `#676767`→`default`; other styles are dropped | Add `rich` to the orchestrator and use `Text.from_markup` | `rich` leaves `\]` in plain text (observed: `'ls [a\\]'`), and classes keep colours themable for dark mode | self |
 | D16 | Live gap between page load and WebSocket attach | Connect the WebSocket first, then re-read the local log and replay events after the page's cursor; drop WebSocket frames whose `id` was already emitted | Fetch `/events?after=` from the agent | The agent appends before broadcasting (`SessionEventBus.emit`), so anything not in the file at read time arrives on the socket; the file is the same data without an extra HTTP hop | self |
 | D17 | Live fragment state | Each SSE connection builds a `TranscriptBuilder` by replaying the whole log silently, then emits fragments only for events after the cursor | Stateless per-event rendering | Tool results need the matching `tool_call` input to format their summary; subagent events need their parent task node | self |
 | D18 | Transcript structure | Flat list of turn blocks; tools are `<details>` rows inside the turn; subagent events nest inside their launching `task` tool row, grouped by `subagent_index` | One nested tree per iteration | Flat append targets keep live updates simple; nesting children under the task row mirrors CONTRIBUTING's scope rule (`scope` = task `tool_use_id`) | self |
 | D19 | Large content | Tool result and input previews capped at 8,000 characters with "… N more characters" | Full content; separate fetch route | The largest local log is 11 MB, mostly tool output; full content would make multi-MB pages. A raw-content route is a follow-up | self |
 | D20 | List size | Show at most 200 rows, newest first, with "Showing 200 of N" | Pagination | Search is the navigation tool; 216 local logs fit on one page today | self |
 | D21 | Existing pages | Leave `/` and `/ui/auth` styling unchanged; add a "Session logs" link in `base.html` | Restyle all pages with nimble.css | Not requested; `test_web_console.py` pins the existing design tokens | self |
-| D22 | Active sessions unavailable (Docker missing or failing) | Show every row as inactive and a notice "Active status unavailable"; the live endpoint ends with a "not running" notice | Return 500 | The orchestrator may run where `docker` is absent (this container); history should still be browsable | self |
+| D22 | Active sessions unavailable (`docker` missing: `list_sessions` raises `OSError`) | Show every row as inactive and a notice "Active status unavailable"; the live endpoint ends with a "not running" notice | Return 500 | The orchestrator may run where `docker` is absent (this container); history should still be browsable | self |
 | D23 | Session ID in URLs | Accept only `^[A-Za-z0-9][A-Za-z0-9._-]*$` and an existing `<id>.jsonl` directly under the sessions directory; else 404 | Path join without checks | Prevents path traversal through the `{session_id}` path parameter | self |
-| D24 | Content-Security-Policy on viewer pages | `default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'`; htmx indicator styles disabled via `htmx-config` meta | No CSP | Logs contain model and tool output; CSP blocks script injection even if escaping regresses | self |
+| D24 | Content-Security-Policy on viewer pages | `default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'`; htmx indicator styles disabled via `htmx-config` meta (`includeIndicatorStyles: false`); Markdown images render as links (`<a href=…>image: alt</a>`) | No CSP; allowing `https:` images; `'unsafe-inline'` styles | Logs contain model and tool output; CSP blocks script injection even if escaping regresses. Loading remote images from logs on page open would contact arbitrary hosts. Inline styles are avoided by class rewrites (D14) | self |
 | D25 | Does the live relay feed the metrics writer? | No | Enqueue `llm_request` frames like `proxy_stream` | The viewer is read-only; the CLI's relay already records metrics and `requests` dedupes by `(session_id, event_id)` | self |
 
 ## Requirements
@@ -101,7 +101,7 @@ Codebase facts found at intake:
   - AC: the row's token and cost figures equal `session_accounting(path)` for that log.
 - R3 MUST mark sessions whose ID is in `list_sessions()` as active.
   - AC: with `list_sessions` patched to return session b, only row b has the active marker.
-  - AC: when `list_sessions` raises `OSError` or `DockerError`, the page returns 200, no row is active, and "Active status unavailable" appears.
+  - AC: when `list_sessions` raises `FileNotFoundError` (no `docker` binary), the page returns 200, no row is active, and "Active status unavailable" appears.
 - R4 MUST render at most 200 rows and say "Showing 200 of N" when more match.
   - AC: with 201 logs, 200 rows render and "Showing 200 of 201" appears.
 - R5 MUST keep rendering when a log is unreadable (`EventIdConflict`, `LogAppendError`) or contains invalid lines.
@@ -116,18 +116,19 @@ Codebase facts found at intake:
   - AC: `after:2026-07-11` includes a session started 2026-07-11T00:00:01Z; `before:2026-07-11` excludes it.
   - AC: `workspace:arch` matches workspaces `archie` and `arch`, not `myarch`.
   - AC: `before:2026-13-01` filters nothing by date and the page shows a notice naming `before:2026-13-01`.
-- R7 MUST update the table as the user types, without a full page reload, and keep the query in the URL.
-  - AC: a request with header `HX-Request: true` returns only the `<tbody id="session-rows">` fragment (no `<html>`); the input carries `hx-get="/ui/sessions"`, `hx-trigger` with a delay, and `hx-push-url="true"`.
+- R7 MUST update the results (table, row count line, and search notices) as the user types, without a full page reload, and keep the query in the URL.
+  - AC: a request with header `HX-Request: true` returns only the `<section id="results">` fragment (no `<html>`), and that fragment contains the notices and the count line; a request that also has `HX-History-Restore-Request: true` gets the full page; both responses carry `Vary: HX-Request, HX-History-Restore-Request`; the input carries `hx-get="/ui/sessions"`, `hx-target="#results"`, `hx-swap="outerHTML"`, `hx-trigger` with a delay, and `hx-push-url="true"`.
 
 **Transcript page**
 
 - R8 MUST serve `GET /ui/sessions/{id}` with a header (ID, workspace, start time, models, usage, active state) and the transcript grouped by turn.
   - AC: a log with two user messages renders two `.turn` blocks, each starting with a `.msg-user` block.
-  - AC: unknown IDs and IDs failing D23 (`..%2Fsecret`, `a/b`) return 404.
+  - AC: a valid-pattern ID with no file (`nope-01k0000000`) and IDs failing the D23 pattern (`.hidden`, `bad%20id`) return 404; a `.hidden.jsonl` file placed in the sessions dir is not served.
 - R9 MUST render user and assistant text as Markdown inside a `.md` container styled differently from interface chrome, with fenced code highlighted by Pygments.
   - AC: an assistant message with a ```` ```python ```` block renders `<div class="md">` containing `class="highlight"`.
   - AC: a user message `<script>alert(1)</script>` renders as escaped text; no `<script>alert` appears in the response.
   - AC: a link `[x](javascript:alert(1))` does not produce an `href="javascript:`.
+  - AC: a right-aligned table column renders `class="align-right"` and the response has no `style=` attribute; `![x](https://e.test/a.png)` renders a link to that URL and no `<img`.
 - R10 MUST render each tool call as one row with its formatted summary (`format_tool_pending`/`format_tool_complete`), status (pending, ok, error), duration, and an expandable body with the input and the result preview (D19).
   - AC: a `shell` call with `is_error=true` renders a `.tool.error` row whose summary contains `ls` in a `.b` span.
   - AC: a 10,000-character result renders 8,000 characters and "… 2000 more characters".
@@ -144,13 +145,15 @@ Codebase facts found at intake:
   - AC (fake agent WebSocket): with the log holding events e1–e3, `after=e2`, and the socket sending `handshake`, `session_status`, e3 again, e4, the stream contains fragments for e3 and e4 once each, and nothing for e1–e2.
   - AC: a `Last-Event-ID` header takes precedence over `after`.
 - R15 MUST stream assistant text live: `text_delta` appends to a streaming block, and the matching `assistant_message` replaces it with rendered Markdown.
-  - AC: deltas "Hel", "lo" then `assistant_message` "Hello" produce two `hx-swap-oob="beforeend:#stream-…"` fragments followed by one `hx-swap-oob="outerHTML"` fragment with id `stream-…`.
+  - AC: on a fresh builder with no deltas, `assistant_message` yields the rendered text appended to the turn and a `hx-swap-oob="delete"` element for its `stream-…` id.
+  - AC: deltas "Hel", "lo" then `assistant_message` "Hello" produce, in order: one fragment appending a `.stream` element with id `stream-…` containing "Hel" to the turn's items; one `hx-swap-oob="beforeend:#stream-…"` fragment containing "lo"; one `hx-swap-oob="outerHTML"` fragment with id `stream-…` whose content is the rendered Markdown block.
 - R16 MUST end the stream with `event: end` and a "Session ended" notice when the agent socket closes, and with a "Session is not running" notice when the session is not active or the agent is unreachable.
-  - AC: each case's stream ends with `event: end` and the notice text.
+  - AC: each case's stream ends with `event: end` and the notice text, including when `list_sessions` raises `FileNotFoundError`.
 - R17 MUST keep the viewer read-only: the relay never sends a frame to the agent socket.
   - AC: the fake agent socket records zero `send()` calls.
-- R18 MUST update the header usage and the live state indicator during live updates.
+- R18 MUST update the header usage during live updates, and show the live state in `#live-state`: "connecting" on page load, "live" after the SSE `open`, "ended" after `event: end`, "reconnecting" after an error.
   - AC: an `llm_request` frame produces an `hx-swap-oob="outerHTML"` fragment for `#session-usage` with the new totals.
+  - AC: the page for an active session renders `<span id="live-state">connecting</span>` and loads `live.js`; an inactive session renders no `#live-state` and no `live.js`. The JavaScript state changes are checked in the browser (Risks).
 - R19 SHOULD send an SSE comment (`: ping`) every 15 seconds while idle, so proxies and the browser keep the connection. It may be skipped if a test cannot exercise timing without sleeping; the interval is a module constant tests can lower.
   - AC: with the interval set to 0.01 s and an idle fake socket, the stream contains `: ping`.
 
@@ -181,10 +184,10 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 - `orchestrator/src/archie_orchestrator/session_index.py` (new): `SessionSummary` (frozen dataclass), `summarize_log(path) -> SessionSummary`, `SessionIndex.summaries(sessions_dir) -> list[SessionSummary]`, `session_start(session_id) -> datetime | None` (decodes the 10-char Crockford ULID timestamp), `sessions_dir() -> Path`.
 - `orchestrator/src/archie_orchestrator/session_search.py` (new): `Query` dataclass, `parse_query(text) -> Query`, `matches(summary, query) -> bool`.
-- `orchestrator/src/archie_orchestrator/transcript.py` (new): `render_markdown(text) -> Markup`, `markup_to_html(rich_markup) -> Markup` (D15), node dataclasses, `TranscriptBuilder.apply(event) -> list[Change]`, `Change(kind: "append" | "replace" | "append_text", node, parent_id, text)`.
+- `orchestrator/src/archie_orchestrator/transcript.py` (new): `render_markdown(text) -> Markup`, `markup_to_html(rich_markup) -> Markup` (D15), node dataclasses, `TranscriptBuilder.apply(event) -> list[Change]`, `Change(kind: "append" | "replace" | "append_text" | "remove", node, parent_id, target_id, text)`.
 - `orchestrator/src/archie_orchestrator/web.py`: add `session_list_page`, `session_detail_page`, `session_live` handlers. Follow `sessions_page` for template rendering and `proxy.py:proxy_stream` for the `websockets.connect` call and error handling.
 - `orchestrator/src/archie_orchestrator/app.py`: register `/ui/sessions`, `/ui/sessions/{session_id}`, `/ui/sessions/{session_id}/live`.
-- Templates (new): `templates/viewer/base.html`, `viewer/list.html`, `viewer/_rows.html`, `viewer/detail.html`, `viewer/_nodes.html` (Jinja macros, one per node type; used by page and live fragments).
+- Templates (new): `templates/viewer/base.html`, `viewer/list.html`, `viewer/_results.html`, `viewer/detail.html`, `viewer/_nodes.html` (Jinja macros, one per node type; used by page and live fragments).
 - Static (new): `static/vendor/nimble.min.css`, `static/vendor/htmx.min.js`, `static/vendor/LICENSES.md`, `static/viewer/viewer.css`, `static/viewer/pygments.css` (generated, see Config), `static/viewer/live.js`.
 - `templates/base.html`: one "Session logs" link (D21).
 - Tests (new): `tests/test_session_search.py`, `tests/test_session_index.py`, `tests/test_web_session_list.py`, `tests/test_web_session_detail.py`, `tests/test_web_session_live.py`. Follow `tests/test_web_auth_status.py` (ASGI client) and `tests/test_orchestrator_ws_proxy.py` (fake `websockets.connect`).
@@ -208,20 +211,21 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ### Data flow
 
-- **List:** request → `asyncio.to_thread(index.summaries, dir)` and `asyncio.to_thread(list_sessions)` → `parse_query` → filter → sort → cap 200 → `list.html` (or `_rows.html` when `HX-Request`).
+- **List:** request (partial only when `HX-Request` is set and `HX-History-Restore-Request` is not) → `asyncio.to_thread(index.summaries, dir)` and `asyncio.to_thread(list_sessions)` → `parse_query` → filter → sort → cap 200 → `list.html` (or `_results.html`, the `<section id="results">` with notices, count line and table, when `HX-Request`).
 - **Detail:** validate ID (D23) → `SessionLog(path).read()` in a thread → `TranscriptBuilder` over all events → `detail.html` with `data-last-event-id` of the last persisted event and `data-live-url` when active.
-- **Live:** `live.js` opens `EventSource(live_url?after=<last id>)` → handler resolves the session (`proxy._resolve_session` in a thread) → `websockets.connect(ws://127.0.0.1:<port>/stream)` → read log, replay into builder silently up to the cursor, emit fragments for later events (D16, D17) → for each socket frame: decode with `decode_event`, skip `handshake`/`session_status`/`error_notice` and already-emitted IDs, `builder.apply` → render each `Change` as a fragment → `event: fragment\nid: <event id>\ndata: <html lines>`. Socket close → "Session ended" + `event: end`. `live.js` swaps fragments into `#transcript` with `beforeend`, so OOB elements land by ID; on `end` it closes; on error it reconnects after 1, 2, 4… up to 30 s with the latest `lastEventId`.
-- **Failure paths:** not active / no port / refused connection → "Session is not running" + `end` (R16). Undecodable socket frame → log at warning, skip. Browser disconnect → Starlette cancels the generator; the `async with websockets.connect` closes the agent socket.
+- **Live:** `live.js` opens `EventSource(live_url?after=<last id>)` → handler resolves the session (`proxy._resolve_session` in a thread) → `websockets.connect(ws://127.0.0.1:<port>/stream)` → read log, replay into builder silently up to the cursor, emit fragments for later events (D16, D17); if the cursor is not in the log, send `event: reload` and stop (`live.js` reloads the page) → for each socket frame: decode with `decode_event`, skip `handshake`/`session_status`/`error_notice` and already-emitted IDs, `builder.apply` → render each `Change` as a fragment → `event: fragment\nid: <event id>\ndata: <html lines>`. Socket close → "Session ended" + `event: end`. `live.js` swaps fragments into `#transcript` with `beforeend`, so OOB elements land by ID; on `end` it closes; on `reload` it calls `location.reload()`; on error it reconnects after 1, 2, 4… up to 30 s with the latest `lastEventId`.
+- **Failure paths:** not active / no port / `list_sessions` raising `OSError` / refused connection → "Session is not running" + `end` (R16). Undecodable socket frame → log at warning, skip. Browser disconnect → Starlette cancels the generator; the `async with websockets.connect` closes the agent socket.
 
 ### Error handling
 
 | Failure | Response |
 |---|---|
-| `list_sessions` raises `OSError`/`DockerError` | fail open: no active markers, notice (D22) |
+| `list_sessions` raises `OSError` (no `docker`) | fail open: no active markers, notice (D22) |
 | Log invalid lines | `SessionLog` skips them (existing warning) |
 | `EventIdConflict` / `LogAppendError` on a log | list: row with `error`; detail: 200 page showing the error text |
 | Invalid ID or missing file | 404 HTML |
-| Agent unreachable / closes | SSE notice + `event: end` (R16) |
+| Agent unreachable / closes, or `docker` missing during resolve | SSE notice + `event: end` (R16) |
+| Live cursor not in log | `event: reload` |
 | Undecodable live frame | skip, `log.warning` |
 
 ### Non-functional
@@ -240,7 +244,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ### [ ] M1 — Session list page (tracer bullet)
 
-- **Approach:** Build `session_index.py` first (one pass over `SessionLog(path).read()` computing D6/D7 and `search_text`). Add `viewer/base.html` loading the vendored assets and the CSP header (a small helper in `web.py` that wraps `templates.TemplateResponse` and sets the header). Vendor assets with `curl` from jsdelivr and record their SHA-256 in `LICENSES.md`. ⚠️ `list_sessions` raises `FileNotFoundError` when `docker` is missing; catch `OSError` and `DockerError` (D22). ⚠️ Patch `archie_orchestrator.web.list_sessions` in tests, matching `test_web_console.py`.
+- **Approach:** Build `session_index.py` first (one pass over `SessionLog(path).read()` computing D6/D7 and `search_text`). Add `viewer/base.html` loading the vendored assets and the CSP header (a small helper in `web.py` that wraps `templates.TemplateResponse` and sets the header). Vendor assets with `curl` from jsdelivr and record their SHA-256 in `LICENSES.md`. ⚠️ `list_sessions` raises `FileNotFoundError` when `docker` is missing (it returns `[]` on a non-zero exit); catch `OSError` (D22). ⚠️ Patch `archie_orchestrator.web.list_sessions` in tests, matching `test_web_console.py`.
 - **Test seam:** `summarize_log()` and `GET /ui/sessions` through `httpx.ASGITransport` with `ARCHIE_HOME_DIR` set to `tmp_path`.
 - **Edge cases:**
   - ID without a valid timestamp → `started_at=None`, sorted after dated logs.
@@ -249,7 +253,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 - **Tasks:**
   - `session_index.py` with `SessionSummary`, `summarize_log`, `SessionIndex`, `session_start`, `sessions_dir`.
   - Vendor nimble.css and htmx; `LICENSES.md`.
-  - `viewer/base.html`, `viewer/list.html`, `viewer/_rows.html`, `viewer.css`; route in `app.py`; link in `base.html`.
+  - `viewer/base.html`, `viewer/list.html`, `viewer/_results.html`, `viewer.css`; route in `app.py`; link in `base.html`.
   - Tests for R1–R5 and the CSP header part of R13.
 - **Deliverable:** `/ui/sessions` lists logs with models, usage and active markers.
 - **Verify:** `uv run pytest tests/test_session_index.py tests/test_web_session_list.py` passes; `uv run pytest tests/test_web_console.py` still passes.
@@ -257,7 +261,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ### [ ] M2 — Search
 
-- **Approach:** Hand-written tokenizer in `session_search.py` (scan for `"`, whitespace, `key:value`); dates with `date.fromisoformat` restricted to `YYYY-MM-DD` by regex. `matches` checks `search_text` substrings and start date per D8. Search input in `list.html` uses htmx attributes from R7 and targets `#session-rows` with `outerHTML`.
+- **Approach:** Hand-written tokenizer in `session_search.py` (scan for `"`, whitespace, `key:value`); dates with `date.fromisoformat` restricted to `YYYY-MM-DD` by regex. `matches` checks `search_text` substrings and start date per D8. Search input in `list.html` uses the htmx attributes from R7.
 - **Test seam:** `parse_query()` / `matches()` and `GET /ui/sessions?q=…`.
 - **Edge cases:**
   - Empty or whitespace query → all rows.
@@ -274,7 +278,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ### [ ] M3 — Transcript page
 
-- **Approach:** `TranscriptBuilder` follows the event handling in `cli/src/archie_cli/tui/app.py:_render_canonical` and `_handle_scoped_event` (open those for ordering rules), but builds nodes: `TurnNode` (user message, items, footer), `TextNode`, `ToolNode` (call, result, children `SubagentNode`s), `NoticeNode` (compaction, error, interrupted). Node IDs: `turn-<event id>`, `msg-<event id>`, `tool-<tool_use_id>`, `sub-<scope>-<index>`, `stream-<turn>-<iteration>-<request_id>` with scope/index when present, sanitised to `[A-Za-z0-9_-]`. `_nodes.html` has one macro per node type. Markdown: `MarkdownIt("js-default").enable("table")` with a `highlight` callback using Pygments (`get_lexer_by_name`, fallback `TextLexer`). Tool summaries: pending → `format_tool_pending`; result → `format_tool_complete(name, input, content, is_error, duration_ms)`; exec input shown with the Python lexer.
+- **Approach:** `TranscriptBuilder` follows the event handling in `cli/src/archie_cli/tui/app.py:_render_canonical` and `_handle_scoped_event` (open those for ordering rules), but builds nodes: `TurnNode` (user message, items, footer), `TextNode`, `ToolNode` (call, result, children `SubagentNode`s), `NoticeNode` (compaction, error, interrupted). Node IDs: `turn-<event id>`, `msg-<event id>`, `tool-<tool_use_id>`, `sub-<scope>-<index>`, `stream-<turn>-<iteration>-<request_id>` with scope/index when present, sanitised to `[A-Za-z0-9_-]`. `_nodes.html` has one macro per node type. Markdown: `MarkdownIt("js-default", {"highlight": fn})`. `fn(code, lang, attrs)` returns `<pre class="highlight"><code>` + `pygments.highlight(code, lexer, HtmlFormatter(nowrap=True))` + `</code></pre>` (markdown-it uses output starting with `<pre` as-is); lexer from `get_lexer_by_name(lang)`, fallback `TextLexer`. Override `renderer.rules["th_open"/"td_open"]` to move `style="text-align:X"` to `class="align-X"`, and `rules["image"]` to render `<a href=src>image: alt</a>` (D24). `pygments.css` uses `HtmlFormatter(style=…).get_style_defs(".highlight")`. Tool summaries: pending → `format_tool_pending`; result → `format_tool_complete(name, input, content, is_error, duration_ms)`; exec input shown with the Python lexer.
 - **Test seam:** `GET /ui/sessions/{id}` through the ASGI client with crafted logs written via `SessionLog.append`, and `markup_to_html()` directly.
 - **Edge cases:**
   - Events before any `user_message` (e.g. `session_started`) → header only, no empty turn.
@@ -283,21 +287,22 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
   - `assistant_message` with empty content → no block.
   - Markup `\[exit: 1]` → literal `[exit: 1]`.
 - **Tasks:**
+  - Add `markdown-it-py>=3` and `pygments>=2.17` to `orchestrator/pyproject.toml`; run `uv lock` (expect no version changes).
   - `transcript.py` (renderers, nodes, builder, `--pygments-css` entry point) and `pygments.css`.
   - `viewer/detail.html`, `viewer/_nodes.html`, styles.
   - Route in `app.py`; 404 handling.
   - Tests for R8–R12 and the rest of R13.
 - **Deliverable:** `/ui/sessions/<id>` shows a structured transcript.
-- **Verify:** `uv run pytest tests/test_web_session_detail.py` passes; rendering the largest local log (`~/.nexus/sessions`, 11 MB) through `TranscriptBuilder` completes and the page size is reported in the Outcome.
+- **Verify:** `uv run pytest tests/test_web_session_detail.py` passes; a one-off ASGI request for the largest local log in `~/.nexus/sessions` (11 MB) returns 200 within 5 s; record the time and page size in the Outcome.
 - **Outcome:**
 
 ### [ ] M4 — Live updates
 
-- **Approach:** `session_live` returns a `StreamingResponse` from an async generator. Reuse `proxy._resolve_session` (in a thread) and `websockets.connect(..., open_timeout=10)` as in `proxy_stream`. Idle pings use `asyncio.wait_for(anext(socket_iter), PING_INTERVAL)`. `TranscriptBuilder.apply` returns `Change`s; `append` with a parent renders `<div hx-swap-oob="beforeend:#<parent>-items">node</div>`, top-level appends go to `#transcript` via the client's `beforeend` swap, `replace` renders the node with `hx-swap-oob="outerHTML"`, `append_text` renders `<span hx-swap-oob="beforeend:#<stream id>">escaped text</span>`. Usage header re-rendered on `llm_request`. Multi-line HTML is sent as multiple `data:` lines. `live.js` is loaded only when the page is active.
+- **Approach:** `session_live` returns a `StreamingResponse` from an async generator. Reuse `proxy._resolve_session` (in a thread; catch `OSError` as well as its `KeyError`/`ValueError`) and `websockets.connect(..., open_timeout=10)` as in `proxy_stream`. A reader task (cancelled and awaited in the generator's `finally`, as `proxy_stream` does at `proxy.py:211-216`) copies socket frames into an `asyncio.Queue` and puts a sentinel when the socket ends; the generator waits with `asyncio.wait_for(queue.get(), PING_INTERVAL)` and sends `: ping` on timeout. ⚠️ Never `wait_for` the socket iterator itself: the timeout cancels and finishes its async generator, so the next read looks like a closed socket. `TranscriptBuilder.apply` returns `Change`s; `append` with a parent renders `<div hx-swap-oob="beforeend:#<parent>-items">node</div>`, top-level appends go to `#transcript` via the client's `beforeend` swap, `replace` renders the node with `hx-swap-oob="outerHTML"`, `append_text` renders `<span hx-swap-oob="beforeend:#<stream id>">escaped text</span>`. The first `text_delta` for a request key yields an `append` of a `StreamNode` (id `stream-…`, holds the text) into the current turn's items, or the subagent group's items for child events; later deltas yield `append_text`; the matching `assistant_message` always yields `replace` of the deterministic `stream-…` id by its `TextNode`, even when this builder saw no deltas. The fragment is `<div hx-swap-oob="outerHTML:#stream-…">`-wrapped only when that id exists in the builder; otherwise the builder yields an `append` of the `TextNode` plus a `remove` Change for `#stream-…` (rendered `<div id="stream-…" hx-swap-oob="delete"></div>`), which clears a partial block left by an earlier connection. `live.js` also adds class `stale` to `.stream` elements on reconnect so CSS dims them until replaced. Usage header re-rendered on `llm_request`. Multi-line HTML is sent as multiple `data:` lines. `live.js` is loaded only when the page is active.
 - **Test seam:** `GET /ui/sessions/{id}/live` through `httpx.ASGITransport` (the response completes because the fake socket closes), with `archie_orchestrator.proxy.list_sessions` and `archie_orchestrator.web.websockets.connect` patched as in `test_orchestrator_ws_proxy.py`.
 - **Wiring:** state = per-request `TranscriptBuilder` + `emitted_ids: set[str]`; producer = agent socket frames and the log re-read; consumer = browser `EventSource` in `live.js`; call site = `detail.html` `data-live-url`.
 - **Edge cases:**
-  - Cursor not in the log (`CursorNotFound`) → replay everything after the start (emit all), since the page would be stale.
+  - Cursor not in the log (`CursorNotFound`) → `event: reload`; the page reloads and gets a fresh cursor. No `after` → emit everything.
   - Socket sends a persisted event already emitted from the log re-read → skipped (R14).
   - `text_delta` after its `assistant_message` → ignored, as the TUI does with `_finalized_assistant_requests`.
   - Session not active → notice + `end` without connecting.
@@ -305,7 +310,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
   - `session_live` handler and route.
   - Fragment rendering helpers in `transcript.py`/`_nodes.html`.
   - `static/viewer/live.js` and the live indicator in `detail.html`.
-  - Tests for R14–R19.
+  - Tests for R14–R19, including the ping AC with a fake socket that stays idle and then sends one event, which must still be relayed after the ping.
   - Route table in `docs/architecture.md` (R20).
 - **Deliverable:** an open transcript of an active session updates as the agent works.
 - **Verify:** `uv run pytest tests/test_web_session_live.py` passes; full `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .` pass; `rg -n "/ui/sessions" docs/architecture.md` shows three routes.
@@ -320,6 +325,9 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 - Local historical logs contain lines the current schema rejects; those events are silently missing from transcripts (existing `SessionLog` behaviour).
 
 ## Review
+
+- Plan review: pass 1 ❌ (2 ❌, 6 ⚠️, 6 ℹ️). All 14 agreed and fixed: CSP vs table `style=` (class rewrite, D14/D24, R9 AC); idle ping cancelling the socket iterator (queue + reader task, M4); nimble.css scoped package name (D12); redundant `enable("table")`; `DockerError` never raised (R3, D22); D23 AC unreachable through routing (R8 AC); Pygments wrapper (M3); notices/count outside the swapped fragment (R7 `#results`); missing stream-node creation (R15, M4); D15 compound tags and class names; stale-cursor duplicate append (`event: reload`); `OSError` during live resolve (R16); M3 Verify threshold; remote images (D24).
+- Plan review: pass 2 ⚠️ (3 ⚠️, 3 ℹ️). All agreed and fixed: htmx history restore receiving the partial (R7: full page on `HX-History-Restore-Request`, `Vary`); `assistant_message` with no local stream node after reconnect (`remove` Change, R15 AC); live-state indicator AC (R18); stale error-table row; dependency task in M3; reader-task cleanup in M4. Stopped after two passes.
 
 ## Outcome
 
