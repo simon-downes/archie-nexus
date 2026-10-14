@@ -1,6 +1,6 @@
 # 064 — Session log viewer
 
-Status: implementing
+Status: reviewing
 Branch: build-it/064-session-log-viewer (base: main @ 02bfe1c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/064-session-log-viewer
 Updated: 2026-10-14
