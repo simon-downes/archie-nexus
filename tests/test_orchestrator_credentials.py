@@ -31,9 +31,21 @@ async def test_provider_discovery_is_complete_and_secret_free():
         response = await http.get("/auth/providers")
     assert response.status_code == 200
     providers = {item["name"]: item for item in response.json()}
-    assert set(providers) == {"notion", "linear", "slack", "github", "aws", "scalr", "jira", "google", "bedrock"}
+    assert set(providers) == {
+        "notion",
+        "linear",
+        "slack",
+        "github",
+        "aws",
+        "scalr",
+        "jira",
+        "google",
+        "bedrock",
+    }
     assert providers["bedrock"]["fields"] == [
-        "aws_access_key_id", "aws_secret_access_key", "aws_session_token"
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "aws_session_token",
     ]
     assert "client_secret" not in response.text
 
@@ -58,7 +70,9 @@ async def test_static_credential_replacement_and_deletion_preserve_other_entries
 @pytest.mark.asyncio
 async def test_static_credential_validation_does_not_modify_existing():
     async with await client() as http:
-        assert (await http.put("/auth/credential/github", json={"token": "keep"})).status_code == 200
+        assert (
+            await http.put("/auth/credential/github", json={"token": "keep"})
+        ).status_code == 200
         response = await http.put("/auth/credential/github", json={"token": "new", "extra": "bad"})
     assert response.status_code == 400
     assert "keep" in (await _read_store()).read_text()

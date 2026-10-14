@@ -73,6 +73,7 @@ def create_skill_tool(
 ) -> ToolSpec:
     """Create a skill tool with session-local, deduplicated content state."""
     lock = asyncio.Lock()
+
     async def handler(name: str = "", references=None, **kwargs) -> str:
         async with lock:
             if not name:
@@ -200,8 +201,10 @@ def _read_skill_body(path: Path) -> tuple[str, str | None]:
         if len(parts) < 3:
             return "", "Error: malformed SKILL.md"
         frontmatter = yaml.safe_load(parts[1])
-        if not isinstance(frontmatter, dict) or not frontmatter.get("name") or not frontmatter.get(
-            "description"
+        if (
+            not isinstance(frontmatter, dict)
+            or not frontmatter.get("name")
+            or not frontmatter.get("description")
         ):
             return "", "Error: malformed SKILL.md"
         return parts[2].strip(), None

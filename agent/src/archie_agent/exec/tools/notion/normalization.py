@@ -60,7 +60,13 @@ def normalize_comments(value: Any) -> list[dict[str, Any]]:
         value = value["results"]
     if isinstance(value, dict) and isinstance(value.get("text"), str):
         return [
-            {"id": comment_id, "url": url, "user_url": user_url, "created": created, "body": body.strip()[:8000]}
+            {
+                "id": comment_id,
+                "url": url,
+                "user_url": user_url,
+                "created": created,
+                "body": body.strip()[:8000],
+            }
             for comment_id, url, user_url, created, body in _COMMENT_RE.findall(value["text"])
         ][:50]
     if isinstance(value, dict) and set(value) <= {"suggested_edits_status"}:

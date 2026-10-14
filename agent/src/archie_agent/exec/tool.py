@@ -200,7 +200,7 @@ def _build_exec_description() -> str:
         "async def main():\n"
         '    hits = await grep(pattern=r"TODO", include="*.py")\n'
         "    counts = {}\n"
-        '    for line in hits.splitlines():\n'
+        "    for line in hits.splitlines():\n"
         '        if line.endswith(":") and not line.startswith(" "):\n'
         "            current = line[:-1]\n"
         '        elif "|" in line:\n'

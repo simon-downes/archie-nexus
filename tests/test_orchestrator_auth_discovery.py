@@ -23,11 +23,13 @@ class Transport:
         if method == "GET" and url.endswith("oauth-protected-resource"):
             return Response({"authorization_servers": ["https://auth.example"]})
         if method == "GET":
-            return Response({
-                "authorization_endpoint": "https://auth.example/authorize",
-                "token_endpoint": "https://auth.example/token",
-                "registration_endpoint": "https://auth.example/register",
-            })
+            return Response(
+                {
+                    "authorization_endpoint": "https://auth.example/authorize",
+                    "token_endpoint": "https://auth.example/token",
+                    "registration_endpoint": "https://auth.example/register",
+                }
+            )
         if method == "POST" and url.endswith("register"):
             return Response({"client_id": "dynamic-client"})
         raise AssertionError((method, url))

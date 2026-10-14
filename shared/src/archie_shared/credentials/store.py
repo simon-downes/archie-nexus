@@ -143,6 +143,7 @@ def _update_store(update) -> None:
 
 def replace_credential(service: str, fields: dict[str, str]) -> None:
     """Replace one provider entry while preserving all other entries."""
+
     def update(data: dict[str, dict]) -> None:
         data[service] = dict(fields)
 
@@ -151,6 +152,7 @@ def replace_credential(service: str, fields: dict[str, str]) -> None:
 
 def delete_credential(service: str) -> None:
     """Delete one provider entry; missing entries are ignored."""
+
     def update(data: dict[str, dict]) -> None:
         data.pop(service, None)
 
@@ -164,6 +166,7 @@ def set_credential(service: str, fields: dict[str, str | None]) -> None:
     None values remove the field from the entry.
     Unknown services are tolerated (preserved on write).
     """
+
     def update(store: dict[str, dict]) -> None:
         if service not in store or not isinstance(store[service], dict):
             store[service] = {}

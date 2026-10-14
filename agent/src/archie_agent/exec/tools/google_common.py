@@ -175,9 +175,7 @@ async def _google_get(
     except httpx.HTTPError as exc:
         detail = _diagnostic(str(exc))
         suffix = f": {detail}" if detail else ""
-        raise GoogleTransportError(
-            f"Google request failed ({type(exc).__name__}){suffix}"
-        ) from exc
+        raise GoogleTransportError(f"Google request failed ({type(exc).__name__}){suffix}") from exc
     if response.status_code == 401:
         raise GoogleAuthenticationError("Google authentication failed")
     if response.status_code == 403:

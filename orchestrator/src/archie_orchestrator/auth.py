@@ -272,7 +272,9 @@ class AuthService:
         except AuthError:
             raise
         except (ValueError, TypeError, KeyError) as exc:
-            raise ProviderUnavailableError("OAuth token refresh returned an invalid response") from exc
+            raise ProviderUnavailableError(
+                "OAuth token refresh returned an invalid response"
+            ) from exc
         current = {
             key: getattr(credential, key)
             for key in credential.__struct_fields__

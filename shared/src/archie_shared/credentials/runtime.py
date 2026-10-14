@@ -35,7 +35,9 @@ def runtime_environment(config: NexusConfig) -> dict[str, str]:
                 raise ValueError(f"Provider '{name}' has invalid environment name '{env_name}'")
             previous = owners.get(env_name)
             if previous and previous != name:
-                raise ValueError(f"Environment variable '{env_name}' is mapped by both '{previous}' and '{name}'")
+                raise ValueError(
+                    f"Environment variable '{env_name}' is mapped by both '{previous}' and '{name}'"
+                )
             owners[env_name] = name
         credential = get_credential(name, CREDENTIAL_TYPES[name])
         if credential is None:

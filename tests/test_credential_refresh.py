@@ -10,7 +10,9 @@ async def test_refresh_sweep_refreshes_expiring_oauth_credentials(monkeypatch):
     now = datetime(2026, 1, 1, tzinfo=UTC)
     credentials = {
         "google": OAuthCredential(
-            access_token="old", refresh_token="refresh", expires_at=(now + timedelta(minutes=2)).isoformat()
+            access_token="old",
+            refresh_token="refresh",
+            expires_at=(now + timedelta(minutes=2)).isoformat(),
         )
     }
     refreshed = []

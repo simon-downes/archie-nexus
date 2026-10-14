@@ -53,7 +53,5 @@ def test_flattened_prompt_without_dynamic_section():
     structured = build_system_prompt_structured(
         "model", catalog=_catalog(), agents_context="Project rules"
     )
-    flattened = build_system_prompt(
-        "model", catalog=_catalog(), agents_context="Project rules"
-    )
+    flattened = build_system_prompt("model", catalog=_catalog(), agents_context="Project rules")
     assert flattened == structured.static_system.text

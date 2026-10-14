@@ -11,7 +11,17 @@ from archie_shared.credentials.models import CREDENTIAL_TYPES, AwsCredential, Be
 def test_all_agent_kit_providers_have_typed_definitions():
     from archie_shared.credentials.providers import PROVIDERS
 
-    assert set(PROVIDERS) == {"notion", "linear", "slack", "github", "aws", "scalr", "jira", "google", "bedrock"}
+    assert set(PROVIDERS) == {
+        "notion",
+        "linear",
+        "slack",
+        "github",
+        "aws",
+        "scalr",
+        "jira",
+        "google",
+        "bedrock",
+    }
     assert CREDENTIAL_TYPES["aws"] is AwsCredential
     assert CREDENTIAL_TYPES["bedrock"] is BedrockCredential
     assert "account" in CREDENTIAL_TYPES["scalr"].__struct_fields__
@@ -27,7 +37,9 @@ def test_provider_and_status_responses_are_secret_free_and_strict():
     assert "token" in encoded
     assert "secret" not in encoded.lower()
     with pytest.raises(msgspec.ValidationError):
-        msgspec.json.decode(b'{"name":"github","fields":[],"unexpected":"x"}', type=StaticProviderResponse)
+        msgspec.json.decode(
+            b'{"name":"github","fields":[],"unexpected":"x"}', type=StaticProviderResponse
+        )
 
 
 def test_oauth_response_contains_required_metadata_without_secret():

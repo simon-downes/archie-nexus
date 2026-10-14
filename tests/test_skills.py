@@ -334,9 +334,7 @@ class TestSkillTool:
         catalog = self._make_catalog(tmp_path)
         (tmp_path / "my-skill" / "binary.bin").write_bytes(b"\x00\x01")
         spec = create_skill_tool(catalog, set())
-        result = await spec.handler(
-            name="test-skill", references=["../../etc/passwd", ""]
-        )
+        result = await spec.handler(name="test-skill", references=["../../etc/passwd", ""])
         assert "../../etc/passwd" in result
         assert "invalid reference" in result
         binary_result = await spec.handler(name="test-skill", references=["binary.bin"])

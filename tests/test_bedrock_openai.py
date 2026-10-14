@@ -274,6 +274,11 @@ def test_cache_validation_retries_without_metadata():
 
 
 def test_client_targets_bedrock_runtime_for_inference_profiles():
-    assert runtime_base_url("us-east-1") == "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+    assert (
+        runtime_base_url("us-east-1") == "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+    )
     client = BedrockOpenAIClient("global.openai.gpt-5.6-luna", "us-east-1")
-    assert str(client.client.base_url).rstrip("/") == "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+    assert (
+        str(client.client.base_url).rstrip("/")
+        == "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+    )

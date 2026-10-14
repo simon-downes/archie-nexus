@@ -11,6 +11,7 @@ def _app() -> ArchieApp:
         container_name="container",
     )
 
+
 @pytest.mark.asyncio
 async def test_quit_without_termination_disconnects_only():
     app = _app()

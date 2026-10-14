@@ -35,8 +35,8 @@ async def test_auth_status_browser_renders_html_and_actions():
     assert "Authentication status" in response.text
     assert "OAuth credentials" in response.text
     assert "Static credentials" in response.text
-    assert "data-action=\"refresh\"" in response.text
-    assert "data-action=\"login\"" in response.text
+    assert 'data-action="refresh"' in response.text
+    assert 'data-action="login"' in response.text
     assert "2026-01-01 00:00:00 UTC" in response.text
     assert "access_token" not in response.text
 

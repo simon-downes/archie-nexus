@@ -14,7 +14,7 @@ def test_normalize_fetch_envelope_extracts_page_content_and_ancestry():
         "text": (
             f'<page url="https://app.notion.com/p/{PAGE}">'
             f'<ancestor-path><parent-page url="https://app.notion.com/p/{PARENT}" title="Scratch"/>'
-            "</ancestor-path><properties>\n{\"title\":\"Archie Test\"}\n</properties>"
+            '</ancestor-path><properties>\n{"title":"Archie Test"}\n</properties>'
             "<content>\nThis is the test space for archie\n</content></page>"
         ),
         "path": "Simon’s Scratch Pad",

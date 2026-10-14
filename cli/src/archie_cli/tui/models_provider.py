@@ -16,6 +16,7 @@ def _cost_summary(model) -> str:
     tiered = " tiered" if len(model.cost.rates) > 1 else ""
     return f"${rate.input:.2f}/${rate.output:.2f} per M tokens{tiered}"
 
+
 _catalog_cache: dict | None = None
 
 
