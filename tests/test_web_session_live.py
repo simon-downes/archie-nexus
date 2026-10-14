@@ -459,3 +459,46 @@ async def test_unreadable_log_ends_stream(session_logs):
     _, messages = await _live(f"/ui/sessions/{SID}/live", agent=FakeAgent(_frames()))
     assert messages[-1]["event"] == "end"
     assert "could not be read" in messages[-1]["data"]
+
+
+@pytest.mark.asyncio
+async def test_first_child_assistant_message_is_sent_once(session_logs):
+    w = session_logs
+    user = w.user("go")
+    call = w.tool_call("task", {"tasks": [{}]}, tool_use_id="tu-task")
+    w.write(SID, [user, call])
+    child = w.assistant("CHILDTEXT", scope="tu-task", index=0)
+    _, messages = await _live(
+        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
+    )
+    text = "\n".join(m["data"] for m in _fragments(messages))
+    assert text.count("CHILDTEXT") == 1
+    assert _ids_in(text).count(f"msg-{child.id}") == 1
+
+
+@pytest.mark.asyncio
+async def test_resumed_child_stream_replaces_stale_group(session_logs):
+    w = session_logs
+    user = w.user("go")
+    call = w.tool_call("task", {"tasks": [{}]}, tool_use_id="tu-task")
+    w.write(SID, [user, call])
+    delta = json.dumps(
+        {
+            "type": "text_delta",
+            "id": "d1",
+            "turn": 1,
+            "iteration": 1,
+            "scope": "tu-task",
+            "subagent_index": 0,
+            "request_id": "c1",
+            "text": "child streaming",
+        }
+    )
+    _, messages = await _live(
+        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(delta))
+    )
+    frag = next(m["data"] for m in _fragments(messages) if "child streaming" in m["data"])
+    marker = '<template data-remove-id="sub-tu-task-0"></template>'
+    assert marker in frag
+    assert frag.index(marker) < frag.index('class="subagent" id="sub-tu-task-0"')
+    assert frag.count("child streaming") == 1

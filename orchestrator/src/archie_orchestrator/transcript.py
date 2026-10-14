@@ -334,6 +334,7 @@ class TranscriptBuilder:
         self._streams: dict[tuple, StreamNode] = {}
         self._finalized: set[tuple] = set()
         self._seen: set[str] = set()
+        self._new_groups: set[str] = set()  # group ids created by the event being applied
 
     # -- containers -----------------------------------------------------
 
@@ -346,40 +347,50 @@ class TranscriptBuilder:
             return self.preamble, None
         return turn.items, turn.items_id
 
-    def _subagent(self, scope: str, index: int, changes: list[Change]) -> tuple[SubagentNode, bool]:
-        """Return the child group for (scope, index) and whether it was just created."""
+    def _subagent(self, scope: str, index: int, changes: list[Change]) -> SubagentNode:
+        """Return the child group for (scope, index), creating it on first use.
+
+        A new group is sent as one ``append`` that is rendered after ``apply``
+        returns, so it already holds the items this event adds; callers must not
+        also append those items. The group is preceded by a ``remove`` of its id,
+        which clears a group left in the page by an earlier live connection.
+        """
         key = (scope, index)
         node = self._subagents.get(key)
         if node is not None:
-            return node, False
+            return node
         node = SubagentNode(id=dom_id("sub", scope, index), scope=scope, index=index)
         self._subagents[key] = node
         parent = self._tools.get(scope)
         if parent is not None:
             parent.children.append(node)
-            changes.append(Change("append", node, parent_id=parent.children_id))
+            parent_id = parent.children_id
         else:
             items, parent_id = self._root_container()
             items.append(node)
-            changes.append(Change("append", node, parent_id=parent_id))
-        return node, True
+        changes.append(Change("remove", target_id=node.id))
+        changes.append(Change("append", node, parent_id=parent_id))
+        self._new_groups.add(node.id)
+        return node
 
-    def _container(self, event, changes: list[Change]) -> tuple[list, str | None, bool]:
-        """Return (items, DOM id of items, whether the container was just created)."""
+    def _container(self, event, changes: list[Change]) -> tuple[list, str | None]:
+        """Return (items, DOM id of items) for the event's scope."""
         scope = getattr(event, "scope", None)
         index = getattr(event, "subagent_index", None)
         if scope is not None and index is not None:
-            node, created = self._subagent(scope, index, changes)
-            return node.items, node.items_id, created
-        items, parent_id = self._root_container()
-        return items, parent_id, False
+            node = self._subagent(scope, index, changes)
+            return node.items, node.items_id
+        return self._root_container()
 
     def _add(self, event, node, changes: list[Change]) -> None:
-        items, parent_id, created = self._container(event, changes)
+        items, parent_id = self._container(event, changes)
         items.append(node)
-        # A just-created group is sent whole, already holding this node.
-        if not created:
+        if not self._in_new_group(parent_id):
             changes.append(Change("append", node, parent_id=parent_id))
+
+    def _in_new_group(self, items_id: str | None) -> bool:
+        """True when ``items_id`` belongs to a group created by the current event."""
+        return items_id is not None and items_id.removesuffix("-items") in self._new_groups
 
     @staticmethod
     def _request_key(event) -> tuple:
@@ -401,6 +412,7 @@ class TranscriptBuilder:
             if event.persist:
                 self.last_persisted_id = event_id
         changes: list[Change] = []
+        self._new_groups.clear()
         child = getattr(event, "scope", None) is not None and (
             getattr(event, "subagent_index", None) is not None
         )
@@ -439,7 +451,7 @@ class TranscriptBuilder:
             stream_id = self._stream_id(key)
             node = TextNode(dom_id("msg", event.id), "assistant", event.content, event.interrupted)
             visible = bool(event.content) or event.interrupted
-            items, _, _ = self._container(event, changes)
+            items, _ = self._container(event, changes)
             if stream is not None:
                 index = next((i for i, item in enumerate(items) if item is stream), None)
                 if visible and index is not None:
