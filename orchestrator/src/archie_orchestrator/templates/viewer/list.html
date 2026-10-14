@@ -1,0 +1,16 @@
+{% extends "viewer/base.html" %}
+{% block title %}Session logs{% endblock %}
+{% block content %}
+<section class="chrome search-bar">
+    <form role="search" action="/ui/sessions" method="get">
+        <input type="search" name="q" value="{{ q }}" autocomplete="off" spellcheck="false"
+               aria-label="Search sessions"
+               placeholder='"quoted phrase" word after:2026-07-01 before:2026-10-01 workspace:name'
+               hx-get="/ui/sessions" hx-trigger="input changed delay:250ms, search"
+               hx-target="#results" hx-swap="outerHTML" hx-push-url="true">
+    </form>
+    <p class="hint">Words and <code>"phrases"</code> match user and assistant messages, session IDs and workspaces.
+        Filters: <code>after:YYYY-MM-DD</code> (inclusive), <code>before:YYYY-MM-DD</code> (exclusive), <code>workspace:prefix</code>. Dates are UTC.</p>
+</section>
+{% include "viewer/_results.html" %}
+{% endblock %}

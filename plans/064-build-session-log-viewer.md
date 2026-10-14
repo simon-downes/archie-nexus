@@ -242,7 +242,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ## Milestones
 
-### [ ] M1 — Session list page (tracer bullet)
+### [x] M1 — Session list page (tracer bullet)
 
 - **Approach:** Build `session_index.py` first (one pass over `SessionLog(path).read()` computing D6/D7 and `search_text`). Add `viewer/base.html` loading the vendored assets and the CSP header (a small helper in `web.py` that wraps `templates.TemplateResponse` and sets the header). Vendor assets with `curl` from jsdelivr and record their SHA-256 in `LICENSES.md`. ⚠️ `list_sessions` raises `FileNotFoundError` when `docker` is missing (it returns `[]` on a non-zero exit); catch `OSError` (D22). ⚠️ Patch `archie_orchestrator.web.list_sessions` in tests, matching `test_web_console.py`.
 - **Test seam:** `summarize_log()` and `GET /ui/sessions` through `httpx.ASGITransport` with `ARCHIE_HOME_DIR` set to `tmp_path`.
@@ -257,7 +257,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
   - Tests for R1–R5 and the CSP header part of R13.
 - **Deliverable:** `/ui/sessions` lists logs with models, usage and active markers.
 - **Verify:** `uv run pytest tests/test_session_index.py tests/test_web_session_list.py` passes; `uv run pytest tests/test_web_console.py` still passes.
-- **Outcome:**
+- **Outcome:** Built `session_index.py` (`SessionSummary`, `summarize_log`, `summarize_events`, `SessionIndex`, `session_start`, `sessions_dir`), vendored assets with `LICENSES.md` (SHA-256 recorded), `viewer/base.html`, `list.html`, `_results.html`, `viewer.css`, `session_list_page` + route, and a "Session logs" link in `base.html`. Tests: a `session_logs` fixture in `tests/conftest.py`; `uv run pytest tests/test_session_index.py tests/test_web_session_list.py tests/test_web_console.py` → 33 passed. Against the 216 local logs: cold request 0.91 s, warm 0.01 s, 200 rows, "Showing 200 of 216"; checked in agent-browser. `uvicorn` startup needs a `docker` binary (existing `lifespan` calls `list_sessions` without catching `FileNotFoundError`); a stub `docker` on PATH was used for the browser check, and this was left unchanged (out of scope).
 
 ### [ ] M2 — Search
 

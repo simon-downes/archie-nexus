@@ -1,0 +1,167 @@
+/* Session log viewer. nimble.css supplies the classless base (in cascade layers);
+   these unlayered rules win over it. Chrome (navigation, tables, tool rows, meta)
+   uses small sans/mono type on tinted surfaces; turn content (.md) uses larger
+   reading type on a plain surface, so the two never blend. */
+
+body.viewer {
+    --nc-content-width: min(78rem, 100%);
+    --v-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --v-chrome-bg: var(--nc-surface-2);
+    --v-chrome-border: var(--nc-border);
+    --v-dim: color-mix(in oklab, var(--nc-text) 55%, transparent);
+    --v-user: light-dark(oklch(0.55 0.15 250), oklch(0.7 0.14 250));
+    --v-assistant: light-dark(oklch(0.55 0.13 160), oklch(0.72 0.13 160));
+    --v-tool: light-dark(oklch(0.55 0.04 260), oklch(0.65 0.04 260));
+    --v-ok: light-dark(#15803d, #67c26d);
+    --v-err: light-dark(#b91c1c, #ff6d67);
+    --v-warn: light-dark(#a16207, #e0b04a);
+    --v-default: light-dark(#6b6b6b, #8a8a8a);
+}
+
+.viewer .chrome {
+    font-size: 0.875rem;
+}
+
+.viewer .dim {
+    color: var(--v-dim);
+}
+
+.viewer .err {
+    color: var(--v-err);
+}
+
+.viewer .ok {
+    color: var(--v-ok);
+}
+
+/* --- top bar ----------------------------------------------------------- */
+
+.viewer .topbar {
+    display: flex;
+    align-items: baseline;
+    gap: 1.5rem;
+    padding-block: 0.75rem;
+    border-bottom: 1px solid var(--v-chrome-border);
+    margin-bottom: 1.25rem;
+}
+
+.viewer .topbar .brand {
+    font-weight: 700;
+    text-decoration: none;
+    color: var(--nc-text);
+}
+
+.viewer .topbar .brand span {
+    font-weight: 400;
+    color: var(--v-dim);
+}
+
+.viewer .topbar nav {
+    display: flex;
+    gap: 1rem;
+}
+
+.viewer .topbar .meta {
+    margin-left: auto;
+    color: var(--v-dim);
+    font-family: var(--v-mono);
+    font-size: 0.75rem;
+}
+
+/* --- list page --------------------------------------------------------- */
+
+.viewer .search-bar form {
+    margin: 0;
+}
+
+.viewer .search-bar input[type="search"] {
+    width: 100%;
+    font-family: var(--v-mono);
+    font-size: 0.95rem;
+}
+
+.viewer .search-bar .hint {
+    color: var(--v-dim);
+    font-size: 0.8rem;
+    margin-block: 0.4rem 1rem;
+}
+
+.viewer .notice {
+    border-left: 3px solid var(--v-warn);
+    background: var(--v-chrome-bg);
+    padding: 0.4rem 0.75rem;
+    margin-block: 0.5rem;
+}
+
+.viewer .count,
+.viewer .empty {
+    color: var(--v-dim);
+    margin-block: 0.5rem;
+}
+
+.viewer .table-wrap {
+    overflow-x: auto;
+}
+
+.viewer table.sessions {
+    width: 100%;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.viewer table.sessions th {
+    font-weight: 600;
+    color: var(--v-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.7rem;
+}
+
+.viewer table.sessions td,
+.viewer table.sessions th {
+    padding: 0.35rem 0.6rem;
+}
+
+.viewer table.sessions .id,
+.viewer table.sessions .num,
+.viewer table.sessions .when {
+    font-family: var(--v-mono);
+}
+
+.viewer .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer table.sessions .models {
+    white-space: normal;
+    min-width: 12rem;
+}
+
+.viewer .model {
+    display: inline-block;
+    font-family: var(--v-mono);
+    font-size: 0.75rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: 999px;
+    padding: 0 0.5rem;
+    margin: 0.1rem 0.25rem 0.1rem 0;
+}
+
+.viewer .model .n {
+    color: var(--v-dim);
+}
+
+.viewer tr.active .id a {
+    font-weight: 700;
+}
+
+.viewer .badge-active {
+    color: var(--v-ok);
+}
+
+.viewer .htmx-request.results,
+.viewer .results.htmx-swapping {
+    opacity: 0.6;
+}

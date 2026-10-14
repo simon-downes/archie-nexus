@@ -1,11 +1,14 @@
 """Web console route handlers for the orchestrator.
 
-Provides a read-only HTML view of orchestrator state at GET /.
+Provides read-only HTML views of orchestrator state: running sessions at GET /,
+credential status at /ui/auth, and the session log viewer under /ui/sessions.
 Localhost-only, no auth, no session control actions.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,9 +19,18 @@ from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
 
 from archie_orchestrator.docker import list_sessions
+from archie_orchestrator.session_index import SessionIndex, SessionSummary, sessions_dir
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+log = logging.getLogger(__name__)
+
+VIEWER_CSP = (
+    "default-src 'self'; img-src 'self' data:; style-src 'self'; "
+    "script-src 'self'; connect-src 'self'"
+)
+MAX_ROWS = 200
 
 
 def _uptime(start_time: datetime) -> str:
@@ -129,3 +141,81 @@ async def sessions_page(request: Request) -> HTMLResponse:
             "version": _get_version(),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Session log viewer
+# ---------------------------------------------------------------------------
+
+
+def _viewer_response(request: Request, name: str, context: dict, status_code: int = 200):
+    """Render a viewer template with the viewer Content-Security-Policy."""
+    response = templates.TemplateResponse(
+        request, name, {"version": _get_version(), **context}, status_code=status_code
+    )
+    response.headers["Content-Security-Policy"] = VIEWER_CSP
+    return response
+
+
+def _session_index(request: Request) -> SessionIndex:
+    index = getattr(request.app.state, "session_index", None)
+    if index is None:
+        index = SessionIndex()
+        request.app.state.session_index = index
+    return index
+
+
+def _active_ids() -> set[str] | None:
+    """Return running session IDs, or None when Docker cannot be queried."""
+    try:
+        return {s.session_id for s in list_sessions()}
+    except OSError as exc:
+        log.warning("Active session lookup failed: %s", exc)
+        return None
+
+
+def _fmt_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def _fmt_cost(value: float) -> str:
+    return f"${value:.4f}"
+
+
+def _fmt_started(summary: SessionSummary) -> str:
+    if summary.started_at is None:
+        return "—"
+    return summary.started_at.strftime("%Y-%m-%d %H:%M")
+
+
+def _row(summary: SessionSummary, active: set[str]) -> dict:
+    return {
+        "session_id": summary.session_id,
+        "workspace": summary.workspace,
+        "started": _fmt_started(summary),
+        "models": summary.models,
+        "input_tokens": _fmt_int(summary.input_tokens),
+        "cache_read_tokens": _fmt_int(summary.cache_read_tokens),
+        "cache_write_tokens": _fmt_int(summary.cache_write_tokens),
+        "output_tokens": _fmt_int(summary.output_tokens),
+        "cost": _fmt_cost(summary.cost_usd),
+        "active": summary.session_id in active,
+        "error": summary.error,
+    }
+
+
+async def session_list_page(request: Request) -> HTMLResponse:
+    """GET /ui/sessions — persisted session logs, newest first."""
+    q = request.query_params.get("q", "")
+    index = _session_index(request)
+    summaries, active = await asyncio.gather(
+        asyncio.to_thread(index.summaries, sessions_dir()),
+        asyncio.to_thread(_active_ids),
+    )
+    notices: list[str] = []
+    if active is None:
+        notices.append("Active status unavailable: Docker could not be queried.")
+        active = set()
+    rows = [_row(s, active) for s in summaries[:MAX_ROWS]]
+    context = {"q": q, "rows": rows, "total": len(summaries), "notices": notices}
+    return _viewer_response(request, "viewer/list.html", context)

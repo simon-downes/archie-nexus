@@ -1,0 +1,48 @@
+<section id="results" class="chrome results">
+    {% for notice in notices %}
+    <p class="notice">{{ notice }}</p>
+    {% endfor %}
+    {% if total == 0 %}
+    <p class="empty">{% if q %}No sessions match this search.{% else %}No session logs.{% endif %}</p>
+    {% else %}
+    <p class="count">{% if rows|length < total %}Showing {{ rows|length }} of {{ total }}{% else %}{{ total }} session{{ "" if total == 1 else "s" }}{% endif %}</p>
+    <div class="table-wrap">
+    <table class="sessions">
+        <thead>
+            <tr>
+                <th></th>
+                <th>Session</th>
+                <th>Workspace</th>
+                <th>Started (UTC)</th>
+                <th>Models</th>
+                <th class="num" title="Input tokens">In</th>
+                <th class="num" title="Cache read tokens">Cache R</th>
+                <th class="num" title="Cache write tokens">Cache W</th>
+                <th class="num" title="Output tokens">Out</th>
+                <th class="num">Cost</th>
+            </tr>
+        </thead>
+        <tbody id="session-rows">
+            {% for row in rows %}
+            <tr data-session-id="{{ row.session_id }}"{% if row.active %} class="active"{% endif %}>
+                <td class="state">{% if row.active %}<span class="badge-active" title="Running">●</span>{% endif %}</td>
+                <td class="id"><a href="/ui/sessions/{{ row.session_id }}">{{ row.session_id }}</a></td>
+                <td>{{ row.workspace }}</td>
+                <td class="when">{{ row.started }}</td>
+                {% if row.error %}
+                <td colspan="6"><span class="err">unreadable</span> <span class="dim">{{ row.error }}</span></td>
+                {% else %}
+                <td class="models">{% for key, turns in row.models %}<span class="model">{{ key }} <span class="n">×{{ turns }}</span></span>{% else %}<span class="dim">—</span>{% endfor %}</td>
+                <td class="num">{{ row.input_tokens }}</td>
+                <td class="num">{{ row.cache_read_tokens }}</td>
+                <td class="num">{{ row.cache_write_tokens }}</td>
+                <td class="num">{{ row.output_tokens }}</td>
+                <td class="num cost">{{ row.cost }}</td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% endif %}
+</section>

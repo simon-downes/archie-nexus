@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false, "historyRestoreAsHxRequest": false}'>
+    <title>{% block title %}Session logs{% endblock %} — Archie</title>
+    <link rel="stylesheet" href="/static/vendor/nimble.min.css">
+    <link rel="stylesheet" href="/static/viewer/viewer.css">
+    {% block styles %}{% endblock %}
+    <script src="/static/vendor/htmx.min.js" defer></script>
+    {% block scripts %}{% endblock %}
+</head>
+<body class="viewer">
+    <header class="chrome topbar">
+        <a class="brand" href="/ui/sessions">Archie <span>session logs</span></a>
+        <nav>
+            <a href="/">Running</a>
+            <a href="/ui/sessions">Logs</a>
+            <a href="/ui/auth">Auth</a>
+        </nav>
+        <span class="meta">v{{ version }}</span>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

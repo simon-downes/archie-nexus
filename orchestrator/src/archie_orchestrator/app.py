@@ -2,6 +2,7 @@
 
 Routes:
   GET    /                                — web console (session list)
+  GET    /ui/sessions                     — session log viewer (list and search)
   GET    /health                          — liveness probe
   GET    /sessions                        — list running archie sessions
   POST   /sessions                        — start a new session
@@ -42,7 +43,7 @@ from archie_orchestrator.proxy import (
     proxy_status,
     proxy_stream,
 )
-from archie_orchestrator.web import auth_status_page, sessions_page
+from archie_orchestrator.web import auth_status_page, session_list_page, sessions_page
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -481,6 +482,7 @@ app = Starlette(
         Route("/", sessions_page, methods=["GET"]),
         Route("/auth/status", auth_status, methods=["GET"]),
         Route("/ui/auth", auth_status_page, methods=["GET"]),
+        Route("/ui/sessions", session_list_page, methods=["GET"]),
         Route("/health", health),
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),
