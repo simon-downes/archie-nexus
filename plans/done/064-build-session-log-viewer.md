@@ -1,6 +1,6 @@
 # 064 — Session log viewer
 
-Status: reviewing
+Status: done
 Branch: build-it/064-session-log-viewer (base: main @ 02bfe1c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/064-session-log-viewer
 Updated: 2026-10-14
@@ -319,6 +319,7 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
 
 ## Change log
 
+- C3 (review, browser evidence): tool row status classes renamed `ok`/`error`/`pending` → `is-ok`/`is-error`/`is-pending` because `.ok` is also the green text utility and tinted all nested content; R10 AC updated. No scope change.
 - C2 (review): Review fixes changed behaviour and structure — (a) each event's fragments go out as one SSE message with the event id (was one message per fragment, last one carrying the id), so reconnect cursors never split an event; (b) SSE data is split on CR, LF and CRLF; (c) a newly created subagent group is sent once, already holding its first item; (d) the first `text_delta` a builder sees, and an `assistant_message` with no local stream, emit a removal marker (`<template data-remove-id>`, applied by `live.js` before the swap) instead of htmx `hx-swap-oob="delete"`, which logs `htmx:oobErrorNoTarget` when the target is absent; (e) `read_events` in `session_index.py` also treats `UnicodeDecodeError` as unreadable, and the live relay ends with a notice on an unreadable log; (f) the detail page renders in a worker thread; (g) the relay queue is bounded at 1024 frames, matching the agent; (h) exec source previews are capped; (i) the CSP adds `frame-ancestors`, `base-uri`, `form-action`; (j) token/cost totals use a new `UsageTotals` in `shared/src/archie_shared/session/accounting.py`, which `session_accounting` now also uses; `proxy.resolve_session` was renamed `resolve_session`; number formatting is two Jinja filters (`tokens`, `usd`). Evidence: reviewer reproductions and the new regression tests. No scope change.
 - C1 (M4): `replace` fragments carry `hx-swap-oob="outerHTML:#<target_id>"` instead of bare `outerHTML` — a finished stream (`stream-…`) is replaced by a message node with a different id, so htmx's default id matching would miss it; R15/R18 ACs and tests assert the explicit selector. Fragments are built by `render_change` in `web.py` (Python wraps the node macros) rather than a separate Jinja macro, so the root-element `hx-swap-oob` injection lives in one place. Live-only `text_delta` fragments have no SSE `id`, so reconnect cursors are always persisted event ids. No scope change.
 ## Risks
@@ -352,8 +353,24 @@ Three orchestrator modules feed two Jinja pages and one SSE endpoint. `session_i
   - ⚠️ reconnect while a child streams left the old, emptied group in the page with a duplicate id → fixed: a new group is preceded by a removal marker for its own id; `test_resumed_child_stream_replaces_stale_group` (failed first).
   - ❓ stale `proxy._resolve_session` references in the plan → updated.
   - Stopped after two rounds (skill limit); the round-2 ❌ is fixed and covered by a test that failed before the fix.
+- Browser evidence pass found one more defect (treated as ❌): tool rows used the status as a bare class (`ok`/`error`), which collided with the `.ok`/`.err` colour utilities, so everything inside a successful `task` row (subagent messages) was green. Fixed by renaming the row classes to `is-ok`/`is-error`/`is-pending` (C3); re-checked in agent-browser (computed colour of nested text is the body colour).
+- Merge risk: Medium: the worst remaining failure is a live-view glitch (a misplaced or stale fragment until reload) or a slow first list load on a very large sessions directory; the routes are read-only, untrusted log content is escaped and covered by a CSP, and the one shared change (`UsageTotals` behind `session_accounting`) keeps the same output, which the existing accounting tests check.
 
 ## Outcome
+
+Delivered a read-only session log viewer in the orchestrator:
+
+- `/ui/sessions` lists every `<ARCHIE_HOME_DIR>/sessions/*.jsonl`, newest first, with workspace, start time, models ordered by turn count, input/cache read/cache write/output tokens, cost, and an active marker. One search box takes words, `"phrases"`, `after:`/`before:` dates and `workspace:` prefixes, updates the table as you type (htmx), and keeps the query in the URL.
+- `/ui/sessions/<id>` renders the transcript by turn: user and assistant Markdown in a reading style distinct from the chrome, collapsible tool rows with summaries from `tool_summaries.py`, inputs and capped results, subagent groups nested under their `task` row, compaction/error/interrupt notices, and per-turn usage.
+- For an active session, `live.js` follows `/ui/sessions/<id>/live` (SSE), which relays the agent `/stream` read-only as htmx fragments: streamed text, tool progress, subagents, usage and a live-state badge; it resumes from the last persisted event id after a drop.
+
+Verification (all run in the worktree):
+
+- `uv run pytest` → 1240 passed (baseline 1146; 94 new tests); `uv run ruff check .` and `uv run ruff format --check .` clean.
+- Real local data (216 logs, 112 MB): list cold 0.91 s, warm 0.01 s; largest transcript (11 MB log) 200 in 0.4 s, 9.7 MB page.
+- agent-browser, with a stand-in agent WebSocket and a stub `docker`: search swaps, notices, history; streaming → final Markdown; tool pending → ok; subagent nesting; usage updates; reconnect after killing the orchestrator mid-stream (resumed with the stored cursor, no duplicate ids); "Session ended" on agent close; no console errors under the CSP.
+
+Not verified: a real agent container (Docker is not available here), so the relay was exercised against a stand-in agent that follows the `/stream` contract, not the real agent; dark mode was not looked at; browsers other than headless Chromium.
 
 PR: pending
 
