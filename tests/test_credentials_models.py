@@ -29,7 +29,7 @@ def test_all_agent_kit_providers_have_typed_definitions():
 
 
 def test_provider_and_status_responses_are_secret_free_and_strict():
-    provider = StaticProviderResponse(name="github", fields=["token"])
+    provider = StaticProviderResponse(name="github", fields=["personal_token", "work_token"])
     status = CredentialStatus(
         provider="github", auth_type="static", configured=True, state="configured"
     )

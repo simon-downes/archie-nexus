@@ -304,3 +304,112 @@ def test_first_other_remote_when_no_known_names(env, tmp_path):
     repo = make_repo(tmp_path / "r", work="git@github.com:tillo/service.git")
     _, data = run_gh(env, "pr", "list", cwd=repo)
     assert data["GH_TOKEN"] == "work-secret"
+
+
+# --- Review fixes ---
+
+
+@pytest.fixture
+def work_repo(tmp_path):
+    return make_repo(tmp_path / "w", origin="git@github.com:tillo/service.git")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["repo", "view", "-b", "feature/foo"],
+        ["repo", "sync", "--branch", "release/1.0"],
+        ["repo", "deploy-key", "add", "/home/archie/.ssh/id.pub"],
+    ],
+)
+def test_repo_flag_values_do_not_override_remote(env, work_repo, args):
+    _, data = run_gh(env, *args, cwd=work_repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_repo_create_uses_target_not_template(env, personal_repo):
+    args = ["repo", "create", "--template", "simon-downes/t", "tillo/new"]
+    _, data = run_gh(env, *args, cwd=personal_repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["repo", "list", "tillo"],
+        ["repo", "list", "--limit", "5", "tillo"],
+        ["search", "repos", "--owner", "tillo"],
+        ["search", "repos", "--owner=tillo"],
+        ["api", "https://api.github.com/repos/tillo/service"],
+    ],
+)
+def test_owner_arguments_select_work_token(env, personal_repo, args):
+    _, data = run_gh(env, *args, cwd=personal_repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_repo_list_without_owner_uses_remote(env, work_repo):
+    _, data = run_gh(env, "repo", "list", cwd=work_repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_non_github_upstream_is_ignored(env, tmp_path):
+    repo = make_repo(
+        tmp_path / "r",
+        origin="git@github.com:tillo/service.git",
+        upstream="git@gitlab.com:someone/mirror.git",
+    )
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_local_path_upstream_is_ignored(env, tmp_path):
+    repo = make_repo(
+        tmp_path / "r",
+        origin="https://github.com/tillo/service.git",
+        upstream=str(tmp_path / "elsewhere"),
+    )
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_gh_resolved_with_other_value_is_used(env, tmp_path):
+    repo = make_repo(
+        tmp_path / "r",
+        origin="git@github.com:simon-downes/service.git",
+        upstream="git@github.com:simon-downes/other.git",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "fork", "git@github.com:tillo/service.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "remote.fork.gh-resolved", "tillo/service"], check=True
+    )
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_malformed_config_warns_and_uses_personal(env, work_repo):
+    config = Path(env["ARCHIE_HOME_DIR"]) / "config.yaml"
+    config.write_text("auth: [unclosed\n")
+    proc, data = run_gh(env, "pr", "list", cwd=work_repo)
+    assert data["GH_TOKEN"] == "personal-secret"
+    assert f"gh: could not read {config}" in proc.stderr
+
+
+def test_non_string_token_is_treated_as_missing(env, personal_repo):
+    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
+    creds.write_text("github:\n  personal_token: [a, b]\n  work_token: w\n")
+    proc, data = run_gh(env, "pr", "list", cwd=personal_repo)
+    assert data["GH_TOKEN"] is None
+    assert "github.personal_token is not set" in proc.stderr
+
+
+def test_runs_when_home_and_archie_home_are_unset(env, tmp_path):
+    bare = {k: v for k, v in env.items() if k not in {"HOME", "ARCHIE_HOME_DIR"}}
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    proc, data = run_gh(bare, "--version", cwd=outside)
+    assert proc.returncode == 0
+    assert data["argv"] == ["--version"]

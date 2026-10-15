@@ -312,7 +312,7 @@ Projection is a startup snapshot. New containers use the latest stored credentia
 
 GitHub credentials are not projected into the container environment. The image installs the real GitHub CLI as `gh-base` and puts a wrapper at `/usr/local/bin/gh` (source: `container/bin/gh`). On each call the wrapper:
 
-1. Finds the target owner, in this order: a `gh api` endpoint starting `repos/`, `orgs/` or `users/<owner>`, or the `gh repo <subcommand> <owner/repo>` argument; then `-R`/`--repo`; then `GH_REPO`; then the git remote gh treats as the base repository (`gh-resolved=base`, then `upstream`, `github`, `origin`, then the first remote).
+1. Finds the target owner, in this order: a `gh api` endpoint (path or full URL) starting `repos/`, `orgs/` or `users/<owner>`, the repository argument of `gh repo <subcommand>`, or the owner argument of `gh repo list`; then `--owner`; then `-R`/`--repo`; then `GH_REPO`; then the GitHub remote gh treats as the base repository (the one `gh repo set-default` marked, then `upstream`, `github`, `origin`, then the first). Remotes on other hosts are ignored.
 2. Reads `auth.providers.github.work_orgs` from `config.yaml` with `yq`. If the owner matches an entry exactly, ignoring case, it uses `github.work_token`. Otherwise it uses `github.personal_token`.
 3. Reads that one token from `credentials.yaml` with `yq` and runs `gh-base` with all arguments unchanged and `GH_TOKEN` set only in that process.
 
@@ -323,7 +323,9 @@ auth:
       work_orgs: [tillo]
 ```
 
-Both files are read on every call, so changes apply to running sessions. If the caller already set `GH_TOKEN` or `GITHUB_TOKEN`, the wrapper leaves the environment alone. If the selected token is missing or a file cannot be parsed, the wrapper prints a warning to stderr and runs `gh-base` without a token. Owner detection uses argument patterns rather than gh's flag definitions, so a command that names its repository only through a URL argument (for example `gh pr view https://github.com/o/r/pull/1`) uses the token for the current directory's remote.
+Both files are read on every call, so changes apply to running sessions. If the caller already set `GH_TOKEN` or `GITHUB_TOKEN`, the wrapper leaves the environment alone. If the selected token is missing or not a string, or a file cannot be parsed, the wrapper prints a warning to stderr and runs `gh-base` without a token; gh then falls back to its own stored login, if one exists in the container.
+
+Owner detection uses argument patterns rather than gh's flag definitions. A `gh repo` argument that directly follows another flag is skipped, because it may be that flag's value (`gh repo view -b feature/x`). The cost is that `gh repo view --web o/r` uses the remote's token. A command that names its repository only through a URL argument (for example `gh pr view https://github.com/o/r/pull/1`) also uses the token for the current directory's remote. Pass `-R owner/repo` in those cases.
 
 `work_orgs` is accepted only under `auth.providers.github`.
 

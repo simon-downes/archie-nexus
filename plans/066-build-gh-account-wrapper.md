@@ -71,18 +71,18 @@ Codebase facts:
 | D7 | How the real gh is renamed | `dpkg-divert --rename` `/usr/bin/gh` → `/usr/bin/gh-base` | `mv` after install | `mv` is undone by any later `apt-get upgrade`, which would reinstate `/usr/bin/gh`; a diversion survives upgrades | self |
 | D8 | How the wrapper finds the real gh | `gh-base` on `PATH` | hard-coded `/usr/bin/gh-base`; test-only env var | PATH lookup lets tests put a fake `gh-base` first without a test-only knob | self |
 | D9 | Owner source order (revised, C1) | `gh api` endpoint `repos\|orgs\|users/<owner>` or `gh repo <sub> <owner/repo>` positional → `-R/--repo` arg → `GH_REPO` → git remote | remote only; `-R`/`GH_REPO` first | Matches what gh itself targets: a literal endpoint or repo argument is what gh calls, and explicit repo flags override the cwd repo | self |
-| D10 | Which git remote | `gh-resolved=base` remote, then `upstream`, `github`, `origin`, then first other | `origin` only | Mirrors gh's own base-repo choice so the token matches the repo gh talks to (a fork's PRs go to `upstream`) | self |
+| D10 | Which git remote (revised, C2) | Among GitHub-host remotes only: any `gh-resolved` remote, then `upstream`, `github`, `origin`, then first | `origin` only; name order over all remotes | Mirrors gh's own base-repo choice so the token matches the repo gh talks to (a fork's PRs go to `upstream`); gh ignores non-GitHub remotes | self |
 | D11 | Owner match | Case-insensitive, exact owner | substring / glob | GitHub owner names are case-insensitive; substring would let `tillo-fork` match `tillo` | self |
 | D12 | Caller-set `GH_TOKEN`/`GITHUB_TOKEN` | If either is non-empty, the wrapper sets nothing and execs `gh-base` with the env as-is | always overwrite | With projection removed, a set token is deliberate (e.g. a one-off `GH_TOKEN=… gh …`); setting `GH_TOKEN` beside a caller's `GITHUB_TOKEN` would silently override it because gh prefers `GH_TOKEN` | self |
 | D13 | Selected token missing | Unset `GH_TOKEN`, warn once on stderr naming the field, still run gh | exit non-zero | `gh --version`, `gh help` and public reads work without auth; gh prints its own auth error otherwise | self |
 | D14 | Required fields | Both `personal_token` and `work_token` required on login | optional fields | `StaticProvider.fields` doubles as the required list (`auth.py:489`); optional fields would need a new provider concept | self |
 | D15 | `work_orgs` on non-github providers | Reject at config load | silently ignore | `AuthProviderOverride` is shared by all providers; a misplaced key would otherwise do nothing silently | self |
 | D16 | Old `github.token` entries | Not migrated; status shows "Invalid stored credential" until `archie auth login github` is rerun | auto-migrate token into one field | Unknown which account the old token belongs to; a wrong guess routes requests to the wrong owner | self |
+| D17 | Wrapper source path | `container/bin/gh` (new) | `scripts/`, repo root | Container-only file, copied by the Dockerfile; keeps it apart from Python packages | self |
 | D18 | Unreadable YAML (missing or malformed file) | Treat as empty, print `gh: could not read <path>` to stderr for malformed files, continue | exit non-zero | Same reasoning as D13: gh still runs and reports its own auth error; a broken config shouldn't block `gh --version` | self |
-| D19 | Argument scanning strategy | Pattern scan with no flag table: `-R`/`--repo` anywhere before `--`; for `api`, the first later arg matching `^/?(repos\|orgs\|users)/<owner>`; for `repo <sub>`, the first later non-flag arg shaped `owner/repo` | a table of value-taking flags per command | A flag table duplicates gh's CLI surface and goes stale with gh releases; the pattern scan is wrong only when a flag value is literally `-R`/`--repo` or an `owner/repo`-shaped string before the real one, which is recorded under Risks | self |
+| D19 | Argument scanning strategy (revised, C2) | Pattern scan with no flag table; a `repo` positional directly after a bare flag is skipped as a possible flag value; only `repo` subcommands that take a repository use the positional; `repo list` takes a bare owner; `--owner` counts: `-R`/`--repo` anywhere before `--`; for `api`, the first later arg matching `^/?(repos\|orgs\|users)/<owner>`; for `repo <sub>`, the first later non-flag arg shaped `owner/repo` | a table of value-taking flags per command | A flag table duplicates gh's CLI surface and goes stale with gh releases; the pattern scan is wrong only when a flag value is literally `-R`/`--repo` or an `owner/repo`-shaped string before the real one, which is recorded under Risks | self |
 | D20 | Wrapper tests on hosts without bash/git/yq | `pytest.mark.skipif` when any is missing | hard fail | `uv run pytest` also runs on the host, where yq isn't a project dependency | self |
 | D21 | Dockerfile COPY placement and mode | `COPY container/bin/gh` next to the `entrypoint.sh` COPY, `chmod +x` in that RUN | `COPY --chmod` right after the gh install | Late placement keeps wrapper edits from invalidating the tool layers; plain `chmod` matches the entrypoint pattern and doesn't need BuildKit | self |
-| D17 | Wrapper source path | `container/bin/gh` (new) | `scripts/`, repo root | Container-only file, copied by the Dockerfile; keeps it apart from Python packages | self |
 
 ## Requirements
 
@@ -209,6 +209,7 @@ drops env projection, and types `work_orgs`.
 
 ## Change log
 
+- C2 (review): owner resolution widened and narrowed after code review — `repo` positionals after a bare flag are skipped (`-b feature/x` had picked owner `feature`), only repository-taking `repo` subcommands use the positional, `repo list <owner>`, `--owner` and full-URL `api` endpoints count, non-GitHub remotes are ignored, any `gh-resolved` value counts, non-string YAML values are treated as missing, and an unset `HOME` no longer aborts — evidence: reviewer reproductions with a fake `gh-base` — no scope change.
 - C1 (M2): owner precedence changed so an `api` endpoint or `repo` positional beats `-R`/`GH_REPO`, and `users/<owner>` endpoints were added — a literal endpoint is the repo gh calls, while `GH_REPO` only fills `{owner}` placeholders — no scope change.
 
 ## Risks
@@ -218,13 +219,21 @@ drops env projection, and types `work_orgs`.
 - Not verified: whether `uploads.github.com/user-attachments` accepts a fine-grained token.
 - Existing `github.token` entries become invalid until login is rerun (D16).
 - A user `config.yaml` that sets `auth.providers.github.env` (e.g. `{token: GH_TOKEN}`) makes `runtime_environment()` raise "maps unknown credential field" and container start fail; the docs migration note tells users to remove it.
-- D19 pattern scan misreads a flag value that is literally `-R`/`--repo`, or an `owner/repo`-shaped value before the real `gh repo <sub>` positional; the token then follows that string's owner.
+- D19 pattern scan misreads a flag value that is literally `-R`/`--repo`/`--owner`. A `gh repo` positional after a boolean flag (`gh repo view --web o/r`) is skipped and the remote's token is used. Documented in `auth-credentials.md` with `-R` as the workaround.
+- With no token selected, gh falls back to any login stored in the container's gh config; the warning says so.
 
 ## Review
 
 - Plan review: 1 pass. 3 ⚠️ (GITHUB_TOKEN-only case → D12/AC; malformed YAML → D18; arg scanning strategy → D19) and 6 ℹ️ (root `-R` AC → `gh issue list -R`; default-home AC; D6 wording; test skips → D20; COPY placement/BuildKit → D21; M4 Verify made exact; existing `github.env` override → Risks). All accepted; no ❌, so no second pass.
-- Code review:
-- Merge risk:
+- Code review: 1 round, roles correctness, conventions, risk (risk ran: secrets, shell, public config key). No ❌, so no second round. Accepted and fixed:
+  - correctness ⚠️ `repo` flag values (`-b feature/x`, `--template o/t`, deploy-key path) taken as target → skip positional after a bare flag; positional only for repository-taking subcommands (C2).
+  - correctness ⚠️ non-GitHub `upstream` chosen as base remote → GitHub-host remotes only (C2).
+  - risk ⚠️ `repo list <owner>` / `--owner` ignored → both now select the owner (C2).
+  - ℹ️ unset `HOME` aborted under `set -u` → `${HOME:-}`; full-URL `api` endpoints; malformed `config.yaml` test; non-string YAML token → treated as missing; missing-token warning names gh's stored-login fallback.
+  - conventions ℹ️ README layout row for `container/`; `test_credentials_models.py` github fields; `config.md` defaults block restored to `providers: {}` and re-wrapped; D17 row order; architecture.md pointer (answers the ❓: yes, a one-line pointer was added).
+  - ❓ `gh-resolved` values other than `base`: any `gh-resolved` remote now counts.
+  - Rejected: none.
+- Merge risk: Medium: a wrong owner guess sends the other account's token, so gh returns 404/permission errors or public-only results for that call; it is limited to `gh` (git uses SSH), each token is fine-grained to one owner, and `-R` overrides the guess.
 
 ## Outcome
 
