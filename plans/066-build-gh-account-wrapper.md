@@ -1,6 +1,6 @@
 # 066 — Owner-aware gh wrapper with work and personal GitHub tokens
 
-Status: implementing
+Status: reviewing
 Branch: build-it/066-gh-account-wrapper (base: main @ 23b01dd)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/066-gh-account-wrapper
 Updated: 2026-10-15
