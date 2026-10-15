@@ -40,8 +40,9 @@ written before code, kept true during it, and describing the result at the end.
   separate them. Otherwise write the assumption into the plan and let implementation
   test it.
 - **The plan is the memory.** After a compaction or restart, the plan and git history
-  must be enough to continue. Re-read the plan at the start of each stage, and re-read
-  this skill after a compaction.
+  must be enough to continue. Re-read the plan at the start of each stage. After a
+  compaction, re-read this file with `read` at `<skill-dir>/SKILL.md`; reloading the
+  skill may return only a "content already loaded" notice.
 - **Keep the plan true.** Edit it to describe what is actually being built. Log a
   deviation only when it changes scope, behaviour or a recorded decision.
 - **Scale depth; keep the gates.** A small change gets a short plan, one milestone and
