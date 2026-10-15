@@ -22,7 +22,9 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-Prefer scoping Ruff commands to files you touched to avoid unrelated churn. Ruff is configured in `pyproject.toml` with line length 100 and rules `E W F I B C4 N UP` (`E501` is ignored).
+Prefer scoping Ruff commands to files you touched to avoid unrelated churn.
+
+The session log viewer's syntax-highlighting stylesheet is generated. After a Pygments upgrade, regenerate it with `uv run python -m archie_orchestrator.transcript --pygments-css > orchestrator/src/archie_orchestrator/static/viewer/pygments.css` (`tests/test_web_session_detail.py` checks that it is current). Ruff is configured in `pyproject.toml` with line length 100 and rules `E W F I B C4 N UP` (`E501` is ignored).
 
 ## Change guidance
 

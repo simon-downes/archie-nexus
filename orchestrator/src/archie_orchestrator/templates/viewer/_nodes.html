@@ -1,0 +1,106 @@
+{#- One macro per transcript node kind. Used by detail.html and by live fragments. -#}
+
+{% macro node(n) -%}
+{%- if n.kind == "turn" %}{{ turn(n) }}
+{%- elif n.kind == "text" %}{{ text(n) }}
+{%- elif n.kind == "stream" %}{{ stream(n) }}
+{%- elif n.kind == "tool" %}{{ tool(n) }}
+{%- elif n.kind == "subagent" %}{{ subagent(n) }}
+{%- elif n.kind == "notice" %}{{ notice(n) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro turn(t) -%}
+<section class="turn" id="{{ t.id }}">
+    <div class="chrome turn-head"><span class="turn-no">Turn {{ t.number }}</span></div>
+    {% if t.user %}{{ text(t.user) }}{% endif %}
+    <div class="turn-items" id="{{ t.items_id }}">
+        {%- for item in t.items %}{{ node(item) }}{% endfor -%}
+    </div>
+    {{ turn_footer(t) }}
+</section>
+<!-- /turn -->
+{%- endmacro %}
+
+{% macro turn_footer(t) -%}
+<div class="chrome turn-foot" id="{{ t.footer_id }}">
+    {%- set u = t.usage %}
+    {%- if u.requests %}
+    <span title="Root-scope requests in this turn">{{ u.requests }} request{{ "" if u.requests == 1 else "s" }}</span>
+    <span title="Input tokens">in {{ u.input_tokens|tokens }}</span>
+    <span title="Cache read / write tokens">cache {{ u.cache_read_tokens|tokens }} / {{ u.cache_write_tokens|tokens }}</span>
+    <span title="Output tokens">out {{ u.output_tokens|tokens }}</span>
+    <span class="cost">{{ u.cost_usd|usd }}</span>
+    {%- endif %}
+    {%- if t.stop_reason %}<span class="dim">{{ t.stop_reason }}</span>{% endif -%}
+</div>
+{%- endmacro %}
+
+{% macro text(m) -%}
+<div class="msg msg-{{ m.role }}" id="{{ m.id }}">
+    <div class="chrome msg-role">{{ "You" if m.role == "user" else "Archie" }}{% if m.interrupted %} <span class="dim">(interrupted)</span>{% endif %}</div>
+    {%- if m.content %}
+    <div class="md">{{ m.html }}</div>
+    {%- endif %}
+</div>
+{%- endmacro %}
+
+{% macro stream(s) -%}
+<div class="msg msg-assistant streaming" id="{{ s.id }}">
+    <div class="chrome msg-role">Archie <span class="dim">(streaming)</span></div>
+    <div class="md stream" id="{{ s.id }}-text">{{ s.text }}</div>
+</div>
+{%- endmacro %}
+
+{% macro tool(t) -%}
+<details class="tool is-{{ t.status }}" id="{{ t.id }}">
+    <summary class="chrome tool-line">
+        <span class="tool-status" title="{{ t.status }}"></span>
+        <span class="tool-summary">{{ t.summary_html }}</span>
+    </summary>
+    <div class="chrome tool-body">
+        {%- set detail = t.detail_html %}
+        {%- if detail %}<pre class="tool-detail">{{ detail }}</pre>{% endif %}
+        <h4>Input <span class="dim">{{ t.name }}</span></h4>
+        {{ t.input_html }}
+        {%- if t.result is not none %}
+        {%- set shown, omitted = t.result_preview %}
+        <h4>Result{% if t.status == "error" %} <span class="err">error</span>{% endif %}</h4>
+        <pre class="tool-result">{{ shown }}</pre>
+        {%- if omitted %}<p class="omitted">… {{ omitted }} more characters</p>{% endif %}
+        {%- endif %}
+    </div>
+    <div class="subagents" id="{{ t.children_id }}">
+        {%- for child in t.children %}{{ subagent(child) }}{% endfor -%}
+    </div>
+</details>
+<!-- /{{ t.id }} -->
+{%- endmacro %}
+
+{% macro subagent(s) -%}
+<section class="subagent" id="{{ s.id }}">
+    <div class="chrome sub-head">Subagent {{ s.index + 1 }}</div>
+    <div class="sub-items" id="{{ s.items_id }}">
+        {%- for item in s.items %}{{ node(item) }}{% endfor -%}
+    </div>
+</section>
+{%- endmacro %}
+
+{% macro notice(n) -%}
+<aside class="notice-block {{ n.variant }}" id="{{ n.id }}">
+    <p class="chrome"><strong>{{ n.title }}</strong>{% if n.detail %} <span class="detail">{{ n.detail }}</span>{% endif %}</p>
+    {%- if n.body_markdown %}
+    <details class="chrome"><summary>Summary</summary><div class="md">{{ n.body_html }}</div></details>
+    {%- endif %}
+</aside>
+{%- endmacro %}
+
+{% macro usage(u) -%}
+<dl class="chrome usage" id="session-usage">
+    <div><dt>Input</dt><dd>{{ u.input_tokens|tokens }}</dd></div>
+    <div><dt>Cache read</dt><dd>{{ u.cache_read_tokens|tokens }}</dd></div>
+    <div><dt>Cache write</dt><dd>{{ u.cache_write_tokens|tokens }}</dd></div>
+    <div><dt>Output</dt><dd>{{ u.output_tokens|tokens }}</dd></div>
+    <div><dt>Cost</dt><dd class="cost">{{ u.cost_usd|usd }}</dd></div>
+</dl>
+{%- endmacro %}

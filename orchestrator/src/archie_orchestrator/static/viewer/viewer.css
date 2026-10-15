@@ -1,0 +1,534 @@
+/* Session log viewer. nimble.css supplies the classless base (in cascade layers);
+   these unlayered rules win over it. Chrome (navigation, tables, tool rows, meta)
+   uses small sans/mono type on tinted surfaces; turn content (.md) uses larger
+   reading type on a plain surface, so the two never blend. */
+
+body.viewer {
+    --nc-content-width: min(78rem, 100%);
+    --v-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --v-chrome-bg: var(--nc-surface-2);
+    --v-chrome-border: var(--nc-border);
+    --v-dim: color-mix(in oklab, var(--nc-text) 55%, transparent);
+    --v-user: light-dark(oklch(0.55 0.15 250), oklch(0.7 0.14 250));
+    --v-assistant: light-dark(oklch(0.55 0.13 160), oklch(0.72 0.13 160));
+    --v-tool: light-dark(oklch(0.55 0.04 260), oklch(0.65 0.04 260));
+    --v-ok: light-dark(#15803d, #67c26d);
+    --v-err: light-dark(#b91c1c, #ff6d67);
+    --v-warn: light-dark(#a16207, #e0b04a);
+    --v-default: light-dark(#6b6b6b, #8a8a8a);
+}
+
+.viewer .chrome {
+    font-size: 0.875rem;
+}
+
+.viewer .dim {
+    color: var(--v-dim);
+}
+
+.viewer .err {
+    color: var(--v-err);
+}
+
+.viewer .ok {
+    color: var(--v-ok);
+}
+
+/* --- top bar ----------------------------------------------------------- */
+
+.viewer .topbar {
+    display: flex;
+    align-items: baseline;
+    gap: 1.5rem;
+    padding-block: 0.75rem;
+    border-bottom: 1px solid var(--v-chrome-border);
+    margin-bottom: 1.25rem;
+}
+
+.viewer .topbar .brand {
+    font-weight: 700;
+    text-decoration: none;
+    color: var(--nc-text);
+}
+
+.viewer .topbar .brand span {
+    font-weight: 400;
+    color: var(--v-dim);
+}
+
+.viewer .topbar nav {
+    display: flex;
+    gap: 1rem;
+}
+
+.viewer .topbar .meta {
+    margin-left: auto;
+    color: var(--v-dim);
+    font-family: var(--v-mono);
+    font-size: 0.75rem;
+}
+
+/* --- list page --------------------------------------------------------- */
+
+.viewer .search-bar form {
+    margin: 0;
+}
+
+.viewer .search-bar input[type="search"] {
+    width: 100%;
+    font-family: var(--v-mono);
+    font-size: 0.95rem;
+}
+
+.viewer .search-bar .hint {
+    color: var(--v-dim);
+    font-size: 0.8rem;
+    margin-block: 0.4rem 1rem;
+}
+
+.viewer .notice {
+    border-left: 3px solid var(--v-warn);
+    background: var(--v-chrome-bg);
+    padding: 0.4rem 0.75rem;
+    margin-block: 0.5rem;
+}
+
+.viewer .count,
+.viewer .empty {
+    color: var(--v-dim);
+    margin-block: 0.5rem;
+}
+
+.viewer .table-wrap {
+    overflow-x: auto;
+}
+
+.viewer table.sessions {
+    width: 100%;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.viewer table.sessions th {
+    font-weight: 600;
+    color: var(--v-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.7rem;
+}
+
+.viewer table.sessions td,
+.viewer table.sessions th {
+    padding: 0.35rem 0.6rem;
+}
+
+.viewer table.sessions .id,
+.viewer table.sessions .num,
+.viewer table.sessions .when {
+    font-family: var(--v-mono);
+}
+
+.viewer .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer table.sessions .models {
+    white-space: normal;
+    min-width: 12rem;
+}
+
+.viewer .model {
+    display: inline-block;
+    font-family: var(--v-mono);
+    font-size: 0.75rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: 999px;
+    padding: 0 0.5rem;
+    margin: 0.1rem 0.25rem 0.1rem 0;
+}
+
+.viewer .model .n {
+    color: var(--v-dim);
+}
+
+.viewer tr.active .id a {
+    font-weight: 700;
+}
+
+.viewer .badge-active {
+    color: var(--v-ok);
+}
+
+.viewer .htmx-request.results,
+.viewer .results.htmx-swapping {
+    opacity: 0.6;
+}
+
+/* --- transcript: header ----------------------------------------------- */
+
+.viewer .session-head {
+    margin-bottom: 1.5rem;
+}
+
+.viewer .crumbs {
+    margin: 0;
+    color: var(--v-dim);
+}
+
+.viewer .session-id {
+    font-family: var(--v-mono);
+    font-size: 1.35rem;
+    margin-block: 0.25rem 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.viewer .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.25rem;
+    margin-block: 0 0.75rem;
+}
+
+.viewer .facts .workspace {
+    font-weight: 600;
+}
+
+.viewer dl.usage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.5rem;
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+}
+
+.viewer dl.usage div {
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+}
+
+.viewer dl.usage dt {
+    color: var(--v-dim);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.viewer dl.usage dd {
+    margin: 0;
+    font-family: var(--v-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer .live {
+    font-family: var(--nc-font-sans);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.1rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--v-chrome-border);
+    color: var(--v-dim);
+}
+
+.viewer .live .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.viewer .live.is-live {
+    color: var(--v-ok);
+    border-color: currentColor;
+}
+
+.viewer .live.is-live .dot {
+    animation: v-pulse 1.6s ease-in-out infinite;
+}
+
+.viewer .live.is-reconnecting {
+    color: var(--v-warn);
+}
+
+@keyframes v-pulse {
+    50% { opacity: 0.25; }
+}
+
+/* --- transcript: turns -------------------------------------------------- */
+
+.viewer .transcript {
+    display: flex;
+    flex-direction: column;
+    gap: 1.75rem;
+}
+
+.viewer .turn {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--v-chrome-border);
+}
+
+.viewer .turn-head {
+    color: var(--v-dim);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.viewer .turn-items,
+.viewer .sub-items {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.viewer .turn-foot {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    color: var(--v-dim);
+    font-family: var(--v-mono);
+    font-size: 0.72rem;
+}
+
+.viewer .turn-foot:empty {
+    display: none;
+}
+
+/* --- messages: the turn content, styled as reading text ----------------- */
+
+.viewer .msg {
+    border-left: 3px solid var(--v-assistant);
+    padding: 0.1rem 0 0.1rem 1rem;
+}
+
+.viewer .msg-user {
+    border-left-color: var(--v-user);
+    background: color-mix(in oklab, var(--v-user) 7%, transparent);
+    border-radius: 0 var(--nc-radius) var(--nc-radius) 0;
+    padding-block: 0.5rem;
+}
+
+.viewer .msg-role {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--v-assistant);
+    margin-bottom: 0.2rem;
+}
+
+.viewer .msg-user .msg-role {
+    color: var(--v-user);
+}
+
+.viewer .md {
+    font-size: 1rem;
+    line-height: 1.6;
+    max-width: 52rem;
+    overflow-wrap: anywhere;
+}
+
+.viewer .md > :first-child {
+    margin-top: 0;
+}
+
+.viewer .md > :last-child {
+    margin-bottom: 0;
+}
+
+.viewer .md pre.highlight {
+    font-size: 0.85rem;
+    line-height: 1.45;
+    overflow-x: auto;
+    padding: 0.75rem 1rem;
+    border-radius: var(--nc-radius);
+}
+
+.viewer .md table {
+    font-size: 0.9rem;
+}
+
+.viewer .align-right { text-align: right; }
+.viewer .align-center { text-align: center; }
+.viewer .align-left { text-align: left; }
+
+.viewer .md.stream {
+    white-space: pre-wrap;
+}
+
+.viewer .streaming.stale {
+    opacity: 0.5;
+}
+
+.viewer .streaming .md.stream::after {
+    content: "▍";
+    color: var(--v-assistant);
+    animation: v-pulse 1s steps(2) infinite;
+}
+
+/* --- tools: interface chrome -------------------------------------------- */
+
+.viewer details.tool {
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    background: var(--v-chrome-bg);
+    margin: 0;
+    padding: 0;
+}
+
+.viewer details.tool > summary.tool-line {
+    display: flex;
+    gap: 0.6rem;
+    align-items: baseline;
+    padding: 0.3rem 0.6rem;
+    margin: 0;
+    font-family: var(--v-mono);
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--nc-text);
+    cursor: pointer;
+    list-style: none;
+}
+
+.viewer details.tool > summary::-webkit-details-marker {
+    display: none;
+}
+
+.viewer .tool-summary {
+    overflow-wrap: anywhere;
+}
+
+.viewer .tool-status::before {
+    content: "✓";
+    color: var(--v-ok);
+}
+
+.viewer .tool.is-error > summary .tool-status::before {
+    content: "✗";
+    color: var(--v-err);
+}
+
+.viewer .tool.is-pending > summary .tool-status::before {
+    content: "…";
+    color: var(--v-warn);
+}
+
+.viewer .tool .b { font-weight: 700; }
+.viewer .tool .i { font-style: italic; }
+.viewer .tool .default { color: var(--v-default); }
+
+.viewer .tool-body {
+    padding: 0.25rem 0.75rem 0.75rem;
+    border-top: 1px solid var(--v-chrome-border);
+}
+
+.viewer .tool-body h4 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--v-dim);
+    margin-block: 0.6rem 0.25rem;
+}
+
+.viewer .tool-body pre {
+    font-size: 0.78rem;
+    line-height: 1.4;
+    max-height: 32rem;
+    overflow: auto;
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--nc-radius);
+    background: var(--nc-surface-1);
+    color: var(--nc-text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.viewer .omitted {
+    color: var(--v-dim);
+    font-style: italic;
+    font-size: 0.75rem;
+    margin: 0.25rem 0 0;
+}
+
+.viewer .subagents:empty {
+    display: none;
+}
+
+.viewer .subagents {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem 0.6rem 0.6rem 1.25rem;
+}
+
+.viewer .subagent {
+    border-left: 2px dashed var(--v-tool);
+    padding-left: 0.75rem;
+}
+
+.viewer .sub-head {
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--v-tool);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.35rem;
+}
+
+.viewer .subagent .msg .md {
+    font-size: 0.92rem;
+}
+
+/* --- notices ------------------------------------------------------------- */
+
+.viewer .notice-block {
+    border: 1px dashed var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    padding: 0.35rem 0.75rem;
+    font-size: 0.85rem;
+}
+
+.viewer .notice-block p {
+    margin: 0;
+}
+
+.viewer .notice-block .detail {
+    color: var(--v-dim);
+    font-family: var(--v-mono);
+    font-size: 0.8rem;
+    margin-left: 0.5rem;
+}
+
+.viewer .notice-block.turn-error {
+    border: 1px solid var(--v-err);
+    color: var(--v-err);
+}
+
+.viewer .notice-block.turn-error .detail {
+    color: inherit;
+}
+
+.viewer .notice-block.turn-interrupted {
+    border-color: var(--v-warn);
+    color: var(--v-warn);
+}
+
+.viewer .notice-block details {
+    margin: 0.35rem 0 0;
+}
