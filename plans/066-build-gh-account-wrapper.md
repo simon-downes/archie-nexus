@@ -1,6 +1,6 @@
 # 066 — Owner-aware gh wrapper with work and personal GitHub tokens
 
-Status: planning
+Status: implementing
 Branch: build-it/066-gh-account-wrapper (base: main @ 23b01dd)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/066-gh-account-wrapper
 Updated: 2026-10-15
@@ -67,17 +67,21 @@ Codebase facts:
 | D3 | Env projection | Remove (`env={}`, `set_env=False`); wrapper sets `GH_TOKEN` only for the exec'd gh | keep projecting | User specified; keeps tokens out of the container env | user |
 | D4 | Unmatched owner | Use `personal_token` | fail closed (brain entry) | User specified "everything else" | user |
 | D5 | Where `work_orgs` lives | `auth.providers.github.work_orgs` in `config.yaml`, typed on `AuthProviderOverride` | separate top-level `github:` config | User said "provider config"; `AuthProviderOverride` is the existing per-provider config struct | user/self |
-| D6 | Wrapper language | POSIX-ish bash + `yq` | Python script | User suggested targeted yq; bash starts in ms and needs no venv; venv is on PATH but not guaranteed for every shell | self |
+| D6 | Wrapper language | bash (arrays and `[[ ]]` allowed) + `yq` | Python script | User suggested targeted yq; bash starts in ms and needs no venv; venv is on PATH but not guaranteed for every shell | self |
 | D7 | How the real gh is renamed | `dpkg-divert --rename` `/usr/bin/gh` → `/usr/bin/gh-base` | `mv` after install | `mv` is undone by any later `apt-get upgrade`, which would reinstate `/usr/bin/gh`; a diversion survives upgrades | self |
 | D8 | How the wrapper finds the real gh | `gh-base` on `PATH` | hard-coded `/usr/bin/gh-base`; test-only env var | PATH lookup lets tests put a fake `gh-base` first without a test-only knob | self |
 | D9 | Owner source order | `-R/--repo` arg → `GH_REPO` → `gh api` endpoint `repos/<owner>/`/`orgs/<owner>/` → `gh repo <sub> <owner/repo>` positional → git remote | remote only | Matches what gh itself targets: explicit repo flags override the cwd repo in gh | self |
 | D10 | Which git remote | `gh-resolved=base` remote, then `upstream`, `github`, `origin`, then first other | `origin` only | Mirrors gh's own base-repo choice so the token matches the repo gh talks to (a fork's PRs go to `upstream`) | self |
 | D11 | Owner match | Case-insensitive, exact owner | substring / glob | GitHub owner names are case-insensitive; substring would let `tillo-fork` match `tillo` | self |
-| D12 | Caller-set `GH_TOKEN`/`GITHUB_TOKEN` | Respected: wrapper passes through unchanged | always overwrite | With projection removed, a set token is deliberate (e.g. a one-off `GH_TOKEN=… gh …`) | self |
+| D12 | Caller-set `GH_TOKEN`/`GITHUB_TOKEN` | If either is non-empty, the wrapper sets nothing and execs `gh-base` with the env as-is | always overwrite | With projection removed, a set token is deliberate (e.g. a one-off `GH_TOKEN=… gh …`); setting `GH_TOKEN` beside a caller's `GITHUB_TOKEN` would silently override it because gh prefers `GH_TOKEN` | self |
 | D13 | Selected token missing | Unset `GH_TOKEN`, warn once on stderr naming the field, still run gh | exit non-zero | `gh --version`, `gh help` and public reads work without auth; gh prints its own auth error otherwise | self |
 | D14 | Required fields | Both `personal_token` and `work_token` required on login | optional fields | `StaticProvider.fields` doubles as the required list (`auth.py:489`); optional fields would need a new provider concept | self |
 | D15 | `work_orgs` on non-github providers | Reject at config load | silently ignore | `AuthProviderOverride` is shared by all providers; a misplaced key would otherwise do nothing silently | self |
 | D16 | Old `github.token` entries | Not migrated; status shows "Invalid stored credential" until `archie auth login github` is rerun | auto-migrate token into one field | Unknown which account the old token belongs to; a wrong guess routes requests to the wrong owner | self |
+| D18 | Unreadable YAML (missing or malformed file) | Treat as empty, print `gh: could not read <path>` to stderr for malformed files, continue | exit non-zero | Same reasoning as D13: gh still runs and reports its own auth error; a broken config shouldn't block `gh --version` | self |
+| D19 | Argument scanning strategy | Pattern scan with no flag table: `-R`/`--repo` anywhere before `--`; for `api`, the first later arg matching `^/?(repos\|orgs\|users)/<owner>`; for `repo <sub>`, the first later non-flag arg shaped `owner/repo` | a table of value-taking flags per command | A flag table duplicates gh's CLI surface and goes stale with gh releases; the pattern scan is wrong only when a flag value is literally `-R`/`--repo` or an `owner/repo`-shaped string before the real one, which is recorded under Risks | self |
+| D20 | Wrapper tests on hosts without bash/git/yq | `pytest.mark.skipif` when any is missing | hard fail | `uv run pytest` also runs on the host, where yq isn't a project dependency | self |
+| D21 | Dockerfile COPY placement and mode | `COPY container/bin/gh` next to the `entrypoint.sh` COPY, `chmod +x` in that RUN | `COPY --chmod` right after the gh install | Late placement keeps wrapper edits from invalidating the tool layers; plain `chmod` matches the entrypoint pattern and doesn't need BuildKit | self |
 | D17 | Wrapper source path | `container/bin/gh` (new) | `scripts/`, repo root | Container-only file, copied by the Dockerfile; keeps it apart from Python packages | self |
 
 ## Requirements
@@ -87,15 +91,17 @@ Codebase facts:
 - MUST pass all arguments, stdin, and the exit code through unchanged.
   - AC: `gh pr create --title "a b" --body ''` reaches `gh-base` as the same argv (including the empty arg); `gh-base` exit 3 → wrapper exit 3; stdin is readable by `gh-base`.
 - MUST read tokens and `work_orgs` from `$ARCHIE_HOME_DIR/credentials.yaml` and `config.yaml` on each call, defaulting `ARCHIE_HOME_DIR` to `~/.nexus`.
-  - AC: changing `credentials.yaml` between two calls changes the token the second call sees.
+  - AC: changing `credentials.yaml` between two calls changes the token the second call sees; with `ARCHIE_HOME_DIR` unset and `HOME=<tmp>`, tokens are read from `<tmp>/.nexus/credentials.yaml`.
 - MUST resolve the owner from `-R`/`--repo` (`-R o/r`, `-Ro/r`, `--repo o/r`, `--repo=o/r`, `HOST/o/r`, URL), `GH_REPO`, a `gh api` endpoint starting `repos/<owner>/` or `orgs/<owner>/` (with or without leading `/`), and the `gh repo <sub> <owner/repo>` positional, before the git remote.
-  - AC: run in a personal-origin repo, `gh -R tillo/x issue list` gets the work token; each listed form is tested.
+  - AC: run in a personal-origin repo, `gh issue list -R tillo/x` gets the work token; each listed form is tested.
 - MUST pick the git remote in the order: `gh-resolved=base`, `upstream`, `github`, `origin`, first other; and parse SSH (`git@host:o/r`), `ssh://`, and `https://` URLs.
   - AC: repo with `origin`=personal and `upstream`=tillo → work token.
 - MUST match owners case-insensitively and exactly.
   - AC: `Tillo` matches `tillo`; `tillo-labs` does not match `tillo`.
-- MUST leave a caller-set `GH_TOKEN` or `GITHUB_TOKEN` untouched.
-  - AC: `GH_TOKEN=x gh …` → `gh-base` sees `x`.
+- MUST leave a caller-set `GH_TOKEN` or `GITHUB_TOKEN` untouched and set no token of its own when either is non-empty.
+  - AC: `GH_TOKEN=x gh …` → `gh-base` sees `GH_TOKEN=x`; `GITHUB_TOKEN=y gh …` → `gh-base` sees `GITHUB_TOKEN=y` and no `GH_TOKEN`.
+- MUST treat a missing or malformed `credentials.yaml`/`config.yaml` as empty and still run `gh-base`.
+  - AC: malformed `credentials.yaml` → stderr contains `gh: could not read`, `gh-base` runs without `GH_TOKEN`.
 - MUST, when the selected token is empty, run `gh-base` with `GH_TOKEN` unset and print `gh: github.<field> is not set in <path>` to stderr.
   - AC: test asserts the stderr line and that `gh-base` ran without `GH_TOKEN`.
 - MUST replace `GithubCredential.token` with `personal_token` and `work_token`, both required by `PUT /auth/credential/github`.
@@ -150,20 +156,21 @@ drops env projection, and types `work_orgs`.
 - **Approach:** `container/bin/gh`, bash, `set -u`. Resolve home `${ARCHIE_HOME_DIR:-$HOME/.nexus}`.
   Owner from `git remote get-url origin` (M2 widens this). Orgs via
   `yq '.auth.providers.github.work_orgs[]'`; token via `yq '.github.<field> // ""'`.
-  Missing files → empty. `exec gh-base "$@"`.
+  Missing files → empty; malformed → empty + warning (D18). `exec gh-base "$@"`.
 - **Test seam:** the wrapper executable, run with `subprocess` in a temp git repo; fake
   `gh-base` script records env and argv.
 - **Edge cases:** no git repo → personal; missing config file → no work orgs; missing
   token → warning + unset (D13); caller `GH_TOKEN` → untouched (D12).
-- **Tasks:** wrapper; tests for work/personal selection, argv/stdin/exit passthrough,
-  per-call reads, missing token, caller token.
+- **Tasks:** wrapper; tests (skipped without bash/git/yq, D20) for work/personal selection,
+  argv/stdin/exit passthrough, per-call reads, default home, missing token, malformed YAML,
+  caller `GH_TOKEN`/`GITHUB_TOKEN`.
 - **Deliverable:** wrapper selects the right token from `origin`.
 - **Verify:** `uv run pytest tests/test_gh_wrapper.py` passes.
 - **Outcome:**
 
 ### [ ] M2 — Explicit repo targets and gh's remote order
 
-- **Approach:** Parse args once without consuming them: `-R`/`--repo` forms, `GH_REPO`,
+- **Approach:** Scan args per D19 without consuming them (`-R<value>` counts only when the value has no whitespace): `-R`/`--repo` forms, `GH_REPO`,
   `api` endpoint, `repo <sub> <o/r>`. Normalise `HOST/o/r` and URLs to the owner. Remote
   order per D10 using `git config --get-regexp '^remote\..*\.gh-resolved$'` and `git remote`.
 - **Test seam:** same as M1.
@@ -191,12 +198,13 @@ drops env projection, and types `work_orgs`.
 ### [ ] M4 — Image installs the wrapper
 
 - **Approach:** In the GitHub CLI RUN step, after `apt-get install gh`, run
-  `dpkg-divert --local --rename --divert /usr/bin/gh-base --add /usr/bin/gh`. Then
-  `COPY --chmod=0755 container/bin/gh /usr/local/bin/gh`.
+  `dpkg-divert --local --rename --divert /usr/bin/gh-base --add /usr/bin/gh`. Next to
+  the `entrypoint.sh` COPY, `COPY container/bin/gh /usr/local/bin/gh` and add
+  `chmod +x /usr/local/bin/gh` to that RUN (D21).
 - **Test seam:** none (infrastructure).
 - **Tasks:** Dockerfile; docs note in `auth-credentials.md`.
 - **Deliverable:** image layout per requirement.
-- **Verify:** Dockerfile inspection; `bash -n container/bin/gh` and `shellcheck container/bin/gh` clean; locally, the wrapper with `gh-base` symlinked to `/usr/bin/gh` runs `gh --version`.
+- **Verify:** Dockerfile inspection; `bash -n container/bin/gh` and `shellcheck container/bin/gh` exit 0; `d=$(mktemp -d); ln -s /usr/bin/gh $d/gh-base; PATH=$d:$PATH container/bin/gh --version` prints `gh version …` and exits 0.
 - **Outcome:**
 
 ## Change log
@@ -207,10 +215,12 @@ drops env projection, and types `work_orgs`.
 - Owner detection is heuristic for commands that name a repo in other ways (e.g. `gh pr view https://github.com/o/r/pull/1`); those fall back to the cwd remote and may pick the wrong token.
 - Not verified: whether `uploads.github.com/user-attachments` accepts a fine-grained token.
 - Existing `github.token` entries become invalid until login is rerun (D16).
+- A user `config.yaml` that sets `auth.providers.github.env` (e.g. `{token: GH_TOKEN}`) makes `runtime_environment()` raise "maps unknown credential field" and container start fail; the docs migration note tells users to remove it.
+- D19 pattern scan misreads a flag value that is literally `-R`/`--repo`, or an `owner/repo`-shaped value before the real `gh repo <sub>` positional; the token then follows that string's owner.
 
 ## Review
 
-- Plan review:
+- Plan review: 1 pass. 3 ⚠️ (GITHUB_TOKEN-only case → D12/AC; malformed YAML → D18; arg scanning strategy → D19) and 6 ℹ️ (root `-R` AC → `gh issue list -R`; default-home AC; D6 wording; test skips → D20; COPY placement/BuildKit → D21; M4 Verify made exact; existing `github.env` override → Risks). All accepted; no ❌, so no second pass.
 - Code review:
 - Merge risk:
 
