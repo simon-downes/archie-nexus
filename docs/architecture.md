@@ -62,7 +62,7 @@ paths; configured mounts are appended separately.
 | `ARCHIE_HOME_DIR` (normally `~/.nexus`) | `/home/archie/.nexus` | config, credentials, sessions, brain |
 | `~/.agents` | `/home/archie/.agents` | agent-related user content |
 
-The image contains dependencies and system tools. The runtime user is `archie`, with its UID matched to the host user during `archie build`. The home and persona mounts are read-write: a session can modify shared user data and repository-tracked persona content. Treat those mounts as a deliberate trust boundary, not as isolated per-container state.
+The image contains dependencies and system tools. `gh` on `PATH` is a repository wrapper (`container/bin/gh`) around the real binary, `gh-base`; it selects a GitHub token per call from the credential store, so GitHub tokens are not part of the container environment (see [Authentication and credentials](auth-credentials.md#github-cli-token-selection)). The runtime user is `archie`, with its UID matched to the host user during `archie build`. The home and persona mounts are read-write: a session can modify shared user data and repository-tracked persona content. Treat those mounts as a deliberate trust boundary, not as isolated per-container state.
 
 ## Host HTTP API
 

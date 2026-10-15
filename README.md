@@ -19,6 +19,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 | `agent/` | Container-side Starlette service, agent loop, providers, tools, subagents |
 | `shared/` | Configuration, models, public commands/events, session-log persistence, credentials |
 | `persona/` | Repository-tracked prompts, agents, and skills mounted into sessions |
+| `container/` | Files copied into the agent image, such as the `gh` wrapper |
 | `tests/` | Cross-package and component tests |
 | `plans/` | Design and implementation records; consult relevant plans when changing a contract |
 

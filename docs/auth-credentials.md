@@ -32,7 +32,7 @@ By default:
 | `slack` | OAuth | access/refresh token and OAuth metadata | Browser OAuth flow |
 | `google` | OAuth | access/refresh token and OAuth metadata | Browser OAuth flow |
 | `linear` | Static | `token` | Prompt or JSON stdin |
-| `github` | Static | `token` | `GH_TOKEN` |
+| `github` | Static | `personal_token`, `work_token` | Prompt or JSON stdin |
 | `aws` | Static | `access_key_id`, `secret_access_key`, `session_token` | AWS credential chain plus STS validation |
 | `scalr` | Static | `token`, `hostname`, `account` | `SCALR_TOKEN`, `SCALR_HOSTNAME`, `SCALR_ACCOUNT` |
 | `jira` | Static | `email`, `token`, `cloud_id` | Prompt or JSON stdin |
@@ -51,7 +51,8 @@ bedrock:
   aws_session_token: ...
 
 github:
-  token: ...
+  personal_token: github_pat_...
+  work_token: github_pat_...
 
 scalr:
   token: ...
@@ -173,14 +174,6 @@ The field mapping differs by provider:
 bedrock → aws_access_key_id, aws_secret_access_key, aws_session_token
 aws     → access_key_id, secret_access_key, session_token
 ```
-
-For GitHub, the CLI reads:
-
-```text
-GH_TOKEN
-```
-
-and sends it as the provider’s `token` field.
 
 For Scalr, the CLI reads:
 
@@ -307,7 +300,6 @@ Current mappings are:
 | --- | --- | --- |
 | `bedrock` | `aws_access_key_id` → `AWS_ACCESS_KEY_ID`, `aws_secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `aws_session_token` → `AWS_SESSION_TOKEN` | `false` |
 | `aws` | `access_key_id` → `AWS_ACCESS_KEY_ID`, `secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `session_token` → `AWS_SESSION_TOKEN` | `true` |
-| `github` | `token` → `GH_TOKEN` | `true` |
 | `scalr` | `token` → `SCALR_TOKEN`, `hostname` → `SCALR_HOSTNAME`, `account` → `SCALR_ACCOUNT` | `true` |
 
 This preserves the distinction between Bedrock and general AWS credentials: Bedrock integrations read the typed `bedrock` entry, while the general `aws` entry supplies standard AWS environment variables for shell commands, the AWS CLI, and `exec`.
@@ -315,6 +307,29 @@ This preserves the distinction between Bedrock and general AWS credentials: Bedr
 Only explicitly enabled providers are projected. Missing providers are skipped, and mapping errors such as unknown credential fields, invalid environment names, or duplicate environment ownership fail container startup before Docker is invoked. Environment values are never logged.
 
 Projection is a startup snapshot. New containers use the latest stored credentials; an already-running agent keeps its original environment and must be restarted to receive changed values. Environment variables are inherited by processes inside the container and may be visible to processes with access to the container, so mappings should remain limited to tools that need them.
+
+### GitHub CLI token selection
+
+GitHub credentials are not projected into the container environment. The image installs the real GitHub CLI as `gh-base` and puts a wrapper at `/usr/local/bin/gh` (source: `container/bin/gh`). On each call the wrapper:
+
+1. Finds the target owner, in this order: a `gh api` endpoint (path or full URL) starting `repos/`, `orgs/` or `users/<owner>`, the repository argument of `gh repo <subcommand>`, or the owner argument of `gh repo list`; then `--owner`; then `-R`/`--repo`; then `GH_REPO`; then the GitHub remote gh treats as the base repository (the one `gh repo set-default` marked, then `upstream`, `github`, `origin`, then the first). Remotes on other hosts are ignored.
+2. Reads `auth.providers.github.work_orgs` from `config.yaml` with `yq`. If the owner matches an entry exactly, ignoring case, it uses `github.work_token`. Otherwise it uses `github.personal_token`.
+3. Reads that one token from `credentials.yaml` with `yq` and runs `gh-base` with all arguments unchanged and `GH_TOKEN` set only in that process.
+
+```yaml
+auth:
+  providers:
+    github:
+      work_orgs: [tillo]
+```
+
+Both files are read on every call, so changes apply to running sessions. If the caller already set `GH_TOKEN` or `GITHUB_TOKEN`, the wrapper leaves the environment alone. If the selected token is missing or not a string, or a file cannot be parsed, the wrapper prints a warning to stderr and runs `gh-base` without a token; gh then falls back to its own stored login, if one exists in the container.
+
+Owner detection uses argument patterns rather than gh's flag definitions. A `gh repo` argument that directly follows another flag is skipped, because it may be that flag's value (`gh repo view -b feature/x`). The cost is that `gh repo view --web o/r` uses the remote's token. A command that names its repository only through a URL argument (for example `gh pr view https://github.com/o/r/pull/1`) also uses the token for the current directory's remote. Pass `-R owner/repo` in those cases.
+
+`work_orgs` is accepted only under `auth.providers.github`.
+
+Upgrading from the single `github.token` field: the old entry fails validation and `archie auth status` reports it as needing reauthentication. Rerun `archie auth login github`. Also remove any `auth.providers.github.env` override from `config.yaml`; mapping the removed `token` field stops containers from starting.
 
 ## Security model
 
@@ -334,8 +349,7 @@ The auth API follows the current trusted local deployment model:
 ### Configure GitHub
 
 ```bash
-export GH_TOKEN=ghp_...
-archie auth login github
+archie auth login github   # prompts for personal_token and work_token (input hidden)
 archie auth status
 ```
 

@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# gh wrapper: runs the real GitHub CLI (gh-base) with the token for the target owner.
+#
+# Archie stores two fine-grained GitHub tokens in $ARCHIE_HOME_DIR/credentials.yaml:
+#   github.work_token      used when the target owner is listed in
+#                          auth.providers.github.work_orgs in config.yaml
+#   github.personal_token  used for every other owner
+#
+# Both files are read on every call, so token changes apply immediately and no token
+# is kept in the container environment. The token is set as GH_TOKEN only in the
+# environment of the exec'd gh-base. If the caller already set GH_TOKEN or
+# GITHUB_TOKEN, the wrapper changes nothing. All arguments, stdin and the exit code
+# pass through unchanged.
+
+set -u
+
+home="${ARCHIE_HOME_DIR:-${HOME:-}/.nexus}"
+credentials="$home/credentials.yaml"
+config="$home/config.yaml"
+
+warn() {
+    printf 'gh: %s\n' "$*" >&2
+}
+
+# read_yaml FILE EXPR: print the yq result. A missing file prints nothing. A file yq
+# cannot read prints nothing, warns, and returns 2.
+read_yaml() {
+    local file=$1 expr=$2 out
+    [[ -f $file ]] || return 0
+    if ! out=$(yq -r "$expr" "$file" 2>/dev/null); then
+        warn "could not read $file"
+        return 2
+    fi
+    printf '%s\n' "$out"
+}
+
+# owner_from_url URL: print the owner from an SSH (git@host:o/r), ssh:// or https://
+# remote URL.
+owner_from_url() {
+    local url=$1 path
+    case $url in
+        *://*)
+            path=${url#*://}
+            path=${path#*@}
+            path=${path#*/}
+            ;;
+        *:*) path=${url#*:} ;;
+        *) return 1 ;;
+    esac
+    path=${path#/}
+    [[ $path == */* ]] || return 1
+    printf '%s' "${path%%/*}"
+}
+
+# owner_from_spec SPEC: print the owner from a repository spec as gh accepts it:
+# OWNER/REPO, HOST/OWNER/REPO, or a URL.
+owner_from_spec() {
+    local spec=$1 rest
+    if [[ $spec == *://* || $spec == git@*:* ]]; then
+        owner_from_url "$spec"
+        return
+    fi
+    [[ $spec == */* && $spec != *[[:space:]]* ]] || return 1
+    rest=${spec#*/}
+    if [[ $rest == */* ]]; then
+        printf '%s' "${rest%%/*}"
+    else
+        printf '%s' "${spec%%/*}"
+    fi
+}
+
+# Subcommands of `gh repo` whose first positional argument is a repository.
+REPO_POSITIONAL_SUBCOMMANDS=" archive clone create delete edit fork set-default sync unarchive view "
+
+# owner_from_args ARGS...: print the owner of an explicit target on the command line.
+# An api endpoint, a `gh repo <sub>` repository argument, a `gh repo list` owner, or an
+# --owner flag wins over -R/--repo, because that is what gh calls. Scanning stops at
+# `--`. A positional that follows a bare flag (`-b feature/x`) may be that flag's value,
+# so it is skipped; a skipped target falls back to -R, GH_REPO or the remote.
+owner_from_args() {
+    local cmd=${1:-} sub=${2:-} repo_flag="" owner_flag="" target="" arg prev="" i=0
+    local owner after_flag=0 skip
+    for arg in "$@"; do
+        i=$((i + 1))
+        [[ $arg == -- ]] && break
+        case $prev in
+            -R | --repo)
+                repo_flag=$arg prev="" after_flag=0
+                continue
+                ;;
+            --owner)
+                owner_flag=$arg prev="" after_flag=0
+                continue
+                ;;
+        esac
+        prev=$arg
+        skip=$after_flag
+        after_flag=0
+        case $arg in
+            -R | --repo | --owner) continue ;;
+            --repo=*) repo_flag=${arg#--repo=} ;;
+            --owner=*) owner_flag=${arg#--owner=} ;;
+            -R?*) [[ $arg != *[[:space:]]* ]] && repo_flag=${arg#-R} ;;
+            --*=*) ;;
+            -? | --*) after_flag=1 && continue ;;
+            -*) ;;
+            *)
+                [[ -n $target || $i -lt 2 ]] && continue
+                if [[ $cmd == api ]]; then
+                    if [[ $arg =~ ^(https?://[^/]+(/api/v3)?)?/?(repos|orgs|users)/([^/?{}]+) ]]; then
+                        target=${BASH_REMATCH[4]}
+                    fi
+                elif [[ $cmd == repo && $i -ge 3 && $skip == 0 ]]; then
+                    if [[ $sub == list ]]; then
+                        [[ $arg =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] && target=$arg
+                    elif [[ $REPO_POSITIONAL_SUBCOMMANDS == *" $sub "* ]]; then
+                        if owner=$(owner_from_spec "$arg"); then
+                            target=$owner
+                        fi
+                    fi
+                fi
+                ;;
+        esac
+    done
+    if [[ -n $target ]]; then
+        printf '%s' "$target"
+    elif [[ -n $owner_flag ]]; then
+        printf '%s' "$owner_flag"
+    elif [[ -n $repo_flag ]]; then
+        owner_from_spec "$repo_flag"
+    fi
+}
+
+# host_from_url URL: print the host of an SSH, ssh:// or https:// remote URL.
+host_from_url() {
+    local url=$1 host
+    case $url in
+        *://*)
+            host=${url#*://}
+            host=${host#*@}
+            host=${host%%/*}
+            host=${host%%:*}
+            ;;
+        *:*)
+            host=${url%%:*}
+            host=${host#*@}
+            ;;
+        *) return 1 ;;
+    esac
+    printf '%s' "${host,,}"
+}
+
+# is_github_url URL: succeed when the URL points at github.com or $GH_HOST.
+is_github_url() {
+    local host
+    host=$(host_from_url "$1") || return 1
+    [[ $host == github.com || $host == ssh.github.com || $host == "${GH_HOST:-github.com}" ]]
+}
+
+# base_remote: print the GitHub remote gh treats as the base repository: the one marked
+# with gh-resolved by `gh repo set-default`, else upstream, github, origin, else the
+# first remote. Remotes that are not GitHub hosts are ignored, as gh ignores them.
+base_remote() {
+    local line name url
+    local -a remotes=()
+    while IFS= read -r line; do
+        name=${line#remote.}
+        name=${name%%.gh-resolved *}
+        printf '%s' "$name"
+        return
+    done < <(git config --get-regexp '^remote\..*\.gh-resolved$' 2>/dev/null)
+    while IFS= read -r name; do
+        url=$(git remote get-url "$name" 2>/dev/null) || continue
+        is_github_url "$url" && remotes+=("$name")
+    done < <(git remote 2>/dev/null)
+    ((${#remotes[@]})) || return 1
+    for name in upstream github origin; do
+        for line in "${remotes[@]}"; do
+            if [[ $line == "$name" ]]; then
+                printf '%s' "$name"
+                return
+            fi
+        done
+    done
+    printf '%s' "${remotes[0]}"
+}
+
+# resolve_owner ARGS...: print the owner of the repository gh will act on, if known.
+resolve_owner() {
+    local owner remote url
+    if owner=$(owner_from_args "$@") && [[ -n $owner ]]; then
+        printf '%s' "$owner"
+        return
+    fi
+    if [[ -n ${GH_REPO:-} ]] && owner=$(owner_from_spec "$GH_REPO"); then
+        printf '%s' "$owner"
+        return
+    fi
+    remote=$(base_remote) || return 0
+    [[ -n $remote ]] || return 0
+    url=$(git remote get-url "$remote" 2>/dev/null) || return 0
+    owner_from_url "$url"
+}
+
+if [[ -n ${GH_TOKEN:-} || -n ${GITHUB_TOKEN:-} ]]; then
+    exec gh-base "$@"
+fi
+
+owner=$(resolve_owner "$@")
+field=personal_token
+if [[ -n $owner ]]; then
+    while IFS= read -r org; do
+        if [[ -n $org && ${org,,} == "${owner,,}" ]]; then
+            field=work_token
+            break
+        fi
+    done < <(read_yaml "$config" '.auth.providers.github.work_orgs[] | select(tag == "!!str")')
+fi
+
+unset GH_TOKEN
+if token=$(read_yaml "$credentials" ".github.$field | select(tag == \"!!str\")"); then
+    if [[ -n $token ]]; then
+        export GH_TOKEN=$token
+        exec gh-base "$@"
+    fi
+    warn "github.$field is not set in $credentials; gh will use its own stored login, if any"
+fi
+exec gh-base "$@"
