@@ -52,10 +52,99 @@ owner_from_url() {
     printf '%s' "${path%%/*}"
 }
 
+# owner_from_spec SPEC: print the owner from a repository spec as gh accepts it:
+# OWNER/REPO, HOST/OWNER/REPO, or a URL.
+owner_from_spec() {
+    local spec=$1 rest
+    if [[ $spec == *://* || $spec == git@*:* ]]; then
+        owner_from_url "$spec"
+        return
+    fi
+    [[ $spec == */* && $spec != *[[:space:]]* ]] || return 1
+    rest=${spec#*/}
+    if [[ $rest == */* ]]; then
+        printf '%s' "${rest%%/*}"
+    else
+        printf '%s' "${spec%%/*}"
+    fi
+}
+
+# owner_from_args ARGS...: print the owner of an explicit target on the command line.
+# An api endpoint or a `gh repo <sub>` positional wins over -R/--repo, because that is
+# the repository gh calls. Scanning stops at `--`.
+owner_from_args() {
+    local cmd=${1:-} repo_flag="" target="" arg prev="" i=0 owner
+    for arg in "$@"; do
+        i=$((i + 1))
+        [[ $arg == -- ]] && break
+        if [[ $prev == -R || $prev == --repo ]]; then
+            repo_flag=$arg
+            prev=""
+            continue
+        fi
+        prev=$arg
+        case $arg in
+            -R | --repo) continue ;;
+            --repo=*) repo_flag=${arg#--repo=} ;;
+            -R?*) [[ $arg != *[[:space:]]* ]] && repo_flag=${arg#-R} ;;
+            -*) ;;
+            *)
+                [[ -n $target || $i -lt 2 ]] && continue
+                if [[ $cmd == api ]]; then
+                    if [[ $arg =~ ^/?(repos|orgs|users)/([^/?{}]+) ]]; then
+                        target=${BASH_REMATCH[2]}
+                    fi
+                elif [[ $cmd == repo && $i -ge 3 ]]; then
+                    if owner=$(owner_from_spec "$arg"); then
+                        target=$owner
+                    fi
+                fi
+                ;;
+        esac
+    done
+    if [[ -n $target ]]; then
+        printf '%s' "$target"
+    elif [[ -n $repo_flag ]]; then
+        owner_from_spec "$repo_flag"
+    fi
+}
+
+# base_remote: print the remote gh treats as the base repository: the one marked
+# gh-resolved=base by `gh repo set-default`, else upstream, github, origin, else the
+# first remote.
+base_remote() {
+    local line name remotes
+    while IFS= read -r line; do
+        if [[ $line == *" base" ]]; then
+            name=${line#remote.}
+            printf '%s' "${name%.gh-resolved base}"
+            return
+        fi
+    done < <(git config --get-regexp '^remote\..*\.gh-resolved$' 2>/dev/null)
+    remotes=$(git remote 2>/dev/null) || return 1
+    for name in upstream github origin; do
+        if grep -qxF "$name" <<<"$remotes"; then
+            printf '%s' "$name"
+            return
+        fi
+    done
+    printf '%s' "${remotes%%$'\n'*}"
+}
+
 # resolve_owner ARGS...: print the owner of the repository gh will act on, if known.
 resolve_owner() {
-    local url
-    url=$(git remote get-url origin 2>/dev/null) || return 0
+    local owner remote url
+    if owner=$(owner_from_args "$@") && [[ -n $owner ]]; then
+        printf '%s' "$owner"
+        return
+    fi
+    if [[ -n ${GH_REPO:-} ]] && owner=$(owner_from_spec "$GH_REPO"); then
+        printf '%s' "$owner"
+        return
+    fi
+    remote=$(base_remote) || return 0
+    [[ -n $remote ]] || return 0
+    url=$(git remote get-url "$remote" 2>/dev/null) || return 0
     owner_from_url "$url"
 }
 

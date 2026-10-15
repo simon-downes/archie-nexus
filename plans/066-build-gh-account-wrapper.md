@@ -70,7 +70,7 @@ Codebase facts:
 | D6 | Wrapper language | bash (arrays and `[[ ]]` allowed) + `yq` | Python script | User suggested targeted yq; bash starts in ms and needs no venv; venv is on PATH but not guaranteed for every shell | self |
 | D7 | How the real gh is renamed | `dpkg-divert --rename` `/usr/bin/gh` → `/usr/bin/gh-base` | `mv` after install | `mv` is undone by any later `apt-get upgrade`, which would reinstate `/usr/bin/gh`; a diversion survives upgrades | self |
 | D8 | How the wrapper finds the real gh | `gh-base` on `PATH` | hard-coded `/usr/bin/gh-base`; test-only env var | PATH lookup lets tests put a fake `gh-base` first without a test-only knob | self |
-| D9 | Owner source order | `-R/--repo` arg → `GH_REPO` → `gh api` endpoint `repos/<owner>/`/`orgs/<owner>/` → `gh repo <sub> <owner/repo>` positional → git remote | remote only | Matches what gh itself targets: explicit repo flags override the cwd repo in gh | self |
+| D9 | Owner source order (revised, C1) | `gh api` endpoint `repos\|orgs\|users/<owner>` or `gh repo <sub> <owner/repo>` positional → `-R/--repo` arg → `GH_REPO` → git remote | remote only; `-R`/`GH_REPO` first | Matches what gh itself targets: a literal endpoint or repo argument is what gh calls, and explicit repo flags override the cwd repo | self |
 | D10 | Which git remote | `gh-resolved=base` remote, then `upstream`, `github`, `origin`, then first other | `origin` only | Mirrors gh's own base-repo choice so the token matches the repo gh talks to (a fork's PRs go to `upstream`) | self |
 | D11 | Owner match | Case-insensitive, exact owner | substring / glob | GitHub owner names are case-insensitive; substring would let `tillo-fork` match `tillo` | self |
 | D12 | Caller-set `GH_TOKEN`/`GITHUB_TOKEN` | If either is non-empty, the wrapper sets nothing and execs `gh-base` with the env as-is | always overwrite | With projection removed, a set token is deliberate (e.g. a one-off `GH_TOKEN=… gh …`); setting `GH_TOKEN` beside a caller's `GITHUB_TOKEN` would silently override it because gh prefers `GH_TOKEN` | self |
@@ -92,7 +92,7 @@ Codebase facts:
   - AC: `gh pr create --title "a b" --body ''` reaches `gh-base` as the same argv (including the empty arg); `gh-base` exit 3 → wrapper exit 3; stdin is readable by `gh-base`.
 - MUST read tokens and `work_orgs` from `$ARCHIE_HOME_DIR/credentials.yaml` and `config.yaml` on each call, defaulting `ARCHIE_HOME_DIR` to `~/.nexus`.
   - AC: changing `credentials.yaml` between two calls changes the token the second call sees; with `ARCHIE_HOME_DIR` unset and `HOME=<tmp>`, tokens are read from `<tmp>/.nexus/credentials.yaml`.
-- MUST resolve the owner from `-R`/`--repo` (`-R o/r`, `-Ro/r`, `--repo o/r`, `--repo=o/r`, `HOST/o/r`, URL), `GH_REPO`, a `gh api` endpoint starting `repos/<owner>/` or `orgs/<owner>/` (with or without leading `/`), and the `gh repo <sub> <owner/repo>` positional, before the git remote.
+- MUST resolve the owner from a `gh api` endpoint starting `repos/`, `orgs/` or `users/<owner>` (with or without leading `/`) or the `gh repo <sub> <owner/repo>` positional, then `-R`/`--repo` (`-R o/r`, `-Ro/r`, `--repo o/r`, `--repo=o/r`, `HOST/o/r`, URL), then `GH_REPO`, before the git remote.
   - AC: run in a personal-origin repo, `gh issue list -R tillo/x` gets the work token; each listed form is tested.
 - MUST pick the git remote in the order: `gh-resolved=base`, `upstream`, `github`, `origin`, first other; and parse SSH (`git@host:o/r`), `ssh://`, and `https://` URLs.
   - AC: repo with `origin`=personal and `upstream`=tillo → work token.
@@ -168,7 +168,7 @@ drops env projection, and types `work_orgs`.
 - **Verify:** `uv run pytest tests/test_gh_wrapper.py` passes.
 - **Outcome:** `container/bin/gh` built; 13 tests in `tests/test_gh_wrapper.py` pass (work/personal from origin, https URL, no repo, argv/stdin/exit passthrough, per-call reads, default home, missing config, missing token, malformed YAML, caller GH_TOKEN/GITHUB_TOKEN, token not in argv); `shellcheck` clean.
 
-### [ ] M2 — Explicit repo targets and gh's remote order
+### [x] M2 — Explicit repo targets and gh's remote order
 
 - **Approach:** Scan args per D19 without consuming them (`-R<value>` counts only when the value has no whitespace): `-R`/`--repo` forms, `GH_REPO`,
   `api` endpoint, `repo <sub> <o/r>`. Normalise `HOST/o/r` and URLs to the owner. Remote
@@ -179,7 +179,7 @@ drops env projection, and types `work_orgs`.
 - **Tasks:** owner parsing; remote ordering; URL forms; case-insensitive exact match; tests.
 - **Deliverable:** owner resolution matches the requirement list.
 - **Verify:** `uv run pytest tests/test_gh_wrapper.py` passes.
-- **Outcome:**
+- **Outcome:** owner parsing (`owner_from_args`, `owner_from_spec`) and gh's remote order (`base_remote`) added; 37 wrapper tests pass, including 14 explicit-target forms, `GH_REPO`, `--`, trailing `-R`, `{owner}` placeholder, exact match, and the four remote-order cases; `shellcheck` clean. Precedence deviates (→ C1).
 
 ### [ ] M3 — Credential and config shape
 
@@ -208,6 +208,8 @@ drops env projection, and types `work_orgs`.
 - **Outcome:**
 
 ## Change log
+
+- C1 (M2): owner precedence changed so an `api` endpoint or `repo` positional beats `-R`/`GH_REPO`, and `users/<owner>` endpoints were added — a literal endpoint is the repo gh calls, while `GH_REPO` only fills `{owner}` placeholders — no scope change.
 
 ## Risks
 

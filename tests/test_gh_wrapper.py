@@ -178,3 +178,117 @@ def test_token_never_appears_in_argv(env, tmp_path):
     repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
     _, data = run_gh(env, "pr", "list", cwd=repo)
     assert "work-secret" not in json.dumps(data["argv"])
+
+
+# --- M2: explicit repo targets and gh's remote order ---
+
+
+@pytest.fixture
+def personal_repo(tmp_path):
+    return make_repo(tmp_path / "p", origin="git@github.com:simon-downes/archie-nexus.git")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["issue", "list", "-R", "tillo/service"],
+        ["issue", "list", "-Rtillo/service"],
+        ["issue", "list", "--repo", "tillo/service"],
+        ["issue", "list", "--repo=tillo/service"],
+        ["issue", "list", "-R", "github.com/tillo/service"],
+        ["issue", "list", "-R", "https://github.com/tillo/service"],
+        ["issue", "list", "-R", "TILLO/service"],
+        ["api", "repos/tillo/service/pulls"],
+        ["api", "/repos/tillo/service/pulls"],
+        ["api", "-X", "GET", "-H", "Accept: x", "orgs/tillo/members"],
+        ["api", "users/tillo"],
+        ["repo", "view", "tillo/service"],
+        ["repo", "view", "--json", "name", "tillo/service"],
+        ["repo", "clone", "https://github.com/tillo/service"],
+    ],
+)
+def test_explicit_target_overrides_remote(env, personal_repo, args):
+    _, data = run_gh(env, *args, cwd=personal_repo)
+    assert data["GH_TOKEN"] == "work-secret"
+    assert data["argv"] == args
+
+
+def test_gh_repo_env_overrides_remote(env, personal_repo):
+    _, data = run_gh(env, "pr", "list", cwd=personal_repo, extra={"GH_REPO": "tillo/service"})
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_repo_flag_beats_gh_repo_env(env, personal_repo):
+    _, data = run_gh(
+        env,
+        "pr",
+        "list",
+        "-R",
+        "simon-downes/x",
+        cwd=personal_repo,
+        extra={"GH_REPO": "tillo/service"},
+    )
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_flags_after_double_dash_are_ignored(env, personal_repo):
+    _, data = run_gh(env, "pr", "comment", "--body-file", "-", "--", "-R", "tillo/x", cwd=personal_repo)
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_trailing_repo_flag_without_value_falls_back_to_remote(env, personal_repo):
+    _, data = run_gh(env, "issue", "list", "-R", cwd=personal_repo)
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_api_placeholder_falls_back_to_remote(env, tmp_path):
+    repo = make_repo(tmp_path / "w", origin="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "api", "repos/{owner}/{repo}/pulls", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_owner_match_is_exact(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo-labs/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_upstream_remote_beats_origin(env, tmp_path):
+    repo = make_repo(
+        tmp_path / "r",
+        origin="git@github.com:simon-downes/service.git",
+        upstream="git@github.com:tillo/service.git",
+    )
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_gh_resolved_base_remote_beats_upstream(env, tmp_path):
+    repo = make_repo(
+        tmp_path / "r",
+        origin="git@github.com:tillo/service.git",
+        upstream="git@github.com:tillo/other.git",
+    )
+    subprocess.run(["git", "-C", str(repo), "config", "remote.origin.gh-resolved", "base"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "set-url", "upstream", "git@github.com:simon-downes/o.git"],
+        check=True,
+    )
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_github_remote_beats_origin(env, tmp_path):
+    repo = make_repo(
+        tmp_path / "r",
+        origin="git@github.com:simon-downes/service.git",
+        github="ssh://git@github.com/tillo/service.git",
+    )
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_first_other_remote_when_no_known_names(env, tmp_path):
+    repo = make_repo(tmp_path / "r", work="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
