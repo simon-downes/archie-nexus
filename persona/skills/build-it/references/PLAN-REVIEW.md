@@ -57,8 +57,10 @@ For each milestone:
 - Is M1 (after any prefactor) a tracer bullet: the core behaviour, end to end, as thin as
   possible? A first milestone that builds a peripheral feature, or the core one layer at
   a time, is a finding.
-- Would the implementor have to choose a library, decide where code lives, invent a
-  pattern, or look up something the plan could have stated? Each of these is a finding.
+- Would the implementor have to choose a library, decide where code lives, or invent a
+  pattern? Each of these is a finding. Library API details, option names and edge-case
+  behaviour that implementation and its tests will settle are not findings. Don't read
+  library source or run prototypes to check them.
 - Does Verify say how to observe the result (a command and the passing result)?
 - Do Approach and Tasks overlap, or do two milestones do the same work?
 

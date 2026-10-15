@@ -41,9 +41,11 @@ describes the finished outcome when you are done, including what changed and why
 - **The plan doc is the product's memory.** Every decision, milestone, change and review
   result lands in it. If the session compacts or restarts, the plan alone must be enough
   to resume. Once it exists, re-read it at the start of every phase.
-- **Facts are free; questions are scarce.** Look up anything knowable from code, docs,
-  manifests or git before asking. Spend questions only on preferences and judgement
-  calls that would change the outcome.
+- **Questions are scarce; research is not free.** Look up anything knowable from code,
+  docs, manifests or git before asking the user. Spend questions only on preferences
+  and judgement calls that would change the outcome. But look up only what changes a
+  decision: every probe costs minutes, and implementation will surface most details
+  anyway.
 - **Decide like the user would.** When you decide on the user's behalf, take the option
   you would have recommended to them. Prefer the conventional, reversible option that
   follows existing codebase patterns. Record why, including the rejected alternative.
@@ -186,6 +188,15 @@ but answer each yourself with your recommendation.
   any project, tie it to a constraint of this one.
 - Add each decision to the Decisions table as `self`.
 
+**Research budget.** Settle each decision with the cheapest evidence that settles it:
+the project's own code, a manifest, or a library's documentation. Do not read library
+source, download packages, or run prototypes to confirm how a library behaves. Do so
+only when two options differ materially and the docs cannot tell them apart. When you
+can't confirm a detail cheaply, write the assumption down. Put it in the milestone's
+Approach or under Risks, and let implementation confirm it. Implementation finds that
+kind of detail faster, with real tests, and **Changing the plan** covers it if the
+assumption turns out wrong.
+
 ## Phase 4: Plan
 
 1. Complete the plan in the format of `references/PLAN-FORMAT.md`, following the rules
@@ -227,7 +238,9 @@ These are the rules the plan reviewer checks. Get them right the first time.
   working session.
 - **No decision is left for implementation time.** The implementor never chooses a
   library, decides where code lives, or invents a pattern. Resolve these in the
-  Approach. "Follow the pattern" names a file to open.
+  Approach. "Follow the pattern" names a file to open. Details are not decisions:
+  exact API calls, option names, markup quirks and library edge cases belong to
+  implementation. Don't pre-verify them.
 - Every behavioural milestone names its test seam: the public boundary the tests
   exercise.
 - Verify is an exact command or observation and its passing result
@@ -272,7 +285,9 @@ waiting.
 
 ### Changing the plan
 
-When reality disagrees with the plan, change the plan. You do not need approval.
+When reality disagrees with the plan, change the plan. You do not need approval. This
+includes changing the approach: new information often appears only during
+implementation, and acting on it is expected. It doesn't mean the plan failed.
 
 1. Edit the affected sections (requirements, design, milestones, decisions) so they
    describe the new truth. A revised Decisions row gets "(revised, C#)".
