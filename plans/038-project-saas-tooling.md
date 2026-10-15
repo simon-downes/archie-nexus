@@ -36,7 +36,7 @@ These decisions constrain every service spec.
 - **D5: Policy is local to the agent tool layer** — provider credentials and permissions remain the provider’s responsibility; Nexus adds a model-facing read/write/resource boundary before or while building provider requests.
 - **D6: Credentials stay in the existing store** — service clients read typed credentials through `archie_shared.credentials` from the mounted `ARCHIE_HOME_DIR`. New services must not accept secrets as model/tool arguments. Environment projection is opt-in per provider and is not used for Jira.
 - **D7: Exec-first exposure** — SaaS functions are initially available through `exec`, not the permanent native tool catalog. Extend the existing decorator/registry with explicit `exec_enabled`, `exec_docs`, and service namespace metadata so a function can be exec-enabled, omitted from permanent exec documentation, and exposed under a service namespace. Service skills document the functions. Provider specs may choose more restrictive exposure but must not expose secrets.
-- **D8: Existing runtime configuration path and lifecycle** — the agent loads and owns the validated Nexus config at session startup. Each exec invocation receives the immutable non-secret tool-policy snapshot from the agent through the existing runner invocation context; the runner does not reread `config.yaml`. Policy changes require a new session/container and are not live control-plane updates. Jira credentials continue to be read from the mounted credential store. Any shared config schema changes are therefore visible when a new session starts.
+- **D8: Existing runtime configuration path and lifecycle** — the agent loads and owns the validated Nexus config at session startup. Each exec invocation receives the immutable non-secret tool-policy snapshot from the agent through the existing runner invocation context; the runner does not reread `config.yaml`. Policy changes require a new session/container and are not live control-plane updates. (Superseded by plan 065: the agent re-reads tool policy before each exec call; the runner contract is unchanged.) Jira credentials continue to be read from the mounted credential store. Any shared config schema changes are therefore visible when a new session starts.
 - **D9: Bounded and safe results** — service functions validate inputs, bound result sizes/pagination, avoid returning unnecessary sensitive fields, and use distinct errors for configuration, policy, provider authorization, not-found, rate-limit, and transport failures where the provider supports those distinctions.
 - **D10: Agent-kit is capability reference** — existing agent-kit commands and clients define the capability comparison and gap analysis, but not the Nexus module, client, sync/async, or permission implementation.
 - **D11: Trust-boundary scope** — SaaS policy governs decorated SaaS functions only. It does not constrain arbitrary model-authored filesystem, subprocess, network, or Python-library access already available inside the trusted session container; this existing trust-boundary limitation is documented rather than solved by this project.
@@ -57,7 +57,7 @@ Provider specs define the concrete scope type and enforcement behavior. They mus
 - The existing mounted Nexus home directory gives the agent access to credentials without adding a new credential transport.
 - `exec` tool registration remains explicit through `exec/tools/__init__.py`; service packages must import their public modules to register functions.
 - The first SaaS spec must add the shared decorator/registry capability required by D7 while preserving existing flat tool names and native-tool behavior. Service namespaces are registry metadata, not credential-provider registration; a credential provider may exist before tooling and a tool may be disabled when credentials are absent.
-- Tool policy is loaded from `config.yaml` once by the agent at session startup, then passed as an immutable non-secret snapshot through the existing exec runner context. The runner never rereads the file; changing policy requires a new session/container.
+- Tool policy is loaded from `config.yaml` once by the agent at session startup, then passed as an immutable non-secret snapshot through the existing exec runner context. The runner never rereads the file; changing policy requires a new session/container. (Superseded by plan 065: the agent re-reads tool policy before each exec call; the runner still never reads the file.)
 
 ### Exposure and guidance
 
@@ -65,7 +65,7 @@ Each service package should expose only its intended public functions from `__in
 
 ### Permissions
 
-The common policy distinguishes read and write enablement. Policy is loaded once by the agent per session and each exec invocation receives that immutable snapshot; it is not a live authorization service. Every operation is classified as read, write, or write-with-internal-read. Policy is checked before credential/provider access; a write-with-internal-read may perform only the provider reads explicitly documented by that provider spec. Policy errors must not disclose resources outside scope. Provider scopes are intentionally provider-specific. A service spec must identify:
+The common policy distinguishes read and write enablement. Policy is loaded once by the agent per session and each exec invocation receives that immutable snapshot; it is not a live authorization service. (Superseded by plan 065: each exec invocation receives a snapshot re-read at call time.) Every operation is classified as read, write, or write-with-internal-read. Policy is checked before credential/provider access; a write-with-internal-read may perform only the provider reads explicitly documented by that provider spec. Policy errors must not disclose resources outside scope. Provider scopes are intentionally provider-specific. A service spec must identify:
 
 - which functions are reads versus writes;
 - how missing/empty scope behaves;
@@ -110,7 +110,7 @@ The shared SaaS foundation is complete when:
 
 - `NexusConfig` accepts strict common `tools` policy blocks with opaque scopes, applies safe defaults, accepts unknown provider entries, and rejects malformed common fields.
 - Recognized-provider scope resolvers fail before credential/provider access when their opaque scope is invalid.
-- Policy is a session-start snapshot and this behavior is covered by tests.
+- Policy is a session-start snapshot and this behavior is covered by tests. (Superseded by plan 065: policy is re-read per exec call.)
 - Read, write, and write-with-internal-read operation classes have documented evaluation order and provider-specific internal-read rules.
 - Existing flat exec/native tools retain their current behavior while namespaced exec-only tools can be registered, injected, and omitted from native/permanent documentation surfaces.
 - Credential-provider registration and SaaS-tool registration remain independent and are covered by compatibility tests.

@@ -1,6 +1,6 @@
 # 065 — Live tool policy reload
 
-Status: implementing
+Status: done
 Branch: build-it/065-live-tool-policy (base: main @ 5cb7363)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/065-live-tool-policy
 Updated: 2026-05-16
@@ -95,12 +95,27 @@ Codebase facts found at intake:
 
 ## Change log
 
+- M1 done: `LiveToolPolicy` and 9 unit tests.
+- M2 done: harness, task tool, `ChildDispatch` and `app.py` wired; 6 integration tests run real exec subprocesses.
+- M3 done: Google skill, `docs/config.md`, `docs/event-spec.md`, the `tool_policy.py` docstring, and supersede notes in plan 038.
+
 ## Risks
+
+- A TUI client that connects after a failure notice does not see it (notices are live-only and deduplicated per agent process). Accepted under D2.
+- An editor that truncates before writing can expose an empty file for a moment; for one exec call that yields defaults (reads on, writes off). Fails closed for writes; accepted, same as D6.
+- `refresh()` reads the file on the event loop (~1 ms). Accepted against ~190 ms per exec call.
 
 ## Review
 
+Independent review: no blocking issues. Fixed: plan 038 still said a new session was needed (S1); a misnamed test, missing harness→task-tool wiring test and missing TUI no-end-turn test (S2); doc wording, docstring, `docs/config.md`, extra dedupe tests (nits). Not taken: moving the read to a thread (needs a lock; not worth it at ~1 ms), the zero-byte-file guard, and the dead `ARCHIE_TOOL_POLICY` env fallback in `jira/policy.py`.
+
 ## Outcome
+
+Checks: `uv run pytest` 1256 passed (baseline 1240); `ruff check` and `ruff format --check` clean.
 
 PR: pending
 
 ## Follow-ups
+
+- Send reload warnings to the agent log and/or orchestrator error log (user deferred, D2).
+- Remove the unused `ARCHIE_TOOL_POLICY` env fallback in `agent/src/archie_agent/exec/tools/jira/policy.py`.

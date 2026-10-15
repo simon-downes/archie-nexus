@@ -63,8 +63,20 @@ def test_changed_error_notifies_again(home):
     _, second = live.refresh()
     _, third = live.refresh()
     assert first is not None and second is not None
+    assert second.kind == RELOAD_FAILED_KIND
     assert first.message != second.message
     assert third is None
+
+
+def test_same_error_after_recovery_notifies_again(home):
+    live = LiveToolPolicy({})
+    (home / "config.yaml").write_text("tools: [unclosed\n")
+    live.refresh()
+    (home / "config.yaml").write_text(NOTION_WRITE_ON)
+    live.refresh()
+    (home / "config.yaml").write_text("tools: [unclosed\n")
+    _, notice = live.refresh()
+    assert notice is not None and notice.kind == RELOAD_FAILED_KIND
 
 
 def test_recovery_notifies_once(home):

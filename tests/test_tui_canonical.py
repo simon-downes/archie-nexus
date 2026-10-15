@@ -484,6 +484,17 @@ def test_automatic_compaction_does_not_end_turn():
     assert app._turn_active is True
 
 
+def test_tool_policy_notices_do_not_end_turn():
+    app = _make_app()
+    app._turn_active = True
+    conv = MagicMock()
+    with patch.object(app, "query_one", return_value=conv):
+        for kind in ("tool_policy_reload_failed", "tool_policy_reloaded"):
+            app._apply_event(ErrorNotice(id=f"e-{kind}", kind=kind, message="policy"))
+    assert app._turn_active is True
+    assert conv.add_client_error.call_count == 2
+
+
 def test_manual_compaction_failure_ends_pending_turn():
     app = _make_app()
     app._turn_active = True

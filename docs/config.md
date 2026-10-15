@@ -32,8 +32,10 @@ tools: {}
 ```
 
 See [Authentication and credentials](auth-credentials.md) for `auth` provider settings and
-credential storage. The `tools` section controls provider tool policy. `cli` and `web` are
-currently reserved for future settings.
+credential storage. The `tools` section controls provider tool policy. The agent re-reads it
+before each exec call, so `tools` edits apply to running sessions; if the file is invalid, the
+last valid policy stays in force and the TUI shows a warning. Other sections are read at startup.
+`cli` and `web` are currently reserved for future settings.
 
 ## Host mounts
 

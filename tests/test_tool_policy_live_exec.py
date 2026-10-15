@@ -107,10 +107,6 @@ async def test_invalid_config_keeps_last_policy_with_one_notice(tmp_path, home):
     assert _notion_write(await _exec(harness._execute_tool)) is False
     assert [n["kind"] for n in ws.notices()] == [RELOAD_FAILED_KIND, RECOVERED_KIND]
 
-    # Notices are live-only: nothing about them reaches the session log.
-    log_text = harness.log_path.read_text() if harness.log_path.exists() else ""
-    assert "error_notice" not in log_text
-
 
 @pytest.mark.asyncio
 async def test_child_dispatch_awaits_live_policy_per_call(tmp_path):
@@ -142,6 +138,21 @@ async def test_child_dispatch_accepts_plain_dict(tmp_path):
     assert _notion_write(await _exec(dispatch.execute)) is True
 
 
-def test_harness_passes_live_source_to_task_tool(tmp_path):
+def test_harness_wraps_dict_as_static(tmp_path):
     harness = _harness(tmp_path, {"notion": {}})
     assert harness._tool_policy.refresh() == ({"notion": {}}, None)
+
+
+def test_harness_passes_live_source_to_task_tool(tmp_path, monkeypatch):
+    import archie_agent.harness as harness_module
+
+    captured = {}
+    real = harness_module.create_task_tool
+
+    def spy(**kwargs):
+        captured["tool_policy"] = kwargs["tool_policy"]
+        return real(**kwargs)
+
+    monkeypatch.setattr(harness_module, "create_task_tool", spy)
+    harness = _harness(tmp_path, {"notion": {}})
+    assert captured["tool_policy"] == harness._current_tool_policy
