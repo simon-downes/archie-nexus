@@ -50,12 +50,23 @@ next maintainer find it where they expect?
 - *Performance:* N+1 queries, unbounded loads, external calls without timeouts. Don't
   flag micro-optimisations or cold paths without evidence.
 
-## What not to flag
+## Scope
 
-- Problems present at the base sha that the change doesn't make materially worse.
+Flag a finding, at any severity, only when all three hold:
+
+- **The change caused it.** The diff or the plan introduced it, or makes it materially
+  worse. Existing problems elsewhere in a file or function the change touches are out
+  of scope, even when they sit a few lines from an edit.
+- **Its trigger is realistic.** A real input, state or call sequence reaches it.
+- **Its fix stays in scope.** Fixing it doesn't mean redesigning code the change didn't
+  need to touch.
+
+Don't flag:
+
 - Anything the project's formatter or linter enforces.
 - An equally valid alternative design, when the code is clear and follows conventions.
 - Future use cases the requirements don't need.
+- Small local duplication where an abstraction would couple unrelated concepts.
 - "Add more tests/logging" without naming what can't currently be verified or diagnosed.
 - Anything a caller, guard or existing test already defeats. Check before you flag.
 
@@ -85,6 +96,7 @@ Verdict: APPROVE | APPROVE WITH SUGGESTIONS | REQUEST CHANGES
 ```
 
 - ❌ incorrect, unsafe, or violates a MUST. ⚠️ a concrete defect. ℹ️ a smaller in-scope
-  improvement, such as duplication, dead code, unclear naming or a stale comment. Report
-  every ℹ️ you find: the author fixes each one they agree with. ❓ unclear intent.
+  improvement, such as duplicated logic that can drift, dead code, unclear naming or a
+  stale comment. Report every in-scope ℹ️: the author fixes each one they agree with.
+  ❓ unclear intent.
 - With no findings, write `Verdict: APPROVE` and one sentence on what you checked.

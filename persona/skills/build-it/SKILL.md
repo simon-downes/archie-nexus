@@ -173,11 +173,12 @@ Set `Status: reviewing` and commit.
 3. **Spec check, yourself.** Trace every MUST requirement to code and a passing test.
    For a change that traces to no requirement, remove it, or add the requirement it
    serves and log a deviation.
-4. **Fix everything you agree with.** Treat each finding as a claim: read the cited code
-   and agree only when it holds. Reject a finding when the reviewer is wrong, missed
-   context, or the problem is already handled another way.
-   - Fix every finding you agree with, at any severity. ℹ️ findings count: duplication,
-     dead code and stale docs are cheap now and costly later.
+4. **Fix everything you agree with.** Treat each finding as a claim: read the cited code.
+   Agree only when the change introduced the problem, its trigger is realistic and
+   reachable, and its fix stays in scope. Reject a finding when the reviewer is wrong,
+   missed context, or the problem is already handled another way.
+   - Fix every finding you agree with, at any severity. ℹ️ findings count: duplicated
+     logic that can drift, dead code and stale docs are cheap now and costly later.
    - Answer each ❓; fix the code or plan if the answer shows a problem.
    - Send valid out-of-scope findings to Follow-ups. Record the resolutions, and each
      rejection with its reason, in the plan's Review section.
