@@ -28,6 +28,14 @@ class NotionTransportError(ToolError):
     pass
 
 
+class NotionToolError(ToolError):
+    pass
+
+
+class NotionResponseError(ToolError):
+    pass
+
+
 @asynccontextmanager
 async def _session():
     try:
@@ -53,9 +61,13 @@ async def _session():
             async with session_type(read_stream, write_stream) as client:
                 await client.initialize()
                 yield client
-    except NotionConfigurationError:
+    except (NotionConfigurationError, NotionToolError, NotionResponseError):
         raise
     except Exception as exc:
+        if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+            exc = exc.exceptions[0]
+        if isinstance(exc, (NotionConfigurationError, NotionToolError, NotionResponseError)):
+            raise exc
         raise NotionTransportError("Notion MCP request could not be completed") from exc
 
 
@@ -63,7 +75,15 @@ async def _call(client: Any, name: str, arguments: dict[str, Any]) -> Any:
     try:
         result = await client.call_tool(name, arguments)
         text = "\n".join(getattr(block, "text", "") for block in getattr(result, "content", []))
-        return json.loads(text) if text else {}
+        if getattr(result, "isError", False):
+            message = " ".join(text.split())[:300] or "Notion tool rejected the request"
+            raise NotionToolError(message)
+        try:
+            return json.loads(text) if text else {}
+        except json.JSONDecodeError as exc:
+            raise NotionResponseError("Notion returned a non-JSON response") from exc
+    except (NotionToolError, NotionResponseError):
+        raise
     except Exception as exc:
         raise NotionTransportError("Notion MCP request failed") from exc
 

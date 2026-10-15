@@ -13,6 +13,7 @@ CHILD = "22222222-2222-2222-2222-222222222222"
 def test_resource_id_accepts_supported_urls():
     assert resource_id(f"https://www.notion.so/Page-{ROOT}") == ROOT.replace("-", "")
     assert resource_id(f"https://team.notion.site/Page-{ROOT}?v=1") == ROOT.replace("-", "")
+    assert resource_id(f"https://app.notion.com/p/{ROOT}") == ROOT.replace("-", "")
 
 
 async def test_get_page_returns_bounded_projection_and_properties():
@@ -48,6 +49,20 @@ async def test_get_page_denies_unrelated_resource():
     ):
         with pytest.raises(NotionPolicyError):
             await get_page(CHILD)
+
+
+def test_normalize_fetch_preserves_data_source_and_view_urls():
+    from archie_agent.exec.tools.notion.normalization import normalize_fetch
+
+    result = normalize_fetch(
+        {
+            "metadata": {"type": "database"},
+            "text": '<data-source url="collection://source-1"><view url="view://view-1">',
+        },
+        ROOT,
+    )
+    assert result["data_sources"] == ["collection://source-1"]
+    assert result["views"] == [{"url": "view://view-1"}]
 
 
 async def test_get_database_returns_views():

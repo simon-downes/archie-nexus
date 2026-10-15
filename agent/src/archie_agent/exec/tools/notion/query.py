@@ -16,16 +16,33 @@ class NotionQueryError(ToolError):
     pass
 
 
-def _validate_filters(filters: list[str] | None) -> list[str]:
-    if filters is None:
-        return []
-    if (
-        not isinstance(filters, list)
-        or len(filters) > 20
-        or any(not isinstance(item, str) or not item.strip() or len(item) > 200 for item in filters)
-    ):
-        raise NotionValidationError("filters must contain at most 20 bounded expressions")
-    return [item.strip() for item in filters]
+def _validate_filter(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or len(value) > 20:
+        raise NotionValidationError("filter must be a bounded structured filter")
+    return value
+
+
+def _validate_sort(value: list[dict[str, str]] | None) -> list[dict[str, str]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) > 20:
+        raise NotionValidationError("sort must contain at most 20 entries")
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"property", "direction"}
+            or not isinstance(item["property"], str)
+            or not item["property"].strip()
+            or item["direction"] not in {"ascending", "descending"}
+        ):
+            raise NotionValidationError(
+                "sort entries require property and ascending or descending direction"
+            )
+    return [
+        {"property": item["property"].strip(), "direction": item["direction"]} for item in value
+    ]
 
 
 @tool(native=False, exec_docs=False, namespace="notion")
@@ -33,9 +50,9 @@ async def query_database(
     id_or_url: str,
     *,
     view: str | None = None,
-    filters: list[str] | None = None,
-    sort: str | None = None,
-    columns: list[str] | None = None,
+    data_source: str | None = None,
+    filter: dict[str, Any] | None = None,
+    sort: list[dict[str, str]] | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Query a bounded Notion database view."""
@@ -50,24 +67,32 @@ async def query_database(
     from .reads import _authorize
 
     _authorize(schema, database_id, policy, "database")
-    args: dict[str, Any] = {"data_source_url": database_id, "mode": "rows", "limit": limit}
-    if view:
+    if data_source is not None and (not isinstance(data_source, str) or not data_source.strip()):
+        raise NotionValidationError("data_source must be a non-empty data-source URL")
+    if view is not None:
         if not isinstance(view, str) or not view.strip() or len(view) > 200:
             raise NotionValidationError("view must be 1-200 characters")
-        args["view"] = view.strip()
-    args["filters"] = _validate_filters(filters)
-    if sort is not None:
-        if not isinstance(sort, str) or not sort.strip() or len(sort) > 200:
-            raise NotionValidationError("sort must be a bounded expression")
-        args["sort"] = sort.strip()
-    if columns is not None:
-        if (
-            not isinstance(columns, list)
-            or len(columns) > 50
-            or any(not isinstance(item, str) or not item.strip() for item in columns)
-        ):
-            raise NotionValidationError("columns must contain at most 50 names")
-        args["columns"] = columns
+        views = [item.get("url") for item in schema.get("views", []) if isinstance(item, dict)]
+        if view.strip() not in views:
+            raise NotionValidationError("view is not part of this database")
+        args: dict[str, Any] = {
+            "data": {"mode": "view", "view_url": view.strip(), "page_size": limit}
+        }
+    else:
+        data_sources = schema.get("data_sources", [])
+        if not isinstance(data_sources, list) or not data_sources:
+            raise NotionQueryError("Notion database has no queryable data source")
+        source = data_source.strip() if data_source else data_sources[0]
+        if source not in data_sources:
+            raise NotionValidationError("data_source is not part of this database")
+        data: dict[str, Any] = {"mode": "rows", "data_source_url": source, "limit": limit}
+        validated_filter = _validate_filter(filter)
+        validated_sort = _validate_sort(sort)
+        if validated_filter is not None:
+            data["filter"] = validated_filter
+        if validated_sort is not None:
+            data["sort"] = validated_sort
+        args = {"data": data}
     raw = await notion_call("notion-query-data-sources", args)
     rows = raw.get("results", raw) if isinstance(raw, dict) else raw
     if not isinstance(rows, list):

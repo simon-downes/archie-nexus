@@ -24,7 +24,7 @@ description: >
 
 ## Shared input rules
 
-- **Resource ID:** accept a canonical 32-character Notion ID, UUID-form ID, or a URL hosted by `notion.so`, `www.notion.so`, or a `*.notion.site` domain whose path ends in a Notion ID. Do not pass arbitrary URLs.
+- **Resource ID:** accept a canonical 32-character Notion ID, UUID-form ID, or a URL hosted by `notion.so`, `www.notion.so`, `app.notion.com`, or a `*.notion.site` domain whose path ends in a Notion ID. Do not pass arbitrary URLs.
 - **Search query:** non-empty string, maximum 200 characters.
 - **Limit:** integer in the documented range; `bool` is not a valid integer limit.
 - **Text:** limits count characters. Search, view, sort, and filter strings must be bounded and non-empty where documented.
@@ -141,14 +141,14 @@ Fetches one authorized page. A page root or proven descendant is allowed. `inclu
 
 Fetches one authorized database/data source. It returns bounded metadata and, when requested and available, up to 50 views. It does not guarantee a complete database schema projection.
 
-### `notion.query_database(id_or_url, view=None, filters=None, sort=None, columns=None, limit=50)`
+### `notion.query_database(id_or_url, view=None, data_source=None, filter=None, sort=None, limit=50)`
 
 Authorizes the database before issuing the row query. `limit` must be `1..100`.
 
-- `view`: optional non-empty string, maximum 200 characters.
-- `filters`: optional list of at most 20 non-empty strings, each maximum 200 characters. The current tool bounds and forwards these expressions; it does not locally parse or guarantee `Property=Value`, `Property!=Value`, or `Property~=Value` semantics.
-- `sort`: optional non-empty string, maximum 200 characters.
-- `columns`: optional list of at most 50 non-empty strings.
+- `data_source`: optional `collection://...` URL returned by the database metadata. The first data source is used by default.
+- `view`: optional `view://...` URL returned by the database metadata. View queries use the provider's view mode.
+- `filter`: optional provider-shaped structured filter object. Do not pass expression strings.
+- `sort`: optional list of objects with `property` and `direction`, where direction is `ascending` or `descending`.
 
 Rows are capped locally at `limit`. Use the database ID rather than a connected-source search result ID.
 
@@ -214,15 +214,14 @@ async def main():
 async def main():
     rows = await notion.query_database(
         "<database-id>",
-        filters=["Status=Done"],
-        sort="Delivery:desc",
-        columns=["Name", "Status"],
+        filter={"property": "Status", "select": {"equals": "Done"}},
+        sort=[{"property": "Delivery", "direction": "descending"}],
         limit=10,
     )
     return rows
 ```
 
-Treat filter and sort expressions as provider-facing strings; inspect returned rows rather than assuming every property type is supported.
+Filters and sorts use the provider's structured schema; inspect returned rows rather than assuming every property type is supported.
 
 ### Confirm before writing
 

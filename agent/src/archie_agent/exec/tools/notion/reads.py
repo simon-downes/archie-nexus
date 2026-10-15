@@ -27,9 +27,11 @@ def resource_id(value: str) -> str:
     value = value.strip()
     if value.startswith("http://") or value.startswith("https://"):
         parsed = urlparse(value)
-        if parsed.netloc not in {"notion.so", "www.notion.so"} and not parsed.netloc.endswith(
-            ".notion.site"
-        ):
+        if parsed.netloc not in {
+            "notion.so",
+            "www.notion.so",
+            "app.notion.com",
+        } and not parsed.netloc.endswith(".notion.site"):
             raise NotionValidationError("Unsupported Notion URL")
         match = re.search(
             r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})$", parsed.path

@@ -8,6 +8,10 @@ from typing import Any
 
 _ID_RE = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32}"
 _PARENT_RE = re.compile(rf'<(?:parent-page|ancestor-\d+-page)\s+url="[^"]*?({_ID_RE})"')
+_DATA_SOURCE_RE = re.compile(
+    r'<(?:data-source|collection)\b[^>]*?url="(?:\{\{)?(collection://[^"}]+)(?:\}\})?"'
+)
+_VIEW_RE = re.compile(r'<view\b[^>]*?url="(?:\{\{)?(view://[^"}]+)(?:\}\})?"')
 _PROPERTIES_RE = re.compile(r"<properties>\s*(\{.*?\})\s*</properties>", re.DOTALL)
 _CONTENT_RE = re.compile(r"<content>\s*(.*?)\s*</content>", re.DOTALL)
 _COMMENT_RE = re.compile(
@@ -39,6 +43,8 @@ def normalize_fetch(value: Any, requested_id: str) -> dict[str, Any] | None:
         "path": value.get("path"),
         "last_edited_time": value.get("page_last_edited_at"),
         "ancestors": [_canonical_id(item) for item in _PARENT_RE.findall(text)],
+        "data_sources": _DATA_SOURCE_RE.findall(text),
+        "views": [{"url": url} for url in _VIEW_RE.findall(text)],
     }
     properties_match = _PROPERTIES_RE.search(text)
     if properties_match:

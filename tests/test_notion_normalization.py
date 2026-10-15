@@ -27,6 +27,19 @@ def test_normalize_fetch_envelope_extracts_page_content_and_ancestry():
     assert result["properties"] == {"title": "Archie Test"}
 
 
+def test_normalize_fetch_extracts_wrapped_database_urls():
+    raw = {
+        "metadata": {"type": "database"},
+        "text": (
+            '<data-sources><data-source url="{{collection://source-1}}">'
+            '<views><view url="{{view://view-1}}"></view></views>'
+        ),
+    }
+    result = normalize_fetch(raw, PAGE)
+    assert result["data_sources"] == ["collection://source-1"]
+    assert result["views"] == [{"url": "view://view-1"}]
+
+
 def test_normalize_comments_empty_suggested_edits_response():
     assert normalize_comments({"suggested_edits_status": "not_enabled"}) == []
 
