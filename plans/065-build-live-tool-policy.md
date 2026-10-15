@@ -1,6 +1,6 @@
 # 065 — Live tool policy reload
 
-Status: interviewing
+Status: implementing
 Branch: build-it/065-live-tool-policy (base: main @ 5cb7363)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/065-live-tool-policy
 Updated: 2026-05-16
@@ -55,12 +55,43 @@ Codebase facts found at intake:
 
 | #  | Decision | Chosen | Rejected | Why | Source |
 |----|----------|--------|----------|-----|--------|
+| D1 | Behaviour when `config.yaml` is invalid mid-session | Keep using the last valid policy | Fail closed (error every exec call); fall back to defaults | User: config breaks are usually short-lived and easy to fix; running agents must not stop working | user Q1 |
+| D2 | Where reload warnings appear | Live `error_notice` to the session's TUI clients only | Also agent container log; also orchestrator error log | User: MVP is TUI only; may change later | user Q2 |
+| D3 | Policy source | Agent re-reads the mounted `config.yaml` before each exec call | Fetch from orchestrator over HTTP; TTL cache; mtime cache | Read costs ~0.8 ms against ~190 ms per exec; HTTP adds coupling and an availability dependency; a TTL delays edits | self, measured |
+| D4 | Warning deduplication | Notify on state transitions: first failure, a changed error message, and recovery | Notify on every failing exec call | Every-call notices flood the TUI while the user fixes the file | self (user concern) |
+| D5 | Runner contract | Unchanged: the agent writes the snapshot to `context.json`; the runner never reads `config.yaml` | Runner reads config | Keeps plan 038 D8's boundary; only the snapshot's freshness changes | self |
+| D6 | Missing `config.yaml` | Treated as valid and yields defaults (reads on, writes off) | Treat as error | Matches `load_nexus_config()` startup behaviour; the result fails closed for writes | self |
 
 ## Requirements
 
+- R1: Each root exec call MUST use the policy from `config.yaml` as read at call time.
+  - AC: enabling `notion.write` in the file makes the next root exec call see `write.enabled: true` without restarting.
+- R2: Each subagent exec call MUST use the same live policy source.
+  - AC: a `ChildDispatch` exec call sees a policy change made after the child started.
+- R3: If the file cannot be read, parsed or validated, the exec call MUST proceed with the last valid policy.
+  - AC: the exec call runs; its `context.json` holds the last valid snapshot.
+- R4: The agent MUST emit one live `error_notice` (kind `tool_policy_reload_failed`) on the first failure, and again only when the error message changes.
+  - AC: three exec calls against the same invalid file produce one notice.
+- R5: The agent MUST emit one live `error_notice` (kind `tool_policy_reloaded`) when a reload succeeds after a failure.
+- R6: Notices MUST NOT be persisted, MUST NOT end the turn in the TUI, and MUST NOT be logged by the agent (D2).
+  - AC: the kinds are not in the TUI's end-turn set; `ErrorNotice` is already live-only.
+- R7: Docs that say policy changes need a new session MUST be updated.
+
 ## Design
 
+- New module `agent/src/archie_agent/tool_policy_live.py` with `LiveToolPolicy`:
+  - constructed with the startup snapshot and a `loader` callable (default: `load_nexus_config()` → `policy_snapshot(ToolsConfig(providers=config.tools))`);
+  - `refresh() -> tuple[dict, ErrorNotice | None]` is synchronous: on success it stores and returns the new snapshot, plus a recovery notice if the previous state was failed; on any exception it returns the last valid snapshot, plus a failure notice if the error message differs from the last reported one;
+  - `LiveToolPolicy.static(snapshot)` has no loader, for tests and callers that pass a plain dict.
+- `AgentHarness(tool_policy=...)` accepts `dict | LiveToolPolicy | None`; a dict is wrapped with `static`. A new `async _current_tool_policy()` calls `refresh()`, emits any notice through the event bus (best effort), and returns the snapshot. Root exec uses it; `create_task_tool(tool_policy=...)` receives the coroutine function, and `ChildDispatch` awaits it before each exec call.
+- `app.lifespan` builds `LiveToolPolicy(startup_snapshot)` with the default loader.
+- No change to `run_exec`, the runner, provider policy modules, or the TUI.
+
 ## Milestones
+
+- M1: `LiveToolPolicy` with unit tests (valid reload, invalid fallback, dedupe, recovery, missing file).
+- M2: wire into harness, task tool, `ChildDispatch`, and `app.py`; tests for root and child exec seeing a live change and for one notice across repeated failures.
+- M3: update `persona/skills/google/SKILL.md`; full checks.
 
 ## Change log
 

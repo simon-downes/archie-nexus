@@ -26,7 +26,7 @@ description: >
         enabled: false
   ```
 
-- Reads default to enabled when omitted. Writes default to disabled when omitted. Policy is snapshotted at session start; changing `config.yaml` requires a new session.
+- Reads default to enabled when omitted. Writes default to disabled when omitted. The agent re-reads `config.yaml` before each exec call, so a policy change takes effect on the next call without a new session. If `config.yaml` is invalid, the last valid policy stays in force and the TUI shows one warning until the file is fixed.
 - Google Nexus policy has no resource scopes, service blocks, operation allowlists, or OAuth-scope requirements. OAuth scopes are provider configuration and must be changed through the Google authentication setup.
 - All public tools return bounded JSON-serializable projections or raise typed errors. They do not return error objects.
 - Validate arguments before credentials or provider calls. Do not bypass a policy denial by using another Google API, raw HTTP, or a sibling public tool.

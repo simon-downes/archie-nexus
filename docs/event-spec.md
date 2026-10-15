@@ -83,8 +83,9 @@ flushes buffered live events through `_apply_event(event)` and deduplicates by e
 identity. `handshake` is followed by `session_status`; neither is a
 snapshot or accounting authority.
 
-`error_notice` is used for targeted command rejections and best-effort storage-failure
-notification. It is not a persisted turn terminal event. Accepted turns emit exactly
+`error_notice` is used for targeted command rejections, best-effort storage-failure
+notification, and tool-policy reload warnings (`tool_policy_reload_failed`,
+`tool_policy_reloaded`). It is not a persisted turn terminal event. Accepted turns emit exactly
 one persisted `turn_complete`, `turn_error`, or `turn_interrupted`, except when the
 append path itself fails. Available partial assistant text is persisted as an interrupted
 `assistant_message` before the matching terminal event.
