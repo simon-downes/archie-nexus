@@ -107,11 +107,15 @@ RUN TFDOCS_VERSION=$(curl -fsSL https://api.github.com/repos/terraform-docs/terr
     | tar -xz -C /usr/local/bin terraform-docs && chmod +x /usr/local/bin/terraform-docs
 
 # --- GitHub CLI ---
+# The real binary is diverted to /usr/bin/gh-base so package upgrades keep it there.
+# /usr/local/bin/gh (copied below) is a wrapper that picks the GitHub token per call.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
     > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*
+    apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/* && \
+    dpkg-divert --local --rename --divert /usr/bin/gh-base --add /usr/bin/gh && \
+    /usr/bin/gh-base --version
 
 # --- difftastic (structural diff tool) ---
 RUN DIFFT_VERSION=$(curl -s https://api.github.com/repos/Wilfred/difftastic/releases/latest | grep '"tag_name"' | cut -d'"' -f4) && \
@@ -201,9 +205,10 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/archie/venv
 RUN cd /opt/archie && uv sync --package archie-agent --no-dev --no-install-project
 ENV PATH="/opt/archie/venv/bin:$PATH"
 
-# --- Entrypoint script ---
+# --- Entrypoint script and gh wrapper ---
 COPY entrypoint.sh /opt/archie/entrypoint.sh
-RUN chmod +x /opt/archie/entrypoint.sh
+COPY container/bin/gh /usr/local/bin/gh
+RUN chmod +x /opt/archie/entrypoint.sh /usr/local/bin/gh
 
 # --- Create workspace mount point ---
 RUN mkdir /workspace

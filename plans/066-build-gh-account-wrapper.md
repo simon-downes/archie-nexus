@@ -195,7 +195,7 @@ drops env projection, and types `work_orgs`.
 - **Verify:** `uv run pytest` passes; `uv run ruff check .` clean.
 - **Outcome:** `GithubCredential(personal_token, work_token)`; `github` provider has both fields, no env, `set_env=False`; `AuthProviderOverride.work_orgs` added and `AuthConfig.__post_init__` rejects it for other providers. New/updated tests: runtime (no GH_TOKEN), CLI login (JSON stdin, hidden prompts), orchestrator (both required, legacy `token` 400, provider descriptor), config (github accepted, google rejected). Full suite 1304 passed; ruff check clean. Docs: `auth-credentials.md`, `config.md`.
 
-### [ ] M4 — Image installs the wrapper
+### [x] M4 — Image installs the wrapper
 
 - **Approach:** In the GitHub CLI RUN step, after `apt-get install gh`, run
   `dpkg-divert --local --rename --divert /usr/bin/gh-base --add /usr/bin/gh`. Next to
@@ -205,7 +205,7 @@ drops env projection, and types `work_orgs`.
 - **Tasks:** Dockerfile; docs note in `auth-credentials.md`.
 - **Deliverable:** image layout per requirement.
 - **Verify:** Dockerfile inspection; `bash -n container/bin/gh` and `shellcheck container/bin/gh` exit 0; `d=$(mktemp -d); ln -s /usr/bin/gh $d/gh-base; PATH=$d:$PATH container/bin/gh --version` prints `gh version …` and exits 0.
-- **Outcome:**
+- **Outcome:** Dockerfile diverts `/usr/bin/gh` → `/usr/bin/gh-base` (and runs `gh-base --version` in the build step), copies `container/bin/gh` to `/usr/local/bin/gh` beside the entrypoint, `chmod +x` in the same RUN. `bash -n` and `shellcheck` exit 0; with `gh-base` symlinked to `/usr/bin/gh`, `container/bin/gh --version` printed `gh version 2.102.0` and exited 0; with an empty token, it warned and gh reported "not logged into any GitHub hosts". Git mode set to 100755 (the M1 commit had 100644 because the workspace filesystem dropped the exec bit). Image build not run (no Docker here).
 
 ## Change log
 
