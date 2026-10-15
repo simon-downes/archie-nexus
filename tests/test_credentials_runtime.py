@@ -13,12 +13,11 @@ def test_runtime_environment_projects_selected_credentials(monkeypatch, tmp_path
     assert env == {"AWS_ACCESS_KEY_ID": "AKIA", "AWS_SECRET_ACCESS_KEY": "secret"}
 
 
-def test_runtime_environment_projects_github_and_scalr(monkeypatch, tmp_path):
+def test_runtime_environment_projects_scalr_but_not_github(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    replace_credential("github", {"token": "gh"})
+    replace_credential("github", {"personal_token": "personal", "work_token": "work"})
     replace_credential("scalr", {"token": "scalr", "hostname": "host", "account": "acct"})
     assert runtime_environment(NexusConfig()) == {
-        "GH_TOKEN": "gh",
         "SCALR_TOKEN": "scalr",
         "SCALR_HOSTNAME": "host",
         "SCALR_ACCOUNT": "acct",
@@ -28,7 +27,9 @@ def test_runtime_environment_projects_github_and_scalr(monkeypatch, tmp_path):
 def test_runtime_environment_rejects_invalid_override_mapping(tmp_path, monkeypatch):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = NexusConfig(
-        auth=AuthConfig(providers={"github": AuthProviderOverride(env={"bad": "GH_TOKEN"})})
+        auth=AuthConfig(
+            providers={"github": AuthProviderOverride(env={"token": "GH_TOKEN"}, set_env=True)}
+        )
     )
     with pytest.raises(ValueError, match="unknown credential field"):
         runtime_environment(config)

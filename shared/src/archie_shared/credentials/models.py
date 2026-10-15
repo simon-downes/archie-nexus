@@ -39,9 +39,13 @@ class LinearCredential(msgspec.Struct, forbid_unknown_fields=True):
 
 
 class GithubCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """GitHub personal access token."""
+    """GitHub fine-grained tokens: one for work organisations, one for everything else.
 
-    token: str | None = None
+    The container gh wrapper picks between them per call; see auth.providers.github.work_orgs.
+    """
+
+    personal_token: str | None = None
+    work_token: str | None = None
 
 
 class ScalrCredential(msgspec.Struct, forbid_unknown_fields=True):

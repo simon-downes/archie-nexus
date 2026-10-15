@@ -232,7 +232,9 @@ def test_repo_flag_beats_gh_repo_env(env, personal_repo):
 
 
 def test_flags_after_double_dash_are_ignored(env, personal_repo):
-    _, data = run_gh(env, "pr", "comment", "--body-file", "-", "--", "-R", "tillo/x", cwd=personal_repo)
+    _, data = run_gh(
+        env, "pr", "comment", "--body-file", "-", "--", "-R", "tillo/x", cwd=personal_repo
+    )
     assert data["GH_TOKEN"] == "personal-secret"
 
 
@@ -269,9 +271,19 @@ def test_gh_resolved_base_remote_beats_upstream(env, tmp_path):
         origin="git@github.com:tillo/service.git",
         upstream="git@github.com:tillo/other.git",
     )
-    subprocess.run(["git", "-C", str(repo), "config", "remote.origin.gh-resolved", "base"], check=True)
     subprocess.run(
-        ["git", "-C", str(repo), "remote", "set-url", "upstream", "git@github.com:simon-downes/o.git"],
+        ["git", "-C", str(repo), "config", "remote.origin.gh-resolved", "base"], check=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "set-url",
+            "upstream",
+            "git@github.com:simon-downes/o.git",
+        ],
         check=True,
     )
     _, data = run_gh(env, "pr", "list", cwd=repo)

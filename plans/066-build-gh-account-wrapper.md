@@ -181,7 +181,7 @@ drops env projection, and types `work_orgs`.
 - **Verify:** `uv run pytest tests/test_gh_wrapper.py` passes.
 - **Outcome:** owner parsing (`owner_from_args`, `owner_from_spec`) and gh's remote order (`base_remote`) added; 37 wrapper tests pass, including 14 explicit-target forms, `GH_REPO`, `--`, trailing `-R`, `{owner}` placeholder, exact match, and the four remote-order cases; `shellcheck` clean. Precedence deviates (→ C1).
 
-### [ ] M3 — Credential and config shape
+### [x] M3 — Credential and config shape
 
 - **Approach:** `GithubCredential(personal_token, work_token)`; `github` provider
   `fields=["personal_token","work_token"]`, no `env`, `set_env=False`.
@@ -193,7 +193,7 @@ drops env projection, and types `work_orgs`.
 - **Tasks:** model/provider/api changes; tests; docs `auth-credentials.md` + `config.md`.
 - **Deliverable:** new credential fields stored, no env projection, `work_orgs` typed.
 - **Verify:** `uv run pytest` passes; `uv run ruff check .` clean.
-- **Outcome:**
+- **Outcome:** `GithubCredential(personal_token, work_token)`; `github` provider has both fields, no env, `set_env=False`; `AuthProviderOverride.work_orgs` added and `AuthConfig.__post_init__` rejects it for other providers. New/updated tests: runtime (no GH_TOKEN), CLI login (JSON stdin, hidden prompts), orchestrator (both required, legacy `token` 400, provider descriptor), config (github accepted, google rejected). Full suite 1304 passed; ruff check clean. Docs: `auth-credentials.md`, `config.md`.
 
 ### [ ] M4 — Image installs the wrapper
 

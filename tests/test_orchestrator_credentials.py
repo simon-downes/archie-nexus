@@ -14,6 +14,9 @@ def _app_state(monkeypatch, tmp_path):
     app.state.auth_service = AuthService(app.state.config)
 
 
+GITHUB = {"personal_token": "personal-secret", "work_token": "work-secret"}
+
+
 async def client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
@@ -53,12 +56,14 @@ async def test_provider_discovery_is_complete_and_secret_free():
 @pytest.mark.asyncio
 async def test_static_credential_replacement_and_deletion_preserve_other_entries(tmp_path):
     async with await client() as http:
-        response = await http.put("/auth/credential/github", json={"token": "secret"})
+        response = await http.put("/auth/credential/github", json=GITHUB)
         assert response.status_code == 200
         assert response.json()["state"] == "configured"
         response = await http.put("/auth/credential/linear", json={"token": "other"})
         assert response.status_code == 200
-        response = await http.put("/auth/credential/github", json={"token": "new"})
+        response = await http.put(
+            "/auth/credential/github", json={"personal_token": "p2", "work_token": "w2"}
+        )
         assert response.status_code == 200
         response = await http.delete("/auth/credential/github")
         assert response.status_code == 200
@@ -71,11 +76,35 @@ async def test_static_credential_replacement_and_deletion_preserve_other_entries
 async def test_static_credential_validation_does_not_modify_existing():
     async with await client() as http:
         assert (
-            await http.put("/auth/credential/github", json={"token": "keep"})
+            await http.put(
+                "/auth/credential/github", json={"personal_token": "keep", "work_token": "w"}
+            )
         ).status_code == 200
-        response = await http.put("/auth/credential/github", json={"token": "new", "extra": "bad"})
+        response = await http.put("/auth/credential/github", json={**GITHUB, "extra": "bad"})
     assert response.status_code == 400
     assert "keep" in (await _read_store()).read_text()
+
+
+@pytest.mark.asyncio
+async def test_github_requires_both_tokens_and_rejects_legacy_token():
+    async with await client() as http:
+        legacy = await http.put("/auth/credential/github", json={"token": "old"})
+        partial = await http.put("/auth/credential/github", json={"personal_token": "p"})
+        status = (await http.get("/auth/status")).json()
+    assert legacy.status_code == 400
+    assert partial.status_code == 400
+    assert "work_token" in partial.json()["error"]
+    github = next(item for item in status if item["provider"] == "github")
+    assert github["state"] == "missing"
+
+
+@pytest.mark.asyncio
+async def test_github_provider_lists_both_fields_and_no_env():
+    async with await client() as http:
+        providers = {item["name"]: item for item in (await http.get("/auth/providers")).json()}
+    assert providers["github"]["fields"] == ["personal_token", "work_token"]
+    assert providers["github"]["env"] == {}
+    assert providers["github"]["set_env"] is False
 
 
 @pytest.mark.asyncio

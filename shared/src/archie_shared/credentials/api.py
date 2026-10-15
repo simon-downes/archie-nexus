@@ -65,7 +65,14 @@ class AuthProviderOverride(msgspec.Struct, forbid_unknown_fields=True):
     extra_params: dict[str, str] | None = None
     env: dict[str, str] | None = None
     set_env: bool | None = None
+    # github only: owners (orgs or users) whose repositories use github.work_token.
+    work_orgs: list[str] | None = None
 
 
 class AuthConfig(msgspec.Struct, forbid_unknown_fields=True):
     providers: dict[str, AuthProviderOverride] = msgspec.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name, override in self.providers.items():
+            if name != "github" and override.work_orgs is not None:
+                raise ValueError(f"auth.providers.{name}.work_orgs is only valid for github")

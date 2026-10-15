@@ -96,11 +96,11 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
         name="linear",
         fields=["token"],
     ),
+    # Not projected into the container environment: the container gh wrapper reads the
+    # matching token from credentials.yaml on each call.
     "github": StaticProvider(
         name="github",
-        fields=["token"],
-        env={"token": "GH_TOKEN"},
-        set_env=True,
+        fields=["personal_token", "work_token"],
     ),
     "aws": StaticProvider(
         name="aws",

@@ -229,3 +229,17 @@ def test_expand_workspace_root_absolute(tmp_path):
     config = NexusConfig(global_=GlobalConfig(workspace_root=str(tmp_path / "projects")))
     result = expand_workspace_root(config)
     assert result == tmp_path / "projects"
+
+
+def test_github_work_orgs_config(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("auth:\n  providers:\n    github:\n      work_orgs: [tillo, Tillo-Labs]\n")
+    config = load_nexus_config(path=cfg)
+    assert config.auth.providers["github"].work_orgs == ["tillo", "Tillo-Labs"]
+
+
+def test_work_orgs_rejected_for_other_providers(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("auth:\n  providers:\n    google:\n      work_orgs: [tillo]\n")
+    with pytest.raises(ConfigError, match="work_orgs"):
+        load_nexus_config(path=cfg)

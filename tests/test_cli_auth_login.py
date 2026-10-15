@@ -48,8 +48,15 @@ def test_oauth_login_surfaces_orchestrator_configuration_error():
     assert "Could not start orchestrator OAuth login" not in result.output
 
 
-def test_github_login_uses_gh_token(monkeypatch):
-    monkeypatch.setenv("GH_TOKEN", "github-secret")
+def test_github_login_reads_both_tokens_from_json_stdin(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "ignored")
+    monkeypatch.setattr(
+        "sys.stdin",
+        MagicMock(
+            isatty=lambda: False,
+            read=lambda: json.dumps({"personal_token": "p-secret", "work_token": "w-secret"}),
+        ),
+    )
     response = _response()
     with (
         patch("archie_cli.auth._orchestrator_url", return_value="http://127.0.0.1:7600"),
@@ -58,9 +65,28 @@ def test_github_login_uses_gh_token(monkeypatch):
         _set_static_from_login("github")
     put.assert_called_once_with(
         "http://127.0.0.1:7600/auth/credential/github",
-        json={"token": "github-secret"},
+        json={"personal_token": "p-secret", "work_token": "w-secret"},
         timeout=10,
     )
+
+
+def test_github_login_prompts_for_both_tokens_hidden(monkeypatch):
+    monkeypatch.setattr("sys.stdin", MagicMock(isatty=lambda: True))
+    prompts = []
+
+    def prompt(text, **kwargs):
+        prompts.append((text, kwargs.get("hide_input")))
+        return {"github personal_token": "p", "github work_token": "w"}[text]
+
+    response = _response()
+    with (
+        patch("archie_cli.auth.click.prompt", side_effect=prompt),
+        patch("archie_cli.auth._orchestrator_url", return_value="http://test"),
+        patch("archie_cli.auth.httpx.put", return_value=response) as put,
+    ):
+        _set_static_from_login("github")
+    assert prompts == [("github personal_token", True), ("github work_token", True)]
+    assert put.call_args.kwargs["json"] == {"personal_token": "p", "work_token": "w"}
 
 
 def test_scalr_login_uses_environment(monkeypatch):
