@@ -43,6 +43,7 @@ from archie_agent.compaction import is_compact_command
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
+from archie_agent.tool_policy_live import LiveToolPolicy
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -124,7 +125,7 @@ async def lifespan(app):
         model_catalog=_catalog,
         region=_config.global_.region,
         subagents=_config.agent.subagents,
-        tool_policy=policy_snapshot(ToolsConfig(providers=_config.tools)),
+        tool_policy=LiveToolPolicy(policy_snapshot(ToolsConfig(providers=_config.tools))),
         turn_cost_limit=_config.agent.turn_cost_limit,
         compaction=_config.agent.compaction,
     )

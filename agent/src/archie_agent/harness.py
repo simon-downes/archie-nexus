@@ -58,6 +58,7 @@ from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, re
 from archie_agent.session import DisplayEntry, Session, Turn
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import create_skill_tool, discover_skills
+from archie_agent.tool_policy_live import LiveToolPolicy
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -103,7 +104,7 @@ class AgentHarness:
         model_catalog: dict[str, "ModelEntry"] | None = None,
         region: str = "eu-west-1",
         subagents: SubagentsConfig | None = None,
-        tool_policy: dict | None = None,
+        tool_policy: "dict | LiveToolPolicy | None" = None,
         turn_cost_limit: float = 50.0,
         compaction: CompactionConfig | None = None,
         compaction_llm: "LLMClient | None" = None,
@@ -116,7 +117,11 @@ class AgentHarness:
         self._model_catalog = model_catalog or {}
         self._region = region
         self._subagents = subagents or SubagentsConfig()
-        self._tool_policy = tool_policy or {}
+        self._tool_policy = (
+            tool_policy
+            if isinstance(tool_policy, LiveToolPolicy)
+            else LiveToolPolicy.static(tool_policy)
+        )
         self._turn_cost_limit = turn_cost_limit
         self._baseline_context_tokens: int | None = None
         self._baseline_turn_count = 0
@@ -185,7 +190,7 @@ class AgentHarness:
                 emit=self._emit_event,
                 exec_python=self._exec_python,
                 exec_run_root=self._exec_run_root,
-                tool_policy=self._tool_policy,
+                tool_policy=self._current_tool_policy,
                 turn_cost_limit=self._turn_cost_limit,
                 max_concurrent=self._subagents.max_concurrent,
                 live_children=self._children,
@@ -942,7 +947,7 @@ class AgentHarness:
                     kwargs["python"] = self._exec_python
                 if self._exec_run_root:
                     kwargs["run_root"] = self._exec_run_root
-                kwargs["policy_snapshot"] = self._tool_policy
+                kwargs["policy_snapshot"] = await self._current_tool_policy()
                 envelope = await run_exec(source, **kwargs)
                 content = format_result(envelope)
                 is_error = not envelope.ok
@@ -1009,6 +1014,16 @@ class AgentHarness:
         """SIGKILL the subprocess group if it hasn't exited after the grace period."""
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
+
+    async def _current_tool_policy(self) -> dict:
+        """Reload tool policy for one exec call; show a live notice on state change."""
+        snapshot, notice = self._tool_policy.refresh()
+        if notice is not None:
+            try:
+                await self._event_bus.emit(notice)
+            except Exception:  # noqa: BLE001 — a notice must never fail the exec call
+                pass
+        return snapshot
 
     async def _emit_event(self, event: SessionEvent) -> None:
         """Submit a typed child event through the session event bus."""

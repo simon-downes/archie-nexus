@@ -1,4 +1,4 @@
-"""Non-secret tool policy configuration and session snapshots."""
+"""Non-secret tool policy configuration and per-exec snapshots."""
 
 from __future__ import annotations
 
