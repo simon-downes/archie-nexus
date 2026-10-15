@@ -56,7 +56,6 @@ next maintainer find it where they expect?
 - Anything the project's formatter or linter enforces.
 - An equally valid alternative design, when the code is clear and follows conventions.
 - Future use cases the requirements don't need.
-- Small local duplication where an abstraction would couple unrelated concepts.
 - "Add more tests/logging" without naming what can't currently be verified or diagnosed.
 - Anything a caller, guard or existing test already defeats. Check before you flag.
 
@@ -86,5 +85,6 @@ Verdict: APPROVE | APPROVE WITH SUGGESTIONS | REQUEST CHANGES
 ```
 
 - ❌ incorrect, unsafe, or violates a MUST. ⚠️ a concrete defect. ℹ️ a smaller in-scope
-  improvement; report it only when it is clearly worth the edit. ❓ unclear intent.
+  improvement, such as duplication, dead code, unclear naming or a stale comment. Report
+  every ℹ️ you find: the author fixes each one they agree with. ❓ unclear intent.
 - With no findings, write `Verdict: APPROVE` and one sentence on what you checked.

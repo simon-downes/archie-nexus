@@ -55,6 +55,7 @@ Verdict: ✅ Clean | ⚠️ Findings | ❌ Significant gaps
   or `M#, <field>`.
 - ❌ Gap: the implementor will need missing information, or a decision is unresolved.
 - ⚠️ Concern: ambiguity or a probable problem.
-- ℹ️ Note: a smaller improvement worth the edit.
+- ℹ️ Note: a smaller improvement. Report every one; the author fixes each they agree
+  with.
 - Report only checks with findings, one finding per problem. If there are none, write
   `Verdict: ✅ Clean` and one sentence on what you verified.
