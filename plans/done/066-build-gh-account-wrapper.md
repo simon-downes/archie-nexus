@@ -243,8 +243,8 @@ Verification: `uv run pytest` 1320 passed (54 wrapper tests); `uv run ruff check
 
 Not verified: the image build (`archie build`; no Docker in this environment). Real GitHub calls with fine-grained tokens, including the `user-attachments` screenshot upload.
 
-PR: pending
-CI:
+PR: not created — `pr.py open` pushed the branch, then `gh pr create` failed: "GraphQL: Resource not accessible by personal access token (createPullRequest)". The container's current `GH_TOKEN` is the old single (Tillo) token, which is the problem this change fixes.
+CI: none (no PR)
 
 ## Follow-ups
 
