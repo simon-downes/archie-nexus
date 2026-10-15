@@ -1,6 +1,6 @@
 # 066 — Owner-aware gh wrapper with work and personal GitHub tokens
 
-Status: reviewing
+Status: done
 Branch: build-it/066-gh-account-wrapper (base: main @ 23b01dd)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/066-gh-account-wrapper
 Updated: 2026-10-15
@@ -237,7 +237,16 @@ drops env projection, and types `work_orgs`.
 
 ## Outcome
 
+Delivered: `container/bin/gh`, installed by the Dockerfile at `/usr/local/bin/gh` over the real binary, which is diverted to `/usr/bin/gh-base`. It reads `auth.providers.github.work_orgs` and one of `github.work_token` / `github.personal_token` with `yq` on every call, and runs `gh-base` with every argument unchanged and `GH_TOKEN` set only in that process. The github credential is now `personal_token` + `work_token`, both required. It is no longer projected into the container environment. `work_orgs` is typed and rejected for other providers.
+
+Verification: `uv run pytest` 1320 passed (54 wrapper tests); `uv run ruff check .` clean; `ruff format --check` clean; `shellcheck container/bin/gh` clean; the wrapper in front of the real gh 2.102.0 printed `gh version` and, with an empty token, warned and let gh report "not logged into any GitHub hosts".
+
+Not verified: the image build (`archie build`; no Docker in this environment). Real GitHub calls with fine-grained tokens, including the `user-attachments` screenshot upload.
+
 PR: pending
 CI:
 
 ## Follow-ups
+
+- Update brain entry `projects/archie/github-multi-account-credentials.md` once merged.
+- Create the two fine-grained tokens, run `archie auth login github`, add `work_orgs: [tillo]`, rebuild the image, then test the `user-attachments` screenshot upload before reopening the 064 PR flow.
