@@ -151,7 +151,7 @@ drops env projection, and types `work_orgs`.
 
 ## Milestones
 
-### [ ] M1 — Wrapper picks the token from the origin remote (tracer bullet)
+### [x] M1 — Wrapper picks the token from the origin remote (tracer bullet)
 
 - **Approach:** `container/bin/gh`, bash, `set -u`. Resolve home `${ARCHIE_HOME_DIR:-$HOME/.nexus}`.
   Owner from `git remote get-url origin` (M2 widens this). Orgs via
@@ -166,7 +166,7 @@ drops env projection, and types `work_orgs`.
   caller `GH_TOKEN`/`GITHUB_TOKEN`.
 - **Deliverable:** wrapper selects the right token from `origin`.
 - **Verify:** `uv run pytest tests/test_gh_wrapper.py` passes.
-- **Outcome:**
+- **Outcome:** `container/bin/gh` built; 13 tests in `tests/test_gh_wrapper.py` pass (work/personal from origin, https URL, no repo, argv/stdin/exit passthrough, per-call reads, default home, missing config, missing token, malformed YAML, caller GH_TOKEN/GITHUB_TOKEN, token not in argv); `shellcheck` clean.
 
 ### [ ] M2 — Explicit repo targets and gh's remote order
 

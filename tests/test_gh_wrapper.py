@@ -1,0 +1,180 @@
+"""Tests for the container gh wrapper (container/bin/gh).
+
+The wrapper is run as a subprocess with a fake ``gh-base`` first on PATH. The fake
+prints the token environment, its argv, and its stdin as JSON, then exits with the
+code given in ``FAKE_EXIT``.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+WRAPPER = Path(__file__).resolve().parents[1] / "container" / "bin" / "gh"
+
+pytestmark = pytest.mark.skipif(
+    not all(shutil.which(tool) for tool in ("bash", "git", "yq")),
+    reason="gh wrapper tests need bash, git and yq",
+)
+
+FAKE_GH_BASE = f"""#!{sys.executable}
+import json, os, sys
+print(json.dumps({{
+    "GH_TOKEN": os.environ.get("GH_TOKEN"),
+    "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN"),
+    "argv": sys.argv[1:],
+    "stdin": "" if sys.stdin.isatty() else sys.stdin.read(),
+}}))
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+"""
+
+CREDENTIALS = "github:\n  personal_token: personal-secret\n  work_token: work-secret\n"
+CONFIG = "auth:\n  providers:\n    github:\n      work_orgs: [tillo]\n"
+
+
+@pytest.fixture
+def env(tmp_path):
+    """A clean environment with a fake gh-base and a Nexus home holding both tokens."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "gh-base"
+    fake.write_text(FAKE_GH_BASE)
+    fake.chmod(0o755)
+    home = tmp_path / "nexus"
+    home.mkdir()
+    (home / "credentials.yaml").write_text(CREDENTIALS)
+    (home / "config.yaml").write_text(CONFIG)
+    base = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path / "userhome"),
+        "ARCHIE_HOME_DIR": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    return base
+
+
+def make_repo(path: Path, **remotes: str) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    for name, url in remotes.items():
+        subprocess.run(["git", "-C", str(path), "remote", "add", name, url], check=True)
+    return path
+
+
+def run_gh(env, *args, cwd, stdin=None, extra=None):
+    full_env = {**env, **(extra or {})}
+    proc = subprocess.run(
+        ["bash", str(WRAPPER), *args],
+        cwd=cwd,
+        env=full_env,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    data = json.loads(proc.stdout) if proc.stdout.strip() else None
+    return proc, data
+
+
+# --- M1: token selection from the origin remote ---
+
+
+def test_work_org_origin_uses_work_token(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_other_origin_uses_personal_token(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/archie-nexus.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_https_origin_is_parsed(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="https://github.com/tillo/service")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "work-secret"
+
+
+def test_outside_a_repo_uses_personal_token(env, tmp_path):
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    _, data = run_gh(env, "auth", "status", cwd=outside)
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_arguments_stdin_and_exit_code_pass_through(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    args = ["pr", "create", "--title", "a b  c", "--body", "", "--label", "x;$(id)"]
+    proc, data = run_gh(env, *args, cwd=repo, stdin="hello\n", extra={"FAKE_EXIT": "3"})
+    assert data["argv"] == args
+    assert data["stdin"] == "hello\n"
+    assert proc.returncode == 3
+
+
+def test_credentials_are_read_on_every_call(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
+    _, first = run_gh(env, "pr", "list", cwd=repo)
+    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
+    creds.write_text(CREDENTIALS.replace("personal-secret", "rotated"))
+    _, second = run_gh(env, "pr", "list", cwd=repo)
+    assert (first["GH_TOKEN"], second["GH_TOKEN"]) == ("personal-secret", "rotated")
+
+
+def test_default_home_is_dot_nexus(env, tmp_path):
+    userhome = Path(env["HOME"]) / ".nexus"
+    userhome.mkdir(parents=True)
+    (userhome / "credentials.yaml").write_text(CREDENTIALS.replace("personal-secret", "from-home"))
+    env = {k: v for k, v in env.items() if k != "ARCHIE_HOME_DIR"}
+    repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "from-home"
+
+
+def test_missing_config_means_no_work_orgs(env, tmp_path):
+    (Path(env["ARCHIE_HOME_DIR"]) / "config.yaml").unlink()
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] == "personal-secret"
+
+
+def test_missing_token_warns_and_runs_without_token(env, tmp_path):
+    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
+    creds.write_text("github:\n  personal_token: personal-secret\n")
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    proc, data = run_gh(env, "pr", "list", cwd=repo, extra={"GH_TOKEN": ""})
+    assert data["GH_TOKEN"] is None
+    assert f"gh: github.work_token is not set in {creds}" in proc.stderr
+
+
+def test_malformed_credentials_warn_and_run_without_token(env, tmp_path):
+    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
+    creds.write_text("github: [unclosed\n")
+    repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
+    proc, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] is None
+    assert f"gh: could not read {creds}" in proc.stderr
+
+
+def test_caller_gh_token_is_left_alone(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo, extra={"GH_TOKEN": "caller"})
+    assert data["GH_TOKEN"] == "caller"
+
+
+def test_caller_github_token_is_left_alone(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo, extra={"GITHUB_TOKEN": "caller"})
+    assert data["GITHUB_TOKEN"] == "caller"
+    assert data["GH_TOKEN"] is None
+
+
+def test_token_never_appears_in_argv(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    _, data = run_gh(env, "pr", "list", cwd=repo)
+    assert "work-secret" not in json.dumps(data["argv"])

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# gh wrapper: runs the real GitHub CLI (gh-base) with the token for the target owner.
+#
+# Archie stores two fine-grained GitHub tokens in $ARCHIE_HOME_DIR/credentials.yaml:
+#   github.work_token      used when the target owner is listed in
+#                          auth.providers.github.work_orgs in config.yaml
+#   github.personal_token  used for every other owner
+#
+# Both files are read on every call, so token changes apply immediately and no token
+# is kept in the container environment. The token is set as GH_TOKEN only in the
+# environment of the exec'd gh-base. If the caller already set GH_TOKEN or
+# GITHUB_TOKEN, the wrapper changes nothing. All arguments, stdin and the exit code
+# pass through unchanged.
+
+set -u
+
+home="${ARCHIE_HOME_DIR:-$HOME/.nexus}"
+credentials="$home/credentials.yaml"
+config="$home/config.yaml"
+
+warn() {
+    printf 'gh: %s\n' "$*" >&2
+}
+
+# read_yaml FILE EXPR: print the yq result. A missing file prints nothing. A file yq
+# cannot read prints nothing, warns, and returns 2.
+read_yaml() {
+    local file=$1 expr=$2 out
+    [[ -f $file ]] || return 0
+    if ! out=$(yq -r "$expr" "$file" 2>/dev/null); then
+        warn "could not read $file"
+        return 2
+    fi
+    printf '%s\n' "$out"
+}
+
+# owner_from_url URL: print the owner from an SSH (git@host:o/r), ssh:// or https://
+# remote URL.
+owner_from_url() {
+    local url=$1 path
+    case $url in
+        *://*)
+            path=${url#*://}
+            path=${path#*@}
+            path=${path#*/}
+            ;;
+        *:*) path=${url#*:} ;;
+        *) return 1 ;;
+    esac
+    path=${path#/}
+    [[ $path == */* ]] || return 1
+    printf '%s' "${path%%/*}"
+}
+
+# resolve_owner ARGS...: print the owner of the repository gh will act on, if known.
+resolve_owner() {
+    local url
+    url=$(git remote get-url origin 2>/dev/null) || return 0
+    owner_from_url "$url"
+}
+
+if [[ -n ${GH_TOKEN:-} || -n ${GITHUB_TOKEN:-} ]]; then
+    exec gh-base "$@"
+fi
+
+owner=$(resolve_owner "$@")
+field=personal_token
+if [[ -n $owner ]]; then
+    while IFS= read -r org; do
+        if [[ -n $org && ${org,,} == "${owner,,}" ]]; then
+            field=work_token
+            break
+        fi
+    done < <(read_yaml "$config" '.auth.providers.github.work_orgs[]')
+fi
+
+unset GH_TOKEN
+if token=$(read_yaml "$credentials" ".github.$field // \"\""); then
+    if [[ -n $token ]]; then
+        export GH_TOKEN=$token
+        exec gh-base "$@"
+    fi
+    warn "github.$field is not set in $credentials"
+fi
+exec gh-base "$@"
