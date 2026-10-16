@@ -9,8 +9,9 @@ Worktree: /workspace/archie-nexus/.git/build-it-worktrees/068-datadog-tooling
 Give the agent Datadog access through an exec-only `datadog` namespace and a matching
 `persona/skills/datadog/SKILL.md`, following the existing Jira and incident.io tool patterns.
 When done, model code can query metrics, logs, spans, events, monitors, dashboards and the
-software catalog for incident investigation and service health checks, and can make bounded,
-policy-gated monitor and dashboard writes. No delete operation exists.
+software catalog for incident investigation and service health checks, and can create and
+update monitors tagged `managedby:archie` when write policy allows. Dashboards are read-only.
+No delete operation exists.
 
 ## Context
 
@@ -21,7 +22,8 @@ restrict deletions, "but that's why we expose a tool and not the raw credentials
 The design scope is the brain entry `projects/archie/datadog-incident-operations-tools.md`
 (Datadog section): read-heavy wrapper; bounded monitor and dashboard writes behind an ownership
 boundary; no deletes; no SLOs; service checks and event posting deferred. Its open decisions
-(ownership tag, naming convention, raw query language, limits) are resolved in Decisions below.
+(ownership tag, naming convention, raw query language, limits) are resolved in Decisions below;
+dashboard writes were dropped (D3).
 
 Codebase facts:
 
