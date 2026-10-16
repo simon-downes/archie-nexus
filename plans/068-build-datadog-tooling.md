@@ -226,7 +226,7 @@ All new under `agent/src/archie_agent/exec/tools/datadog/`:
   options=None)`, `update_monitor(monitor_id, name=None, query=None, message=None, tags=None,
   priority=None, options=None)`. `update_monitor` sends a PUT with only the given fields, and
   `options` is merged over the monitor's current options from the ownership GET (D18). It
-  returns the monitor from a follow-up GET. With no fields given, it raises `DatadogInputError`.
+  returns the monitor from the PUT response. With no fields given, it raises `DatadogInputError`.
 - `client.py` `_ALLOWED` (method, path): `GET /api/v1/query`, `GET /api/v1/search`,
   `POST /api/v2/logs/events/search`, `POST /api/v2/spans/events/search`, `GET /api/v2/events`,
   `GET /api/v1/monitor/search`, `GET /api/v1/monitor/<int>`, `POST /api/v1/monitor/validate`,
@@ -364,7 +364,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 - **Outcome:** Wrote `persona/skills/datadog/SKILL.md`, `tests/test_datadog_skill.py` (all 14
   functions, all 12 error classes, safety rules, no `api.datadoghq`/`DD-API-KEY`/`/api/v1`/
   `ARCHIE_HOME_DIR`, discovery as `datadog`) and the `docs/config.md` sentence. The incident.io
-  branch's net diff leaves `docs/config.md` unchanged, so that file does not conflict. Live smoke
+  branch also edits the `docs/config.md` sentence (see Risks). Live smoke
   through `runner.run()` with write policy enabled in `context.json` (shapes only):
 
   ```
@@ -377,14 +377,26 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 
 ## Deviations
 
+- M4/review: `update_monitor` returns the PUT response instead of a follow-up GET. A 2xx with an
+  unexpected body raises `DatadogResponseError` saying the update was applied, not
+  `DatadogMutationIndeterminateError`. The follow-up GET threw away a known success and reported it as
+  uncertain (general review ℹ️).
+- Review: a `scope` in either policy block now fails both gates (the skill already promised it).
+
 ## Risks
 
 - `get_dashboard` on a large dashboard can exceed the 16,000-character exec result limit
   (live: 38 widgets → 10,360 chars). The skill tells the agent to select fields in code before
   returning them.
 
-- Merging after (or before) PR #5 conflicts in `exec/tools/__init__.py` (one import) and
-  `tests/conftest.py` (`pytest_plugins`); resolve by keeping both entries.
+- Merging after (or before) PR #5 conflicts in `exec/tools/__init__.py` (one import),
+  `tests/conftest.py` (`pytest_plugins`) and `docs/config.md` (the same policy sentence);
+  resolve each by keeping both entries.
+- The allowlist guards the tool interface only. Exec code runs in the same Python process and
+  can import `archie_shared.credentials.store.get_credential` and read the Datadog keys
+  (verified live: the key is readable from `main()`). Jira, incident.io and Slack have the same
+  exposure; closing it means credential isolation in the exec runner, outside this change. The
+  skill tells the agent to use only `datadog.*` functions.
 - An invalid `config.yaml` makes every Datadog call fail with a configuration error while other
   tools keep working on the last valid policy; intended (fail closed on the API host).
 - The key may lack `monitors_write`; live create/update cannot be verified and are covered by unit tests only.
@@ -404,6 +416,18 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   record fields incl. bounded log `attributes` and no span `custom`; catalog/team filter params;
   explicit `_ALLOWED` list; `validate_monitor` adds the tag; update return value and empty-call
   rule; top-level widget cap; registration test staging (M3 12 → M4 14); smoke inputs named.
+- Code review: `general` and `risk`, one round each (the first `risk` run crashed with a provider
+  error and was re-run).
+  - Fixed: missing `truncated` flags on span, widget, template-variable and catalog records;
+    tests isolated from the developer's `config.yaml` (autouse `ARCHIE_HOME_DIR` fixture in
+    `tests/datadog_fakes.py`, plus a site-override test); over-length optional-query tests;
+    a scope in either block fails every gate; the update return value (see Deviations);
+    duplicated constants (`DASHBOARD_ID`, `MAX_ERROR`, `MAX_TAGS`, `MAX_TEXT`, `SORTS`) now
+    have one definition; the `collection` alias removed; the plan's `docs/config.md` conflict claim
+    corrected.
+  - Risk ❓ (exec code can read credentials in-process): confirmed live. It is pre-existing and
+    shared with every credentialed tool; recorded under Risks and Follow-ups, and the client
+    docstring and skill no longer imply process isolation.
 
 ## Outcome
 
@@ -411,6 +435,9 @@ PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Credential isolation for exec tools (keys readable by model code in the runner process;
+  affects Datadog, Jira, incident.io, Slack).
 
 - Dashboard writes once an ownership marker exists (for example a Datadog team `archie`).
 - Monitor downtimes and muting (needs `monitors_downtime`).

@@ -27,8 +27,6 @@ from archie_agent.exec.tools.datadog.monitors import (
     validate_monitor,
 )
 
-from tests.datadog_fakes import Seq
-
 SEARCH = ("GET", "/api/v1/monitor/search")
 VALIDATE = ("POST", "/api/v1/monitor/validate")
 
@@ -210,9 +208,10 @@ async def test_update_keeps_ownership_tag(fake, policy):
 async def test_update_sends_only_given_fields_and_merges_options(fake, policy):
     policy(WRITE)
     current = {**OWNED, "options": {"thresholds": {"critical": 10}, "notify_no_data": True}}
-    client = fake({GET42: current, PUT42: current}, "monitors")
+    client = fake({GET42: current, PUT42: {**current, "message": "new"}}, "monitors")
     result = await update_monitor(42, message="new", options={"thresholds": {"critical": 5}})
-    assert [call[:2] for call in client.calls] == [GET42, PUT42, GET42]
+    assert [call[:2] for call in client.calls] == [GET42, PUT42]
+    assert result["message"] == "new"
     assert client.calls[1][3] == {
         "message": "new",
         "options": {"thresholds": {"critical": 5}, "notify_no_data": True},
@@ -279,10 +278,17 @@ async def test_update_read_error_on_put_is_indeterminate(fake, policy):
         await update_monitor(42, name="y")
 
 
-async def test_update_verification_failure_is_indeterminate(fake, policy):
+async def test_update_5xx_on_put_is_indeterminate(fake, policy):
     policy(WRITE)
-    fake({GET42: Seq([OWNED, DatadogResponseError("HTTP 500")]), PUT42: OWNED}, "monitors")
+    fake({GET42: OWNED, PUT42: DatadogResponseError("Datadog returned HTTP 502")}, "monitors")
     with pytest.raises(DatadogMutationIndeterminateError):
+        await update_monitor(42, name="y")
+
+
+async def test_update_success_with_odd_body_says_updated(fake, policy):
+    policy(WRITE)
+    fake({GET42: OWNED, PUT42: {"unexpected": True}}, "monitors")
+    with pytest.raises(DatadogResponseError, match="was updated"):
         await update_monitor(42, name="y")
 
 

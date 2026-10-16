@@ -6,19 +6,20 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .client import DatadogInputError
+from .client import DASHBOARD_ID, DatadogInputError
 
 MAX_QUERY = 2_000
 MAX_TEXT = 4_000
 _RELATIVE = re.compile(r"^([1-9][0-9]{0,5})([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
 _MAX_WINDOW = timedelta(days=31)
-_DASHBOARD = re.compile(r"^[a-z0-9]{3}-[a-z0-9]{3}-[a-z0-9]{3}$")
+_DASHBOARD = re.compile(DASHBOARD_ID)
 _KIND = re.compile(r"^[a-z0-9_.-]{1,64}$")
-_MAX_TAGS = 50
+MAX_TAGS = 50
 _MAX_TAG = 200
 
 OWNERSHIP_TAG = "managedby:archie"
+SORTS = {"newest": "-timestamp", "oldest": "timestamp"}
 
 MONITOR_TYPES = frozenset(
     {
@@ -151,8 +152,8 @@ def kind(value: Any) -> str | None:
 def tags(value: Any) -> list[str]:
     if value is None:
         return []
-    if not isinstance(value, list) or len(value) > _MAX_TAGS:
-        raise DatadogInputError(f"tags must be a list of at most {_MAX_TAGS} strings")
+    if not isinstance(value, list) or len(value) > MAX_TAGS:
+        raise DatadogInputError(f"tags must be a list of at most {MAX_TAGS} strings")
     result = []
     for item in value:
         if not isinstance(item, str) or not item.strip() or len(item) > _MAX_TAG:
@@ -164,7 +165,7 @@ def tags(value: Any) -> list[str]:
 def with_ownership(values: list[str]) -> list[str]:
     """Return ``values`` with the ownership tag appended once."""
     kept = [item for item in values if item != OWNERSHIP_TAG]
-    if len(kept) >= _MAX_TAGS:
+    if len(kept) >= MAX_TAGS:
         raise DatadogInputError(f"tags must leave room for {OWNERSHIP_TAG}")
     return [*kept, OWNERSHIP_TAG]
 

@@ -7,7 +7,6 @@ from archie_agent.exec.tools import tool
 from . import validation
 from .client import datadog_client
 from .formatting import span
-from .logs import SORTS
 from .paging import collection, iso
 from .policy import require_read
 
@@ -24,7 +23,7 @@ async def search_spans(
     text = validation.query(query)
     begin, finish = validation.time_window(start, end)
     count = validation.limit(limit)
-    order = SORTS[validation.choice(sort, "sort", set(SORTS))]
+    order = validation.SORTS[validation.choice(sort, "sort", set(validation.SORTS))]
     require_read()
     body = {
         "data": {

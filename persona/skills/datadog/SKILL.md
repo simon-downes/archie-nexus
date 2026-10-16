@@ -15,7 +15,7 @@ description: >
 
 - Call Datadog only through `exec`, using `await datadog.<function>(...)`.
 - Credentials are implicit. Never request, pass, print, or store Datadog keys, and do not make raw HTTP calls to Datadog.
-- **Nothing can be deleted.** The tool only sends a fixed list of requests, and none of them deletes, mutes, or creates downtimes. Dashboards are read-only.
+- **Nothing can be deleted.** The tool only sends a fixed list of requests, and none of them deletes, mutes, or creates downtimes. Dashboards are read-only. Use only the `datadog.*` functions; never import the tool's internals or credential modules, or call Datadog any other way.
 - **Writes are limited to monitors this tool owns.** `create_monitor` always adds the tag `managedby:archie`. `update_monitor` refuses any monitor without that tag, even when write policy is on. Do not try to add the tag to someone else's monitor to get around this.
 - Reads are enabled by default; writes are disabled by default. Policy:
 
@@ -28,7 +28,7 @@ description: >
         enabled: true   # needed for create_monitor and update_monitor
   ```
 
-  A `scope` in either block is not supported; setting one makes every call fail with `DatadogPolicyError`.
+  A `scope` in either block is not supported; setting one makes every Datadog call fail with `DatadogPolicyError`.
 - Get explicit user intent before creating or changing a monitor. A monitor can page people. Prefer `validate_monitor` first.
 - Calls return JSON-serializable values or raise typed errors; they do not return error objects.
 - Results are normalised and bounded (see each function). The exec result is truncated at 16,000 characters, so keep `limit`s small and return only the fields you need. A large dashboard alone can be over 10,000 characters.
@@ -146,11 +146,12 @@ Returns spans:
   "end": "2026-10-01T10:59:00.541Z",
   "duration_ms": 372.04,
   "status": "error",
-  "error": "http_error: 502 Bad Gateway"
+  "error": "http_error: 502 Bad Gateway",
+  "truncated": false
 }
 ```
 
-This makes one request, so it returns at most `limit` spans. Custom span attributes are not returned.
+This makes one request, so it returns at most `limit` spans. `error` is at most 500 characters. Custom span attributes are not returned.
 
 ### `datadog.list_events(query=None, start="1h", end=None, limit=20)`
 
@@ -202,7 +203,7 @@ Creates a monitor and returns its detail. Needs write policy.
 
 ### `datadog.update_monitor(monitor_id, name=None, query=None, message=None, tags=None, priority=None, options=None)`
 
-Changes a monitor that has `managedby:archie`, and returns its detail read back after the change. Needs write policy.
+Changes a monitor that has `managedby:archie`, and returns its detail as Datadog reports it after the change. Needs write policy.
 
 - Only the arguments you pass are sent. At least one is required.
 - `tags` replaces the tag list; `managedby:archie` is always kept.
@@ -218,14 +219,14 @@ Returns dashboard summaries: `{"id", "title", "description", "layout_type", "aut
 Returns a summary plus `url`, `template_variables` (names), `widget_count`, and up to 100 top-level `widgets`:
 
 ```json
-{"id": 123, "type": "timeseries", "title": "Errors", "queries": ["sum:errors{$env}"]}
+{"id": 123, "type": "timeseries", "title": "Errors", "queries": ["sum:errors{$env}"], "truncated": false}
 ```
 
 Each widget has at most 10 queries of up to 500 characters. A group widget also has `child_count`; widgets inside groups are not listed. Return only what you need, because large dashboards approach the exec output limit.
 
 ### `datadog.list_catalog_entities(kind=None, query=None, limit=50)`
 
-Returns `{"id", "kind", "name", "display_name", "owner", "tags"}` per entity. `kind` is a catalog kind such as `service`, `api`, `datastore`, `queue` or `system`. `query` filters by entity name.
+Returns `{"id", "kind", "name", "display_name", "owner", "tags", "truncated"}` per entity. `kind` is a catalog kind such as `service`, `api`, `datastore`, `queue` or `system`. `query` filters by entity name.
 
 ### `datadog.list_teams(query=None, limit=50)`
 
@@ -245,7 +246,7 @@ Errors are sanitized and never contain keys. Some carry Datadog's error message,
 - `DatadogNotFoundError`: the monitor or dashboard does not exist.
 - `DatadogRateLimitError`: throttled. `retry_after_seconds` is an integer or `None`. Wait at least that long before one retry.
 - `DatadogTransportError`: the network failed or the 60-second call limit expired. Reads are safe to retry once.
-- `DatadogResponseError`: Datadog returned something unexpected. Report it; retry a read at most once.
+- `DatadogResponseError`: Datadog returned something unexpected. Report it; retry a read at most once. After `update_monitor`, the message says the update was applied; check the monitor with `get_monitor` instead of retrying.
 - `DatadogMutationIndeterminateError`: a create or update may or may not have happened. **Do not retry blindly.** Check with `get_monitor`, or `search_monitors("tag:managedby:archie")` for a create, before doing anything else.
 
 ## Examples

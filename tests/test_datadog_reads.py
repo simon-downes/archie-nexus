@@ -14,6 +14,7 @@ from archie_agent.exec.tools.datadog.dashboards import get_dashboard, list_dashb
 from archie_agent.exec.tools.datadog.events import list_events
 from archie_agent.exec.tools.datadog.logs import search_logs
 from archie_agent.exec.tools.datadog.metrics import query_metrics, search_metrics
+from archie_agent.exec.tools.datadog.monitors import search_monitors
 from archie_agent.exec.tools.datadog.traces import search_spans
 from archie_agent.exec.tools.datadog.validation import time_window
 
@@ -307,6 +308,47 @@ async def test_list_events_sends_query_and_follows_cursor(fake):
     assert client.calls[1][2]["page[limit]"] == 9
 
 
+@pytest.mark.parametrize(
+    ("module", "call"),
+    [
+        ("events", lambda: list_events("x" * 2001)),
+        ("monitors", lambda: search_monitors("x" * 2001)),
+        ("dashboards", lambda: list_dashboards("x" * 2001)),
+        ("catalog", lambda: list_catalog_entities(query="x" * 2001)),
+        ("catalog", lambda: list_teams("x" * 2001)),
+        ("events", lambda: list_events(3)),
+    ],
+)
+async def test_optional_queries_reject_bad_values(fake, module, call):
+    client = fake({}, module)
+    with pytest.raises(DatadogInputError):
+        await call()
+    assert client.calls == []
+
+
+def test_truncation_is_flagged_on_every_bounded_record():
+    from archie_agent.exec.tools.datadog.formatting import catalog_entity, dashboard_detail, span
+
+    long_error = {"attributes": {"custom": {"error": {"type": "E", "message": "m" * 900}}}}
+    assert span(long_error)["truncated"] is True
+    assert len(span(long_error)["error"]) == 500
+    assert span(SPAN)["truncated"] is False
+    entity = {"id": "u", "attributes": {"tags": [f"t{i}" for i in range(60)]}}
+    assert catalog_entity(entity)["truncated"] is True
+    many = {"requests": [{"q": f"q{i}"} for i in range(12)]}
+    detail = dashboard_detail(
+        {
+            "id": "abc-def-ghi",
+            "widgets": [{"id": 1, "definition": {"type": "timeseries", **many}}],
+            "template_variables": [{"name": f"v{i}"} for i in range(60)],
+        }
+    )
+    assert detail["widgets"][0]["truncated"] is True
+    assert len(detail["widgets"][0]["queries"]) == 10
+    assert len(detail["template_variables"]) == 50
+    assert detail["truncated"] is True
+
+
 async def test_list_events_blank_query_is_no_filter(fake):
     client = fake({EVENTS: {"data": []}}, "events")
     await list_events("  ")
@@ -402,6 +444,7 @@ async def test_get_dashboard_widgets_and_bounds(fake):
         "type": "group",
         "title": "G",
         "queries": [],
+        "truncated": False,
         "child_count": 2,
     }
 
@@ -441,6 +484,7 @@ async def test_list_catalog_entities_filters(fake):
             "display_name": "API",
             "owner": "team:pay",
             "tags": ["t"],
+            "truncated": False,
         }
     ]
 

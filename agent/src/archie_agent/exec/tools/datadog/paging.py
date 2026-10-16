@@ -13,7 +13,8 @@ def iso(value) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _data(value: Any) -> list[dict]:
+def collection(value: Any) -> list[dict]:
+    """Return the dict items under ``data``; anything else is a malformed response."""
     data = value.get("data") if isinstance(value, dict) else None
     if not isinstance(data, list):
         raise DatadogResponseError("Datadog returned a malformed collection")
@@ -38,7 +39,7 @@ async def search_pages(
         if cursor:
             page["cursor"] = cursor
         value = await client.request("POST", path, json={**body, "page": page})
-        items = _data(value)
+        items = collection(value)
         results.extend(items)
         cursor = _after(value)
         if len(results) >= limit or not items or not cursor:
@@ -57,13 +58,9 @@ async def list_pages(
         if cursor:
             query["page[cursor]"] = cursor
         value = await client.request("GET", path, params=query)
-        items = _data(value)
+        items = collection(value)
         results.extend(items)
         cursor = _after(value)
         if len(results) >= limit or not items or not cursor:
             break
     return results[:limit]
-
-
-def collection(value: Any) -> list[dict]:
-    return _data(value)

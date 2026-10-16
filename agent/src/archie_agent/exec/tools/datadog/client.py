@@ -1,7 +1,8 @@
 """Async Datadog REST client limited to an allowlist of requests, with sanitized errors.
 
-Datadog application-key scopes cannot forbid deletes, so this client is the boundary: it sends
-only the ``(method, path)`` pairs in ``_ALLOWED``, and none of them is a DELETE.
+Datadog application-key scopes cannot forbid deletes, so the tool API enforces it: this client
+sends only the ``(method, path)`` pairs in ``_ALLOWED``, and none of them is a DELETE. This guards
+the tool interface; it is not process isolation (exec code runs in the same process).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from archie_agent.exec.tools import ToolError
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
 _DEADLINE_SECONDS = 60.0
-_MAX_ERROR = 300
+MAX_ERROR = 300
 
 SITES = frozenset(
     {
@@ -34,7 +35,7 @@ SITES = frozenset(
 )
 
 _MONITOR = r"[1-9][0-9]{0,18}"
-_DASHBOARD = r"[a-z0-9]{3}-[a-z0-9]{3}-[a-z0-9]{3}"
+DASHBOARD_ID = r"[a-z0-9]{3}-[a-z0-9]{3}-[a-z0-9]{3}"
 _ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
@@ -49,7 +50,7 @@ _ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("POST", r"/api/v1/monitor"),
         ("PUT", rf"/api/v1/monitor/{_MONITOR}"),
         ("GET", r"/api/v1/dashboard"),
-        ("GET", rf"/api/v1/dashboard/{_DASHBOARD}"),
+        ("GET", rf"/api/v1/dashboard/{DASHBOARD_ID}"),
         ("GET", r"/api/v2/catalog/entity"),
         ("GET", r"/api/v2/team"),
     )
@@ -176,7 +177,7 @@ def _error_detail(response: httpx.Response, secrets: tuple[str, ...]) -> str:
     detail = first.strip()
     for secret in secrets:
         detail = detail.replace(secret, "[redacted]")
-    return f": {detail[:_MAX_ERROR]}"
+    return f": {detail[:MAX_ERROR]}"
 
 
 class DatadogClient:

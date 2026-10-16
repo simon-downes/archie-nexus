@@ -5,11 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from .validation import MONITOR_OPTIONS, OWNERSHIP_TAG
+from .validation import MAX_TAGS, MAX_TEXT, MONITOR_OPTIONS, OWNERSHIP_TAG
 
-MAX_TEXT = 4_000
 MAX_MESSAGE = 2_000
-MAX_TAGS = 50
 MAX_SERIES = 20
 MAX_POINTS = 300
 MAX_ATTRIBUTES = 30
@@ -128,7 +126,7 @@ def span(item: dict[str, Any]) -> dict[str, Any]:
     error = custom.get("error") if isinstance(custom.get("error"), dict) else {}
     duration = custom.get("duration")
     parts = [error.get("type"), error.get("message")]
-    error_text, _ = text(": ".join(str(part) for part in parts if part), MAX_SPAN_ERROR)
+    error_text, error_cut = text(": ".join(str(part) for part in parts if part), MAX_SPAN_ERROR)
     return {
         "trace_id": attrs.get("trace_id"),
         "span_id": attrs.get("span_id"),
@@ -146,6 +144,7 @@ def span(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "status": attrs.get("status"),
         "error": error_text or None,
+        "truncated": error_cut,
     }
 
 
@@ -215,7 +214,7 @@ def dashboard_summary(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _widget_queries(definition: dict[str, Any]) -> list[str]:
+def _widget_queries(definition: dict[str, Any]) -> tuple[list[str], bool]:
     found: list[str] = []
     requests = definition.get("requests")
     if isinstance(requests, dict):
@@ -234,17 +233,21 @@ def _widget_queries(definition: dict[str, Any]) -> list[str]:
                 found.append(value)
     if isinstance(definition.get("query"), str):
         found.append(definition["query"])
-    return [text(value, MAX_WIDGET_QUERY)[0] for value in found[:MAX_WIDGET_QUERIES]]
+    cut = [text(value, MAX_WIDGET_QUERY) for value in found[:MAX_WIDGET_QUERIES]]
+    truncated = len(found) > MAX_WIDGET_QUERIES or any(was_cut for _, was_cut in cut)
+    return [value for value, _ in cut], truncated
 
 
 def widget(item: dict[str, Any]) -> dict[str, Any]:
     definition = item.get("definition") if isinstance(item.get("definition"), dict) else {}
-    title, _ = text(definition.get("title"), MAX_TITLE)
+    title, title_cut = text(definition.get("title"), MAX_TITLE)
+    queries, queries_cut = _widget_queries(definition)
     record = {
         "id": item.get("id"),
         "type": definition.get("type"),
         "title": title,
-        "queries": _widget_queries(definition),
+        "queries": queries,
+        "truncated": title_cut or queries_cut,
     }
     if definition.get("type") == "group":
         children = definition.get("widgets")
@@ -268,13 +271,15 @@ def dashboard_detail(item: dict[str, Any]) -> dict[str, Any]:
             "widgets": [widget(value) for value in widgets[:MAX_WIDGETS]],
         }
     )
-    record["truncated"] = record["truncated"] or len(widgets) > MAX_WIDGETS
+    record["truncated"] = (
+        record["truncated"] or len(widgets) > MAX_WIDGETS or len(variables) > MAX_TAGS
+    )
     return record
 
 
 def catalog_entity(item: dict[str, Any]) -> dict[str, Any]:
     attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
-    tags, _ = bounded(attrs.get("tags"))
+    tags, tags_cut = bounded(attrs.get("tags"))
     return {
         "id": item.get("id"),
         "kind": attrs.get("kind"),
@@ -282,6 +287,7 @@ def catalog_entity(item: dict[str, Any]) -> dict[str, Any]:
         "display_name": attrs.get("displayName"),
         "owner": attrs.get("owner"),
         "tags": tags,
+        "truncated": tags_cut,
     }
 
 

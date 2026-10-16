@@ -209,9 +209,10 @@ async def update_monitor(
             existing = current.get("options") if isinstance(current.get("options"), dict) else {}
             changes["options"] = {**existing, **extra}
         path = f"/api/v1/monitor/{identifier}"
-        await write.send("PUT", path, changes)
-        try:
-            data = await _fetch(write.client, identifier)
-        except Exception as exc:
-            raise _indeterminate("update", target) from exc
+        data = await write.send("PUT", path, changes)
+    if not isinstance(data, dict) or "id" not in data:
+        raise DatadogResponseError(
+            f"Monitor {identifier} was updated but Datadog returned an unexpected response; "
+            "check it with datadog.get_monitor"
+        )
     return monitor(data, detail=True)

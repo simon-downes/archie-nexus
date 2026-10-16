@@ -10,8 +10,6 @@ from .formatting import log
 from .paging import iso, search_pages
 from .policy import require_read
 
-SORTS = {"newest": "-timestamp", "oldest": "timestamp"}
-
 
 @tool(native=False, exec_docs=False, namespace="datadog")
 async def search_logs(
@@ -25,7 +23,7 @@ async def search_logs(
     text = validation.query(query)
     begin, finish = validation.time_window(start, end)
     count = validation.limit(limit)
-    order = SORTS[validation.choice(sort, "sort", set(SORTS))]
+    order = validation.SORTS[validation.choice(sort, "sort", set(validation.SORTS))]
     require_read()
     body = {"filter": {"query": text, "from": iso(begin), "to": iso(finish)}, "sort": order}
     async with datadog_client() as client:

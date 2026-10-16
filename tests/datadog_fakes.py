@@ -36,6 +36,17 @@ class FakeClient:
         return value
 
 
+@pytest.fixture(autouse=True)
+def datadog_home(monkeypatch, tmp_path_factory, request):
+    """Point ARCHIE_HOME_DIR at an empty directory for Datadog tests.
+
+    The real client reads the Datadog site from ``config.yaml``; without this a developer's own
+    config could change the host the tests expect.
+    """
+    if "datadog" in request.node.nodeid:
+        monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path_factory.mktemp("datadog-home")))
+
+
 @pytest.fixture
 def policy():
     """Install a tool-policy snapshot; an empty one is installed before and after each test.

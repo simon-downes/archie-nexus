@@ -5,7 +5,7 @@ from __future__ import annotations
 from archie_agent.exec.tools import tool
 
 from . import validation
-from .client import DatadogRequestRejectedError, DatadogResponseError, datadog_client
+from .client import MAX_ERROR, DatadogRequestRejectedError, DatadogResponseError, datadog_client
 from .formatting import metric_result
 from .policy import require_read
 
@@ -23,7 +23,9 @@ async def query_metrics(query: str, start: str = "1h", end: str | None = None) -
         raise DatadogResponseError("Datadog returned a malformed metric query response")
     error = data.get("error")
     if isinstance(error, str) and error.strip():
-        raise DatadogRequestRejectedError(f"Datadog rejected the request: {error.strip()[:300]}")
+        raise DatadogRequestRejectedError(
+            f"Datadog rejected the request: {error.strip()[:MAX_ERROR]}"
+        )
     return metric_result(data)
 
 

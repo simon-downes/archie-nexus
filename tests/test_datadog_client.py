@@ -124,11 +124,34 @@ async def test_config_load_failure_is_configuration_error():
                 pass
 
 
-async def test_default_site_resolves_to_eu_host():
+async def test_default_site_sends_to_eu_host(monkeypatch):
     credential = DatadogCredential(api_key=API_KEY, app_key=APP_KEY)
+    seen = []
+    real = client_module.DatadogClient
+
+    def build(api_key, app_key, host):
+        return real(
+            api_key,
+            app_key,
+            host,
+            transport=httpx.MockTransport(
+                lambda request: seen.append(str(request.url)) or httpx.Response(200, json={})
+            ),
+        )
+
+    monkeypatch.setattr(client_module, "DatadogClient", build)
     with patch.object(client_module, "get_credential", return_value=credential):
         async with datadog_client() as client:
-            assert client._host == HOST
+            await client.request("GET", "/api/v2/team")
+    assert seen == [f"{HOST}/api/v2/team"]
+
+
+async def test_configured_site_override_changes_host(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "auth:\n  providers:\n    datadog:\n      site: us5.datadoghq.com\n"
+    )
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    assert client_module.api_host(client_module._site()) == "https://api.us5.datadoghq.com"
 
 
 @pytest.mark.parametrize(
@@ -236,10 +259,19 @@ def test_policy_write_enabled(policy):
 
 
 @pytest.mark.parametrize("block", ["read", "write"])
-def test_policy_scope_is_unsupported(policy, block):
-    policy({"datadog": {block: {"enabled": True, "scope": ["team:x"]}}})
+@pytest.mark.parametrize("gate", [require_read, require_write])
+def test_policy_scope_in_either_block_fails_every_gate(policy, block, gate):
+    policy(
+        {
+            "datadog": {
+                "read": {"enabled": True},
+                "write": {"enabled": True},
+                block: {"enabled": True, "scope": ["team:x"]},
+            }
+        }
+    )
     with pytest.raises(DatadogPolicyError, match="scope is not supported"):
-        require_read() if block == "read" else require_write()
+        gate()
 
 
 async def test_disabled_read_makes_no_request(policy, monkeypatch):
