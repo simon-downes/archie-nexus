@@ -12,6 +12,10 @@ MAX_MESSAGE = 2_000
 MAX_TAGS = 50
 MAX_SERIES = 20
 MAX_POINTS = 300
+MAX_ATTRIBUTES = 30
+MAX_ATTRIBUTE = 200
+MAX_SPAN_ERROR = 500
+MAX_TITLE = 500
 
 
 def text(value: Any, maximum: int = MAX_TEXT) -> tuple[str | None, bool]:
@@ -77,3 +81,84 @@ def metric_result(data: dict[str, Any]) -> dict[str, Any]:
 
 def has_ownership_tag(tags: Any) -> bool:
     return isinstance(tags, list) and OWNERSHIP_TAG in tags
+
+
+def _scalar_attributes(values: Any) -> tuple[dict[str, Any], bool]:
+    """Top-level keys only, at most 30; long strings cut; nested values become ``"…"``."""
+    if not isinstance(values, dict):
+        return {}, False
+    result: dict[str, Any] = {}
+    truncated = len(values) > MAX_ATTRIBUTES
+    for key, value in list(values.items())[:MAX_ATTRIBUTES]:
+        if isinstance(value, str):
+            cut, was_cut = text(value, MAX_ATTRIBUTE)
+            result[str(key)] = cut
+            truncated = truncated or was_cut
+        elif value is None or isinstance(value, (bool, int, float)):
+            result[str(key)] = value
+        else:
+            result[str(key)] = "…"
+    return result, truncated
+
+
+def log(item: dict[str, Any]) -> dict[str, Any]:
+    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    message, message_cut = text(attrs.get("message"), MAX_MESSAGE)
+    tags, tags_cut = bounded(attrs.get("tags"))
+    extra, extra_cut = _scalar_attributes(attrs.get("attributes"))
+    return {
+        "id": item.get("id"),
+        "timestamp": attrs.get("timestamp"),
+        "service": attrs.get("service"),
+        "host": attrs.get("host"),
+        "status": attrs.get("status"),
+        "message": message,
+        "tags": tags,
+        "attributes": extra,
+        "truncated": message_cut or tags_cut or extra_cut,
+    }
+
+
+def span(item: dict[str, Any]) -> dict[str, Any]:
+    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    custom = attrs.get("custom") if isinstance(attrs.get("custom"), dict) else {}
+    error = custom.get("error") if isinstance(custom.get("error"), dict) else {}
+    duration = custom.get("duration")
+    parts = [error.get("type"), error.get("message")]
+    error_text, _ = text(": ".join(str(part) for part in parts if part), MAX_SPAN_ERROR)
+    return {
+        "trace_id": attrs.get("trace_id"),
+        "span_id": attrs.get("span_id"),
+        "parent_id": attrs.get("parent_id"),
+        "service": attrs.get("service"),
+        "resource": attrs.get("resource_name"),
+        "operation": attrs.get("operation_name"),
+        "env": attrs.get("env"),
+        "start": attrs.get("start_timestamp"),
+        "end": attrs.get("end_timestamp"),
+        "duration_ms": (
+            round(duration / 1_000_000, 3)
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+            else None
+        ),
+        "status": attrs.get("status"),
+        "error": error_text or None,
+    }
+
+
+def event(item: dict[str, Any]) -> dict[str, Any]:
+    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    inner = attrs.get("attributes") if isinstance(attrs.get("attributes"), dict) else {}
+    evt = inner.get("evt") if isinstance(inner.get("evt"), dict) else {}
+    message, message_cut = text(attrs.get("message"), MAX_MESSAGE)
+    title, title_cut = text(attrs.get("title") or inner.get("title"), MAX_TITLE)
+    tags, tags_cut = bounded(attrs.get("tags"))
+    return {
+        "id": item.get("id"),
+        "timestamp": attrs.get("timestamp"),
+        "title": title,
+        "message": message,
+        "source": inner.get("source_type_name") or evt.get("type"),
+        "tags": tags,
+        "truncated": message_cut or title_cut or tags_cut,
+    }

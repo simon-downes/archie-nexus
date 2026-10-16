@@ -209,6 +209,8 @@ All new under `agent/src/archie_agent/exec/tools/datadog/`:
 - `validation.py`: `limit`, `query`, `time_window`, `monitor_id`, `dashboard_id`, `tags`,
   `monitor_options`, `choice`.
 - `formatting.py`: `text()` and per-resource normalisers.
+- `paging.py`: v2 cursor helpers (`search_pages` for POST search bodies, `list_pages` for GET
+  lists; both follow `meta.page.after`, at most 5 pages).
 - `metrics.py`: `query_metrics(query, start="1h", end=None)`, `search_metrics(query, limit=50)`.
 - `logs.py`: `search_logs(query, start="1h", end=None, limit=20, sort="newest")`. Record:
   `id`, `timestamp`, `service`, `host`, `status`, `message` (≤2,000), `tags` (≤50), `attributes`
@@ -294,7 +296,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   `load_nexus_config` site lookup work inside the exec subprocess. The policy fixture resets by
   value, because async tests run in a copied context and token resets fail.
 
-### [ ] M2 — Logs, spans and events
+### [x] M2 — Logs, spans and events
 
 - **Approach:** `logs.py`, `traces.py`, `events.py`, their formatters and allowlist entries. Log
   search follows `meta.page.after` until `limit`; spans make one request (5/60 s limit).
@@ -302,7 +304,12 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 - **Edge cases:** 400 with a parse error → message carried; 429 → retry hint.
 - **Deliverable:** model code can search logs, spans and events.
 - **Verify:** `uv run pytest tests/test_datadog_reads.py` passes.
-- **Outcome:**
+- **Outcome:** Added `logs.py`, `traces.py`, `events.py`, `paging.py` and log/span/event
+  formatters. Span `duration_ms` comes from `custom.duration` (ns); the event title and source come
+  from the nested `attributes.attributes` (live shape). `uv run pytest tests/test_datadog_reads.py
+  tests/test_datadog_client.py`: 75 passed; ruff clean. Live via `runner.run()`: 3 error logs (largest
+  record 3,814 chars), 2 error spans with duration and error text, 3 events with a source, and
+  `search_logs("status:((")` → `DatadogRequestRejectedError` carrying "Cannot parse query".
 
 ### [ ] M3 — Monitor, dashboard and catalog reads
 

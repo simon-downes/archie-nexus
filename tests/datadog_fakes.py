@@ -10,10 +10,14 @@ from archie_agent.exec.tools.datadog.client import allowed
 from archie_shared.tool_policy import set_policy_snapshot
 
 
+class Seq(list):
+    """Responses served in order for repeated calls; the last one repeats."""
+
+
 class FakeClient:
     """Records calls and serves canned responses keyed by ``(method, path)``.
 
-    A response may be an exception instance (raised) or a list (served in order).
+    A response may be an exception instance (raised) or a ``Seq`` (served in order).
     Every call is checked against the real client allowlist.
     """
 
@@ -25,7 +29,7 @@ class FakeClient:
         assert allowed(method, path), f"{method} {path} is outside the allowlist"
         self.calls.append((method, path, params, json))
         value = self.responses[(method, path)]
-        if isinstance(value, list) and value and isinstance(value[0], (BaseException, dict)):
+        if isinstance(value, Seq):
             value = value.pop(0) if len(value) > 1 else value[0]
         if isinstance(value, BaseException):
             raise value

@@ -5,10 +5,16 @@ from datetime import UTC, datetime
 import pytest
 from archie_agent.exec.tools.datadog.client import (
     DatadogInputError,
+    DatadogRateLimitError,
     DatadogRequestRejectedError,
 )
+from archie_agent.exec.tools.datadog.events import list_events
+from archie_agent.exec.tools.datadog.logs import search_logs
 from archie_agent.exec.tools.datadog.metrics import query_metrics, search_metrics
+from archie_agent.exec.tools.datadog.traces import search_spans
 from archie_agent.exec.tools.datadog.validation import time_window
+
+from tests.datadog_fakes import Seq
 
 NOW = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 QUERY = ("GET", "/api/v1/query")
@@ -102,3 +108,203 @@ async def test_search_metrics_limit_validation(fake, limit):
     with pytest.raises(DatadogInputError):
         await search_metrics("a", limit=limit)
     assert client.calls == []
+
+
+LOGS = ("POST", "/api/v2/logs/events/search")
+SPANS = ("POST", "/api/v2/spans/events/search")
+EVENTS = ("GET", "/api/v2/events")
+
+
+def _log(i: int, **attrs) -> dict:
+    return {
+        "id": f"log-{i}",
+        "type": "log",
+        "attributes": {
+            "timestamp": "2026-05-01T11:59:00Z",
+            "service": "api",
+            "host": "h1",
+            "status": "error",
+            "message": "boom",
+            "tags": ["env:prod"],
+            **attrs,
+        },
+    }
+
+
+async def test_search_logs_pages_until_limit(fake):
+    client = fake(
+        {
+            LOGS: Seq(
+                [
+                    {"data": [_log(1), _log(2)], "meta": {"page": {"after": "c1"}}},
+                    {"data": [_log(3), _log(4)], "meta": {"page": {"after": "c2"}}},
+                ]
+            )
+        },
+        "logs",
+    )
+    result = await search_logs("service:api status:error", start="15m", limit=3, sort="oldest")
+    assert [item["id"] for item in result] == ["log-1", "log-2", "log-3"]
+    first, second = client.calls[0][3], client.calls[1][3]
+    assert first["filter"]["query"] == "service:api status:error"
+    assert first["sort"] == "timestamp"
+    assert first["page"] == {"limit": 3}
+    assert second["page"] == {"limit": 1, "cursor": "c1"}
+    assert first["filter"]["from"].endswith("Z")
+
+
+async def test_search_logs_stops_without_cursor(fake):
+    client = fake({LOGS: {"data": [_log(1)], "meta": {}}}, "logs")
+    assert len(await search_logs("*", limit=50)) == 1
+    assert len(client.calls) == 1
+
+
+async def test_log_record_is_bounded(fake):
+    item = _log(
+        1,
+        message="m" * 5000,
+        tags=[f"t:{i}" for i in range(60)],
+        attributes={**{f"k{i}": i for i in range(40)}, "nested": {"a": 1}, "long": "x" * 500},
+    )
+    fake({LOGS: {"data": [item]}}, "logs")
+    record = (await search_logs("*"))[0]
+    assert len(record["message"]) == 2000
+    assert len(record["tags"]) == 50
+    assert len(record["attributes"]) == 30
+    assert record["truncated"] is True
+    assert set(record) == {
+        "id",
+        "timestamp",
+        "service",
+        "host",
+        "status",
+        "message",
+        "tags",
+        "attributes",
+        "truncated",
+    }
+
+
+def test_log_attributes_replace_nested_values():
+    from archie_agent.exec.tools.datadog.formatting import log
+
+    record = log(_log(1, attributes={"nested": {"a": 1}, "list": [1], "n": 3, "s": "y" * 300}))
+    assert record["attributes"] == {"nested": "…", "list": "…", "n": 3, "s": "y" * 200}
+
+
+async def test_search_logs_rejected_query_surfaces(fake):
+    fake({LOGS: DatadogRequestRejectedError("Datadog rejected the request: Cannot parse")}, "logs")
+    with pytest.raises(DatadogRequestRejectedError, match="Cannot parse"):
+        await search_logs("status:((")
+
+
+async def test_search_logs_rate_limit_surfaces(fake):
+    fake({LOGS: DatadogRateLimitError(2)}, "logs")
+    with pytest.raises(DatadogRateLimitError) as caught:
+        await search_logs("*")
+    assert caught.value.retry_after_seconds == 2
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"query": " "}, {"query": "*", "sort": "asc"}, {"query": "*", "limit": 0}],
+)
+async def test_search_logs_input_errors(fake, kwargs):
+    client = fake({}, "logs")
+    with pytest.raises(DatadogInputError):
+        await search_logs(**kwargs)
+    assert client.calls == []
+
+
+SPAN = {
+    "id": "s",
+    "type": "spans",
+    "attributes": {
+        "trace_id": "t1",
+        "span_id": "s1",
+        "parent_id": "0",
+        "service": "api",
+        "resource_name": "GET /orders",
+        "operation_name": "http.request",
+        "env": "prod",
+        "start_timestamp": "2026-05-01T11:59:00.000Z",
+        "end_timestamp": "2026-05-01T11:59:00.372Z",
+        "status": "error",
+        "custom": {
+            "duration": 372_039_555,
+            "error": {"type": "http_error", "message": "502 Bad Gateway"},
+            "secret_header": "nope",
+        },
+    },
+}
+
+
+async def test_search_spans_one_request_and_normalises(fake):
+    client = fake({SPANS: {"data": [SPAN, SPAN, SPAN]}}, "traces")
+    result = await search_spans("service:api status:error", limit=2)
+    assert len(client.calls) == 1
+    attributes = client.calls[0][3]["data"]["attributes"]
+    assert client.calls[0][3]["data"]["type"] == "search_request"
+    assert attributes["page"] == {"limit": 2}
+    assert attributes["sort"] == "-timestamp"
+    assert len(result) == 2
+    assert result[0]["duration_ms"] == 372.04
+    assert result[0]["error"] == "http_error: 502 Bad Gateway"
+    assert "custom" not in result[0]
+    assert "secret_header" not in str(result[0])
+
+
+EVENT = {
+    "id": "e1",
+    "type": "event",
+    "attributes": {
+        "timestamp": "2026-05-01T11:00:00Z",
+        "message": "Deployed v42",
+        "tags": ["service:api"],
+        "attributes": {"title": "Deploy", "evt": {"type": "kube_cronjob"}, "_dd": {"x": 1}},
+    },
+}
+
+
+async def test_list_events_omits_query_when_none(fake):
+    client = fake({EVENTS: {"data": [EVENT], "meta": {"page": {}}}}, "events")
+    result = await list_events(limit=5)
+    params = client.calls[0][2]
+    assert "filter[query]" not in params
+    assert params["page[limit]"] == 5
+    assert params["sort"] == "-timestamp"
+    assert result == [
+        {
+            "id": "e1",
+            "timestamp": "2026-05-01T11:00:00Z",
+            "title": "Deploy",
+            "message": "Deployed v42",
+            "source": "kube_cronjob",
+            "tags": ["service:api"],
+            "truncated": False,
+        }
+    ]
+
+
+async def test_list_events_sends_query_and_follows_cursor(fake):
+    client = fake(
+        {
+            EVENTS: Seq(
+                [
+                    {"data": [EVENT], "meta": {"page": {"after": "n"}}},
+                    {"data": [EVENT], "meta": {"page": {}}},
+                ]
+            )
+        },
+        "events",
+    )
+    assert len(await list_events("source:deploy", start="1d", limit=10)) == 2
+    assert client.calls[0][2]["filter[query]"] == "source:deploy"
+    assert client.calls[1][2]["page[cursor]"] == "n"
+    assert client.calls[1][2]["page[limit]"] == 9
+
+
+async def test_list_events_blank_query_is_no_filter(fake):
+    client = fake({EVENTS: {"data": []}}, "events")
+    await list_events("  ")
+    assert "filter[query]" not in client.calls[0][2]
