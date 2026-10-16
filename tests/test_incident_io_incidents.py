@@ -2,7 +2,6 @@
 
 import sys
 from contextlib import asynccontextmanager
-from unittest.mock import patch
 
 import pytest
 from archie_agent.exec.tools.incident_io.client import IncidentIoInputError
@@ -61,9 +60,12 @@ class FakeClient:
         self.calls.append(("items", path, dict(params or {})))
         return self.responses[path][key]
 
-    async def paginate(self, path, key, limit, params=None, *, max_page_size=100):
+    async def paginate(self, path, key, limit, params=None, *, max_page_size=100, keep=None):
         self.calls.append(("paginate", path, dict(params or {}), limit, max_page_size))
-        return self.responses[path][key][:limit]
+        items = self.responses[path][key]
+        if keep:
+            items = [item for item in items if keep(item)]
+        return items[:limit]
 
 
 @pytest.fixture

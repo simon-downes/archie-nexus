@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -168,20 +169,27 @@ class IncidentIoClient:
         params: dict[str, Any] | None = None,
         *,
         max_page_size: int = 100,
+        keep: Callable[[dict], bool] | None = None,
     ) -> list[dict]:
-        """Follow ``after`` cursors until ``limit`` items or the collection ends."""
+        """Follow ``after`` cursors until ``limit`` kept items or the collection ends.
+
+        ``keep`` filters items locally for filters the API does not support; at most
+        ``_MAX_PAGES`` pages are read either way.
+        """
         results: list[dict] = []
         after: str | None = None
         for _ in range(_MAX_PAGES):
             query = dict(params or {})
-            query["page_size"] = min(max_page_size, limit - len(results))
+            query["page_size"] = max_page_size if keep else min(max_page_size, limit - len(results))
             if after:
                 query["after"] = after
             data = await self.get(path, query)
             values = data.get(key)
             if not isinstance(values, list):
                 raise IncidentIoResponseError("incident.io returned a malformed collection")
-            results.extend(item for item in values if isinstance(item, dict))
+            results.extend(
+                item for item in values if isinstance(item, dict) and (keep is None or keep(item))
+            )
             meta = data.get("pagination_meta")
             after = meta.get("after") if isinstance(meta, dict) else None
             if len(results) >= limit or not values or not isinstance(after, str) or not after:

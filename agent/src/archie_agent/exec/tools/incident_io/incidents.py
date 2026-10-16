@@ -8,7 +8,7 @@ from archie_agent.exec.tools import tool
 
 from . import validation as v
 from .client import IncidentIoInputError, IncidentIoResponseError, incident_io_client
-from .formatting import incident_detail, incident_summary
+from .formatting import incident_detail, incident_summary, incident_update, timeline_item
 from .policy import require_read
 from .reference import resolve_ids
 
@@ -97,3 +97,43 @@ async def get_incident(incident: str) -> dict:
             alert_ids.append(value)
     participants = people.get("incident_participants")
     return incident_detail(item, participants if isinstance(participants, dict) else {}, alert_ids)
+
+
+@tool(native=False, exec_docs=False, namespace="incident_io")
+async def incident_timeline(incident: str, limit: int = 50) -> list[dict]:
+    """List an incident's timeline items in the API's order (oldest first)."""
+    key, count = v.incident_id(incident), v.limit(limit)
+    require_read()
+    async with incident_io_client() as client:
+        incident_ulid = await _incident_ulid(client, key)
+        items = await client.paginate(
+            "/v2/incident_timeline_items",
+            "incident_timeline_items",
+            count,
+            {"incident_id": incident_ulid},
+        )
+    return [timeline_item(item) for item in items]
+
+
+@tool(native=False, exec_docs=False, namespace="incident_io")
+async def incident_updates(incident: str, limit: int = 50) -> list[dict]:
+    """List an incident's status and severity updates with their messages."""
+    key, count = v.incident_id(incident), v.limit(limit)
+    require_read()
+    async with incident_io_client() as client:
+        incident_ulid = await _incident_ulid(client, key)
+        items = await client.paginate(
+            "/v2/incident_updates", "incident_updates", count, {"incident_id": incident_ulid}
+        )
+    return [incident_update(item) for item in items]
+
+
+async def _incident_ulid(client, key: str) -> str:
+    """Child endpoints filter by the incident ULID, so resolve a reference number first."""
+    if not key.isdigit():
+        return key
+    data = await client.get(f"/v2/incidents/{key}")
+    item = data.get("incident")
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+        raise IncidentIoResponseError("incident.io returned a malformed incident")
+    return item["id"]

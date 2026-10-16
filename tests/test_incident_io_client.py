@@ -141,6 +141,39 @@ async def test_paginate_stops_when_cursor_missing():
     assert len(calls) == 1
 
 
+async def test_paginate_keep_filters_locally_with_full_pages():
+    calls = []
+
+    def handler(request):
+        params = dict(request.url.params)
+        calls.append(params)
+        page = 2 if "after" in params else 1
+        items = [{"id": f"{page}-{i}", "ok": i % 2 == 0} for i in range(4)]
+        meta = {"after": "c1"} if page == 1 else {}
+        return httpx.Response(200, json={"things": items, "pagination_meta": meta})
+
+    result = await _client(handler).paginate(
+        "/x", "things", 3, max_page_size=4, keep=lambda item: item["ok"]
+    )
+    assert [item["id"] for item in result] == ["1-0", "1-2", "2-0"]
+    assert [c["page_size"] for c in calls] == ["4", "4"]
+
+
+async def test_paginate_reads_at_most_max_pages():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(
+            200, json={"things": [{"ok": False}], "pagination_meta": {"after": "more"}}
+        )
+
+    with patch.object(client_module, "_MAX_PAGES", 3):
+        result = await _client(handler).paginate("/x", "things", 5, keep=lambda item: item["ok"])
+    assert result == []
+    assert len(calls) == 3
+
+
 async def test_paginate_rejects_missing_collection():
     with pytest.raises(IncidentIoResponseError):
         await _client(lambda request: httpx.Response(200, json={})).paginate("/x", "things", 5)

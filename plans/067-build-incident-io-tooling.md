@@ -279,7 +279,7 @@ scope unsupported).
   maxima found during live checks: alerts and incident alerts 50, escalation paths 25, others 100;
   `paginate` takes `max_page_size`.
 
-### [ ] M2 — Incident context: timeline, updates, alerts
+### [x] M2 — Incident context: timeline, updates, alerts
 
 - **Approach:** add `incident_timeline`, `incident_updates` to `incidents.py`; `alerts.py` with
   `list_alerts`, `get_alert`; extend formatters. Linked alerts come from `/v2/incident_alerts`.
@@ -288,7 +288,12 @@ scope unsupported).
 - **Deliverable:** model code can reconstruct an incident's history and linked alerts.
 - **Verify:** `uv run pytest tests/test_incident_io_incidents.py tests/test_incident_io_reads.py`
   passes.
-- **Outcome:**
+- **Outcome:** Added `incident_timeline`, `incident_updates` (both resolve `INC-<n>` to the ULID
+  that the child endpoints need) and `alerts.py` (`list_alerts`, `get_alert` with attributes and
+  linked incident IDs; page size 50). Added `paginate(keep=...)` for local filtering, needed by
+  M3's follow-up/action status filters. 65 incident.io tests pass; ruff clean. Live
+  (`/tmp/incident_io_m2_live.py`): timeline 4 items, updates 3, alerts 16 (all `firing`, matching
+  a direct API count of 16 firing / 0 resolved), `get_alert` with 3 attributes.
 
 ### [ ] M3 — Work items, directory, on-call and reference data
 

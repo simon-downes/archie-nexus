@@ -165,6 +165,67 @@ def incident_detail(
     }
 
 
+def timeline_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "timestamp": gmt(item.get("timestamp")),
+        "title": text(item.get("title"), 2000),
+        "description": text(item.get("description")),
+        "creator": actor(item.get("creator")),
+    }
+
+
+def incident_update(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "created_at": gmt(item.get("created_at")),
+        "updater": actor(item.get("updater")),
+        "message": text(item.get("message")),
+        "new_status": status(item.get("new_incident_status")),
+        "new_severity": name(item.get("new_severity")),
+    }
+
+
+def _attributes(value: Any) -> list[dict[str, Any]]:
+    result = []
+    for entry in _list(value):
+        entry = _dict(entry)
+        raw = entry.get("value") or entry.get("array_value")
+        items = raw if isinstance(raw, list) else [raw]
+        values = []
+        for item in items[:MAX_NESTED]:
+            item = _dict(item)
+            label = item.get("label") or item.get("literal")
+            if label is not None:
+                values.append(text(label, 1000))
+        result.append({"name": name(entry.get("attribute")), "values": values})
+    return result
+
+
+def alert(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "title": text(item.get("title"), 2000),
+        "status": text(item.get("status"), 64),
+        "alert_source_id": text(item.get("alert_source_id"), 100),
+        "deduplication_key": text(item.get("deduplication_key"), 500),
+        "source_url": text(item.get("source_url"), 2000),
+        "created_at": gmt(item.get("created_at")),
+        "updated_at": gmt(item.get("updated_at")),
+        "resolved_at": gmt(item.get("resolved_at")),
+        "tags": [text(tag, 200) for tag in _list(item.get("tags")) if isinstance(tag, str)],
+    }
+
+
+def alert_detail(item: dict[str, Any], incident_ids: list[str]) -> dict[str, Any]:
+    return {
+        **alert(item),
+        "description": text(item.get("description")),
+        "attributes": _attributes(item.get("attributes")),
+        "incident_ids": incident_ids[:MAX_NESTED],
+    }
+
+
 def reference_item(item: dict[str, Any]) -> dict[str, Any]:
     result = {
         "id": text(item.get("id"), 100),
