@@ -22,6 +22,9 @@ Write for a reviewer who did not do the work and has not read the plan. Fill in 
 template and delete any section marked optional that has nothing useful to say.
 
 ```markdown
+
+Implements: `<plans>/done/<NNN>-build-<slug>.md`
+
 <Why: one short paragraph on the problem or need, in the user's terms.>
 
 <What: one short paragraph on what changed and the choices that matter. Group by idea,
@@ -41,12 +44,6 @@ and anything not verified.>
 
 <Optional. Only if collected: what each artifact proves, the URL path and viewport.>
 
-## Model / Harness
-
-- Model: <the model you are running as, or "unknown">
-- Harness: <the agent harness running this skill>
-- Plan: `<plans>/done/<NNN>-build-<slug>.md` on this branch. It records the key
-  decisions, deviations from the reviewed plan, and the review results.
 ```
 
 - Bad: "Added a new validation function and updated the controller to call it. Also added
