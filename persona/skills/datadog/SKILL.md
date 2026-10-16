@@ -107,7 +107,9 @@ At most 20 series are returned. Each keeps its **last** 300 points; `point_count
 
 ### `datadog.search_metrics(query, limit=50)`
 
-Returns metric names that contain `query`, for example `["aws.ec2.cpuutilization", ...]`.
+Returns metric names that contain `query`, for example `["aws.ec2.cpuutilization", ...]`. Returns `[]` when nothing matches.
+
+Matching is a substring match on the metric **name** only, and it does not search tags or integration names. A search for `rabbitmq` finds nothing if RabbitMQ metrics are named `aws.amazonmq.*`. If a search returns `[]`, try the provider prefix (`aws.amazonmq`), a single name fragment (`message_count`), or read the query from an existing dashboard with `datadog.get_dashboard`.
 
 ### `datadog.search_logs(query, start="1h", end=None, limit=20, sort="newest")`
 

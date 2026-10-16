@@ -9,6 +9,7 @@ from archie_agent.exec.tools.datadog.client import (
     DatadogInputError,
     DatadogRateLimitError,
     DatadogRequestRejectedError,
+    DatadogResponseError,
 )
 from archie_agent.exec.tools.datadog.dashboards import get_dashboard, list_dashboards
 from archie_agent.exec.tools.datadog.events import list_events
@@ -104,6 +105,19 @@ async def test_search_metrics_prefixes_and_limits(dd_fake):
     )
     assert await search_metrics("a.", limit=2) == ["a.b", "a.c"]
     assert client.calls[0][2] == {"q": "metrics:a."}
+
+
+@pytest.mark.parametrize("results", [{"metrics": None}, {}])
+async def test_search_metrics_no_matches_returns_empty(dd_fake, results):
+    dd_fake({("GET", "/api/v1/search"): {"results": results}}, "metrics")
+    assert await search_metrics("rabbitmq") == []
+
+
+@pytest.mark.parametrize("data", [{}, {"results": None}, {"results": {"metrics": "x"}}, []])
+async def test_search_metrics_malformed_response(dd_fake, data):
+    dd_fake({("GET", "/api/v1/search"): data}, "metrics")
+    with pytest.raises(DatadogResponseError):
+        await search_metrics("a")
 
 
 @pytest.mark.parametrize("limit", [0, 101, True, "5"])

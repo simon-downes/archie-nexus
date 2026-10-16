@@ -38,7 +38,12 @@ async def search_metrics(query: str, limit: int = 50) -> list[str]:
     async with datadog_client() as client:
         data = await client.request("GET", "/api/v1/search", params={"q": f"metrics:{text}"})
     results = data.get("results") if isinstance(data, dict) else None
-    names = results.get("metrics") if isinstance(results, dict) else None
+    if not isinstance(results, dict):
+        raise DatadogResponseError("Datadog returned a malformed metric search response")
+    # Datadog returns ``"metrics": null`` (or omits the key) when nothing matches.
+    names = results.get("metrics")
+    if names is None:
+        return []
     if not isinstance(names, list):
         raise DatadogResponseError("Datadog returned a malformed metric search response")
     return [name for name in names if isinstance(name, str)][:count]
