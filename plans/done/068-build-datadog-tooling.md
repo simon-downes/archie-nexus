@@ -1,6 +1,6 @@
 # 068 — Datadog tooling and skill
 
-Status: reviewing
+Status: done
 Branch: build-it/068-datadog-tooling (base: main @ 89cf27a)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/068-datadog-tooling
 
@@ -153,6 +153,7 @@ Live API facts (checked with the user's key on `api.datadoghq.eu`, status codes 
 - MUST raise `DatadogMutationIndeterminateError` when a create/update request may have been
   transmitted but its outcome is unknown (Jira `_mutate_issue` pattern).
   - AC: a 500 or malformed body on POST → indeterminate error; a 400 → rejected error.
+  - AC: a 2xx PUT with an unexpected body → `DatadogResponseError` saying the update was applied.
   - AC: `update_monitor(id, options={"thresholds": {...}})` sends the current options with
     `thresholds` replaced; `update_monitor(id)` → input error with no request.
   - AC: a transport `ReadError` on PUT → indeterminate error; a `ConnectError` → transport error;
@@ -416,6 +417,8 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   record fields incl. bounded log `attributes` and no span `custom`; catalog/team filter params;
   explicit `_ALLOWED` list; `validate_monitor` adds the tag; update return value and empty-call
   rule; top-level widget cap; registration test staging (M3 12 → M4 14); smoke inputs named.
+- Spec check: every MUST traced to code and a passing test in `tests/test_datadog_*.py`; the
+  live ACs are recorded in the M5 Outcome.
 - Code review: `general` and `risk`, one round each (the first `risk` run crashed with a provider
   error and was re-run).
   - Fixed: missing `truncated` flags on span, widget, template-variable and catalog records;
@@ -428,8 +431,21 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   - Risk ❓ (exec code can read credentials in-process): confirmed live. It is pre-existing and
     shared with every credentialed tool; recorded under Risks and Follow-ups, and the client
     docstring and skill no longer imply process isolation.
+- Merge risk: Medium. The worst reachable failure is an Archie-owned monitor created or changed
+  wrongly (for example one that pages people). This is limited by write policy being off by default,
+  the `managedby:archie` check on updates, the allowlist with no delete, and the skill requiring
+  user intent. Deletion and edits to monitors Archie doesn't own are not reachable through the tool.
 
 ## Outcome
+
+Delivered the exec-only `datadog` namespace with 14 functions: 12 reads, including
+`validate_monitor`, and 2 monitor writes guarded by write policy and the `managedby:archie` tag.
+It comes with `persona/skills/datadog/SKILL.md` and one `docs/config.md` sentence. Verification:
+`uv run pytest` 1469 passed; `uv run ruff check .` and `ruff format --check .` clean; the live
+smoke through `runner.run()` after review returned 12/12 read-side calls, and `update_monitor`
+on a `managedby:pulumi` monitor was refused with `DatadogOwnershipError`. Not verified live:
+`create_monitor` and a successful `update_monitor`, because a real write is externally visible
+and the key may lack `monitors_write`; unit tests cover them.
 
 PR: pending
 CI: pending
