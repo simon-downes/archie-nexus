@@ -15,7 +15,7 @@ any other file, and don't write fixes.
 Skip any that don't apply.
 
 1. **Rules.** Check every Plan rule: requirement wording and ACs, milestone shape
-   (vertical, M1 a tracer bullet, prefactors labelled), decisions left to the
+   (vertical, M1 a tracer bullet, prefactors labelled), approach choices left to the
    implementor, test seams, Verify steps, traceability.
 2. **Objective.** Could two readers picture different outcomes? Do any requirements
    contradict each other?

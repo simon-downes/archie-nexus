@@ -26,10 +26,10 @@ reviewer needs: a one-milestone change gets a short plan.
   each add one behaviour to the working slice.
 - Order by dependency. Each milestone fits in one working session; a small change may
   need only one.
-- No decision is left for implementation: the implementor never picks a library, decides
-  where code lives, or invents a pattern. "Follow the pattern" names a file to open.
-  Exact API calls, option names and library edge cases are details for implementation;
-  nobody pre-verifies them.
+- The implementor never chooses between materially different approaches: the plan names
+  the library, where code lives, the pattern and the behaviour. "Follow the pattern"
+  names a file to open. Exact API calls, option names and library edge cases are left
+  to implementation; nobody pre-verifies them.
 - Every behavioural milestone names its test seam: the public boundary the tests use.
 - Verify is an exact command or observation and its passing result
   (`uv run pytest tests/test_ls.py -k json` passes), never "test it".
