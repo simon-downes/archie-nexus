@@ -52,10 +52,10 @@ DEFINITION = {
 }
 
 
-async def test_search_monitors_sends_query_and_normalises(fake):
+async def test_search_monitors_sends_query_and_normalises(dd_fake):
     summary = {**MONITOR, "status": "Alert", "created": 1_700_000_000}
     summary.pop("overall_state")
-    client = fake({SEARCH: {"monitors": [summary, summary]}}, "monitors")
+    client = dd_fake({SEARCH: {"monitors": [summary, summary]}}, "monitors")
     result = await search_monitors("status:alert", limit=1)
     assert client.calls[0][2] == {"per_page": 1, "page": 0, "query": "status:alert"}
     assert len(result) == 1
@@ -64,22 +64,22 @@ async def test_search_monitors_sends_query_and_normalises(fake):
     assert result[0]["created"] == "2023-11-14T22:13:20Z"
 
 
-async def test_search_monitors_without_query(fake):
-    client = fake({SEARCH: {"monitors": []}}, "monitors")
+async def test_search_monitors_without_query(dd_fake):
+    client = dd_fake({SEARCH: {"monitors": []}}, "monitors")
     assert await search_monitors() == []
     assert "query" not in client.calls[0][2]
 
 
-async def test_get_monitor_detail_keeps_only_allowed_options(fake):
-    fake({("GET", "/api/v1/monitor/42"): MONITOR}, "monitors")
+async def test_get_monitor_detail_keeps_only_allowed_options(dd_fake):
+    dd_fake({("GET", "/api/v1/monitor/42"): MONITOR}, "monitors")
     result = await get_monitor(42)
     assert result["message"] == "Page @oncall"
     assert result["options"] == {"thresholds": {"critical": 10}}
     assert result["status"] == "Alert"
 
 
-async def test_managed_flag_reflects_ownership_tag(fake):
-    fake(
+async def test_managed_flag_reflects_ownership_tag(dd_fake):
+    dd_fake(
         {("GET", "/api/v1/monitor/7"): {**MONITOR, "id": 7, "tags": ["managedby:archie"]}},
         "monitors",
     )
@@ -87,23 +87,23 @@ async def test_managed_flag_reflects_ownership_tag(fake):
 
 
 @pytest.mark.parametrize("value", [0, -1, True, "42", 4.2])
-async def test_get_monitor_rejects_bad_ids(fake, value):
-    client = fake({}, "monitors")
+async def test_get_monitor_rejects_bad_ids(dd_fake, value):
+    client = dd_fake({}, "monitors")
     with pytest.raises(DatadogInputError):
         await get_monitor(value)
     assert client.calls == []
 
 
-async def test_validate_monitor_adds_tag_and_needs_only_read(fake):
-    client = fake({VALIDATE: {}}, "monitors")
+async def test_validate_monitor_adds_tag_and_needs_only_read(dd_fake):
+    client = dd_fake({VALIDATE: {}}, "monitors")
     assert await validate_monitor(**DEFINITION, tags=["team:x"], priority=3) == {"valid": True}
     body = client.calls[0][3]
     assert body["tags"] == ["team:x", "managedby:archie"]
     assert body["priority"] == 3
 
 
-async def test_validate_monitor_rejection_surfaces(fake):
-    fake(
+async def test_validate_monitor_rejection_surfaces(dd_fake):
+    dd_fake(
         {VALIDATE: DatadogRequestRejectedError("Datadog rejected the request: bad query")},
         "monitors",
     )
@@ -124,16 +124,16 @@ async def test_validate_monitor_rejection_surfaces(fake):
         {"options": ["thresholds"]},
     ],
 )
-async def test_validate_monitor_input_errors(fake, change):
-    client = fake({}, "monitors")
+async def test_validate_monitor_input_errors(dd_fake, change):
+    client = dd_fake({}, "monitors")
     with pytest.raises(DatadogInputError):
         await validate_monitor(**{**DEFINITION, **change})
     assert client.calls == []
 
 
-async def test_read_disabled_blocks_validate(fake, policy):
+async def test_read_disabled_blocks_validate(dd_fake, policy):
     policy({"datadog": {"read": {"enabled": False}}})
-    client = fake({}, "monitors")
+    client = dd_fake({}, "monitors")
     with pytest.raises(DatadogPolicyError):
         await validate_monitor(**DEFINITION)
     assert client.calls == []
@@ -170,8 +170,8 @@ OWNED = {**MONITOR, "tags": ["service:api", "managedby:archie"]}
 WRITE = {"datadog": {"write": {"enabled": True}}}
 
 
-async def test_write_disabled_by_default_makes_no_request(fake):
-    client = fake({}, "monitors")
+async def test_write_disabled_by_default_makes_no_request(dd_fake):
+    client = dd_fake({}, "monitors")
     with pytest.raises(DatadogPolicyError, match="writes are disabled"):
         await create_monitor(**DEFINITION)
     with pytest.raises(DatadogPolicyError, match="writes are disabled"):
@@ -179,9 +179,9 @@ async def test_write_disabled_by_default_makes_no_request(fake):
     assert client.calls == []
 
 
-async def test_create_monitor_adds_ownership_tag(fake, policy):
+async def test_create_monitor_adds_ownership_tag(dd_fake, policy):
     policy(WRITE)
-    client = fake({CREATE: {**OWNED, "id": 99}}, "monitors")
+    client = dd_fake({CREATE: {**OWNED, "id": 99}}, "monitors")
     result = await create_monitor(**DEFINITION, tags=["team:x", "managedby:archie"])
     method, path, _, body = client.calls[0]
     assert (method, path) == CREATE
@@ -190,25 +190,25 @@ async def test_create_monitor_adds_ownership_tag(fake, policy):
     assert result["id"] == 99 and result["managed"] is True
 
 
-async def test_update_refuses_untagged_monitor_without_put(fake, policy):
+async def test_update_refuses_untagged_monitor_without_put(dd_fake, policy):
     policy(WRITE)
-    client = fake({GET42: MONITOR}, "monitors")
+    client = dd_fake({GET42: MONITOR}, "monitors")
     with pytest.raises(DatadogOwnershipError, match="managedby:archie"):
         await update_monitor(42, name="hijack")
     assert [call[:2] for call in client.calls] == [GET42]
 
 
-async def test_update_keeps_ownership_tag(fake, policy):
+async def test_update_keeps_ownership_tag(dd_fake, policy):
     policy(WRITE)
-    client = fake({GET42: OWNED, PUT42: OWNED}, "monitors")
+    client = dd_fake({GET42: OWNED, PUT42: OWNED}, "monitors")
     await update_monitor(42, tags=["team:x"])
     assert client.calls[1][3] == {"tags": ["team:x", "managedby:archie"]}
 
 
-async def test_update_sends_only_given_fields_and_merges_options(fake, policy):
+async def test_update_sends_only_given_fields_and_merges_options(dd_fake, policy):
     policy(WRITE)
     current = {**OWNED, "options": {"thresholds": {"critical": 10}, "notify_no_data": True}}
-    client = fake({GET42: current, PUT42: {**current, "message": "new"}}, "monitors")
+    client = dd_fake({GET42: current, PUT42: {**current, "message": "new"}}, "monitors")
     result = await update_monitor(42, message="new", options={"thresholds": {"critical": 5}})
     assert [call[:2] for call in client.calls] == [GET42, PUT42]
     assert result["message"] == "new"
@@ -219,17 +219,17 @@ async def test_update_sends_only_given_fields_and_merges_options(fake, policy):
     assert result["id"] == 42
 
 
-async def test_update_with_no_fields_is_input_error(fake, policy):
+async def test_update_with_no_fields_is_input_error(dd_fake, policy):
     policy(WRITE)
-    client = fake({}, "monitors")
+    client = dd_fake({}, "monitors")
     with pytest.raises(DatadogInputError):
         await update_monitor(42)
     assert client.calls == []
 
 
-async def test_update_rejects_restricted_options(fake, policy):
+async def test_update_rejects_restricted_options(dd_fake, policy):
     policy(WRITE)
-    client = fake({}, "monitors")
+    client = dd_fake({}, "monitors")
     with pytest.raises(DatadogInputError, match="restricted_roles"):
         await update_monitor(42, options={"restricted_roles": ["admin"]})
     assert client.calls == []
@@ -242,52 +242,54 @@ async def test_update_rejects_restricted_options(fake, policy):
         DatadogTransportError("Datadog request outcome is uncertain", transmitted=True),
     ],
 )
-async def test_create_failure_after_send_is_indeterminate(fake, policy, failure):
+async def test_create_failure_after_send_is_indeterminate(dd_fake, policy, failure):
     policy(WRITE)
-    fake({CREATE: failure}, "monitors")
+    dd_fake({CREATE: failure}, "monitors")
     with pytest.raises(DatadogMutationIndeterminateError, match="verify"):
         await create_monitor(**DEFINITION)
 
 
-async def test_create_malformed_body_is_indeterminate(fake, policy):
+async def test_create_malformed_body_is_indeterminate(dd_fake, policy):
     policy(WRITE)
-    fake({CREATE: {"unexpected": True}}, "monitors")
+    dd_fake({CREATE: {"unexpected": True}}, "monitors")
     with pytest.raises(DatadogMutationIndeterminateError):
         await create_monitor(**DEFINITION)
 
 
-async def test_create_rejected_is_not_indeterminate(fake, policy):
+async def test_create_rejected_is_not_indeterminate(dd_fake, policy):
     policy(WRITE)
-    fake({CREATE: DatadogRequestRejectedError("Datadog rejected the request: bad")}, "monitors")
+    dd_fake({CREATE: DatadogRequestRejectedError("Datadog rejected the request: bad")}, "monitors")
     with pytest.raises(DatadogRequestRejectedError):
         await create_monitor(**DEFINITION)
 
 
-async def test_create_connect_error_is_plain_transport_error(fake, policy):
+async def test_create_connect_error_is_plain_transport_error(dd_fake, policy):
     policy(WRITE)
-    fake({CREATE: DatadogTransportError("could not be completed", transmitted=False)}, "monitors")
+    dd_fake(
+        {CREATE: DatadogTransportError("could not be completed", transmitted=False)}, "monitors"
+    )
     with pytest.raises(DatadogTransportError):
         await create_monitor(**DEFINITION)
 
 
-async def test_update_read_error_on_put_is_indeterminate(fake, policy):
+async def test_update_read_error_on_put_is_indeterminate(dd_fake, policy):
     policy(WRITE)
     failure = DatadogTransportError("uncertain", transmitted=True)
-    fake({GET42: OWNED, PUT42: failure}, "monitors")
+    dd_fake({GET42: OWNED, PUT42: failure}, "monitors")
     with pytest.raises(DatadogMutationIndeterminateError):
         await update_monitor(42, name="y")
 
 
-async def test_update_5xx_on_put_is_indeterminate(fake, policy):
+async def test_update_5xx_on_put_is_indeterminate(dd_fake, policy):
     policy(WRITE)
-    fake({GET42: OWNED, PUT42: DatadogResponseError("Datadog returned HTTP 502")}, "monitors")
+    dd_fake({GET42: OWNED, PUT42: DatadogResponseError("Datadog returned HTTP 502")}, "monitors")
     with pytest.raises(DatadogMutationIndeterminateError):
         await update_monitor(42, name="y")
 
 
-async def test_update_success_with_odd_body_says_updated(fake, policy):
+async def test_update_success_with_odd_body_says_updated(dd_fake, policy):
     policy(WRITE)
-    fake({GET42: OWNED, PUT42: {"unexpected": True}}, "monitors")
+    dd_fake({GET42: OWNED, PUT42: {"unexpected": True}}, "monitors")
     with pytest.raises(DatadogResponseError, match="was updated"):
         await update_monitor(42, name="y")
 

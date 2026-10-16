@@ -20,7 +20,7 @@ from archie_shared.events import (
     UserMessage,
 )
 
-pytest_plugins = ["tests.datadog_fakes"]
+pytest_plugins = ["tests.datadog_fakes", "tests.incident_io_fakes"]
 
 
 @pytest.fixture

@@ -35,9 +35,11 @@ See [Authentication and credentials](auth-credentials.md) for `auth` provider se
 credential storage, including `auth.providers.github.work_orgs`, which selects the token the
 container `gh` wrapper uses. The `tools` section controls provider tool policy. The agent re-reads it
 before each exec call, so `tools` edits apply to running sessions; if the file is invalid, the
-last valid policy stays in force and the TUI shows a warning. Other sections are read at startup.
+last valid policy stays in force and the TUI shows a warning. `tools.incident_io` accepts only
+`read.enabled` (default `true`): the incident.io tools are read-only and do not support a scope.
 `tools.datadog` takes `read.enabled` (default true) and `write.enabled` (default false, needed to
 create or update monitors tagged `managedby:archie`); a `scope` is not supported.
+Other sections are read at startup.
 `cli` and `web` are currently reserved for future settings.
 
 ## Host mounts

@@ -38,8 +38,8 @@ def _series(points: int, **extra) -> dict:
     }
 
 
-async def test_query_metrics_sends_epoch_window_and_normalises(fake):
-    client = fake(
+async def test_query_metrics_sends_epoch_window_and_normalises(dd_fake):
+    client = dd_fake(
         {QUERY: {"query": "q", "from_date": 0, "to_date": 1000, "series": [_series(3)]}},
         "metrics",
     )
@@ -55,8 +55,8 @@ async def test_query_metrics_sends_epoch_window_and_normalises(fake):
     assert result["truncated"] is False
 
 
-async def test_query_metrics_keeps_last_points_and_caps_series(fake):
-    fake({QUERY: {"series": [_series(450)] + [_series(1)] * 25}}, "metrics")
+async def test_query_metrics_keeps_last_points_and_caps_series(dd_fake):
+    dd_fake({QUERY: {"series": [_series(450)] + [_series(1)] * 25}}, "metrics")
     result = await query_metrics("avg:x{*} by {host}")
     first = result["series"][0]
     assert len(first["points"]) == 300
@@ -67,8 +67,8 @@ async def test_query_metrics_keeps_last_points_and_caps_series(fake):
     assert result["truncated"] is True
 
 
-async def test_query_metrics_error_body_is_rejected(fake):
-    fake({QUERY: {"series": [], "error": "Rule 'scope_expr' didn't match"}}, "metrics")
+async def test_query_metrics_error_body_is_rejected(dd_fake):
+    dd_fake({QUERY: {"series": [], "error": "Rule 'scope_expr' didn't match"}}, "metrics")
     with pytest.raises(DatadogRequestRejectedError, match="scope_expr"):
         await query_metrics("avg:((")
 
@@ -83,8 +83,8 @@ async def test_query_metrics_error_body_is_rejected(fake):
         {"query": "avg:x{*}", "start": "32d"},
     ],
 )
-async def test_query_metrics_input_errors_make_no_request(fake, kwargs):
-    client = fake({}, "metrics")
+async def test_query_metrics_input_errors_make_no_request(dd_fake, kwargs):
+    client = dd_fake({}, "metrics")
     with pytest.raises(DatadogInputError):
         await query_metrics(**kwargs)
     assert client.calls == []
@@ -97,8 +97,8 @@ def test_time_window_forms():
     assert begin.tzinfo is not None and (end - begin).total_seconds() == 3600
 
 
-async def test_search_metrics_prefixes_and_limits(fake):
-    client = fake(
+async def test_search_metrics_prefixes_and_limits(dd_fake):
+    client = dd_fake(
         {("GET", "/api/v1/search"): {"results": {"metrics": ["a.b", "a.c", 3, "a.d"]}}},
         "metrics",
     )
@@ -107,8 +107,8 @@ async def test_search_metrics_prefixes_and_limits(fake):
 
 
 @pytest.mark.parametrize("limit", [0, 101, True, "5"])
-async def test_search_metrics_limit_validation(fake, limit):
-    client = fake({}, "metrics")
+async def test_search_metrics_limit_validation(dd_fake, limit):
+    client = dd_fake({}, "metrics")
     with pytest.raises(DatadogInputError):
         await search_metrics("a", limit=limit)
     assert client.calls == []
@@ -135,8 +135,8 @@ def _log(i: int, **attrs) -> dict:
     }
 
 
-async def test_search_logs_pages_until_limit(fake):
-    client = fake(
+async def test_search_logs_pages_until_limit(dd_fake):
+    client = dd_fake(
         {
             LOGS: Seq(
                 [
@@ -157,20 +157,20 @@ async def test_search_logs_pages_until_limit(fake):
     assert first["filter"]["from"].endswith("Z")
 
 
-async def test_search_logs_stops_without_cursor(fake):
-    client = fake({LOGS: {"data": [_log(1)], "meta": {}}}, "logs")
+async def test_search_logs_stops_without_cursor(dd_fake):
+    client = dd_fake({LOGS: {"data": [_log(1)], "meta": {}}}, "logs")
     assert len(await search_logs("*", limit=50)) == 1
     assert len(client.calls) == 1
 
 
-async def test_log_record_is_bounded(fake):
+async def test_log_record_is_bounded(dd_fake):
     item = _log(
         1,
         message="m" * 5000,
         tags=[f"t:{i}" for i in range(60)],
         attributes={**{f"k{i}": i for i in range(40)}, "nested": {"a": 1}, "long": "x" * 500},
     )
-    fake({LOGS: {"data": [item]}}, "logs")
+    dd_fake({LOGS: {"data": [item]}}, "logs")
     record = (await search_logs("*"))[0]
     assert len(record["message"]) == 2000
     assert len(record["tags"]) == 50
@@ -196,14 +196,16 @@ def test_log_attributes_replace_nested_values():
     assert record["attributes"] == {"nested": "…", "list": "…", "n": 3, "s": "y" * 200}
 
 
-async def test_search_logs_rejected_query_surfaces(fake):
-    fake({LOGS: DatadogRequestRejectedError("Datadog rejected the request: Cannot parse")}, "logs")
+async def test_search_logs_rejected_query_surfaces(dd_fake):
+    dd_fake(
+        {LOGS: DatadogRequestRejectedError("Datadog rejected the request: Cannot parse")}, "logs"
+    )
     with pytest.raises(DatadogRequestRejectedError, match="Cannot parse"):
         await search_logs("status:((")
 
 
-async def test_search_logs_rate_limit_surfaces(fake):
-    fake({LOGS: DatadogRateLimitError(2)}, "logs")
+async def test_search_logs_rate_limit_surfaces(dd_fake):
+    dd_fake({LOGS: DatadogRateLimitError(2)}, "logs")
     with pytest.raises(DatadogRateLimitError) as caught:
         await search_logs("*")
     assert caught.value.retry_after_seconds == 2
@@ -213,8 +215,8 @@ async def test_search_logs_rate_limit_surfaces(fake):
     "kwargs",
     [{"query": " "}, {"query": "*", "sort": "asc"}, {"query": "*", "limit": 0}],
 )
-async def test_search_logs_input_errors(fake, kwargs):
-    client = fake({}, "logs")
+async def test_search_logs_input_errors(dd_fake, kwargs):
+    client = dd_fake({}, "logs")
     with pytest.raises(DatadogInputError):
         await search_logs(**kwargs)
     assert client.calls == []
@@ -243,8 +245,8 @@ SPAN = {
 }
 
 
-async def test_search_spans_one_request_and_normalises(fake):
-    client = fake({SPANS: {"data": [SPAN, SPAN, SPAN]}}, "traces")
+async def test_search_spans_one_request_and_normalises(dd_fake):
+    client = dd_fake({SPANS: {"data": [SPAN, SPAN, SPAN]}}, "traces")
     result = await search_spans("service:api status:error", limit=2)
     assert len(client.calls) == 1
     attributes = client.calls[0][3]["data"]["attributes"]
@@ -270,8 +272,8 @@ EVENT = {
 }
 
 
-async def test_list_events_omits_query_when_none(fake):
-    client = fake({EVENTS: {"data": [EVENT], "meta": {"page": {}}}}, "events")
+async def test_list_events_omits_query_when_none(dd_fake):
+    client = dd_fake({EVENTS: {"data": [EVENT], "meta": {"page": {}}}}, "events")
     result = await list_events(limit=5)
     params = client.calls[0][2]
     assert "filter[query]" not in params
@@ -290,8 +292,8 @@ async def test_list_events_omits_query_when_none(fake):
     ]
 
 
-async def test_list_events_sends_query_and_follows_cursor(fake):
-    client = fake(
+async def test_list_events_sends_query_and_follows_cursor(dd_fake):
+    client = dd_fake(
         {
             EVENTS: Seq(
                 [
@@ -319,8 +321,8 @@ async def test_list_events_sends_query_and_follows_cursor(fake):
         ("events", lambda: list_events(3)),
     ],
 )
-async def test_optional_queries_reject_bad_values(fake, module, call):
-    client = fake({}, module)
+async def test_optional_queries_reject_bad_values(dd_fake, module, call):
+    client = dd_fake({}, module)
     with pytest.raises(DatadogInputError):
         await call()
     assert client.calls == []
@@ -349,8 +351,8 @@ def test_truncation_is_flagged_on_every_bounded_record():
     assert detail["truncated"] is True
 
 
-async def test_list_events_blank_query_is_no_filter(fake):
-    client = fake({EVENTS: {"data": []}}, "events")
+async def test_list_events_blank_query_is_no_filter(dd_fake):
+    client = dd_fake({EVENTS: {"data": []}}, "events")
     await list_events("  ")
     assert "filter[query]" not in client.calls[0][2]
 
@@ -417,21 +419,21 @@ DASHBOARD = {
 }
 
 
-async def test_list_dashboards_filters_title_locally(fake):
+async def test_list_dashboards_filters_title_locally(dd_fake):
     items = [
         {"id": "aaa-bbb-ccc", "title": "Payments overview"},
         {"id": "ddd-eee-fff", "title": "Infra"},
         {"id": "ggg-hhh-iii", "title": "payments errors"},
     ]
-    client = fake({DASHBOARDS: {"dashboards": items}}, "dashboards")
+    client = dd_fake({DASHBOARDS: {"dashboards": items}}, "dashboards")
     result = await list_dashboards("PAYMENTS", limit=1)
     assert [item["id"] for item in result] == ["aaa-bbb-ccc"]
     assert client.calls[0][2] is None
     assert len(await list_dashboards()) == 3
 
 
-async def test_get_dashboard_widgets_and_bounds(fake):
-    fake({("GET", "/api/v1/dashboard/abc-def-ghi"): DASHBOARD}, "dashboards")
+async def test_get_dashboard_widgets_and_bounds(dd_fake):
+    dd_fake({("GET", "/api/v1/dashboard/abc-def-ghi"): DASHBOARD}, "dashboards")
     result = await get_dashboard("abc-def-ghi")
     assert result["widget_count"] == 103
     assert len(result["widgets"]) == 100
@@ -450,14 +452,14 @@ async def test_get_dashboard_widgets_and_bounds(fake):
 
 
 @pytest.mark.parametrize("value", ["abc", "ABC-DEF-GHI", "abc-def-ghi/../x", 5])
-async def test_get_dashboard_rejects_bad_ids(fake, value):
-    client = fake({}, "dashboards")
+async def test_get_dashboard_rejects_bad_ids(dd_fake, value):
+    client = dd_fake({}, "dashboards")
     with pytest.raises(DatadogInputError):
         await get_dashboard(value)
     assert client.calls == []
 
 
-async def test_list_catalog_entities_filters(fake):
+async def test_list_catalog_entities_filters(dd_fake):
     entity = {
         "id": "u1",
         "attributes": {
@@ -468,7 +470,7 @@ async def test_list_catalog_entities_filters(fake):
             "tags": ["t"],
         },
     }
-    client = fake({("GET", "/api/v2/catalog/entity"): {"data": [entity]}}, "catalog")
+    client = dd_fake({("GET", "/api/v2/catalog/entity"): {"data": [entity]}}, "catalog")
     result = await list_catalog_entities(kind="service", query="api", limit=5)
     assert client.calls[0][2] == {
         "page[limit]": 5,
@@ -489,16 +491,16 @@ async def test_list_catalog_entities_filters(fake):
     ]
 
 
-async def test_list_catalog_entities_rejects_bad_kind(fake):
-    client = fake({}, "catalog")
+async def test_list_catalog_entities_rejects_bad_kind(dd_fake):
+    client = dd_fake({}, "catalog")
     with pytest.raises(DatadogInputError):
         await list_catalog_entities(kind="Service Name")
     assert client.calls == []
 
 
-async def test_list_teams_keyword(fake):
+async def test_list_teams_keyword(dd_fake):
     item = {"id": "t1", "attributes": {"handle": "pay", "name": "Payments", "user_count": 4}}
-    client = fake({("GET", "/api/v2/team"): {"data": [item]}}, "catalog")
+    client = dd_fake({("GET", "/api/v2/team"): {"data": [item]}}, "catalog")
     assert await list_teams("pay") == [
         {"id": "t1", "handle": "pay", "name": "Payments", "member_count": 4}
     ]

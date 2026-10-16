@@ -59,7 +59,7 @@ def policy():
 
 
 @pytest.fixture
-def fake(monkeypatch, policy):
+def dd_fake(monkeypatch, policy):
     """Install a FakeClient as ``datadog_client`` in the named tool modules."""
 
     def install(responses, *modules):

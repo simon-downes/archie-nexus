@@ -378,6 +378,11 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 
 ## Deviations
 
+- Delivery: PR #5 (incident.io) merged into `main` during the build. I merged `origin/main` into this
+  branch, keeping both entries in `docs/config.md` and `tests/conftest.py`. I renamed the Datadog
+  test fixture `fake` → `dd_fake`, because both plugins defined `fake` and the incident.io one
+  shadowed it (75 Datadog tests failed until the rename). After the merge, `uv run pytest`: 1568 passed.
+
 - M4/review: `update_monitor` returns the PUT response instead of a follow-up GET. A 2xx with an
   unexpected body raises `DatadogResponseError` saying the update was applied, not
   `DatadogMutationIndeterminateError`. The follow-up GET threw away a known success and reported it as
@@ -386,13 +391,14 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 
 ## Risks
 
+- `pr.py open` reported a file-list mismatch (`fs.py`, `tests/test_exec_tools.py`). It came from
+  `main` moving ahead of the base; it was resolved by merging `origin/main` (those files are not
+  in this PR's diff).
+
 - `get_dashboard` on a large dashboard can exceed the 16,000-character exec result limit
   (live: 38 widgets → 10,360 chars). The skill tells the agent to select fields in code before
   returning them.
 
-- Merging after (or before) PR #5 conflicts in `exec/tools/__init__.py` (one import),
-  `tests/conftest.py` (`pytest_plugins`) and `docs/config.md` (the same policy sentence);
-  resolve each by keeping both entries.
 - The allowlist guards the tool interface only. Exec code runs in the same Python process and
   can import `archie_shared.credentials.store.get_credential` and read the Datadog keys
   (verified live: the key is readable from `main()`). Jira, incident.io and Slack have the same
@@ -447,7 +453,7 @@ on a `managedby:pulumi` monitor was refused with `DatadogOwnershipError`. Not ve
 `create_monitor` and a successful `update_monitor`, because a real write is externally visible
 and the key may lack `monitors_write`; unit tests cover them.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/6
 CI: pending
 
 ## Follow-ups
