@@ -1,6 +1,6 @@
 # 067 — incident.io read-only tooling and skill
 
-Status: reviewing
+Status: done
 Branch: build-it/067-incident-io-tooling (base: main @ a1d97e6)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/067-incident-io-tooling
 
@@ -386,8 +386,23 @@ scope unsupported).
   - risk ℹ️: `on_call` truncated silently at 50. Added `entries_truncated`, with a test.
   - Rejected: risk ❓, one shared httpx client per call. It mirrors the Jira pattern, and live runs
     of up to 4 sequential requests finished well inside the 60 s limit. Left as a follow-up.
+- Merge risk: Low: the change adds a new, opt-out, read-only namespace with no writes or shared
+  schema changes, so the worst realistic failure is a wrong or incomplete read. That is limited
+  by the GET-only client, typed errors and the 99 incident.io tests, and reverting the package
+  import removes it.
 
 ## Outcome
+
+Delivered the exec-only, read-only `incident_io` namespace (18 functions) under
+`agent/src/archie_agent/exec/tools/incident_io/`, the `incident-io` skill, a `docs/config.md`
+note, and 99 incident.io tests. Evidence: `uv run pytest` 1427 passed; `uv run ruff check .` and
+`uv run ruff format --check .` clean; the live read-only smoke test `/tmp/incident_io_smoke.py`
+reported 18/18 calls returned without raising (after the review fixes too).
+
+Not verified: behaviour with status pages (the account has none, and they are out of scope);
+alert-to-incident links on real data (the account has no linked alerts, so `alert_ids` and
+`incident_ids` were empty live and are covered by unit tests only); rate-limit handling against
+the real API (unit-tested only).
 
 PR: pending
 CI: pending
