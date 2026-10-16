@@ -105,7 +105,7 @@ async def incident_timeline(incident: str, limit: int = 50) -> list[dict]:
     key, count = v.incident_id(incident), v.limit(limit)
     require_read()
     async with incident_io_client() as client:
-        incident_ulid = await _incident_ulid(client, key)
+        incident_ulid = await resolve_incident_ulid(client, key)
         items = await client.paginate(
             "/v2/incident_timeline_items",
             "incident_timeline_items",
@@ -121,14 +121,14 @@ async def incident_updates(incident: str, limit: int = 50) -> list[dict]:
     key, count = v.incident_id(incident), v.limit(limit)
     require_read()
     async with incident_io_client() as client:
-        incident_ulid = await _incident_ulid(client, key)
+        incident_ulid = await resolve_incident_ulid(client, key)
         items = await client.paginate(
             "/v2/incident_updates", "incident_updates", count, {"incident_id": incident_ulid}
         )
     return [incident_update(item) for item in items]
 
 
-async def _incident_ulid(client, key: str) -> str:
+async def resolve_incident_ulid(client, key: str) -> str:
     """Child endpoints filter by the incident ULID, so resolve a reference number first."""
     if not key.isdigit():
         return key

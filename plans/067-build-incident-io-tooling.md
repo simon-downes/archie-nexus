@@ -295,7 +295,7 @@ scope unsupported).
   (`/tmp/incident_io_m2_live.py`): timeline 4 items, updates 3, alerts 16 (all `firing`, matching
   a direct API count of 16 firing / 0 resolved), `get_alert` with 3 attributes.
 
-### [ ] M3 — Work items, directory, on-call and reference data
+### [x] M3 — Work items, directory, on-call and reference data
 
 - **Approach:** `work.py`, `directory.py`, `on_call.py`. Schedule and
   catalog-type arguments accept an ID or exact name (case-insensitive), resolved by listing.
@@ -306,7 +306,14 @@ scope unsupported).
 - **Verify:** `uv run pytest tests/test_incident_io_reads.py` passes, including a registration
   test for exactly the 18 `incident_io.*` keys and a runner-namespace test that runs exec code
   `await incident_io.reference("severities")` through `runner._build_namespace` with a fake client.
-- **Outcome:**
+- **Outcome:** Added `work.py`, `directory.py`, `on_call.py` and formatters; all 18 functions
+  register (registration test). Runner test drives `runner.run()` with a `context.json` policy and
+  `incident_io.reference("severities")` (exercises `_build_namespace`). 89 incident.io tests pass;
+  ruff clean. Live (`/tmp/incident_io_m3_live.py`, counts/keys only): actions 3; outstanding
+  follow-ups 3 (all `outstanding`); post-mortems 2, content hit the 8,000-char cap with
+  `content_truncated: true`; teams 3; users 3 and lookup by email 1; catalog types 29, entries
+  by type name 2; schedules 3; `on_call` by name now 1 entry, by ID over a week 7; escalation
+  paths 2; reference kinds 3/11/5/11.
 
 ### [ ] M4 — Skill, docs, and live verification
 
@@ -322,6 +329,10 @@ scope unsupported).
 - **Outcome:**
 
 ## Deviations
+
+- M3: action and follow-up `status` filters are applied locally (`paginate(keep=...)`, full pages,
+  at most 20 pages) because the v3 endpoints have no status filter. A rare status may return
+  fewer than `limit` results; the skill documents this.
 
 - M1: `list_incidents` `created_*`/`updated_*` filters accept `YYYY-MM-DD` only, not datetimes.
   The live API rejects datetimes on incident filters (`invalid_value`). The tool rejects a datetime

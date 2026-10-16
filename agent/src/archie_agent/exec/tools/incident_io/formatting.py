@@ -226,6 +226,159 @@ def alert_detail(item: dict[str, Any], incident_ids: list[str]) -> dict[str, Any
     }
 
 
+def action(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "incident_id": text(item.get("incident_id"), 100),
+        "description": text(item.get("description")),
+        "status": text(item.get("status"), 64),
+        "assignee": user(item.get("assignee")),
+        "creator": actor(item.get("creator")),
+        "created_at": gmt(item.get("created_at")),
+        "updated_at": gmt(item.get("updated_at")),
+        "completed_at": gmt(item.get("completed_at")),
+    }
+
+
+def follow_up(item: dict[str, Any]) -> dict[str, Any]:
+    issue = _dict(item.get("external_issue_reference"))
+    return {
+        "id": text(item.get("id"), 100),
+        "incident_id": text(item.get("incident_id"), 100),
+        "title": text(item.get("title"), 2000),
+        "description": text(item.get("description")),
+        "status": text(item.get("status"), 64),
+        "priority": name(item.get("priority")),
+        "assignee": user(item.get("assignee")),
+        "assignee_team": name(item.get("assignee_team")),
+        "labels": [text(v, 200) for v in _list(item.get("labels")) if isinstance(v, str)],
+        "external_issue": (
+            {
+                "provider": text(issue.get("provider"), 64),
+                "name": text(issue.get("issue_name"), 500),
+                "url": text(issue.get("issue_permalink"), 2000),
+            }
+            if issue
+            else None
+        ),
+        "created_at": gmt(item.get("created_at")),
+        "updated_at": gmt(item.get("updated_at")),
+        "completed_at": gmt(item.get("completed_at")),
+    }
+
+
+def postmortem(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "incident_id": text(item.get("incident_id"), 100),
+        "title": text(item.get("title"), 2000),
+        "status": text(item.get("status"), 64),
+        "type": text(item.get("type"), 64),
+        "document_url": text(item.get("document_url"), 2000),
+        "editors": [user(e) for e in _list(item.get("editors")) if user(e)],
+        "created_at": gmt(item.get("created_at")),
+        "updated_at": gmt(item.get("updated_at")),
+    }
+
+
+def team(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "name": text(item.get("name"), 500),
+        "members": [user(m) for m in _list(item.get("members")) if user(m)],
+    }
+
+
+def directory_user(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **(user(item) or {"id": None, "name": None, "email": None, "slack_user_id": None}),
+        "is_active": item.get("is_active") if isinstance(item.get("is_active"), bool) else None,
+        "base_role": name(item.get("base_role")),
+    }
+
+
+def catalog_type(item: dict[str, Any]) -> dict[str, Any]:
+    attributes = _list(_dict(item.get("schema")).get("attributes"))
+    return {
+        "id": text(item.get("id"), 100),
+        "name": text(item.get("name"), 500),
+        "type_name": text(item.get("type_name"), 500),
+        "description": text(item.get("description"), 2000),
+        "is_team_type": item.get("is_team_type") is True,
+        "estimated_count": item.get("estimated_count")
+        if isinstance(item.get("estimated_count"), int)
+        else None,
+        "attributes": [
+            {
+                "id": text(_dict(a).get("id"), 100),
+                "name": name(a),
+                "type": text(_dict(a).get("type"), 200),
+            }
+            for a in attributes
+        ],
+    }
+
+
+def catalog_entry(item: dict[str, Any], attribute_names: dict[str, str]) -> dict[str, Any]:
+    values = {}
+    for key, raw in list(_dict(item.get("attribute_values")).items())[:MAX_NESTED]:
+        raw = _dict(raw)
+        found = []
+        entries = (
+            raw.get("array_value")
+            if isinstance(raw.get("array_value"), list)
+            else [raw.get("value")]
+        )
+        for entry in entries[:MAX_NESTED]:
+            entry = _dict(entry)
+            label = entry.get("label") or entry.get("literal")
+            if label is not None:
+                found.append(text(label, 1000))
+        if found:
+            values[attribute_names.get(key, key)[:200]] = found
+    return {
+        "id": text(item.get("id"), 100),
+        "name": text(item.get("name"), 500),
+        "external_id": text(item.get("external_id"), 500),
+        "aliases": [text(a, 500) for a in _list(item.get("aliases")) if isinstance(a, str)],
+        "attributes": values,
+        "archived_at": gmt(item.get("archived_at")),
+    }
+
+
+def shift(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "user": user(item.get("user")),
+        "start_at": gmt(item.get("start_at")),
+        "end_at": gmt(item.get("end_at")),
+        "rotation_id": text(item.get("rotation_id"), 100),
+    }
+
+
+def schedule(item: dict[str, Any]) -> dict[str, Any]:
+    rotations = _list(_dict(item.get("config")).get("rotations"))
+    return {
+        "id": text(item.get("id"), 100),
+        "name": text(item.get("name"), 500),
+        "timezone": text(item.get("timezone"), 100),
+        "team_ids": [text(v, 100) for v in _list(item.get("team_ids")) if isinstance(v, str)],
+        "rotations": [{"id": text(_dict(r).get("id"), 100), "name": name(r)} for r in rotations],
+        "current_shifts": [shift(_dict(s)) for s in _list(item.get("current_shifts"))],
+        "next_shifts": [shift(_dict(s)) for s in _list(item.get("next_shifts"))],
+        "permalink": text(item.get("permalink"), 2000),
+    }
+
+
+def escalation_path(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": text(item.get("id"), 100),
+        "name": text(item.get("name"), 500),
+        "team_ids": [text(v, 100) for v in _list(item.get("team_ids")) if isinstance(v, str)],
+        "current_responders": [user(r) for r in _list(item.get("current_responders")) if user(r)],
+        "levels": len(_list(item.get("path"))),
+    }
+
+
 def reference_item(item: dict[str, Any]) -> dict[str, Any]:
     result = {
         "id": text(item.get("id"), 100),
