@@ -1,5 +1,6 @@
 """incident.io timeline, update and alert tool tests with a fake client (no network)."""
 
+import contextvars
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -540,7 +541,9 @@ def test_runner_exposes_incident_io_namespace(tmp_path, monkeypatch):
         "async def main():\n    return await incident_io.reference('severities')\n"
     )
     (tmp_path / "context.json").write_text(json.dumps({"incident_io": {"read": {"enabled": True}}}))
-    run(tmp_path)
+    # run() installs the policy snapshot in a contextvar without resetting it; isolate it so the
+    # snapshot does not leak into later tests that rely on an empty one.
+    contextvars.copy_context().run(run, tmp_path)
     envelope = Envelope.read(tmp_path)
     assert envelope.ok is True, envelope.error
     assert envelope.return_value == [{"id": "sev-1", "name": "Critical", "description": None}]
