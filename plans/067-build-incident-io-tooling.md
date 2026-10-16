@@ -7,9 +7,10 @@ Worktree: /workspace/archie-nexus/.git/build-it-worktrees/067-incident-io-toolin
 ## Objective
 
 Give the agent read-only access to incident.io through an exec-only `incident_io` namespace and a
-matching `persona/skills/incident_io/SKILL.md`, following the existing Jira/Slack tool patterns.
-When done, model code can list and read incidents, their timelines and related records, and the
-skill documents the full public surface, limits and errors.
+matching `persona/skills/incident-io/SKILL.md`, following the existing Jira/Slack tool patterns.
+When done, model code can list and read incidents with their timeline, updates, participants,
+alerts, actions, follow-ups and post-mortems, and can read ownership, on-call, catalog and
+reference data. The skill documents the full public surface, limits and errors.
 
 ## Context
 
@@ -28,15 +29,38 @@ Codebase facts:
   `https://api.incident.io/`, Bearer auth (`docs/auth-credentials.md`).
 - Closest pattern: `agent/src/archie_agent/exec/tools/jira/` (static credential, httpx client,
   sanitized typed errors, `policy.py` using `archie_shared.tool_policy.resolve_provider_policy`,
-  `@tool(native=False, exec_docs=False, namespace="jira")`). Slack's `errors.py` shows a shared
-  error base class and `retry_after_seconds` on rate limits.
+  `@tool(native=False, exec_docs=False, namespace="jira")`). Slack's
+  `agent/src/archie_agent/exec/tools/slack/errors.py` shows a shared error base class and
+  `retry_after_seconds` on rate limits.
 - Tool packages are registered by import in `agent/src/archie_agent/exec/tools/__init__.py`
-  `get_all_tools()`.
-- `tools:` config is an open provider map (`shared/src/archie_shared/schemas.py`), so
+  `get_all_tools()`; the runner groups `_namespace` functions into a `SimpleNamespace` per name
+  (`agent/src/archie_agent/exec/runner.py:92-102`).
+- `tools:` config is an open provider map (`shared/src/archie_shared/schemas.py:115`), so
   `tools.incident_io` needs no schema change. Missing policy = read enabled, write disabled.
-- Live credential check: `/v1/identity` returned 200 with viewer-only roles; rate limit header
-  shows 1200 requests per 60s window.
-- The public OpenAPI spec is at `https://api.incident.io/v1/openapiV3.json` (147 GET endpoints).
+- Exec results are truncated at 16,000 characters (`agent/src/archie_agent/exec/tool.py:28`).
+
+Live API facts (checked with the read-only key, field names and status codes only):
+
+- `/v1/identity` 200; roles are viewer-only; rate limit is 1200 requests per 60 s.
+- OpenAPI spec: `https://api.incident.io/v1/openapiV3.json`. Account has ~40 incidents, alerts,
+  actions, follow-ups, 5 schedules, escalation paths, 29 catalog types, teams, post-mortems;
+  no status pages.
+- List endpoints paginate with `page_size` + `after` and return `pagination_meta.after`.
+  `page_size` above the server maximum is silently clamped (251 returned 200).
+- `/v2/incidents` filters use deepObject query keys such as `status_category[one_of]=live`,
+  `created_at[gte]=2026-01-01`, `severity[one_of]=<severity ID>`. An unknown enum value returns
+  200 with an empty list, and a severity *name* matches nothing — filters need IDs, so the tool
+  must validate enums locally and resolve names to IDs.
+- `GET /v2/incidents/{id}` accepts the ULID or the bare reference number (`123`); the full
+  reference `INC-123` returns 404.
+- Error body: `{"type", "status", "request_id", "errors": [{"code", "message"}]}`.
+- `/v1/postmortem_documents/{id}/content` returns `{"markdown": "..."}`.
+- `/v2/schedule_entries` takes `schedule_id`, `entry_window_start`, `entry_window_end` and returns
+  `{"scheduled", "overrides", "final"}` lists.
+- Enums: status category `triage declined merged canceled live learning closed paused`; alert
+  status `firing resolved`; action/follow-up status `outstanding completed deleted not_doing`;
+  incident mode `standard retrospective test tutorial`; `sort_by` `created_at_newest_first`,
+  `created_at_oldest_first`.
 
 ## Baseline
 
@@ -46,3 +70,224 @@ Codebase facts:
 - Failing before this work: none (1328 passed; ruff clean)
 - Not included: `persona/skills/aws-agent-access/`, `plans/060-spec-container-aws-profiles.md`
   (untracked in the user's checkout, unrelated)
+
+## Decisions
+
+| #  | Decision | Chosen | Rejected | Why | Source |
+|----|----------|--------|----------|-----|--------|
+| D1 | Scope of the first build | Full read-only surface: incidents (+timeline, updates, participants, linked alerts), alerts, actions, follow-ups, post-mortems, teams, users, catalog, schedules/on-call, escalation paths, reference data | Core only (~6 functions); everything readable incl. status pages/workflows/transcripts | Covers the design doc's use cases; account has no status pages | user Q1 |
+| D2 | Writes | None; no write functions and no write policy check | Policy-gated writes like Jira | Design doc excludes incident.io writes; key is viewer-only | self |
+| D3 | Namespace and package name | `incident_io` namespace, package `agent/src/archie_agent/exec/tools/incident_io/`, skill dir `persona/skills/incident-io/` with `name: incident-io` | `incidentio`; skill named `incident_io` | Namespace must be a Python identifier and matches the credential provider name; skill names in the catalog are hyphenated (`build-it`, `aws-agent-access`) | self |
+| D4 | HTTP client | Reuse `httpx` with a single-attempt async client modelled on `jira/client.py` | incident.io SDK; automatic retries | No new dependency; no-retry is the established Jira/Slack contract | self |
+| D5 | Read policy scope | Support `read.enabled` only; reject a non-empty `read.scope` with a policy error | Team-ID scope filtering | incident.io objects carry team IDs inconsistently (incidents have `team_ids`, alerts do not), so a scope could not be enforced on every function; failing closed avoids a false sense of restriction | self |
+| D6 | Filter interface | Structured keyword filters; enums validated locally; severity/type/status accepted by name or ID and resolved to IDs via reference endpoints | Raw deepObject filter dicts; IDs only | Matches Jira's "no raw query" rule; live check showed unknown values silently return nothing, which would mislead the model | self |
+| D7 | Incident identifier input | Accept ULID, `INC-123`, or `123`; normalise `INC-123` → `123` | Pass through unchanged | Live check: API 404s on `INC-123`, but users and Slack channels use that form | self |
+| D8 | Output shape | Normalised, bounded dicts per resource (Jira `formatting.py` style); text fields truncated at 8,000 chars; lists capped | Raw provider payloads | Skill rules forbid raw payloads; 16,000-char exec limit | self |
+| D9 | Pagination | Each list function takes `limit` (1–100, default 25) and follows `after` cursors until `limit` or exhaustion; no cursor exposed | Expose `after` cursor to the model | Same contract as `jira.list_issues`; 100 × compact record fits typical use | self |
+| D10 | Rate-limit error | `IncidentIoRateLimitError` with `retry_after_seconds` from `Retry-After` or `X-RateLimit-Reset` | Plain message only | Slack pattern; lets the model wait correctly | self |
+| D11 | On-call "who is on call now" | `incident_io.on_call(schedule, start=None, end=None)` returning the `final` entries, schedule by ID or exact name | Return all three entry lists | `final` already applies overrides; fewer tokens | self |
+| D12 | Module layout | `client.py` (credential, transport, errors), `policy.py`, `formatting.py`, `validation.py`, then `incidents.py`, `alerts.py`, `work.py` (actions, follow-ups, post-mortems), `directory.py` (teams, users, catalog), `on_call.py`, `reference.py` | One large module | Mirrors Jira/Slack's per-area modules | self |
+
+## Requirements
+
+- MUST expose these async functions only under the `incident_io` exec namespace, registered with
+  `@tool(native=False, exec_docs=False, namespace="incident_io")`:
+  `list_incidents`, `get_incident`, `incident_timeline`, `incident_updates`,
+  `list_alerts`, `get_alert`, `list_actions`, `list_follow_ups`, `list_postmortems`,
+  `get_postmortem`, `list_teams`, `list_users`, `list_catalog_types`, `list_catalog_entries`,
+  `list_schedules`, `on_call`, `list_escalation_paths`, `reference`.
+  - AC: `get_all_tools()` contains `incident_io.<name>` for each of the 18 functions, each with
+    `_native is False` and `_exec_docs is False`; no other `incident_io.*` keys exist.
+  - AC: exec code `await incident_io.reference("severities")` resolves through the runner namespace
+    (runner namespace test with a mocked client).
+- MUST NOT issue any HTTP method other than GET to incident.io.
+  - AC: a test asserts every request made by the client across the tool suite uses `GET`; the
+    client exposes no method parameter.
+- MUST load the API key only via `get_credential("incident_io")` and send it as a Bearer token to
+  `https://api.incident.io`; the key never appears in arguments, results, errors or the skill.
+  - AC: missing, empty or unreadable credential raises `IncidentIoConfigurationError` before any
+    request is made.
+  - AC: an error raised for a 401 response does not contain the key string.
+- MUST honour `tools.incident_io.read.enabled`; disabled reads raise `IncidentIoPolicyError`
+  before any request. A non-empty `read.scope` raises `IncidentIoPolicyError` (unsupported).
+  - AC: tests for disabled read, unsupported scope, and missing policy (read enabled).
+- MUST map provider failures to sanitized typed errors: 401 → `IncidentIoAuthenticationError`,
+  403 → `IncidentIoAuthorizationError`, 404 → `IncidentIoNotFoundError`, 429 →
+  `IncidentIoRateLimitError` (with `retry_after_seconds` int or None), 400/422 →
+  `IncidentIoValidationError`, other ≥400 or malformed JSON → `IncidentIoResponseError`, network
+  failure → `IncidentIoTransportError`. No automatic retries.
+  - AC: client tests for each status, including `Retry-After: 30` → `retry_after_seconds == 30`.
+- MUST validate inputs locally before any request: `limit` an int (not bool) in 1–100; enum
+  filters in the documented sets; timestamps parseable ISO-8601 dates or datetimes; IDs
+  non-empty and ≤ 100 chars matching `[A-Za-z0-9_-]`.
+  - AC: invalid input raises `IncidentIoInputError` with no request made.
+- MUST accept incident IDs as a ULID, `INC-<n>` or `<n>`, sending `<n>` for the reference forms.
+  - AC: `get_incident("inc-42")` requests `/v2/incidents/42`.
+- MUST support `list_incidents` filters: `status_category` (list of enum values), `severity`,
+  `incident_type`, `status` (each a name or ID, or a list of them), `created_after`,
+  `created_before`, `updated_after`, `updated_before`, `mode` (default API behaviour excludes
+  test/tutorial), `sort` (`newest`/`oldest`), `limit`.
+  - AC: a severity name is resolved to its ID via `/v1/severities` and sent as
+    `severity[one_of]=<id>`; an unknown name raises `IncidentIoInputError` listing valid names.
+  - AC: `status_category=["live"]` sends `status_category[one_of]=live`.
+- MUST follow `after` cursors until `limit` results or no cursor, never sending `page_size` > 100.
+  - AC: a two-page mocked response with `limit=30` returns 30 items and makes 2 requests.
+- MUST return normalised bounded records: no raw provider objects; text truncated at 8,000
+  chars; nested lists (role assignments, custom fields, attributes) capped at 50 entries.
+  - AC: formatting tests for incident summary/detail, alert, action, follow-up, post-mortem,
+    schedule entry, team, user and catalog entry.
+- MUST provide `persona/skills/incident-io/SKILL.md` documenting every public function, inputs,
+  output shapes, limits, policy and errors, with no credentials, raw URLs, or `ARCHIE_HOME_DIR`.
+  - AC: a skill contract test like `tests/test_slack_skill.py` checks the 18 function names, the
+    error class names, `read-only`, and the absence of `api.incident.io` and `ARCHIE_HOME_DIR`.
+  - AC: `discover_skills` finds a skill named `incident-io`.
+- MUST work against the live account for every function (manual verification, read-only).
+  - AC: a live smoke script run once in M4 calls each function with small limits and reports only
+    counts/keys; every call succeeds or raises a documented typed error.
+
+Out of scope: any write (incident create/update, timeline, escalations, follow-ups, status pages,
+catalog, config); status pages, workflows, call transcripts, pay configs, policies; read scoping;
+cross-provider (Datadog) composition; incremental sync.
+
+## Design
+
+### Overview
+
+A new `incident_io` tool package mirrors `jira/`: one credential/transport module, a policy gate,
+validation helpers, normalising formatters, and per-area modules of `@tool` functions. Every
+function validates input, checks read policy, opens a short-lived client, issues one or more GETs,
+and returns normalised bounded data. A skill documents the surface.
+
+### Stack
+
+- `httpx` (reused, already a dependency of `agent`). No SDK.
+
+### Code structure
+
+All new, under `agent/src/archie_agent/exec/tools/incident_io/`:
+
+- `__init__.py` — imports and `__all__` for the 18 functions (pattern: `jira/__init__.py`).
+- `client.py` — errors (base `IncidentIoError(ToolError)` and subclasses), `_credential()`,
+  `IncidentIoClient.get(path, params)` and `paginate(path, key, params, limit)`, `incident_io_client()`
+  async context manager with a 60 s overall timeout (pattern: `jira/client.py`, rate limit from
+  `slack/client.py` `parse_retry_after`).
+- `policy.py` — `require_read()` using `resolve_provider_policy(current_policy_snapshot(),
+  "incident_io")` (pattern: `jira/policy.py`, without the env fallback that plan 065 flagged as dead).
+- `validation.py` — `limit`, `enum_list`, `timestamp`, `identifier`, `incident_id` helpers.
+- `formatting.py` — `text()`, `user()`, and per-resource normalisers.
+- `reference.py` — `reference(kind)` for `severities`, `incident_types`, `incident_statuses`,
+  `incident_roles`, `custom_fields`, plus internal `resolve_ids(client, kind, values)`.
+- `incidents.py` — `list_incidents`, `get_incident`, `incident_timeline`, `incident_updates`.
+  `get_incident` includes participants (`/v2/incident_participants`) and linked alert IDs
+  (`/v2/incident_alerts`).
+- `alerts.py` — `list_alerts(status, source, created_after, created_before, limit)`, `get_alert`.
+- `work.py` — `list_actions`, `list_follow_ups` (filters: `incident`, `status`, `created_after`,
+  `updated_after`, `team` for follow-ups), `list_postmortems(incident, limit)`,
+  `get_postmortem(id)` with markdown content truncated at 8,000 chars.
+- `directory.py` — `list_teams`, `list_users(email, slack_user_id, include_inactive)`,
+  `list_catalog_types`, `list_catalog_entries(catalog_type, identifier, limit)`.
+- `on_call.py` — `list_schedules`, `on_call(schedule, start, end)`, `list_escalation_paths`.
+
+Edited: `agent/src/archie_agent/exec/tools/__init__.py` (import `incident_io`).
+
+New: `persona/skills/incident-io/SKILL.md` (pattern: `persona/skills/jira/SKILL.md`).
+
+Tests (new): `tests/test_incident_io_client.py`, `tests/test_incident_io_incidents.py`,
+`tests/test_incident_io_reads.py`, `tests/test_incident_io_skill.py`.
+
+Docs (edited): `docs/auth-credentials.md` gains no change; `docs/config.md` gets one sentence
+listing `incident_io` read policy (reads only, scope unsupported).
+
+### Error handling
+
+- Configuration/policy/input errors: raised before any request; do not retry.
+- 401/403: authentication/authorization errors; surface.
+- 404: not-found error; surface.
+- 429: rate-limit error with `retry_after_seconds`; no automatic retry.
+- Network errors: `IncidentIoTransportError`; reads are safe to retry by the model.
+- Malformed JSON or missing expected list key: `IncidentIoResponseError`.
+
+### Non-functional
+
+- Security: GET-only client; key only in the Authorization header; errors carry fixed messages
+  plus at most the provider's `errors[].code` values (no message bodies, no request echo).
+- Bounds: `limit` ≤ 100 per call; page size ≤ 100; text ≤ 8,000 chars; nested lists ≤ 50; overall
+  call timeout 60 s; request timeout 30 s.
+
+### Config / infra
+
+- Optional policy: `tools.incident_io.read.enabled` (default true). No new credential or env var.
+
+## Milestones
+
+### [ ] M1 — Tracer: `incident_io.list_incidents` and `get_incident` end to end
+
+- **Approach:** create `client.py`, `policy.py`, `validation.py`, `formatting.py` (incident
+  summary/detail only), `reference.py` (internal `resolve_ids` + public `reference`) and
+  `incidents.py` (`list_incidents`, `get_incident`). Register the package in
+  `exec/tools/__init__.py`. Follow `jira/client.py` and `jira/search.py`.
+  ⚠️ Build deepObject params as flat keys (`severity[one_of]`); httpx encodes list values as
+  repeated keys — confirm against the live API.
+- **Test seam:** public tool functions with `incident_io_client` patched to a fake client; client
+  tests use `httpx.MockTransport`.
+- **Edge cases:** severity name unknown → `IncidentIoInputError`; `INC-7` → `/v2/incidents/7`;
+  401 → authentication error without key text; 429 with `Retry-After` → `retry_after_seconds`;
+  policy disabled → no request.
+- **Deliverable:** model code can list and read incidents.
+- **Verify:** `uv run pytest tests/test_incident_io_client.py tests/test_incident_io_incidents.py`
+  passes; a one-off live call `list_incidents(limit=2)` and `get_incident(<reference>)` returns
+  normalised records (report keys only).
+- **Outcome:**
+
+### [ ] M2 — Incident context: timeline, updates, alerts
+
+- **Approach:** add `incident_timeline`, `incident_updates` to `incidents.py`; `alerts.py` with
+  `list_alerts`, `get_alert`; extend formatters. Linked alerts come from `/v2/incident_alerts`.
+- **Test seam:** public tool functions with a fake client.
+- **Edge cases:** pagination across 2 pages; alert `status` outside `firing/resolved` → input error.
+- **Deliverable:** model code can reconstruct an incident's history and linked alerts.
+- **Verify:** `uv run pytest tests/test_incident_io_incidents.py tests/test_incident_io_reads.py`
+  passes.
+- **Outcome:**
+
+### [ ] M3 — Work items, directory, on-call and reference data
+
+- **Approach:** `work.py`, `directory.py`, `on_call.py`; finish `reference.py`. Schedule and
+  catalog-type arguments accept an ID or exact name (case-insensitive), resolved by listing.
+- **Test seam:** public tool functions with a fake client.
+- **Edge cases:** ambiguous schedule name → input error listing matches; `on_call` without start
+  and end uses now → now + 1 minute; `end` before `start` → input error.
+- **Deliverable:** all 18 functions callable.
+- **Verify:** `uv run pytest tests/test_incident_io_reads.py` passes; a registration test confirms
+  exactly the 18 `incident_io.*` keys.
+- **Outcome:**
+
+### [ ] M4 — Skill, docs, and live verification
+
+- **Approach:** write `persona/skills/incident-io/SKILL.md` following `persona/skills/jira/SKILL.md`
+  (global rules, choose-the-right-function table, inputs, output schemas, functions, errors,
+  examples); add `tests/test_incident_io_skill.py` like `tests/test_slack_skill.py`; add the
+  `docs/config.md` sentence. Run a live smoke script outside the repo (`/tmp`) that calls each
+  function once with `limit<=3` and prints only function name, result type, count and keys.
+- **Test seam:** skill contract test; `discover_skills` on `persona/skills`.
+- **Deliverable:** documented, discoverable skill; live-verified surface.
+- **Verify:** `uv run pytest tests/test_incident_io_skill.py` passes; live smoke script reports
+  18/18 functions succeeded.
+- **Outcome:**
+
+## Deviations
+
+## Risks
+
+- Filter encoding for multi-value deepObject params (`severity[one_of]` repeated) is assumed from
+  the OpenAPI style; M1 confirms it live.
+- incident.io may add or rename fields; formatters use `.get()` and tolerate missing fields.
+
+## Review
+
+## Outcome
+
+PR: pending
+CI: pending
+
+## Follow-ups
