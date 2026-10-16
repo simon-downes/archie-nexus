@@ -404,7 +404,7 @@ alert-to-incident links on real data (the account has no linked alerts, so `aler
 `incident_ids` were empty live and are covered by unit tests only); rate-limit handling against
 the real API (unit-tested only).
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/5
 CI: pending
 
 ## Follow-ups
