@@ -1,6 +1,6 @@
 # 067 — incident.io read-only tooling and skill
 
-Status: building
+Status: reviewing
 Branch: build-it/067-incident-io-tooling (base: main @ a1d97e6)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/067-incident-io-tooling
 
@@ -315,7 +315,7 @@ scope unsupported).
   by type name 2; schedules 3; `on_call` by name now 1 entry, by ID over a week 7; escalation
   paths 2; reference kinds 3/11/5/11.
 
-### [ ] M4 — Skill, docs, and live verification
+### [x] M4 — Skill, docs, and live verification
 
 - **Approach:** write `persona/skills/incident-io/SKILL.md` following `persona/skills/jira/SKILL.md`
   (global rules, choose-the-right-function table, inputs, output schemas, functions, errors,
@@ -326,7 +326,20 @@ scope unsupported).
 - **Deliverable:** documented, discoverable skill; live-verified surface.
 - **Verify:** `uv run pytest tests/test_incident_io_skill.py` passes; the live smoke script
   reports 18/18 calls returned without raising (output pasted into Outcome).
-- **Outcome:**
+- **Outcome:** Wrote `persona/skills/incident-io/SKILL.md` and `tests/test_incident_io_skill.py`
+  (checks every registered `incident_io.*` function name, all error classes, no `api.incident.io`
+  / `ARCHIE_HOME_DIR` / `Bearer` / `/v2/`, and discovery as `incident-io`); added the
+  `docs/config.md` sentence. The skill test uses `_scan_directory` on the repo skills dir because
+  `discover_skills()` takes no path. Live smoke `/tmp/incident_io_smoke.py` output (shapes only):
+
+  ```
+  list_incidents list 3 · get_incident dict 24 · incident_timeline list 1 · incident_updates list 1
+  list_alerts list 3 · get_alert dict 13 · list_actions list 3 · list_follow_ups list 3
+  list_postmortems list 3 · get_postmortem dict 11 · list_teams list 3 · list_users list 3
+  list_catalog_types list 29 · list_catalog_entries list 3 · list_schedules list 3
+  on_call dict 4 · list_escalation_paths list 2 · reference list 3
+  18/18 calls returned without raising
+  ```
 
 ## Deviations
 
