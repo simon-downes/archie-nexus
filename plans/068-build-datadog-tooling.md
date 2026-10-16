@@ -1,6 +1,6 @@
 # 068 — Datadog tooling and skill
 
-Status: planning
+Status: building
 Branch: build-it/068-datadog-tooling (base: main @ 89cf27a)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/068-datadog-tooling
 
@@ -78,12 +78,14 @@ Live API facts (checked with the user's key on `api.datadoghq.eu`, status codes 
 | D9 | Time inputs | ISO-8601 datetime (naive = UTC) or relative `<n>m`/`<n>h`/`<n>d` meaning "that long ago"; default `start` 1 h ago, `end` now; window at most 31 days | Epoch numbers; Datadog `now-15m` strings | One form works for both v1 (epoch seconds) and v2 (epoch ms) endpoints after local conversion | self |
 | D10 | Rate-limit retry hint | `retry_after_seconds` from `X-RateLimit-Reset` (non-negative integer seconds), else None | `Retry-After` | Datadog sends `X-RateLimit-Reset` as seconds until reset (observed 2, 3, 33) | self |
 | D11 | Provider error detail | First provider error string, truncated to 300 chars, in `DatadogRequestRejectedError` | Fixed message only | Messages like `Cannot parse query: 'status:(('` are needed to fix a query and carry no secrets | self |
-| D15 | Metric search endpoint | `GET /api/v1/search?q=metrics:<query>`, results cut to `limit` locally | `GET /api/v2/metrics` (lists by tag filters, no name search) | Live check: v1 search returns `results.metrics` names for a substring query | self |
-| D16 | Metric point truncation | Keep the last 300 points of each series | First 300; downsampling | During an incident the most recent points matter most; downsampling hides spikes | self |
 | D12 | Metric query endpoint | `GET /api/v1/query`; an `error` field in a 200 body raises `DatadogRequestRejectedError` | `POST /api/v2/query/timeseries` | v1 takes the familiar metric query string directly; live check showed v1 reports bad queries as 200 + `error` | self |
 | D13 | Monitor options | `options` limited to an allowlist (`thresholds`, `notify_no_data`, `no_data_timeframe`, `renotify_interval`, `evaluation_delay`, `new_group_delay`, `require_full_window`, `include_tags`, `notify_audit`, `escalation_message`, `timeout_h`) | Pass-through dict | Blocks fields such as `restricted_roles` that change who can see or edit a monitor | self |
 | D14 | Module layout | Mirror incident.io: `client.py`, `policy.py`, `validation.py`, `formatting.py`, then `metrics.py`, `logs.py`, `traces.py`, `events.py`, `monitors.py`, `dashboards.py`, `catalog.py` | One module | Jira and incident.io split by API area with per-area tests; this keeps the write code (`monitors.py`) separate from the read modules for review | self |
+| D15 | Metric search endpoint | `GET /api/v1/search?q=metrics:<query>`, results cut to `limit` locally | `GET /api/v2/metrics` (lists by tag filters, no name search) | Live check: v1 search returns `results.metrics` names for a substring query | self |
+| D16 | Metric point truncation | Keep the last 300 points of each series | First 300; downsampling | During an incident the most recent points matter most; downsampling hides spikes | self |
 | D17 | Base branch | Stay on `main` @ 89cf27a; copy incident.io patterns from branch `build-it/067-incident-io-tooling` | Stack on the 067 branch | 067 is an independent open PR; stacking would tie this PR's merge to it. The two conflicts are one import line and one docs sentence | self |
+| D18 | `update_monitor` body | Send only the given fields; merge `options` over the current options read by the ownership GET | Send only given fields including a bare `options`; send the full merged definition | Datadog replaces `options` as a whole, so a partial `options` would silently drop `notify_no_data` etc.; sending only changed top-level fields avoids rewriting queries the caller didn't touch | self |
+| D19 | Write failures after sending | 5xx, malformed body, transport error after transmission, or deadline → `DatadogMutationIndeterminateError`; 4xx → `DatadogRequestRejectedError` | Surface the raw typed error | A 5xx or bad body after POST/PUT may hide a change; Jira `_mutate_issue` treats these as indeterminate | self |
 
 ## Requirements
 
@@ -150,12 +152,17 @@ Live API facts (checked with the user's key on `api.datadoghq.eu`, status codes 
     GET and no PUT; update with `tags=["team:x"]` sends `["team:x", "managedby:archie"]`.
 - MUST raise `DatadogMutationIndeterminateError` when a create/update request may have been
   transmitted but its outcome is unknown (Jira `_mutate_issue` pattern).
+  - AC: a 500 or malformed body on POST → indeterminate error; a 400 → rejected error.
+  - AC: `update_monitor(id, options={"thresholds": {...}})` sends the current options with
+    `thresholds` replaced; `update_monitor(id)` → input error with no request.
   - AC: a transport `ReadError` on PUT → indeterminate error; a `ConnectError` → transport error;
     the overall deadline expiring during the POST or PUT → indeterminate error.
-- MUST give `validate_monitor` the same inputs as `create_monitor`, call
+- MUST give `validate_monitor` the same inputs as `create_monitor` (including adding the ownership tag), call
   `POST /api/v1/monitor/validate`, require only read policy, and return `{"valid": true}` or raise
   `DatadogRequestRejectedError`.
-  - AC: unit test with a mocked 400; live call with a valid definition returns `{"valid": true}`.
+  - AC: unit test with a mocked 400; live call with `type="metric alert"`,
+    `query="avg(last_5m):avg:system.cpu.user{*} > 90"`, `name="x"`, `message="x"` returns
+    `{"valid": true}`.
 - MUST provide `persona/skills/datadog/SKILL.md` documenting every function, inputs, outputs,
   limits, rate limits that matter (spans 5/60 s, logs 10/10 s), policy, ownership rule and errors,
   with no credentials, `api.datadoghq`, `DD-API-KEY` or `ARCHIE_HOME_DIR`.
@@ -166,7 +173,7 @@ Live API facts (checked with the user's key on `api.datadoghq.eu`, status codes 
   - AC: a smoke script in `/tmp` prints only function name, result type, count and keys; pass =
     12/12 read-side calls return (`get_monitor` and `get_dashboard` use the first ID from
     `search_monitors(limit=1)` and `list_dashboards(limit=1)`; time windows are the last 15
-    minutes), and `update_monitor(<pulumi monitor>, name=...)` raises
+    minutes), and `update_monitor(<first ID from search_monitors("tag:managedby:pulumi", limit=1)>, name="x")` raises
     `DatadogOwnershipError` (write policy enabled only inside the script's snapshot).
 
 Out of scope: dashboard writes, deletes of any kind, downtimes and muting, SLOs, service checks,
@@ -203,17 +210,34 @@ All new under `agent/src/archie_agent/exec/tools/datadog/`:
   `monitor_options`, `choice`.
 - `formatting.py`: `text()` and per-resource normalisers.
 - `metrics.py`: `query_metrics(query, start="1h", end=None)`, `search_metrics(query, limit=50)`.
-- `logs.py`: `search_logs(query, start, end, limit=20, sort="newest")`, limit 1–100.
-- `traces.py`: `search_spans(query, start, end, limit=20, sort="newest")`, limit 1–100, one request.
-- `events.py`: `list_events(query="*", start, end, limit=20)`, limit 1–100.
+- `logs.py`: `search_logs(query, start="1h", end=None, limit=20, sort="newest")`. Record:
+  `id`, `timestamp`, `service`, `host`, `status`, `message` (≤2,000), `tags` (≤50), `attributes`
+  (top-level keys only, ≤30 keys, scalar values ≤200 chars, nested values replaced by `"…"`).
+- `traces.py`: `search_spans(query, start="1h", end=None, limit=20, sort="newest")`, one request.
+  Record: `trace_id`, `span_id`, `parent_id`, `service`, `resource`, `operation`, `env`, `start`,
+  `end`, `duration_ms`, `status`, `error` (from `custom.error.message`/`type`, ≤500); `custom` is
+  not returned.
+- `events.py`: `list_events(query=None, start="1h", end=None, limit=20)`. Record: `id`,
+  `timestamp`, `title`, `message` (≤2,000), `source`, `tags` (≤50).
 - `monitors.py`: `search_monitors(query=None, limit=20)`, `get_monitor(monitor_id)`,
   `validate_monitor(...)`, `create_monitor(name, type, query, message, tags=None, priority=None,
   options=None)`, `update_monitor(monitor_id, name=None, query=None, message=None, tags=None,
-  priority=None, options=None)`.
+  priority=None, options=None)`. `update_monitor` sends a PUT with only the given fields, and
+  `options` is merged over the monitor's current options from the ownership GET (D18). It
+  returns the monitor from a follow-up GET. With no fields given, it raises `DatadogInputError`.
+- `client.py` `_ALLOWED` (method, path): `GET /api/v1/query`, `GET /api/v1/search`,
+  `POST /api/v2/logs/events/search`, `POST /api/v2/spans/events/search`, `GET /api/v2/events`,
+  `GET /api/v1/monitor/search`, `GET /api/v1/monitor/<int>`, `POST /api/v1/monitor/validate`,
+  `POST /api/v1/monitor`, `PUT /api/v1/monitor/<int>`, `GET /api/v1/dashboard`,
+  `GET /api/v1/dashboard/<id>`, `GET /api/v2/catalog/entity`, `GET /api/v2/team`.
 - `dashboards.py`: `list_dashboards(query=None, limit=50)` (local case-insensitive title
-  filter), `get_dashboard(dashboard_id)` (widgets: id, type, title, queries).
-- `catalog.py`: `list_catalog_entities(kind=None, query=None, limit=50)`,
-  `list_teams(query=None, limit=50)`.
+  filter), `get_dashboard(dashboard_id)` (top-level widgets only, ≤100; each `id`, `type`,
+  `title`, `queries` (≤10), and for groups `child_count`). Monitor record: `id`, `name`, `type`,
+  `status`, `query`, `message` (detail only), `tags`, `priority`, `managed`, `created`, `modified`.
+- `catalog.py`: `list_catalog_entities(kind=None, query=None, limit=50)` sends
+  `filter[kind]` and `filter[name]`; `list_teams(query=None, limit=50)` sends `filter[keyword]`.
+  Entity record: `id`, `kind`, `name`, `display_name`, `owner`, `tags`; team: `id`, `handle`,
+  `name`, `member_count`.
 
 Edited: `agent/src/archie_agent/exec/tools/__init__.py` (import `datadog`), `docs/config.md`.
 New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
@@ -278,7 +302,8 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   `dashboards.py`; `catalog.py`. Monitor records include `managed: bool` (has the ownership tag).
 - **Test seam:** public functions with a fake client; registration test; runner test.
 - **Deliverable:** all read functions callable.
-- **Verify:** `uv run pytest tests/test_datadog_reads.py tests/test_datadog_monitors.py -k "not write"` passes.
+- **Verify:** `uv run pytest tests/test_datadog_reads.py tests/test_datadog_monitors.py -k "not write"` passes;
+  the registration test asserts the 12 read functions here and is tightened to exactly 14 in M4.
 - **Outcome:**
 
 ### [ ] M4 — Guarded monitor writes
@@ -288,7 +313,9 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   `_mutate_issue`. Add the recording-transport test that covers every public function.
 - **Test seam:** public functions with a fake client / recording transport.
 - **Edge cases:** untagged monitor → `DatadogOwnershipError`, no PUT; write disabled → no
-  request; `options` with `restricted_roles` → input error.
+  request; `options` with `restricted_roles` → input error; a 5xx or malformed body after the
+  POST/PUT was sent → `DatadogMutationIndeterminateError`; a 4xx → `DatadogRequestRejectedError`
+  (Datadog rejected it, nothing changed).
 - **Deliverable:** model code can create and update Archie-owned monitors only.
 - **Verify:** `uv run pytest tests/test_datadog_monitors.py tests/test_datadog_client.py` passes.
 - **Outcome:**
@@ -324,6 +351,11 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   endpoint (D15), D3 source label, D14 reason, catalog `kind` rule, base-branch conflict (D17,
   Risks), config-load failure behaviour, deadline during writes → indeterminate error, ownership
   error timing wording, optional query arguments.
+- Plan review pass 2: no ❌. Fixed: uniform `start="1h", end=None` signatures and
+  `list_events(query=None)`; update body rule (D18); write-failure mapping (D19); decision order;
+  record fields incl. bounded log `attributes` and no span `custom`; catalog/team filter params;
+  explicit `_ALLOWED` list; `validate_monitor` adds the tag; update return value and empty-call
+  rule; top-level widget cap; registration test staging (M3 12 → M4 14); smoke inputs named.
 
 ## Outcome
 
