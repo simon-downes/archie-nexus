@@ -1,5 +1,6 @@
 """Datadog monitor tool tests with a fake client (no network)."""
 
+import asyncio
 import contextvars
 import json
 import sys
@@ -8,16 +9,25 @@ from contextlib import asynccontextmanager
 import pytest
 from archie_agent.exec.envelope import Envelope
 from archie_agent.exec.runner import run
+from archie_agent.exec.tools import get_all_tools
 from archie_agent.exec.tools.datadog.client import (
     DatadogInputError,
+    DatadogMutationIndeterminateError,
+    DatadogOwnershipError,
     DatadogPolicyError,
     DatadogRequestRejectedError,
+    DatadogResponseError,
+    DatadogTransportError,
 )
 from archie_agent.exec.tools.datadog.monitors import (
+    create_monitor,
     get_monitor,
     search_monitors,
+    update_monitor,
     validate_monitor,
 )
+
+from tests.datadog_fakes import Seq
 
 SEARCH = ("GET", "/api/v1/monitor/search")
 VALIDATE = ("POST", "/api/v1/monitor/validate")
@@ -153,3 +163,269 @@ def test_runner_exposes_datadog_namespace(tmp_path, monkeypatch):
     envelope = Envelope.read(tmp_path)
     assert envelope.ok is True, envelope.error
     assert envelope.return_value[0]["id"] == 42
+
+
+CREATE = ("POST", "/api/v1/monitor")
+GET42 = ("GET", "/api/v1/monitor/42")
+PUT42 = ("PUT", "/api/v1/monitor/42")
+OWNED = {**MONITOR, "tags": ["service:api", "managedby:archie"]}
+WRITE = {"datadog": {"write": {"enabled": True}}}
+
+
+async def test_write_disabled_by_default_makes_no_request(fake):
+    client = fake({}, "monitors")
+    with pytest.raises(DatadogPolicyError, match="writes are disabled"):
+        await create_monitor(**DEFINITION)
+    with pytest.raises(DatadogPolicyError, match="writes are disabled"):
+        await update_monitor(42, name="y")
+    assert client.calls == []
+
+
+async def test_create_monitor_adds_ownership_tag(fake, policy):
+    policy(WRITE)
+    client = fake({CREATE: {**OWNED, "id": 99}}, "monitors")
+    result = await create_monitor(**DEFINITION, tags=["team:x", "managedby:archie"])
+    method, path, _, body = client.calls[0]
+    assert (method, path) == CREATE
+    assert body["tags"] == ["team:x", "managedby:archie"]
+    assert body["type"] == "metric alert"
+    assert result["id"] == 99 and result["managed"] is True
+
+
+async def test_update_refuses_untagged_monitor_without_put(fake, policy):
+    policy(WRITE)
+    client = fake({GET42: MONITOR}, "monitors")
+    with pytest.raises(DatadogOwnershipError, match="managedby:archie"):
+        await update_monitor(42, name="hijack")
+    assert [call[:2] for call in client.calls] == [GET42]
+
+
+async def test_update_keeps_ownership_tag(fake, policy):
+    policy(WRITE)
+    client = fake({GET42: OWNED, PUT42: OWNED}, "monitors")
+    await update_monitor(42, tags=["team:x"])
+    assert client.calls[1][3] == {"tags": ["team:x", "managedby:archie"]}
+
+
+async def test_update_sends_only_given_fields_and_merges_options(fake, policy):
+    policy(WRITE)
+    current = {**OWNED, "options": {"thresholds": {"critical": 10}, "notify_no_data": True}}
+    client = fake({GET42: current, PUT42: current}, "monitors")
+    result = await update_monitor(42, message="new", options={"thresholds": {"critical": 5}})
+    assert [call[:2] for call in client.calls] == [GET42, PUT42, GET42]
+    assert client.calls[1][3] == {
+        "message": "new",
+        "options": {"thresholds": {"critical": 5}, "notify_no_data": True},
+    }
+    assert result["id"] == 42
+
+
+async def test_update_with_no_fields_is_input_error(fake, policy):
+    policy(WRITE)
+    client = fake({}, "monitors")
+    with pytest.raises(DatadogInputError):
+        await update_monitor(42)
+    assert client.calls == []
+
+
+async def test_update_rejects_restricted_options(fake, policy):
+    policy(WRITE)
+    client = fake({}, "monitors")
+    with pytest.raises(DatadogInputError, match="restricted_roles"):
+        await update_monitor(42, options={"restricted_roles": ["admin"]})
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        DatadogResponseError("Datadog returned HTTP 500"),
+        DatadogTransportError("Datadog request outcome is uncertain", transmitted=True),
+    ],
+)
+async def test_create_failure_after_send_is_indeterminate(fake, policy, failure):
+    policy(WRITE)
+    fake({CREATE: failure}, "monitors")
+    with pytest.raises(DatadogMutationIndeterminateError, match="verify"):
+        await create_monitor(**DEFINITION)
+
+
+async def test_create_malformed_body_is_indeterminate(fake, policy):
+    policy(WRITE)
+    fake({CREATE: {"unexpected": True}}, "monitors")
+    with pytest.raises(DatadogMutationIndeterminateError):
+        await create_monitor(**DEFINITION)
+
+
+async def test_create_rejected_is_not_indeterminate(fake, policy):
+    policy(WRITE)
+    fake({CREATE: DatadogRequestRejectedError("Datadog rejected the request: bad")}, "monitors")
+    with pytest.raises(DatadogRequestRejectedError):
+        await create_monitor(**DEFINITION)
+
+
+async def test_create_connect_error_is_plain_transport_error(fake, policy):
+    policy(WRITE)
+    fake({CREATE: DatadogTransportError("could not be completed", transmitted=False)}, "monitors")
+    with pytest.raises(DatadogTransportError):
+        await create_monitor(**DEFINITION)
+
+
+async def test_update_read_error_on_put_is_indeterminate(fake, policy):
+    policy(WRITE)
+    failure = DatadogTransportError("uncertain", transmitted=True)
+    fake({GET42: OWNED, PUT42: failure}, "monitors")
+    with pytest.raises(DatadogMutationIndeterminateError):
+        await update_monitor(42, name="y")
+
+
+async def test_update_verification_failure_is_indeterminate(fake, policy):
+    policy(WRITE)
+    fake({GET42: Seq([OWNED, DatadogResponseError("HTTP 500")]), PUT42: OWNED}, "monitors")
+    with pytest.raises(DatadogMutationIndeterminateError):
+        await update_monitor(42, name="y")
+
+
+async def test_deadline_during_write_is_indeterminate(monkeypatch, policy):
+    from archie_agent.exec.tools.datadog import client as client_module
+    from archie_shared.credentials.models import DatadogCredential
+
+    policy(WRITE)
+    monkeypatch.setattr(client_module, "_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        client_module, "get_credential", lambda *a: DatadogCredential(api_key="k", app_key="a")
+    )
+
+    class SlowClient:
+        async def request(self, method, path, *, params=None, json=None):
+            if method == "GET":
+                return OWNED
+            await asyncio.sleep(1)
+
+    @asynccontextmanager
+    async def factory():
+        async with client_module.datadog_client():
+            yield SlowClient()
+
+    monkeypatch.setattr(
+        sys.modules["archie_agent.exec.tools.datadog.monitors"], "datadog_client", factory
+    )
+    with pytest.raises(DatadogMutationIndeterminateError):
+        await update_monitor(42, name="y")
+    with pytest.raises(DatadogMutationIndeterminateError):
+        await create_monitor(**DEFINITION)
+
+
+async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
+    from archie_agent.exec.tools.datadog import client as client_module
+    from archie_shared.credentials.models import DatadogCredential
+
+    policy(WRITE)
+    monkeypatch.setattr(client_module, "_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        client_module, "get_credential", lambda *a: DatadogCredential(api_key="k", app_key="a")
+    )
+
+    class SlowGet:
+        async def request(self, method, path, *, params=None, json=None):
+            assert method == "GET", "no write may be sent"
+            await asyncio.sleep(1)
+
+    @asynccontextmanager
+    async def factory():
+        async with client_module.datadog_client():
+            yield SlowGet()
+
+    monkeypatch.setattr(
+        sys.modules["archie_agent.exec.tools.datadog.monitors"], "datadog_client", factory
+    )
+    with pytest.raises(DatadogTransportError):
+        await update_monitor(42, name="y")
+
+
+PUBLIC = {
+    "create_monitor",
+    "get_dashboard",
+    "get_monitor",
+    "list_catalog_entities",
+    "list_dashboards",
+    "list_events",
+    "list_teams",
+    "query_metrics",
+    "search_logs",
+    "search_metrics",
+    "search_monitors",
+    "search_spans",
+    "update_monitor",
+    "validate_monitor",
+}
+
+
+def test_registration_is_exactly_the_public_surface():
+    tools = get_all_tools()
+    keys = {key.removeprefix("datadog.") for key in tools if key.startswith("datadog.")}
+    assert keys == PUBLIC
+    for name in PUBLIC:
+        assert tools[f"datadog.{name}"]._native is False
+        assert tools[f"datadog.{name}"]._exec_docs is False
+
+
+async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, policy):
+    """Drive every function through the real client and a recording transport."""
+    import httpx
+    from archie_agent.exec.tools import datadog as package
+    from archie_agent.exec.tools.datadog.client import DatadogClient, allowed
+
+    policy(WRITE)
+    seen = []
+    bodies = {
+        "/api/v1/query": {"series": []},
+        "/api/v1/search": {"results": {"metrics": []}},
+        "/api/v2/logs/events/search": {"data": []},
+        "/api/v2/spans/events/search": {"data": []},
+        "/api/v2/events": {"data": []},
+        "/api/v1/monitor/search": {"monitors": []},
+        "/api/v1/monitor/validate": {},
+        "/api/v1/monitor": OWNED,
+        "/api/v1/monitor/42": OWNED,
+        "/api/v1/dashboard": {"dashboards": []},
+        "/api/v1/dashboard/abc-def-ghi": {"id": "abc-def-ghi", "widgets": []},
+        "/api/v2/catalog/entity": {"data": []},
+        "/api/v2/team": {"data": []},
+    }
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json=bodies[request.url.path])
+
+    @asynccontextmanager
+    async def factory():
+        yield DatadogClient("k", "a", "https://api.datadoghq.eu", httpx.MockTransport(handler))
+
+    for module in ("metrics", "logs", "traces", "events", "monitors", "dashboards", "catalog"):
+        monkeypatch.setattr(
+            sys.modules[f"archie_agent.exec.tools.datadog.{module}"], "datadog_client", factory
+        )
+    calls = {
+        "query_metrics": ("avg:x{*}",),
+        "search_metrics": ("x",),
+        "search_logs": ("*",),
+        "search_spans": ("*",),
+        "list_events": (),
+        "search_monitors": (),
+        "get_monitor": (42,),
+        "validate_monitor": tuple(DEFINITION.values()),
+        "create_monitor": tuple(DEFINITION.values()),
+        "update_monitor": (42, "renamed"),
+        "list_dashboards": (),
+        "get_dashboard": ("abc-def-ghi",),
+        "list_catalog_entities": (),
+        "list_teams": (),
+    }
+    assert set(calls) == PUBLIC
+    for name, args in calls.items():
+        await getattr(package, name)(*args)
+    assert seen
+    assert all(allowed(method, path) for method, path in seen)
+    assert all(method != "DELETE" for method, _ in seen)
+    assert {method for method, _ in seen} == {"GET", "POST", "PUT"}

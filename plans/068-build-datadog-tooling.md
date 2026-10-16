@@ -329,7 +329,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   `validate_monitor` valid → `{"valid": True}`, invalid query → `DatadogRequestRejectedError`;
   2 dashboards, one with 38 widgets and 44 queries (10,360 chars); 2 catalog entities; 2 teams.
 
-### [ ] M4 — Guarded monitor writes
+### [x] M4 — Guarded monitor writes
 
 - **Approach:** `create_monitor`, `update_monitor` with `require_write`, the ownership GET
   before PUT, tag injection, and the indeterminate-error pattern from `jira/issues.py`
@@ -341,7 +341,16 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   (Datadog rejected it, nothing changed).
 - **Deliverable:** model code can create and update Archie-owned monitors only.
 - **Verify:** `uv run pytest tests/test_datadog_monitors.py tests/test_datadog_client.py` passes.
-- **Outcome:**
+- **Outcome:** Added `create_monitor` and `update_monitor`. A `_Write` helper records whether the
+  write was handed to the transport, so the overall deadline expiring *after* the POST/PUT is
+  indeterminate, while expiring during the ownership GET stays a plain transport error. Update
+  sends only the given fields, merges `options` over the current ones, and returns the monitor
+  from a follow-up GET; a failing follow-up GET is indeterminate. The registration test asserts
+  exactly 14 functions. The allowlist sweep drives all 14 through the real `DatadogClient` with a
+  recording transport and checks every `(method, path)` against `_ALLOWED` (methods seen: GET,
+  POST, PUT; no DELETE). `uv run pytest tests/test_datadog_monitors.py tests/test_datadog_client.py
+  tests/test_datadog_reads.py`: 124 passed; ruff clean. No live create/update was run, because it
+  is externally visible; the live ownership refusal runs in M5.
 
 ### [ ] M5 — Skill, docs and live smoke
 
