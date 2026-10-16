@@ -454,7 +454,7 @@ on a `managedby:pulumi` monitor was refused with `DatadogOwnershipError`. Not ve
 and the key may lack `monitors_write`; unit tests cover them.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/6
-CI: pending
+CI: none
 
 ## Follow-ups
 
