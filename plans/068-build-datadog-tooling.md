@@ -270,7 +270,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 
 ## Milestones
 
-### [ ] M1 — Tracer: `datadog.query_metrics` end to end
+### [x] M1 — Tracer: `datadog.query_metrics` end to end
 
 - **Approach:** build `client.py` (allowlist with the v1 query and metric search entries first),
   `policy.py`, `validation.py`, `formatting.py` (metric series), `metrics.py`; register in
@@ -284,7 +284,15 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 - **Verify:** `uv run pytest tests/test_datadog_client.py tests/test_datadog_reads.py -k "client or metric"`
   passes; a one-off live `query_metrics("avg:system.cpu.user{*}", start="1h")` returns series
   (keys only).
-- **Outcome:**
+- **Outcome:** Built `client.py` (full 14-entry allowlist, site → host, typed errors),
+  `policy.py`, `validation.py`, `formatting.py` (metric series), `metrics.py`; registered in
+  `exec/tools/__init__.py`; `tests/datadog_fakes.py` is a pytest plugin in `tests/conftest.py`
+  (incident.io pattern). `uv run pytest tests/test_datadog_client.py tests/test_datadog_reads.py`:
+  62 passed; ruff clean. Live, through `runner.run()` with an empty `context.json`:
+  `query_metrics("avg:system.cpu.user{*}", start="1h")` 1 series / 180 points;
+  `search_metrics("system.cpu", limit=3)` 3 names. This confirms that credentials and
+  `load_nexus_config` site lookup work inside the exec subprocess. The policy fixture resets by
+  value, because async tests run in a copied context and token resets fail.
 
 ### [ ] M2 — Logs, spans and events
 
