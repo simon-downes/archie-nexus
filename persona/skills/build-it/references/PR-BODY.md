@@ -1,7 +1,7 @@
 # Pull request
 
 The title, body template, and browser-evidence steps for the PR that build-it opens in
-Phase 7. Always use the template below. Don't look for a repository PR template.
+stage 4. Always use the template below. Don't look for a repository PR template.
 
 ---
 
@@ -22,6 +22,9 @@ Write for a reviewer who did not do the work and has not read the plan. Fill in 
 template and delete any section marked optional that has nothing useful to say.
 
 ```markdown
+
+Implements: `<plans>/done/<NNN>-build-<slug>.md`
+
 <Why: one short paragraph on the problem or need, in the user's terms.>
 
 <What: one short paragraph on what changed and the choices that matter. Group by idea,
@@ -41,12 +44,6 @@ and anything not verified.>
 
 <Optional. Only if collected: what each artifact proves, the URL path and viewport.>
 
-## Model / Harness
-
-- Model: <the model you are running as, or "unknown">
-- Harness: <the agent harness running this skill>
-- Plan: `<plans>/done/<NNN>-build-<slug>.md` on this branch. It records every decision,
-  the plan changes and why they were made, and the review results.
 ```
 
 - Bad: "Added a new validation function and updated the controller to call it. Also added
@@ -63,8 +60,9 @@ Link an issue with `Closes #<n>` only when merging fully resolves it.
 ## Browser evidence
 
 Collect evidence only when the change has a user-visible result in a browser and the app can
-run from the worktree without real credentials or external services. Otherwise skip it, and
-give the reason in the Testing section in one line.
+run from the worktree without real credentials or external services. If the change has a
+user-visible result but the app can't run that way, skip it and give the reason in the
+Testing section in one line.
 
 1. **Define the flow** before you open a browser: the start URL, the actions, and the
    expected result, taken from the plan's requirements and ACs. Don't wander into unrelated
@@ -84,4 +82,5 @@ give the reason in the Testing section in one line.
    Evidence section, say what each artifact proves.
 
 Never present a failed attempt as proof. If the flow doesn't behave as the plan says, that
-is a bug: treat it as a ❌ review finding and fix it in Phase 6.
+is a bug: fix it as stage 4 step 6 of the skill describes, then capture the evidence
+again.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push a build-it branch and open or update its draft pull request, or wait for CI.
+"""Push a build-it branch and open or update its pull request, or wait for CI.
 
 Every subcommand prints one JSON object on stdout. Exit code 0 means success; on
 failure the exit code is 1 and the JSON is {"error": "<message>", ...} with whatever
@@ -8,11 +8,11 @@ was already done (for example "pushed": true).
   open --worktree PATH --title TITLE --body-file FILE [--attach FILE[#alt] ...]
       Run from a build-it worktree. Picks the remote (the base branch's upstream
       remote, then origin, then the only remote), pushes the current build-it branch
-      (never force), and opens a draft PR against the base branch recorded in the
-      plan header, or the remote's default branch when the base is detached or not on
-      the remote. If the branch already has an open PR, updates its title and body
-      and leaves its draft state alone. Prints the URL and a check of what GitHub
-      recorded. Outcomes: "created", "updated", "no remote", "no change".
+      (never force), and opens a PR against the base branch recorded in the plan
+      header, or the remote's default branch when the base is detached or not on the
+      remote. If the branch already has an open PR, updates its title and body. Prints
+      the URL and a check of what GitHub recorded. Outcomes: "created", "updated",
+      "no remote", "no change".
 
   push --worktree PATH
       Push the current build-it branch again (for commits made after "open").
@@ -245,7 +245,6 @@ def cmd_open(args: argparse.Namespace) -> dict:
                 "gh",
                 "pr",
                 "create",
-                "--draft",
                 "--repo",
                 repo,
                 "--base",
@@ -270,7 +269,7 @@ def cmd_open(args: argparse.Namespace) -> dict:
                 "--repo",
                 repo,
                 "--json",
-                "headRefName,baseRefName,isDraft,title,files",
+                "headRefName,baseRefName,title,files",
             ],
             wt,
         )
@@ -285,8 +284,6 @@ def cmd_open(args: argparse.Namespace) -> dict:
         mismatches.append(f"base is {pr['baseRefName']}")
     if pr["title"] != args.title:
         mismatches.append("title differs")
-    if outcome == "created" and not pr["isDraft"]:
-        mismatches.append("not a draft")
     if pr_files != set(changed):
         mismatches.append(
             "file list differs from git diff "
@@ -296,7 +293,6 @@ def cmd_open(args: argparse.Namespace) -> dict:
         **info,
         "outcome": outcome,
         "url": url,
-        "draft": pr["isDraft"],
         "warnings": warnings,
         "mismatches": mismatches,
     }

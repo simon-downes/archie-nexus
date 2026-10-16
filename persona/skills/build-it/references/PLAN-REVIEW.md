@@ -1,94 +1,60 @@
 # Plan review
 
-Reviewer instructions for a build-it plan. You audit the plan as an implementor in a fresh
-session would. You have the plan file and the codebase, and nothing else. Report findings only:
-do not edit the plan or any other file, and do not propose fixes.
+You audit a build-it plan the way an implementor starting a fresh session would: with the
+plan file and the codebase, nothing else. Report findings only. Don't edit the plan or
+any other file, and don't write fixes.
 
-## Contents
+## Setup
 
-- Checks 1–6
-- Output format
-
-The plan follows `references/PLAN-FORMAT.md` and the **Plan rules** section of the build-it
-skill's SKILL.md. Skip any check that doesn't apply (for example, no data model).
-
----
+1. Read `PLAN-FORMAT.md` in this directory. Its Plan rules, template and Design table
+   are the standard you check against.
+2. Read the plan at the path in your prompt.
 
 ## Checks
 
-### 1. Objective and requirements
+Skip any that don't apply.
 
-- Is the objective specific? Could two readers picture different outcomes?
-- Does every MUST have an AC that a test or command can check?
-- Are there unmeasured adjectives (fast, secure, robust, properly)?
-- Do any requirements contradict each other?
+1. **Rules.** Check every Plan rule: requirement wording and ACs, milestone shape
+   (vertical, M1 a tracer bullet, prefactors labelled), approach choices left to the
+   implementor, test seams, Verify steps, traceability.
+2. **Objective.** Could two readers picture different outcomes? Do any requirements
+   contradict each other?
+3. **Decisions.** Every row names a rejected option and a Why tied to this codebase. A
+   reason that fits almost any project is a finding. So is a vague choice with no named
+   tool or approach ("add a cache"). A consequential choice the plan makes silently, with
+   no row, is a finding too.
+4. **Codebase claims.** Verify against the repository: named files and directories exist
+   or are marked new, named patterns match what the code does, dependencies are in the
+   manifest or marked new, and check commands exist. For each failure, name the closest
+   real match.
+5. **Design.** Each included subsection meets its "done when" bar. A subsection the work
+   clearly needs is missing (error handling for external calls, config for new env
+   vars). Every named failure has a named response.
+6. **Coherence.** Design and milestone Approaches don't contradict each other, and no two
+   milestones do the same work.
 
-### 2. Decisions
-
-- Does every Decisions row name a rejected option?
-- Does every "Why" survive the anti-generic test? A reason that fits almost any project
-  ("simpler", "standard") is a finding.
-- Is any choice left vague ("use a cache", "add validation") with no named tool or approach?
-
-### 3. Codebase claims
-
-Verify against the repository:
-- referenced files and directories exist (or are marked as new);
-- referenced patterns match what the code actually does;
-- referenced dependencies are in the manifest (or marked as new);
-- named check and test commands exist (justfile, pyproject, package.json, Makefile).
-
-For each claim that fails, name the closest real match if there is one.
-
-### 4. Design
-
-- Does each included Design subsection meet its "done when" bar in PLAN-FORMAT.md?
-- Is a subsection missing that the work clearly needs (error handling for external calls,
-  config for new env vars)?
-- Does every named failure have a named response? "Handle errors gracefully" is a finding.
-
-### 5. Milestones
-
-For each milestone:
-- Are Approach, Test seam, Tasks, Deliverable, and Verify present? Are Wiring and Edge cases
-  present where shared state or external input or failure modes exist?
-- Is it one deliverable, observable, and vertical? A layer-only milestone not labelled
-  prefactor is a finding.
-- Is M1 (after any prefactor) a tracer bullet: the core behaviour, end to end, as thin as
-  possible? A first milestone that builds a peripheral feature, or the core one layer at
-  a time, is a finding.
-- Would the implementor have to choose a library, decide where code lives, or invent a
-  pattern? Each of these is a finding. Library API details, option names and edge-case
-  behaviour that implementation and its tests will settle are not findings. Don't read
-  library source or run prototypes to check them.
-- Does Verify say how to observe the result (a command and the passing result)?
-- Do Approach and Tasks overlap, or do two milestones do the same work?
-
-### 6. Coherence
-
-- Does every MUST trace to a milestone? Does every milestone trace to a requirement?
-- Do Design and milestone Approaches contradict each other?
-- Is the ordering by dependency?
-
----
+**Research budget.** Check claims about this codebase; leave claims about libraries to
+the implementation's tests. Library API details, option names and edge-case behaviour
+are not findings. Don't read library source, download packages or run prototypes to
+check them.
 
 ## Output format
 
 ```
 ## Plan review: <plan title>
 
-Verdict: ✅ Clean | ⚠️ Findings | ❌ Significant gaps
-
 ### <Check name>
-- ❌ **<Location>**: <finding, quoting the plan text>
+- ❌ **<Location>**: <finding, quoting the plan>
 - ⚠️ **<Location>**: <finding>
 - ℹ️ **<Location>**: <finding>
 ```
 
-- Location is one of: `Objective`, `Requirements`, `Decisions D#`, `Design: <subsection>`,
-  `M#`, `M#, <field>`.
-- ❌ Gap: information the implementor will need is missing, or a decision is unresolved.
+- Location: `Objective`, `Requirements`, `Decisions D#`, `Design: <subsection>`, `M#`,
+  or `M#, <field>`.
+- ❌ Gap: the implementor will need missing information, or a decision is unresolved.
 - ⚠️ Concern: ambiguity or a probable problem.
-- ℹ️ Note: a smaller improvement. The orchestrator fixes every finding it agrees with.
-- Report only checks that have findings. One finding is one problem. If there are no
-  findings, write `Verdict: ✅ Clean` and one sentence saying what you verified.
+- ℹ️ Note: a smaller improvement to this plan. Report every one; the author fixes each
+  they agree with.
+- Report only checks with findings, one finding per problem. Don't give a verdict or say
+  whether the plan is ready: the author decides. If there are none, write "No findings."
+  and one sentence on what you verified.
