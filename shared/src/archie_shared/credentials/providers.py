@@ -21,6 +21,7 @@ class StaticProvider(msgspec.Struct, forbid_unknown_fields=True):
 
     name: str
     fields: list[str]
+    site: str | None = None
     env: dict[str, str] = msgspec.field(default_factory=dict)
     set_env: bool = False
     can_refresh_noninteractive: bool = False
@@ -125,6 +126,15 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
     "jira": StaticProvider(
         name="jira",
         fields=["email", "token", "cloud_id"],
+    ),
+    "datadog": StaticProvider(
+        name="datadog",
+        fields=["api_key", "app_key"],
+        site="app.datadoghq.eu",
+    ),
+    "incident_io": StaticProvider(
+        name="incident_io",
+        fields=["api_key"],
     ),
     "notion": OAuthProvider(
         name="notion",

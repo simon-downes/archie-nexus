@@ -37,6 +37,8 @@ By default:
 | `scalr` | Static | `token`, `hostname`, `account` | `SCALR_TOKEN`, `SCALR_HOSTNAME`, `SCALR_ACCOUNT` |
 | `jira` | Static | `email`, `token`, `cloud_id` | Prompt or JSON stdin |
 | `bedrock` | Static | `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token` | AWS credential chain plus STS validation |
+| `datadog` | Static | `api_key`, `app_key` | Prompt or JSON stdin; site defaults to `app.datadoghq.eu` |
+| `incident_io` | Static | `api_key` | Prompt or JSON stdin; API host is `https://api.incident.io/` |
 
 `bedrock` and `aws` are separate provider identities and separate store entries. Their fields are intentionally distinct even though both represent AWS access keys.
 
@@ -80,7 +82,7 @@ Credential values are never returned by status or provider-description APIs. The
 
 ## Provider metadata and configuration
 
-Provider behavior is defined in the shared provider registry. A provider descriptor identifies its auth type and required fields. OAuth descriptors additionally define:
+Provider behavior is defined in the shared provider registry. A provider descriptor identifies its auth type, required fields, and non-secret service configuration such as a site. OAuth descriptors additionally define:
 
 - authorization and token endpoints, when fixed;
 - a discovery `server_url`, when endpoints must be discovered;
@@ -131,7 +133,7 @@ The exact Google redirect URI is then:
 http://127.0.0.1:7600/auth/callback/google
 ```
 
-Supported override fields include OAuth client ID, endpoints, discovery server URL, scopes, token paths, expiry path, and authorization parameters. Client secrets are credential-store data, not public provider configuration.
+Supported override fields include static-provider site, OAuth client ID, endpoints, discovery server URL, scopes, token paths, expiry path, and authorization parameters. Client secrets are credential-store data, not public provider configuration.
 
 Effective OAuth values are resolved in this order:
 
@@ -186,6 +188,10 @@ SCALR_ACCOUNT
 and maps them to `hostname`, `token`, and `account`.
 
 For other static providers, the CLI accepts a JSON object on stdin. If stdin is not a non-empty pipe, it prompts interactively for the provider’s declared fields. Secret-like fields such as tokens, keys, and passwords are hidden while prompting.
+
+Datadog uses `api_key` and `app_key` as secrets. Its non-secret `site` configuration defaults to `app.datadoghq.eu`; Datadog API clients derive the API host `https://api.datadoghq.eu` from that site.
+
+incident.io uses one `api_key` secret. The API uses the fixed host `https://api.incident.io/` and sends the key as a Bearer token. API keys can have account-level and team-scoped permissions; no additional authentication secret or account identifier is required.
 
 Example using JSON stdin:
 

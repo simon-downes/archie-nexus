@@ -5,7 +5,13 @@ from archie_shared.credentials.api import (
     OAuthProviderResponse,
     StaticProviderResponse,
 )
-from archie_shared.credentials.models import CREDENTIAL_TYPES, AwsCredential, BedrockCredential
+from archie_shared.credentials.models import (
+    CREDENTIAL_TYPES,
+    AwsCredential,
+    BedrockCredential,
+    DatadogCredential,
+    IncidentIoCredential,
+)
 
 
 def test_all_agent_kit_providers_have_typed_definitions():
@@ -21,7 +27,11 @@ def test_all_agent_kit_providers_have_typed_definitions():
         "jira",
         "google",
         "bedrock",
+        "datadog",
+        "incident_io",
     }
+    assert CREDENTIAL_TYPES["datadog"] is DatadogCredential
+    assert CREDENTIAL_TYPES["incident_io"] is IncidentIoCredential
     assert CREDENTIAL_TYPES["aws"] is AwsCredential
     assert CREDENTIAL_TYPES["bedrock"] is BedrockCredential
     assert "account" in CREDENTIAL_TYPES["scalr"].__struct_fields__

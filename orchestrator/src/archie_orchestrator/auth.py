@@ -409,6 +409,7 @@ class AuthService:
                     StaticProviderResponse(
                         name=name,
                         fields=provider.fields,
+                        site=provider.site,
                         can_refresh_noninteractive=provider.can_refresh_noninteractive,
                         env=provider.env,
                         set_env=provider.set_env,

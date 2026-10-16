@@ -7,6 +7,7 @@ class StaticProviderResponse(msgspec.Struct, forbid_unknown_fields=True):
     name: str
     auth_type: str = "static"
     fields: list[str] = msgspec.field(default_factory=list)
+    site: str | None = None
     can_refresh_noninteractive: bool = False
     env: dict[str, str] = msgspec.field(default_factory=dict)
     set_env: bool = False
@@ -53,6 +54,7 @@ class OAuthLoginResponse(msgspec.Struct, forbid_unknown_fields=True):
 
 
 class AuthProviderOverride(msgspec.Struct, forbid_unknown_fields=True):
+    site: str | None = None
     client_id: str | None = None
     authorization_endpoint: str | None = None
     token_endpoint: str | None = None

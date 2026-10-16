@@ -4,14 +4,35 @@ from archie_shared.credentials.providers import PROVIDERS, OAuthProvider, Static
 
 
 def test_all_services_present():
-    """Registry covers all 9 services (8 agent-kit + bedrock)."""
-    expected = {"bedrock", "notion", "linear", "slack", "github", "aws", "scalr", "jira", "google"}
+    """Registry covers all configured services."""
+    expected = {
+        "bedrock",
+        "notion",
+        "linear",
+        "slack",
+        "github",
+        "aws",
+        "scalr",
+        "jira",
+        "datadog",
+        "incident_io",
+        "google",
+    }
     assert set(PROVIDERS.keys()) == expected
 
 
 def test_static_providers():
     """Static providers have correct type and fields."""
-    static_services = {"bedrock", "linear", "github", "aws", "scalr", "jira"}
+    static_services = {
+        "bedrock",
+        "linear",
+        "github",
+        "aws",
+        "scalr",
+        "jira",
+        "datadog",
+        "incident_io",
+    }
     for name in static_services:
         provider = PROVIDERS[name]
         assert isinstance(provider, StaticProvider), f"{name} should be StaticProvider"
@@ -27,6 +48,20 @@ def test_oauth_providers():
         assert isinstance(provider, OAuthProvider), f"{name} should be OAuthProvider"
         assert provider.name == name
         assert provider.can_refresh_noninteractive is True
+
+
+def test_incident_io_uses_api_key_only():
+    incident_io = PROVIDERS["incident_io"]
+    assert isinstance(incident_io, StaticProvider)
+    assert incident_io.fields == ["api_key"]
+    assert incident_io.site is None
+
+
+def test_datadog_uses_eu_site_and_key_fields():
+    datadog = PROVIDERS["datadog"]
+    assert isinstance(datadog, StaticProvider)
+    assert datadog.fields == ["api_key", "app_key"]
+    assert datadog.site == "app.datadoghq.eu"
 
 
 def test_bedrock_not_refreshable():

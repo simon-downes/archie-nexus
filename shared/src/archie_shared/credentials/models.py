@@ -64,6 +64,19 @@ class JiraCredential(msgspec.Struct, forbid_unknown_fields=True):
     cloud_id: str | None = None
 
 
+class DatadogCredential(msgspec.Struct, forbid_unknown_fields=True):
+    """Datadog API and application keys."""
+
+    api_key: str | None = None
+    app_key: str | None = None
+
+
+class IncidentIoCredential(msgspec.Struct, forbid_unknown_fields=True):
+    """incident.io API key."""
+
+    api_key: str | None = None
+
+
 class AwsCredential(msgspec.Struct, forbid_unknown_fields=True):
     """Generic AWS credentials (for non-Bedrock AWS services)."""
 
@@ -82,5 +95,7 @@ CREDENTIAL_TYPES: dict[str, type] = {
     "github": GithubCredential,
     "scalr": ScalrCredential,
     "jira": JiraCredential,
+    "datadog": DatadogCredential,
+    "incident_io": IncidentIoCredential,
     "aws": AwsCredential,
 }
