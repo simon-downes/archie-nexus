@@ -64,7 +64,7 @@ def _resolve_path(path: str) -> Path:
     if not path:
         raise PathValidationError("Path must not be empty")
 
-    p = Path(path)
+    p = Path(path).expanduser()
 
     if p.is_absolute():
         return p.resolve()
