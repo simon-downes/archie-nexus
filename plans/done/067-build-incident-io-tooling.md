@@ -405,7 +405,7 @@ alert-to-incident links on real data (the account has no linked alerts, so `aler
 the real API (unit-tested only).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/5
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
