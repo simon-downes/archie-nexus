@@ -1,0 +1,288 @@
+---
+name: datadog
+description: >
+  Use for Datadog investigation and monitor upkeep through the exec datadog namespace:
+  metric queries and metric search, log and span search, the event stream, monitor search
+  and details, dashboards, the software catalog and teams, and creating or updating
+  monitors that this tool owns (tagged managedby:archie). Not for deleting anything,
+  dashboard edits, downtimes or muting, SLOs, posting events, credentials, or raw Datadog
+  API calls.
+---
+
+# Datadog
+
+## Global rules
+
+- Call Datadog only through `exec`, using `await datadog.<function>(...)`.
+- Credentials are implicit. Never request, pass, print, or store Datadog keys, and do not make raw HTTP calls to Datadog.
+- **Nothing can be deleted.** The tool only sends a fixed list of requests, and none of them deletes, mutes, or creates downtimes. Dashboards are read-only.
+- **Writes are limited to monitors this tool owns.** `create_monitor` always adds the tag `managedby:archie`. `update_monitor` refuses any monitor without that tag, even when write policy is on. Do not try to add the tag to someone else's monitor to get around this.
+- Reads are enabled by default; writes are disabled by default. Policy:
+
+  ```yaml
+  tools:
+    datadog:
+      read:
+        enabled: true
+      write:
+        enabled: true   # needed for create_monitor and update_monitor
+  ```
+
+  A `scope` in either block is not supported; setting one makes every call fail with `DatadogPolicyError`.
+- Get explicit user intent before creating or changing a monitor. A monitor can page people. Prefer `validate_monitor` first.
+- Calls return JSON-serializable values or raise typed errors; they do not return error objects.
+- Results are normalised and bounded (see each function). The exec result is truncated at 16,000 characters, so keep `limit`s small and return only the fields you need. A large dashboard alone can be over 10,000 characters.
+- Logs and spans can contain customer data. Search narrowly (service, status, time window), and don't copy raw log messages into Slack, Jira or other external places without need.
+- Results are a snapshot of a live system. Say when data was read if timing matters.
+
+## Choose the right function
+
+| Need | Function |
+|---|---|
+| A metric's values over time | `datadog.query_metrics` |
+| Find metric names | `datadog.search_metrics` |
+| Error logs or log lines for a service | `datadog.search_logs` |
+| Slow or failing requests (APM spans) | `datadog.search_spans` |
+| Deploys, Kubernetes changes, integration and alert events | `datadog.list_events` |
+| Which monitors are alerting, or monitors for a service | `datadog.search_monitors` |
+| One monitor's query, message and options | `datadog.get_monitor` |
+| Check a monitor definition without creating it | `datadog.validate_monitor` |
+| Create or change a monitor this tool owns | `datadog.create_monitor`, `datadog.update_monitor` |
+| Find a dashboard, and see its widgets and queries | `datadog.list_dashboards`, `datadog.get_dashboard` |
+| Services, APIs and other catalog entities | `datadog.list_catalog_entities` |
+| Datadog teams | `datadog.list_teams` |
+
+For an investigation, start with `search_monitors("status:alert")`. Then use `query_metrics` on the monitor's query, `search_logs` and `search_spans` for the service in the same window, and `list_events` for deploys or changes just before the problem started.
+
+## Shared input rules
+
+- **Query strings** use Datadog's own syntax, the same as in the Datadog UI: metric queries (`avg:system.cpu.user{env:prod} by {host}`), log and span search (`service:api status:error @http.status_code:502`), event search, and monitor search (`status:alert tag:service:api`). They are 1–2,000 characters. Optional queries may be `None` or blank, meaning no filter.
+- **Times** (`start`, `end`): an ISO-8601 datetime (naive means UTC), or a relative age `<n>m`, `<n>h` or `<n>d` meaning that long ago. `start` defaults to `1h` and `end` to now. `end` must be after `start`, and the window can be at most 31 days. Output timestamps are UTC strings.
+- **Limit:** an integer `1..100` (`bool` is invalid).
+- **Monitor ID:** a positive integer. **Dashboard ID:** the `abc-def-ghi` form from `list_dashboards` or a dashboard URL.
+- **Sort** (logs, spans): `newest` (default) or `oldest`.
+- Invalid input raises `DatadogInputError` before any request.
+
+## Rate limits that matter
+
+Datadog limits each endpoint separately, and some limits are tight:
+
+- `search_spans`: 5 calls per minute. Make one well-filtered call, not a loop.
+- `search_logs`: 10 calls per 10 seconds.
+- Other reads have higher limits, but don't call them in tight loops.
+
+Nothing retries automatically. On `DatadogRateLimitError`, wait `retry_after_seconds` before one retry.
+
+## Functions
+
+### `datadog.query_metrics(query, start="1h", end=None)`
+
+Runs a metric query and returns:
+
+```json
+{
+  "query": "avg:system.cpu.user{*}",
+  "from": "2026-10-01T10:00:00Z",
+  "to": "2026-10-01T11:00:00Z",
+  "series_count": 1,
+  "series": [
+    {
+      "metric": "system.cpu.user",
+      "display_name": "system.cpu.user",
+      "expression": "avg:system.cpu.user{*}",
+      "scope": "*",
+      "tags": [],
+      "unit": "percent",
+      "interval_seconds": 20,
+      "point_count": 180,
+      "points": [["2026-10-01T10:00:00Z", 12.5]],
+      "truncated": false
+    }
+  ],
+  "truncated": false
+}
+```
+
+At most 20 series are returned. Each keeps its **last** 300 points; `point_count` is the full count. A point value can be `null`. A query that Datadog cannot parse raises `DatadogRequestRejectedError` with Datadog's message.
+
+### `datadog.search_metrics(query, limit=50)`
+
+Returns metric names that contain `query`, for example `["aws.ec2.cpuutilization", ...]`.
+
+### `datadog.search_logs(query, start="1h", end=None, limit=20, sort="newest")`
+
+Returns log records:
+
+```json
+{
+  "id": "...",
+  "timestamp": "2026-10-01T10:59:00Z",
+  "service": "api",
+  "host": "i-0abc",
+  "status": "error",
+  "message": "Payment failed ...",
+  "tags": ["env:prod"],
+  "attributes": {"http.status_code": 502, "context": "…"},
+  "truncated": false
+}
+```
+
+`message` is at most 2,000 characters and `tags` at most 50. `attributes` has at most 30 top-level keys; strings are cut at 200 characters, and nested objects or lists show as `"…"`. To read a nested attribute, put it in the query (`@context.status:ERROR`) rather than expecting it in the output.
+
+### `datadog.search_spans(query, start="1h", end=None, limit=20, sort="newest")`
+
+Returns spans:
+
+```json
+{
+  "trace_id": "...",
+  "span_id": "...",
+  "parent_id": "...",
+  "service": "api",
+  "resource": "GET /orders",
+  "operation": "http.request",
+  "env": "prod",
+  "start": "2026-10-01T10:59:00.169Z",
+  "end": "2026-10-01T10:59:00.541Z",
+  "duration_ms": 372.04,
+  "status": "error",
+  "error": "http_error: 502 Bad Gateway"
+}
+```
+
+This makes one request, so it returns at most `limit` spans. Custom span attributes are not returned.
+
+### `datadog.list_events(query=None, start="1h", end=None, limit=20)`
+
+Returns events, newest first:
+
+```json
+{"id": "...", "timestamp": "...", "title": "... or null", "message": "...", "source": "kube_cronjob", "tags": ["service:api"], "truncated": false}
+```
+
+### `datadog.search_monitors(query=None, limit=20)`
+
+Returns monitor summaries:
+
+```json
+{
+  "id": 123,
+  "name": "API 5xx rate",
+  "type": "query alert",
+  "status": "Alert",
+  "query": "sum(last_5m):...",
+  "tags": ["service:api"],
+  "priority": 2,
+  "managed": false,
+  "created": "...",
+  "modified": "...",
+  "truncated": false
+}
+```
+
+`status` is Datadog's state: `OK`, `Alert`, `Warn`, `No Data`, and so on. `managed` is true when the monitor has `managedby:archie`, which means `update_monitor` may change it. Useful queries are `status:alert`, `tag:service:api`, `type:log`, and `tag:managedby:archie`.
+
+### `datadog.get_monitor(monitor_id)`
+
+Returns a monitor summary plus `message` (up to 4,000 characters) and `options`. Only these option keys are shown and accepted: `thresholds`, `notify_no_data`, `no_data_timeframe`, `renotify_interval`, `evaluation_delay`, `new_group_delay`, `require_full_window`, `include_tags`, `notify_audit`, `escalation_message`, `timeout_h`.
+
+### `datadog.validate_monitor(name, type, query, message, tags=None, priority=None, options=None)`
+
+Asks Datadog whether a definition is valid, without creating anything. It needs read policy only. Returns `{"valid": true}`, or raises `DatadogRequestRejectedError` with Datadog's reason. It takes the same inputs as `create_monitor`.
+
+### `datadog.create_monitor(name, type, query, message, tags=None, priority=None, options=None)`
+
+Creates a monitor and returns its detail. Needs write policy.
+
+- `type`: a Datadog monitor type such as `metric alert`, `query alert`, `log alert`, `trace-analytics alert`, `event-v2 alert`, `composite`, `service check`, `rum alert`, or another type from Datadog's monitor API.
+- `name`: up to 500 characters. `message`: up to 4,000 characters, including any `@` notification handles. Put a handle in only if the user asked for it.
+- `tags`: up to 49 of your own tags; `managedby:archie` is always added.
+- `priority`: 1 (highest) to 5.
+- `options`: only the keys listed under `get_monitor`. Anything else, such as `restricted_roles`, is rejected.
+
+### `datadog.update_monitor(monitor_id, name=None, query=None, message=None, tags=None, priority=None, options=None)`
+
+Changes a monitor that has `managedby:archie`, and returns its detail read back after the change. Needs write policy.
+
+- Only the arguments you pass are sent. At least one is required.
+- `tags` replaces the tag list; `managedby:archie` is always kept.
+- `options` is merged over the current options, so `options={"thresholds": {...}}` leaves the other options unchanged.
+- A monitor without the tag raises `DatadogOwnershipError` before anything is changed.
+
+### `datadog.list_dashboards(query=None, limit=50)`
+
+Returns dashboard summaries: `{"id", "title", "description", "layout_type", "author", "created_at", "modified_at", "truncated"}`. `query` keeps dashboards whose title contains it (case-insensitive).
+
+### `datadog.get_dashboard(dashboard_id)`
+
+Returns a summary plus `url`, `template_variables` (names), `widget_count`, and up to 100 top-level `widgets`:
+
+```json
+{"id": 123, "type": "timeseries", "title": "Errors", "queries": ["sum:errors{$env}"]}
+```
+
+Each widget has at most 10 queries of up to 500 characters. A group widget also has `child_count`; widgets inside groups are not listed. Return only what you need, because large dashboards approach the exec output limit.
+
+### `datadog.list_catalog_entities(kind=None, query=None, limit=50)`
+
+Returns `{"id", "kind", "name", "display_name", "owner", "tags"}` per entity. `kind` is a catalog kind such as `service`, `api`, `datastore`, `queue` or `system`. `query` filters by entity name.
+
+### `datadog.list_teams(query=None, limit=50)`
+
+Returns `{"id", "handle", "name", "member_count"}` per team. `query` matches team names and handles.
+
+## Errors and retry policy
+
+Errors are sanitized and never contain keys. Some carry Datadog's error message, which explains a bad query.
+
+- `DatadogConfigurationError`: credentials are missing, or the Datadog site setting is invalid or unreadable. Do not retry; tell the user to run `archie auth login datadog` or fix the config.
+- `DatadogPolicyError`: reads or writes are disabled, a scope is set, or the request is not one the tool permits. Do not bypass or retry.
+- `DatadogInputError`: local validation failed. Correct the input.
+- `DatadogOwnershipError`: the monitor is not tagged `managedby:archie`. It was not changed. Tell the user; do not retry.
+- `DatadogRequestRejectedError`: Datadog rejected the query or definition (HTTP 400/422, or a metric query error). Fix it using the message; do not retry unchanged.
+- `DatadogAuthenticationError`: the keys were rejected. Do not retry.
+- `DatadogAuthorizationError`: the application key lacks a permission for this call. Do not retry; report which function failed.
+- `DatadogNotFoundError`: the monitor or dashboard does not exist.
+- `DatadogRateLimitError`: throttled. `retry_after_seconds` is an integer or `None`. Wait at least that long before one retry.
+- `DatadogTransportError`: the network failed or the 60-second call limit expired. Reads are safe to retry once.
+- `DatadogResponseError`: Datadog returned something unexpected. Report it; retry a read at most once.
+- `DatadogMutationIndeterminateError`: a create or update may or may not have happened. **Do not retry blindly.** Check with `get_monitor`, or `search_monitors("tag:managedby:archie")` for a create, before doing anything else.
+
+## Examples
+
+```python
+async def main():
+    alerting = await datadog.search_monitors("status:alert tag:service:api", limit=5)
+    if not alerting:
+        return "No alerting monitors for api"
+    errors = await datadog.search_logs("service:api status:error", start="30m", limit=10)
+    deploys = await datadog.list_events("service:api", start="6h", limit=5)
+    return {
+        "monitors": [(m["name"], m["status"]) for m in alerting],
+        "errors": [(e["timestamp"], e["message"][:200]) for e in errors],
+        "recent_events": [(e["timestamp"], e["title"] or e["message"][:100]) for e in deploys],
+    }
+```
+
+```python
+async def main():
+    result = await datadog.query_metrics("sum:trace.http.request.errors{service:api}.as_count()", start="2h")
+    return [
+        {"scope": s["scope"], "latest": s["points"][-1] if s["points"] else None}
+        for s in result["series"]
+    ]
+```
+
+```python
+async def main():
+    definition = dict(
+        name="API p95 latency high",
+        type="metric alert",
+        query="avg(last_10m):p95:trace.http.request{service:api} > 2",
+        message="p95 latency above 2s for api.",
+        tags=["service:api"],
+        options={"thresholds": {"critical": 2}},
+    )
+    await datadog.validate_monitor(**definition)
+    return await datadog.create_monitor(**definition)
+```

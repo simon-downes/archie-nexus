@@ -36,6 +36,8 @@ credential storage, including `auth.providers.github.work_orgs`, which selects t
 container `gh` wrapper uses. The `tools` section controls provider tool policy. The agent re-reads it
 before each exec call, so `tools` edits apply to running sessions; if the file is invalid, the
 last valid policy stays in force and the TUI shows a warning. Other sections are read at startup.
+`tools.datadog` takes `read.enabled` (default true) and `write.enabled` (default false, needed to
+create or update monitors tagged `managedby:archie`); a `scope` is not supported.
 `cli` and `web` are currently reserved for future settings.
 
 ## Host mounts

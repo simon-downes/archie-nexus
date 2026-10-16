@@ -1,6 +1,6 @@
 # 068 — Datadog tooling and skill
 
-Status: building
+Status: reviewing
 Branch: build-it/068-datadog-tooling (base: main @ 89cf27a)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/068-datadog-tooling
 
@@ -352,7 +352,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   tests/test_datadog_reads.py`: 124 passed; ruff clean. No live create/update was run, because it
   is externally visible; the live ownership refusal runs in M5.
 
-### [ ] M5 — Skill, docs and live smoke
+### [x] M5 — Skill, docs and live smoke
 
 - **Approach:** write `persona/skills/datadog/SKILL.md` following
   `persona/skills/jira/SKILL.md` and the incident.io skill; add `tests/test_datadog_skill.py`;
@@ -361,7 +361,19 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 - **Deliverable:** documented, discoverable skill; live-verified read surface.
 - **Verify:** `uv run pytest tests/test_datadog_skill.py` passes; the smoke script prints 12/12
   read-side calls returned and the ownership refusal.
-- **Outcome:**
+- **Outcome:** Wrote `persona/skills/datadog/SKILL.md`, `tests/test_datadog_skill.py` (all 14
+  functions, all 12 error classes, safety rules, no `api.datadoghq`/`DD-API-KEY`/`/api/v1`/
+  `ARCHIE_HOME_DIR`, discovery as `datadog`) and the `docs/config.md` sentence. The incident.io
+  branch's net diff leaves `docs/config.md` unchanged, so that file does not conflict. Live smoke
+  through `runner.run()` with write policy enabled in `context.json` (shapes only):
+
+  ```
+  query_metrics dict 6 · search_metrics list 3 · search_logs list 3 · search_spans list 3
+  list_events list 3 · search_monitors list 1 · get_monitor dict 13 · validate_monitor dict 1
+  list_dashboards list 1 · get_dashboard dict 12 · list_catalog_entities list 2 · list_teams list 2
+  12/12 read-side calls returned without raising
+  update_monitor(<pulumi monitor>) -> DatadogOwnershipError
+  ```
 
 ## Deviations
 
@@ -372,7 +384,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   returning them.
 
 - Merging after (or before) PR #5 conflicts in `exec/tools/__init__.py` (one import) and
-  `docs/config.md` (one sentence); resolve by keeping both.
+  `tests/conftest.py` (`pytest_plugins`); resolve by keeping both entries.
 - An invalid `config.yaml` makes every Datadog call fail with a configuration error while other
   tools keep working on the last valid policy; intended (fail closed on the API host).
 - The key may lack `monitors_write`; live create/update cannot be verified and are covered by unit tests only.
