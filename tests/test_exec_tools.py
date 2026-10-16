@@ -55,6 +55,13 @@ def test_resolve_path_absolute_under_workspace(workspace):
     assert resolved == workspace / "src" / "main.py"
 
 
+def test_resolve_path_expands_user_home(monkeypatch, tmp_path):
+    """Tilde-prefixed paths resolve through the process home directory."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    resolved = _resolve_path("~/notes.txt")
+    assert resolved == tmp_path / "notes.txt"
+
+
 def test_resolve_path_empty():
     with pytest.raises(PathValidationError, match="must not be empty"):
         _resolve_path("")
