@@ -139,6 +139,7 @@ async def test_manual_compaction_persists_order_and_replaces_transcript(tmp_path
         compaction_llm=compaction,
     )
 
+    harness._loaded_content_keys.add(("build-it", "__body__"))
     await harness.run_manual_compaction()
 
     events = _events(harness)
@@ -156,6 +157,7 @@ async def test_manual_compaction_persists_order_and_replaces_transcript(tmp_path
     assert _of(events, CompactionComplete)[0].error is None
     assert len(session.turns) == 1
     assert session.turns[0].compacted
+    assert harness._loaded_content_keys == set()
     assert session.total_cost > 0
     assert harness.turn_active is False
 

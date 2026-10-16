@@ -507,6 +507,9 @@ class AgentHarness:
             )
         )
         self.session.turns = [replacement]
+        # Compaction removes the tool results that carried skill content. The
+        # summary is not a substitute for the tagged skill/reference blocks.
+        self._loaded_content_keys.clear()
         self._baseline_context_tokens = None
         self._baseline_turn_count = 0
         # The replacement prefix has never been cached, so the cold-cache check
