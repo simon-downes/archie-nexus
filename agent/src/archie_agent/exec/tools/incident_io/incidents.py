@@ -42,7 +42,7 @@ async def list_incidents(
 ) -> list[dict]:
     """List incidents using structured filters; newest first by default."""
     count = v.limit(limit)
-    if sort not in _SORT:
+    if not isinstance(sort, str) or sort not in _SORT:
         raise IncidentIoInputError("sort must be 'newest' or 'oldest'")
     params: dict[str, Any] = {"sort_by": _SORT[sort]}
     if status_category is not None:
@@ -100,7 +100,7 @@ async def get_incident(incident: str) -> dict:
 
 
 @tool(native=False, exec_docs=False, namespace="incident_io")
-async def incident_timeline(incident: str, limit: int = 50) -> list[dict]:
+async def incident_timeline(incident: str, limit: int = 25) -> list[dict]:
     """List an incident's timeline items in the API's order (oldest first)."""
     key, count = v.incident_id(incident), v.limit(limit)
     require_read()
@@ -116,7 +116,7 @@ async def incident_timeline(incident: str, limit: int = 50) -> list[dict]:
 
 
 @tool(native=False, exec_docs=False, namespace="incident_io")
-async def incident_updates(incident: str, limit: int = 50) -> list[dict]:
+async def incident_updates(incident: str, limit: int = 25) -> list[dict]:
     """List an incident's status and severity updates with their messages."""
     key, count = v.incident_id(incident), v.limit(limit)
     require_read()

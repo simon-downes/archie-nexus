@@ -54,47 +54,6 @@ PUBLIC = {
 }
 
 
-class FakeClient:
-    def __init__(self, responses):
-        self.responses = responses
-        self.calls = []
-
-    async def get(self, path, params=None):
-        self.calls.append(("get", path, dict(params or {})))
-        return self.responses[path]
-
-    async def items(self, path, key, params=None):
-        self.calls.append(("items", path, dict(params or {})))
-        return self.responses[path][key]
-
-    async def paginate(self, path, key, limit, params=None, *, max_page_size=100, keep=None):
-        self.calls.append(("paginate", path, dict(params or {}), limit, max_page_size))
-        items = self.responses[path][key]
-        if keep:
-            items = [item for item in items if keep(item)]
-        return items[:limit]
-
-
-@pytest.fixture
-def fake(monkeypatch):
-    token = set_policy_snapshot({})
-
-    def install(responses, *modules):
-        client = FakeClient(responses)
-
-        @asynccontextmanager
-        async def factory():
-            yield client
-
-        for module in modules:
-            target = sys.modules[f"archie_agent.exec.tools.incident_io.{module}"]
-            monkeypatch.setattr(target, "incident_io_client", factory)
-        return client
-
-    yield install
-    reset_policy_snapshot(token)
-
-
 async def test_timeline_resolves_reference_to_ulid_and_normalises(fake):
     client = fake(
         {
@@ -547,3 +506,96 @@ def test_runner_exposes_incident_io_namespace(tmp_path, monkeypatch):
     envelope = Envelope.read(tmp_path)
     assert envelope.ok is True, envelope.error
     assert envelope.return_value == [{"id": "sev-1", "name": "Critical", "description": None}]
+
+
+@pytest.mark.parametrize(
+    ("fn", "args", "responses", "module"),
+    [
+        (
+            on_call,
+            ("primary",),
+            {
+                "/v2/schedules": {
+                    "schedules": [{"id": "s1", "name": "Primary"}, {"id": "s2", "name": "primary"}]
+                }
+            },
+            "on_call",
+        ),
+        (
+            list_catalog_entries,
+            ("service",),
+            {
+                "/v3/catalog_types": {
+                    "catalog_types": [
+                        {"id": "c1", "name": "Service"},
+                        {"id": "c2", "name": "SERVICE"},
+                    ]
+                }
+            },
+            "directory",
+        ),
+    ],
+)
+async def test_ambiguous_names_are_rejected_with_matching_ids(fake, fn, args, responses, module):
+    client = fake(responses, module)
+    with pytest.raises(IncidentIoInputError, match=r"matches more than one .*use an ID"):
+        await fn(*args)
+    assert len(client.calls) == 1  # only the lookup; the target endpoint is never called
+
+
+async def test_alert_bare_date_upper_bound_covers_whole_day(fake):
+    client = fake({"/v2/alerts": {"alerts": []}}, "alerts")
+    await list_alerts(created_after="2026-10-01", created_before="2026-10-01")
+    assert client.calls[0][2] == {
+        "created_at[gte]": "2026-10-01T00:00:00Z",
+        "created_at[lte]": "2026-10-01T23:59:59Z",
+    }
+
+
+async def test_on_call_reports_truncated_entries(fake):
+    many = [{"user": {"id": f"u{i}"}} for i in range(60)]
+    fake(
+        {
+            "/v2/schedules": {"schedules": [{"id": "s1", "name": "Primary"}]},
+            "/v2/schedule_entries": {"schedule_entries": {"final": many}},
+        },
+        "on_call",
+    )
+    result = await on_call("s1", start="2026-10-01", end="2026-10-31")
+    assert len(result["entries"]) == 50
+    assert result["entries_truncated"] is True
+
+
+async def test_tool_traffic_through_real_client_is_get_only(monkeypatch):
+    """Drive a multi-request tool through the real client and a GET-only transport."""
+    import httpx
+    from archie_agent.exec.tools.incident_io import client as client_module
+    from archie_agent.exec.tools.incident_io.incidents import get_incident
+
+    methods = []
+
+    def handler(request):
+        methods.append(request.method)
+        path = request.url.path
+        if path == "/v2/incidents/5":
+            return httpx.Response(200, json={"incident": {"id": "01INC", "reference": "INC-5"}})
+        if path == "/v2/incident_participants":
+            return httpx.Response(
+                200, json={"incident_participants": {"active": [], "passive": []}}
+            )
+        return httpx.Response(200, json={"incident_alerts": [], "pagination_meta": {}})
+
+    transport = httpx.MockTransport(handler)
+    real = client_module.IncidentIoClient
+
+    monkeypatch.setattr(client_module, "_credential", lambda: "k")
+    monkeypatch.setattr(
+        client_module, "IncidentIoClient", lambda key: real(key, transport=transport)
+    )
+    token = set_policy_snapshot({})
+    try:
+        result = await get_incident("INC-5")
+    finally:
+        reset_policy_snapshot(token)
+    assert result["reference"] == "INC-5"
+    assert methods == ["GET", "GET", "GET"]

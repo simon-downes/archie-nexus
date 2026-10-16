@@ -23,7 +23,7 @@ async def list_alerts(
     created_before: str | None = None,
     limit: int = 25,
 ) -> list[dict]:
-    """List alerts, newest first, filtered by status, alert source ID or creation time."""
+    """List alerts filtered by status, alert source ID or creation time (API order)."""
     count = v.limit(limit)
     params: dict[str, Any] = {}
     if status is not None:

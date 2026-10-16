@@ -20,6 +20,8 @@ from archie_shared.events import (
     UserMessage,
 )
 
+pytest_plugins = ["tests.incident_io_fakes"]
+
 
 @pytest.fixture
 def make_llm_request() -> Callable[..., LLMRequest]:

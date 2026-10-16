@@ -366,6 +366,26 @@ scope unsupported).
   examples fixed; stray docs line removed; deadline mapped to `IncidentIoTransportError`;
   provider 400/422 renamed `IncidentIoRequestRejectedError` (D13); M1 delivers all reference
   kinds. No second pass (no ❌).
+- Code review: one round, `general` and `risk` (risk required: external input, credentials and a
+  new public tool surface). No ❌. Fixed (agreed):
+  - general ⚠️: ambiguous names had no test, and the plan wanted the matches listed. The three
+    resolvers now share one `validation.choose()`, which lists `name (id)` for ambiguous matches.
+    Tests cover schedule, catalog type and severity.
+  - general ⚠️: a bare `..._before` date on datetime endpoints dropped that day. It now means end
+    of day (23:59:59Z), with a test.
+  - general ℹ️: the skill claimed "no request was made" for name mismatches; corrected.
+  - general ℹ️: some `limit` defaults were 50 against D9's 25. Aligned to 25.
+  - general ℹ️: `FakeClient` and the `fake` fixture were duplicated. Moved to
+    `tests/incident_io_fakes.py`, registered through `pytest_plugins` in `tests/conftest.py`.
+  - general ℹ️: the GET-only AC wasn't exercised by tool traffic. Added a test that drives
+    `get_incident` through the real client and a recording MockTransport (3 GETs).
+  - general ❓: is `list_alerts` "newest first" verified? It isn't. A live check of 16 alerts
+    showed neither ascending nor descending order, so the skill now says API order with no
+    time guarantee.
+  - risk ℹ️: `sort=["newest"]` raised `TypeError`. Now an `isinstance` guard, with a test.
+  - risk ℹ️: `on_call` truncated silently at 50. Added `entries_truncated`, with a test.
+  - Rejected: risk ❓, one shared httpx client per call. It mirrors the Jira pattern, and live runs
+    of up to 4 sequential requests finished well inside the 60 s limit. Left as a follow-up.
 
 ## Outcome
 
@@ -373,3 +393,7 @@ PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Reuse one `httpx.AsyncClient` per `incident_io_client()` call to avoid a TLS handshake per
+  page (risk review ❓); worthwhile if local-filter pagination on slow links nears the 60 s limit.
+- Datadog wrapper and cross-provider incident investigation bundle (brain design doc).

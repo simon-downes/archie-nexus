@@ -13,7 +13,7 @@ from .policy import require_read
 
 
 @tool(native=False, exec_docs=False, namespace="incident_io")
-async def list_teams(limit: int = 50) -> list[dict]:
+async def list_teams(limit: int = 25) -> list[dict]:
     """List teams with their members."""
     count = v.limit(limit)
     require_read()
@@ -58,17 +58,7 @@ async def list_catalog_types() -> list[dict]:
 async def _catalog_type(client: IncidentIoClient, value: str) -> dict:
     """Resolve a catalog type by ID, type name, or case-insensitive display name."""
     items = await client.items("/v3/catalog_types", "catalog_types")
-    lowered = value.lower()
-    exact = [item for item in items if value in (item.get("id"), item.get("type_name"))]
-    named = [item for item in items if str(item.get("name", "")).strip().lower() == lowered]
-    matches = exact or named
-    if len(matches) != 1:
-        names = sorted(str(item.get("name")) for item in items if item.get("name"))
-        problem = "matches more than one" if matches else "is not a known"
-        raise IncidentIoInputError(
-            f"{value!r} {problem} catalog type; valid names: {', '.join(names[:50])}"
-        )
-    return matches[0]
+    return v.choose(items, value, "catalog type", id_keys=("id", "type_name"))
 
 
 @tool(native=False, exec_docs=False, namespace="incident_io")

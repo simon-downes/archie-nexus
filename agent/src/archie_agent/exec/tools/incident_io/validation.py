@@ -16,6 +16,31 @@ _MAX_NAME = 200
 _MAX_VALUES = 20
 
 
+def choose(
+    items: list[dict], value: str, label: str, *, id_keys: tuple[str, ...] = ("id",)
+) -> dict:
+    """Pick exactly one item by an ID-like key or case-insensitive exact name.
+
+    Raises an input error that lists the matching names when ambiguous, or all valid names
+    when nothing matches. Never picks silently.
+    """
+    exact = [item for item in items if any(item.get(key) == value for key in id_keys)]
+    lowered = value.strip().lower()
+    named = [item for item in items if str(item.get("name", "")).strip().lower() == lowered]
+    matches = exact or named
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        listed = sorted(f"{item.get('name')} ({item.get('id')})" for item in matches)
+        raise IncidentIoInputError(
+            f"{value!r} matches more than one {label}; use an ID: {', '.join(listed[:20])}"
+        )
+    names = sorted(str(item.get("name")) for item in items if item.get("name"))
+    raise IncidentIoInputError(
+        f"{value!r} is not a known {label}; valid names: {', '.join(names[:50])}"
+    )
+
+
 def limit(value: Any, maximum: int = 100) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         raise IncidentIoInputError(f"limit must be an integer 1-{maximum}")
@@ -118,7 +143,11 @@ def date_filters(
         label = f"{prefix}_{suffix}"
         if date_only and (not isinstance(value, str) or not _DATE.fullmatch(value.strip())):
             raise IncidentIoInputError(f"{label} must be a YYYY-MM-DD date")
-        bounds.append(timestamp(value, label))
+        parsed = timestamp(value, label)
+        if suffix == "before" and not date_only and _DATE.fullmatch(value.strip()):
+            # A bare date as an upper bound means "through the end of that day".
+            parsed += timedelta(days=1) - timedelta(seconds=1)
+        bounds.append(parsed)
     start, end = bounds
     if start and end and end < start:
         raise IncidentIoInputError(f"{prefix} range end must not be before its start")

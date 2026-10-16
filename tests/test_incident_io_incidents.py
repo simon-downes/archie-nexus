@@ -1,13 +1,9 @@
 """incident.io incident tool tests with a fake client (no network)."""
 
-import sys
-from contextlib import asynccontextmanager
-
 import pytest
 from archie_agent.exec.tools.incident_io.client import IncidentIoInputError
 from archie_agent.exec.tools.incident_io.incidents import get_incident, list_incidents
 from archie_agent.exec.tools.incident_io.reference import reference
-from archie_shared.tool_policy import reset_policy_snapshot, set_policy_snapshot
 
 SEVERITIES = [
     {"id": "sev-1", "name": "Critical", "rank": 3},
@@ -45,49 +41,6 @@ INCIDENT = {
     "slack_channel_name": "inc-42-checkout",
     "permalink": "https://app.incident.io/x/incidents/42",
 }
-
-
-class FakeClient:
-    def __init__(self, responses):
-        self.responses = responses
-        self.calls = []
-
-    async def get(self, path, params=None):
-        self.calls.append(("get", path, dict(params or {})))
-        return self.responses[path]
-
-    async def items(self, path, key, params=None):
-        self.calls.append(("items", path, dict(params or {})))
-        return self.responses[path][key]
-
-    async def paginate(self, path, key, limit, params=None, *, max_page_size=100, keep=None):
-        self.calls.append(("paginate", path, dict(params or {}), limit, max_page_size))
-        items = self.responses[path][key]
-        if keep:
-            items = [item for item in items if keep(item)]
-        return items[:limit]
-
-
-@pytest.fixture
-def fake(monkeypatch):
-    token = set_policy_snapshot({})
-    holder = {}
-
-    def install(responses, *modules):
-        client = FakeClient(responses)
-
-        @asynccontextmanager
-        async def factory():
-            yield client
-
-        for module in modules:
-            target = sys.modules[f"archie_agent.exec.tools.incident_io.{module}"]
-            monkeypatch.setattr(target, "incident_io_client", factory)
-        holder["client"] = client
-        return client
-
-    yield install
-    reset_policy_snapshot(token)
 
 
 async def test_list_incidents_resolves_severity_names_and_encodes_filters(fake):
@@ -148,6 +101,7 @@ async def test_unknown_severity_name_lists_valid_names(fake):
         {"status_category": []},
         {"mode": "prod"},
         {"sort": "updated"},
+        {"sort": ["newest"]},
         {"created_after": "yesterday"},
         {"created_after": "2026-10-02", "created_before": "2026-10-01"},
         {"created_after": "2026-10-01T10:00:00Z"},
@@ -233,3 +187,17 @@ async def test_reference_lists_kind_and_rejects_unknown(fake):
     assert result[0] == {"id": "sev-1", "name": "Critical", "description": None, "rank": 3}
     with pytest.raises(IncidentIoInputError, match="kind must be one of"):
         await reference("pay_configs")
+
+
+async def test_ambiguous_severity_name_is_rejected(fake):
+    client = fake(
+        {
+            "/v1/severities": {
+                "severities": [{"id": "a", "name": "Major"}, {"id": "b", "name": "major"}]
+            }
+        },
+        "incidents",
+    )
+    with pytest.raises(IncidentIoInputError, match=r"matches more than one severity.*Major \(a\)"):
+        await list_incidents(severity="MAJOR")
+    assert [call[1] for call in client.calls] == ["/v1/severities"]

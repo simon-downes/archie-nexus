@@ -56,14 +56,14 @@ When a name matches nothing or several things, the error lists the valid names. 
 
 - **Incident:** an incident ID (`01HX...`), a reference `INC-123` (case-insensitive), or the number `123`. All three forms work wherever `incident` is accepted.
 - **Resource IDs** (`alert_id`, `postmortem_id`, `team`, alert `source`, `slack_user_id`): 1–100 letters, digits, `_` or `-`.
-- **Names or IDs** (`severity`, `incident_type`, `status` on incidents, `schedule`, `catalog_type`): a non-empty string of at most 200 characters. Names match case-insensitively and exactly; partial matches are rejected.
+- **Names or IDs** (`severity`, `incident_type`, `status` on incidents, `schedule`, `catalog_type`): a non-empty string of at most 200 characters. Names match case-insensitively and exactly; partial matches are rejected. If a name matches several items, the error lists them with their IDs; pass the ID.
 - **Lists:** filters that accept a list also accept a single string. Lists hold 1–20 values and match any of them.
 - **Limit:** an integer `1..100` (`bool` is invalid). Lists are paginated internally until `limit` results or the end of the data.
 - **Dates:**
   - `list_incidents` date filters take `YYYY-MM-DD` only. They are inclusive, and datetimes are rejected.
-  - Other date filters take an ISO-8601 date or datetime; naive values are UTC.
+  - Other date filters take an ISO-8601 date or datetime; naive values are UTC. A bare date as a `..._before` bound covers that whole day.
   - Output timestamps are UTC strings such as `2026-10-01T10:00:00Z`.
-- Invalid input raises `IncidentIoInputError` before any request is made.
+- Invalid input raises `IncidentIoInputError`. Format errors are caught before any request; name lookups need one read of the reference list first.
 
 ## Output shapes
 
@@ -135,7 +135,7 @@ Returns incident summaries. `None` leaves a filter off; filters combine with AND
 
 Returns the incident detail, including participants and the IDs of linked alerts (up to 50).
 
-### `incident_io.incident_timeline(incident, limit=50)`
+### `incident_io.incident_timeline(incident, limit=25)`
 
 Returns timeline items in incident.io's order:
 
@@ -143,7 +143,7 @@ Returns timeline items in incident.io's order:
 {"id": "...", "timestamp": "2026-10-01T10:00:00Z", "title": "...", "description": "... or null", "creator": {"type": "workflow", "name": "..."}}
 ```
 
-### `incident_io.incident_updates(incident, limit=50)`
+### `incident_io.incident_updates(incident, limit=25)`
 
 Returns status and severity updates:
 
@@ -153,7 +153,7 @@ Returns status and severity updates:
 
 ### `incident_io.list_alerts(status=None, source=None, created_after=None, created_before=None, limit=25)`
 
-Returns alerts, newest first:
+Returns alerts in incident.io's order, which is not guaranteed to be by time:
 
 ```json
 {"id": "...", "title": "...", "status": "firing", "alert_source_id": "...", "deduplication_key": "...", "source_url": "...", "created_at": "...", "updated_at": "...", "resolved_at": null, "tags": ["checkout"]}
@@ -199,7 +199,7 @@ Returns post-mortem documents, newest first:
 
 Returns a post-mortem plus `content`, its Markdown capped at 8,000 characters, and `content_truncated`, which is true when the cap cut it short. `content` is `null` when the document has no in-app content.
 
-### `incident_io.list_teams(limit=50)`
+### `incident_io.list_teams(limit=25)`
 
 Returns `{"id", "name", "members": [user, ...]}` per team.
 
@@ -234,13 +234,14 @@ Returns schedules with `timezone`, `team_ids`, `rotations` (`[{"id", "name"}]`),
 Returns who is on call for one schedule, with overrides applied:
 
 ```json
-{"schedule_id": "...", "start": "2026-10-01T10:00:00Z", "end": "2026-10-01T10:01:00Z", "entries": [{"user": {...}, "start_at": "...", "end_at": "...", "rotation_id": "..."}]}
+{"schedule_id": "...", "start": "2026-10-01T10:00:00Z", "end": "2026-10-01T10:01:00Z", "entries": [{"user": {...}, "start_at": "...", "end_at": "...", "rotation_id": "..."}], "entries_truncated": false}
 ```
 
 - `schedule`: a schedule ID or exact name.
 - Omit both `start` and `end` to see who is on call now. The window is then now plus one minute.
 - With only `start`, the window is one minute long.
 - `end` must be after `start`, and the window can be at most 31 days.
+- At most 50 entries are returned. When `entries_truncated` is true, the roster is incomplete; query a shorter window.
 
 ### `incident_io.list_escalation_paths(limit=25)`
 
@@ -256,7 +257,7 @@ Errors are sanitized. They never contain credentials or raw provider payloads.
 
 - `IncidentIoConfigurationError`: credentials are missing or incomplete. Do not retry; tell the user to run `archie auth login incident_io`.
 - `IncidentIoPolicyError`: reads are disabled or an unsupported scope is set. Do not bypass or retry.
-- `IncidentIoInputError`: local validation failed, or a name did not match (the message lists valid names). No request was made. Correct the input.
+- `IncidentIoInputError`: local validation failed, or a name matched nothing or several items (the message lists valid names or the matching IDs). Only reference lookups were made. Correct the input.
 - `IncidentIoRequestRejectedError`: incident.io rejected the request (HTTP 400/422). The message may include provider error codes. Correct the input; do not retry unchanged.
 - `IncidentIoAuthenticationError`: the API key was rejected. Do not retry.
 - `IncidentIoAuthorizationError`: the key lacks permission for this data. Do not retry.

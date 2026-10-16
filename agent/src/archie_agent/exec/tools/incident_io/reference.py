@@ -9,6 +9,7 @@ from archie_agent.exec.tools import tool
 from .client import IncidentIoClient, IncidentIoInputError, incident_io_client
 from .formatting import reference_item
 from .policy import require_read
+from .validation import choose
 
 KINDS: dict[str, tuple[str, str]] = {
     "severities": ("/v1/severities", "severities"),
@@ -19,6 +20,15 @@ KINDS: dict[str, tuple[str, str]] = {
 }
 
 
+_LABELS = {
+    "severities": "severity",
+    "incident_types": "incident type",
+    "incident_statuses": "incident status",
+    "incident_roles": "incident role",
+    "custom_fields": "custom field",
+}
+
+
 def _kind(value: Any) -> tuple[str, str]:
     if not isinstance(value, str) or value not in KINDS:
         raise IncidentIoInputError(f"kind must be one of: {', '.join(KINDS)}")
@@ -26,29 +36,15 @@ def _kind(value: Any) -> tuple[str, str]:
 
 
 async def resolve_ids(client: IncidentIoClient, kind: str, wanted: list[str]) -> list[str]:
-    """Map names (case-insensitive) or IDs to IDs; unknown values are an input error."""
+    """Map names (case-insensitive) or IDs to IDs; unknown or ambiguous values are input errors."""
     path, key = KINDS[kind]
-    items = await client.items(path, key)
-    by_id = {str(item.get("id")): str(item.get("id")) for item in items if item.get("id")}
-    by_name: dict[str, list[str]] = {}
-    for item in items:
-        if item.get("id") and isinstance(item.get("name"), str):
-            by_name.setdefault(item["name"].strip().lower(), []).append(str(item["id"]))
+    items = [item for item in await client.items(path, key) if item.get("id")]
+    label = _LABELS[kind]
     result: list[str] = []
     for value in wanted:
-        if value in by_id:
-            match = [by_id[value]]
-        else:
-            match = by_name.get(value.lower(), [])
-        if len(match) != 1:
-            names = sorted({str(item.get("name")) for item in items if item.get("name")})
-            problem = "matches more than one" if match else "is not a known"
-            raise IncidentIoInputError(
-                f"{value!r} {problem} {kind[:-1].replace('_', ' ')}; "
-                f"valid names: {', '.join(names[:50])}"
-            )
-        if match[0] not in result:
-            result.append(match[0])
+        found = str(choose(items, value, label)["id"])
+        if found not in result:
+            result.append(found)
     return result
 
 

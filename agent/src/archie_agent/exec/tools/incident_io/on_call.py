@@ -7,7 +7,6 @@ from archie_agent.exec.tools import tool
 from . import validation as v
 from .client import (
     IncidentIoClient,
-    IncidentIoInputError,
     IncidentIoResponseError,
     incident_io_client,
 )
@@ -31,17 +30,7 @@ async def list_schedules(limit: int = 25) -> list[dict]:
 async def _schedule_id(client: IncidentIoClient, value: str) -> str:
     """Resolve a schedule ID or case-insensitive exact name."""
     items = await client.paginate("/v2/schedules", "schedules", 100)
-    lowered = value.lower()
-    matches = [item for item in items if item.get("id") == value] or [
-        item for item in items if str(item.get("name", "")).strip().lower() == lowered
-    ]
-    if len(matches) != 1:
-        names = sorted(str(item.get("name")) for item in items if item.get("name"))
-        problem = "matches more than one" if matches else "is not a known"
-        raise IncidentIoInputError(
-            f"{value!r} {problem} schedule; valid names: {', '.join(names[:50])}"
-        )
-    return str(matches[0]["id"])
+    return str(v.choose(items, value, "schedule")["id"])
 
 
 @tool(native=False, exec_docs=False, namespace="incident_io")
@@ -69,6 +58,7 @@ async def on_call(schedule: str, start: str | None = None, end: str | None = Non
         "start": v.iso(begin),
         "end": v.iso(finish),
         "entries": [shift(item) for item in final[:MAX_NESTED] if isinstance(item, dict)],
+        "entries_truncated": len(final) > MAX_NESTED,
     }
 
 
