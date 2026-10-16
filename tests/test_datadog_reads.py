@@ -3,11 +3,14 @@
 from datetime import UTC, datetime
 
 import pytest
+from archie_agent.exec.tools import get_all_tools
+from archie_agent.exec.tools.datadog.catalog import list_catalog_entities, list_teams
 from archie_agent.exec.tools.datadog.client import (
     DatadogInputError,
     DatadogRateLimitError,
     DatadogRequestRejectedError,
 )
+from archie_agent.exec.tools.datadog.dashboards import get_dashboard, list_dashboards
 from archie_agent.exec.tools.datadog.events import list_events
 from archie_agent.exec.tools.datadog.logs import search_logs
 from archie_agent.exec.tools.datadog.metrics import query_metrics, search_metrics
@@ -308,3 +311,151 @@ async def test_list_events_blank_query_is_no_filter(fake):
     client = fake({EVENTS: {"data": []}}, "events")
     await list_events("  ")
     assert "filter[query]" not in client.calls[0][2]
+
+
+READS = {
+    "get_dashboard",
+    "get_monitor",
+    "list_catalog_entities",
+    "list_dashboards",
+    "list_events",
+    "list_teams",
+    "query_metrics",
+    "search_logs",
+    "search_metrics",
+    "search_monitors",
+    "search_spans",
+    "validate_monitor",
+}
+
+
+def test_registration_contains_read_functions():
+    tools = get_all_tools()
+    keys = {key.removeprefix("datadog.") for key in tools if key.startswith("datadog.")}
+    assert READS <= keys
+    for name in READS:
+        fn = tools[f"datadog.{name}"]
+        assert fn._native is False and fn._exec_docs is False
+
+
+DASHBOARDS = ("GET", "/api/v1/dashboard")
+DASHBOARD = {
+    "id": "abc-def-ghi",
+    "title": "Payments",
+    "description": "d" * 900,
+    "layout_type": "ordered",
+    "author_handle": "a@example.com",
+    "url": "/dashboard/abc-def-ghi/payments",
+    "template_variables": [{"name": "env"}, {"prefix": "x"}],
+    "widgets": [
+        {"id": 1, "definition": {"type": "note", "content": "hi"}},
+        {
+            "id": 2,
+            "definition": {
+                "type": "timeseries",
+                "title": "Errors",
+                "requests": [
+                    {"q": "sum:errors{*}"},
+                    {
+                        "queries": [
+                            {
+                                "name": "q1",
+                                "data_source": "logs",
+                                "search": {"query": "status:error"},
+                            }
+                        ]
+                    },
+                    {"queries": [{"name": "q2", "data_source": "metrics", "query": "avg:cpu{*}"}]},
+                ],
+            },
+        },
+        {"id": 3, "definition": {"type": "group", "title": "G", "widgets": [{}, {}]}},
+    ]
+    + [{"id": 100 + i, "definition": {"type": "note"}} for i in range(100)],
+}
+
+
+async def test_list_dashboards_filters_title_locally(fake):
+    items = [
+        {"id": "aaa-bbb-ccc", "title": "Payments overview"},
+        {"id": "ddd-eee-fff", "title": "Infra"},
+        {"id": "ggg-hhh-iii", "title": "payments errors"},
+    ]
+    client = fake({DASHBOARDS: {"dashboards": items}}, "dashboards")
+    result = await list_dashboards("PAYMENTS", limit=1)
+    assert [item["id"] for item in result] == ["aaa-bbb-ccc"]
+    assert client.calls[0][2] is None
+    assert len(await list_dashboards()) == 3
+
+
+async def test_get_dashboard_widgets_and_bounds(fake):
+    fake({("GET", "/api/v1/dashboard/abc-def-ghi"): DASHBOARD}, "dashboards")
+    result = await get_dashboard("abc-def-ghi")
+    assert result["widget_count"] == 103
+    assert len(result["widgets"]) == 100
+    assert result["truncated"] is True
+    assert result["template_variables"] == ["env"]
+    assert len(result["description"]) == 500
+    assert result["widgets"][1]["queries"] == ["sum:errors{*}", "status:error", "avg:cpu{*}"]
+    assert result["widgets"][2] == {
+        "id": 3,
+        "type": "group",
+        "title": "G",
+        "queries": [],
+        "child_count": 2,
+    }
+
+
+@pytest.mark.parametrize("value", ["abc", "ABC-DEF-GHI", "abc-def-ghi/../x", 5])
+async def test_get_dashboard_rejects_bad_ids(fake, value):
+    client = fake({}, "dashboards")
+    with pytest.raises(DatadogInputError):
+        await get_dashboard(value)
+    assert client.calls == []
+
+
+async def test_list_catalog_entities_filters(fake):
+    entity = {
+        "id": "u1",
+        "attributes": {
+            "kind": "service",
+            "name": "api",
+            "displayName": "API",
+            "owner": "team:pay",
+            "tags": ["t"],
+        },
+    }
+    client = fake({("GET", "/api/v2/catalog/entity"): {"data": [entity]}}, "catalog")
+    result = await list_catalog_entities(kind="service", query="api", limit=5)
+    assert client.calls[0][2] == {
+        "page[limit]": 5,
+        "page[offset]": 0,
+        "filter[kind]": "service",
+        "filter[name]": "api",
+    }
+    assert result == [
+        {
+            "id": "u1",
+            "kind": "service",
+            "name": "api",
+            "display_name": "API",
+            "owner": "team:pay",
+            "tags": ["t"],
+        }
+    ]
+
+
+async def test_list_catalog_entities_rejects_bad_kind(fake):
+    client = fake({}, "catalog")
+    with pytest.raises(DatadogInputError):
+        await list_catalog_entities(kind="Service Name")
+    assert client.calls == []
+
+
+async def test_list_teams_keyword(fake):
+    item = {"id": "t1", "attributes": {"handle": "pay", "name": "Payments", "user_count": 4}}
+    client = fake({("GET", "/api/v2/team"): {"data": [item]}}, "catalog")
+    assert await list_teams("pay") == [
+        {"id": "t1", "handle": "pay", "name": "Payments", "member_count": 4}
+    ]
+    assert client.calls[0][2]["filter[keyword]"] == "pay"

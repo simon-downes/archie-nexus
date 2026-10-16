@@ -311,7 +311,7 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
   record 3,814 chars), 2 error spans with duration and error text, 3 events with a source, and
   `search_logs("status:((")` → `DatadogRequestRejectedError` carrying "Cannot parse query".
 
-### [ ] M3 — Monitor, dashboard and catalog reads
+### [x] M3 — Monitor, dashboard and catalog reads
 
 - **Approach:** `search_monitors`, `get_monitor`, `validate_monitor` in `monitors.py`;
   `dashboards.py`; `catalog.py`. Monitor records include `managed: bool` (has the ownership tag).
@@ -319,7 +319,15 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 - **Deliverable:** all read functions callable.
 - **Verify:** `uv run pytest tests/test_datadog_reads.py tests/test_datadog_monitors.py -k "not write"` passes;
   the registration test asserts the 12 read functions here and is tightened to exactly 14 in M4.
-- **Outcome:**
+- **Outcome:** Added `monitors.py` (`search_monitors`, `get_monitor`, `validate_monitor`, plus the
+  shared `definition()` builder for M4), `dashboards.py`, `catalog.py` and formatters. Monitor
+  `status` comes from `overall_state` (GET) or `status` (search). Detail `options` show only the
+  D13 allowlisted keys. `uv run pytest tests/test_datadog_reads.py tests/test_datadog_monitors.py
+  tests/test_datadog_client.py`: 106 passed, including the 12-read registration test and the
+  runner test `test_runner_exposes_datadog_namespace`; ruff clean. Live via `runner.run()`:
+  2 alerting monitors; `get_monitor` detail with 3 options and `managed: False`;
+  `validate_monitor` valid → `{"valid": True}`, invalid query → `DatadogRequestRejectedError`;
+  2 dashboards, one with 38 widgets and 44 queries (10,360 chars); 2 catalog entities; 2 teams.
 
 ### [ ] M4 — Guarded monitor writes
 
@@ -349,6 +357,10 @@ New: `persona/skills/datadog/SKILL.md`; tests `tests/datadog_fakes.py`,
 ## Deviations
 
 ## Risks
+
+- `get_dashboard` on a large dashboard can exceed the 16,000-character exec result limit
+  (live: 38 widgets → 10,360 chars). The skill tells the agent to select fields in code before
+  returning them.
 
 - Merging after (or before) PR #5 conflicts in `exec/tools/__init__.py` (one import) and
   `docs/config.md` (one sentence); resolve by keeping both.
