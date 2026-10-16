@@ -48,7 +48,9 @@ Live API facts (checked with the read-only key, field names and status codes onl
 - List endpoints paginate with `page_size` + `after` and return `pagination_meta.after`.
   `page_size` above the server maximum is silently clamped (251 returned 200).
 - `/v2/incidents` filters use deepObject query keys such as `status_category[one_of]=live`,
-  `created_at[gte]=2026-01-01`, `severity[one_of]=<severity ID>`. An unknown enum value returns
+  `created_at[gte]=2026-01-01`, `severity[one_of]=<severity ID>`. Incident date filters accept
+  only `YYYY-MM-DD` (a datetime is rejected with `invalid_value`); alert, action and follow-up
+  date filters accept full datetimes. An unknown enum value returns
   200 with an empty list, and a severity *name* matches nothing — filters need IDs, so the tool
   must validate enums locally and resolve names to IDs.
 - `GET /v2/incidents/{id}` accepts the ULID or the bare reference number (`123`); the full
@@ -126,7 +128,8 @@ Live API facts (checked with the read-only key, field names and status codes onl
   - Enum filters (`status_category`, `mode`, alert/action/follow-up `status`, `sort`): a value or
     non-empty list of values from the documented sets.
   - Timestamps: ISO-8601 date or datetime strings parsed with `datetime.fromisoformat`; naive
-    values are treated as UTC.
+    values are treated as UTC. `list_incidents` date filters accept `YYYY-MM-DD` only (API limit)
+    and are inclusive.
   - Resource IDs (`get_alert`, `get_postmortem`, `incident`/`team` filter args, catalog type ID,
     alert source ID): 1–100 chars matching `[A-Za-z0-9_-]`.
   - Name-or-ID args (`severity`, `incident_type`, `status`, `schedule`, `catalog_type`) and free
@@ -246,7 +249,7 @@ scope unsupported).
 
 ## Milestones
 
-### [ ] M1 — Tracer: `incident_io.list_incidents` and `get_incident` end to end
+### [x] M1 — Tracer: `incident_io.list_incidents` and `get_incident` end to end
 
 - **Approach:** create `client.py`, `policy.py`, `validation.py`, `formatting.py` (incident
   summary/detail only), `reference.py` (complete: internal `resolve_ids` and public `reference`
@@ -266,7 +269,15 @@ scope unsupported).
 - **Verify:** `uv run pytest tests/test_incident_io_client.py tests/test_incident_io_incidents.py`
   passes; a one-off live call `list_incidents(limit=2)` and `get_incident(<reference>)` returns
   normalised records (report keys only).
-- **Outcome:**
+- **Outcome:** Built `client.py`, `policy.py`, `validation.py`, `formatting.py`, `reference.py`
+  (all five kinds) and `incidents.py`; registered in `exec/tools/__init__.py`. 53 tests pass.
+  Live (`/tmp/incident_io_m1_live.py`, keys/counts only): `reference("severities")` 3 items;
+  `list_incidents(limit=2)` 2 summaries; all-severity filter 40 vs single severity 19 (confirms
+  repeated-key encoding of `[one_of]` lists); `status_category="closed"` returned only closed;
+  `get_incident` by reference and by ID agree, with 7 active / 4 passive participants. The live
+  run found that incident date filters reject datetimes (see Deviations). Per-endpoint page-size
+  maxima found during live checks: alerts and incident alerts 50, escalation paths 25, others 100;
+  `paginate` takes `max_page_size`.
 
 ### [ ] M2 — Incident context: timeline, updates, alerts
 
@@ -306,6 +317,10 @@ scope unsupported).
 - **Outcome:**
 
 ## Deviations
+
+- M1: `list_incidents` `created_*`/`updated_*` filters accept `YYYY-MM-DD` only, not datetimes.
+  The live API rejects datetimes on incident filters (`invalid_value`). The tool rejects a datetime
+  locally rather than silently truncating it. Other endpoints keep full datetime filters.
 
 ## Risks
 
