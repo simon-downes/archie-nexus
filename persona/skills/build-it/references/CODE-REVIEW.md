@@ -52,14 +52,15 @@ next maintainer find it where they expect?
 
 ## Scope
 
-Flag a finding, at any severity, only when all three hold:
+Flag a finding only when the change caused it and its fix stays in scope:
 
 - **The change caused it.** The diff or the plan introduced it, or makes it materially
   worse. Existing problems elsewhere in a file or function the change touches are out
   of scope, even when they sit a few lines from an edit.
-- **Its trigger is realistic.** A real input, state or call sequence reaches it.
 - **Its fix stays in scope.** Fixing it doesn't mean redesigning code the change didn't
   need to touch.
+- **For ❌ and ⚠️, its trigger is realistic.** A real input, state or call sequence
+  reaches it. ℹ️ findings (dead code, a stale comment) need no trigger.
 
 Don't flag:
 
@@ -83,7 +84,6 @@ or nothing. ℹ️ needs only the location and the reason.
 ## Code review (<role>): <plan title>
 
 Scope: <base-sha>...HEAD, <N> files
-Verdict: APPROVE | APPROVE WITH SUGGESTIONS | REQUEST CHANGES
 
 ### Findings
 - ❌ **<file>:<line>**: <finding, quoting the code>
@@ -99,4 +99,6 @@ Verdict: APPROVE | APPROVE WITH SUGGESTIONS | REQUEST CHANGES
   improvement, such as duplicated logic that can drift, dead code, unclear naming or a
   stale comment. Report every in-scope ℹ️: the author fixes each one they agree with.
   ❓ unclear intent.
-- With no findings, write `Verdict: APPROVE` and one sentence on what you checked.
+- Don't give a verdict or say whether the change is ready: you see one role's area, and
+  the author decides. With no findings, write "No findings." and one sentence on what
+  you checked.

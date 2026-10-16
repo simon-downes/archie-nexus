@@ -13,7 +13,8 @@ failure the exit code is 1 and the JSON is {"error": "<message>"}.
       "initial_commit", so the worktree starts with the existing files.
 
   list   --repo PATH
-      List build-it branches and the state of the plan on each.
+      List build-it branches and the state of the plan on each. A build is "unfinished"
+      until its plan is done with a PR outcome and, when there is a PR URL, a CI result.
 
   resume --repo PATH --branch build-it/<NNN>-<slug>
       Make sure the branch has a worktree (recreating a deleted one) and print the
@@ -218,7 +219,9 @@ def cmd_list(args: argparse.Namespace) -> dict:
         entry: dict = {"branch": branch, "plan_path": plan}
         if plan:
             entry.update(read_header(git("show", f"{branch}:{plan}", cwd=root)))
-            entry["unfinished"] = entry.get("status") != "done" or entry.get("pr") == "pending"
+            pr, ci = entry.get("pr"), entry.get("ci")
+            awaiting_ci = bool(pr and pr.startswith("http") and ci in (None, "", "pending"))
+            entry["unfinished"] = entry.get("status") != "done" or pr == "pending" or awaiting_ci
         else:
             entry["unfinished"] = True
         path = registered.get(branch)

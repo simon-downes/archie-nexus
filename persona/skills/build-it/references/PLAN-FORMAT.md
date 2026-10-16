@@ -109,7 +109,7 @@ Out of scope: <explicit exclusions>
 
 ## Review
 
-- Plan review: <passes, and how the findings were resolved>
+- Plan review: <number of review passes, and how the findings were resolved>
 - Code review: <roles run (and why `risk` was skipped), rounds, findings fixed, each
   rejection with its reason>
 - Merge risk: <level>: <failure path and what limits it>
@@ -119,7 +119,7 @@ Out of scope: <explicit exclusions>
 <Filled at the end: what was delivered, verification evidence, what was not verified.>
 
 PR: <pending | URL | no remote | no change | the error>
-CI: <passed | none | still running after 20 minutes | failing check, cause, what was done>
+CI: <pending | passed | none | still running after 20 minutes | failing check, cause, what was done>
 
 ## Follow-ups
 

@@ -46,8 +46,8 @@ written before code, kept true during it, and describing the result at the end.
 - **Keep the plan true.** Edit it to describe what is actually being built. Log a
   deviation only when it changes scope, behaviour or a recorded decision.
 - **Scale depth; keep the gates.** A small change gets a short plan, one milestone and
-  one reviewer. Every build still gets a plan, a plan review, a code review, full checks
-  and a PR.
+  usually one reviewer. Every build still gets a plan, a plan review, a code review,
+  full checks and a PR.
 - **Done means verified.** A step is done when you saw its check pass. Report anything
   else as not verified.
 
@@ -131,10 +131,11 @@ Set the plan's `Status` as each stage begins: `planning`, `building`, `reviewing
 1. **Complete the plan** per `references/PLAN-FORMAT.md`, meeting its Plan rules, and
    commit it alone.
 2. **Plan review.** Spawn one reviewer (see Reviewers below) with
-   `references/PLAN-REVIEW.md`. Check each finding against the plan and the code, fix
-   every one you agree with at any severity, and record how each was resolved in the
-   plan's Review section. Run a second pass only if you fixed a ❌; stop after two, and
-   put anything unresolved under Risks.
+   `references/PLAN-REVIEW.md`. Check each finding against the plan and the code, and
+   reject it when the reviewer is wrong or missed context. Fix every one you agree with
+   at any severity, and record how each was resolved, rejections with their reason, in
+   the plan's Review section. Run a second pass only if you fixed a ❌; stop after two,
+   and put anything unresolved under Risks.
 3. Set `Status: building` and commit. Deviations are logged from here on.
 
 ## 3. Build and verify
@@ -174,14 +175,16 @@ Set `Status: reviewing` and commit.
    For a change that traces to no requirement, remove it, or add the requirement it
    serves and log a deviation.
 4. **Fix everything you agree with.** Treat each finding as a claim: read the cited code.
-   Agree only when the change introduced the problem, its trigger is realistic and
-   reachable, and its fix stays in scope. Reject a finding when the reviewer is wrong,
-   missed context, or the problem is already handled another way.
-   - Fix every finding you agree with, at any severity. ℹ️ findings count: duplicated
-     logic that can drift, dead code and stale docs are cheap now and costly later.
+   Agree only when the change introduced the problem or made it materially worse, and
+   (for ❌ and ⚠️) its trigger is realistic and reachable. Reject a finding when the
+   reviewer is wrong, missed context, or the problem is already handled another way.
+   - Fix every finding you agree with, at any severity, when its fix stays in scope.
+     ℹ️ findings count: duplicated logic that can drift, dead code and stale docs are
+     cheap now and costly later.
    - Answer each ❓; fix the code or plan if the answer shows a problem.
-   - Send valid out-of-scope findings to Follow-ups. Record the resolutions, and each
-     rejection with its reason, in the plan's Review section.
+   - Send a finding you agree with but whose fix is out of scope to Follow-ups, unfixed.
+     Record the resolutions, and each rejection with its reason, in the plan's Review
+     section.
    - Re-run checks and commit. Run a second round only for an agreed ❌, with the role
      that raised it. Stop after two rounds, and put what remains under Risks.
 5. **Rate merge risk** by the worst failure the change can still cause, not by the number
@@ -193,14 +196,16 @@ Set `Status: reviewing` and commit.
      many users.
    - **Severe:** a reachable path to an outage, data loss or a security exposure.
 6. **Browser evidence**: if the change has a result a user sees in a browser, follow the
-   Browser evidence section of `references/PR-BODY.md`.
-7. **Close the plan.** Fill its Outcome with `PR: pending`, set `Status: done`,
-   `git mv` it into `<plans_dir>/done/`, and commit.
+   Browser evidence section of `references/PR-BODY.md`. If the flow fails, fix it, re-run
+   the checks and commit; if the fix is more than a few lines, run the `general` reviewer
+   on it, within the two-round limit.
+7. **Close the plan.** Fill its Outcome with `PR: pending` and `CI: pending`, set
+   `Status: done`, `git mv` it into `<plans_dir>/done/`, and commit.
 8. **Open the PR.** Write the title and body per `references/PR-BODY.md`, saving the body
    to a file outside the worktree. Run `pr.py open --worktree <wt> --title "<title>"
    --body-file <file> [--attach '<path>#<alt>' ...]`.
    - Put the URL, or the outcome (`no remote`, `no change`, or the error), on the plan's
-     `PR:` line. On an error, don't retry another way.
+     `PR:` line. With no URL, set `CI: none`. On an error, don't retry another way.
    - Record `warnings` and `mismatches` under Risks. If a warning says the PR includes
      unreviewed commits, add it to the PR body and run `open` again.
    - Commit the plan, and run `pr.py push` if a push has already succeeded.
@@ -230,7 +235,7 @@ Then continue from the earliest incomplete step:
 - `building`: the first milestone not done.
 - `reviewing`: stage 4 step 1.
 - `done` with `PR: pending`: stage 4 step 8.
-- `done` with a PR URL but no recorded `CI:` result: stage 4 step 9.
+- `done` with a PR URL and `CI: pending` or no `CI:` line: stage 4 step 9.
 
 Plans from before this version may say `interviewing` (treat it as `planning`) or
 `implementing` (treat it as `building`).

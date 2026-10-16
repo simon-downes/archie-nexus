@@ -85,4 +85,5 @@ Testing section in one line.
    Evidence section, say what each artifact proves.
 
 Never present a failed attempt as proof. If the flow doesn't behave as the plan says, that
-is a bug: treat it as a ❌ review finding and fix it before closing the plan.
+is a bug: fix it as stage 4 step 6 of the skill describes, then capture the evidence
+again.

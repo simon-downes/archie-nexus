@@ -43,8 +43,6 @@ check them.
 ```
 ## Plan review: <plan title>
 
-Verdict: ✅ Clean | ⚠️ Findings | ❌ Significant gaps
-
 ### <Check name>
 - ❌ **<Location>**: <finding, quoting the plan>
 - ⚠️ **<Location>**: <finding>
@@ -57,5 +55,6 @@ Verdict: ✅ Clean | ⚠️ Findings | ❌ Significant gaps
 - ⚠️ Concern: ambiguity or a probable problem.
 - ℹ️ Note: a smaller improvement to this plan. Report every one; the author fixes each
   they agree with.
-- Report only checks with findings, one finding per problem. If there are none, write
-  `Verdict: ✅ Clean` and one sentence on what you verified.
+- Report only checks with findings, one finding per problem. Don't give a verdict or say
+  whether the plan is ready: the author decides. If there are none, write "No findings."
+  and one sentence on what you verified.
