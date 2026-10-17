@@ -42,6 +42,7 @@ _ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     for method, pattern in (
         ("GET", r"/api/v1/query"),
         ("GET", r"/api/v1/search"),
+        ("GET", r"/api/v1/metrics"),
         ("GET", rf"/api/v1/metrics/{METRIC}"),
         ("GET", rf"/api/v2/metrics/{METRIC}/all-tags"),
         ("GET", rf"/api/v2/metrics/{METRIC}/assets"),

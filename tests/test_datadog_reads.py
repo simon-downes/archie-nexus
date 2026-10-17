@@ -129,6 +129,79 @@ async def test_search_metrics_limit_validation(dd_fake, limit):
     assert client.calls == []
 
 
+LIST = ("GET", "/api/v1/metrics")
+
+
+async def test_search_metrics_by_tag_lists_filters_and_sorts(dd_fake):
+    client = dd_fake(
+        {LIST: {"metrics": ["aws.mq.b", "aws.MQ.a", "system.cpu", 3, "aws.mq.c"]}}, "metrics"
+    )
+    assert await search_metrics("mq", tag=" queue:* ", limit=2) == ["aws.MQ.a", "aws.mq.b"]
+    method, path, params, _ = client.calls[0]
+    assert (method, path) == LIST
+    assert params == {"from": 0, "tag_filter": "queue:*"}
+
+
+@pytest.mark.parametrize("query", [None, "", "  "])
+async def test_search_metrics_filtered_blank_query_means_no_name_filter(dd_fake, query):
+    dd_fake({LIST: {"metrics": ["b", "a"]}}, "metrics")
+    assert await search_metrics(query, tag="queue:*") == ["a", "b"]
+
+
+async def test_search_metrics_active_within_sends_from_without_tag_filter(dd_fake):
+    client = dd_fake({LIST: {"metrics": ["x"]}}, "metrics")
+    before = datetime.now(UTC).timestamp()
+    assert await search_metrics(active_within="2h") == ["x"]
+    params = client.calls[0][2]
+    assert "tag_filter" not in params
+    assert before - 7200 - 5 <= params["from"] <= before - 7200 + 5
+
+
+async def test_search_metrics_tag_and_active_within_together(dd_fake):
+    client = dd_fake({LIST: {"metrics": []}}, "metrics")
+    assert await search_metrics(tag="env:prod,service:api", active_within="30d") == []
+    params = client.calls[0][2]
+    assert params["tag_filter"] == "env:prod,service:api" and params["from"] > 0
+
+
+@pytest.mark.parametrize("data", [{"metrics": None}, {}])
+async def test_search_metrics_filtered_no_matches_returns_empty(dd_fake, data):
+    dd_fake({LIST: data}, "metrics")
+    assert await search_metrics(tag="bogus") == []
+
+
+@pytest.mark.parametrize("data", [[], {"metrics": "x"}])
+async def test_search_metrics_filtered_malformed_response(dd_fake, data):
+    dd_fake({LIST: data}, "metrics")
+    with pytest.raises(DatadogResponseError):
+        await search_metrics(tag="queue:*")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"query": "  "},
+        {"tag": ""},
+        {"tag": "   "},
+        {"tag": "queue:* env:prod"},
+        {"tag": "a" * 501},
+        {"tag": 5},
+        {"active_within": "2"},
+        {"active_within": "1w"},
+        {"active_within": "366d"},
+        {"active_within": "2026-01-01T00:00:00"},
+        {"active_within": 60},
+        {"query": "x" * 2001, "tag": "a:b"},
+    ],
+)
+async def test_search_metrics_rejects_bad_filters(dd_fake, kwargs):
+    client = dd_fake({}, "metrics")
+    with pytest.raises(DatadogInputError):
+        await search_metrics(**kwargs)
+    assert client.calls == []
+
+
 METRIC = "aws.amazonmq.message_count"
 META = ("GET", f"/api/v1/metrics/{METRIC}")
 ALL_TAGS = ("GET", f"/api/v2/metrics/{METRIC}/all-tags")

@@ -41,6 +41,7 @@ description: >
 |---|---|
 | A metric's values over time | `datadog.query_metrics` |
 | Find metric names | `datadog.search_metrics` |
+| Metrics that carry a tag (for example every metric with a `queue` tag), or that reported recently | `datadog.search_metrics(tag=..., active_within=...)` |
 | A metric's tag keys and values, and the dashboards and monitors that use it | `datadog.describe_metric` |
 | Error logs or log lines for a service | `datadog.search_logs` |
 | Slow or failing requests (APM spans) | `datadog.search_spans` |
@@ -106,11 +107,22 @@ Runs a metric query and returns:
 
 At most 20 series are returned. Each keeps its **last** 300 points; `point_count` is the full count. A point value can be `null`. A query that Datadog cannot parse raises `DatadogRequestRejectedError` with Datadog's message.
 
-### `datadog.search_metrics(query, limit=50)`
+### `datadog.search_metrics(query=None, limit=50, tag=None, active_within=None)`
 
-Returns metric names that contain `query`, for example `["aws.ec2.cpuutilization", ...]`. Returns `[]` when nothing matches.
+Returns metric names, for example `["aws.ec2.cpuutilization", ...]`. Returns `[]` when nothing matches.
 
-Matching is a substring match on the metric **name** only, and it does not search tags or integration names. A search for `rabbitmq` finds nothing if RabbitMQ metrics are named `aws.amazonmq.*`. If a search returns `[]`, try the provider prefix (`aws.amazonmq`), a single name fragment (`message_count`), or read the query from an existing dashboard with `datadog.get_dashboard`.
+**By name** (only `query`): a substring match on the metric **name**, which does not search tags or integration names. `query` is required in this form. A search for `rabbitmq` finds nothing if RabbitMQ metrics are named `aws.amazonmq.*`. If a name search returns `[]`, try the provider prefix (`aws.amazonmq`) or a single name fragment (`message_count`), or filter by tag instead.
+
+**By tag or recency** (`tag` or `active_within` set):
+
+- `tag` keeps metrics that carry a tag: `queue:*` (any value of `queue`), `queue:audit*` (a value prefix), `queue:audit-log`, or several tags separated by commas (`environment:production,queue:*`). It cannot match a bare word across all tags (`*rabbitmq*` finds nothing), so you need to know the tag key. Get keys from `describe_metric` on a related metric.
+- `active_within` (`15m`, `2h`, `30d`, at most `365d`) keeps metrics that reported within that age. Without it, a `tag` search includes quiet metrics too.
+- `query` is optional here and keeps names that contain it (case-insensitive). Results are sorted by name.
+
+```python
+names = await datadog.search_metrics(tag="queue:*", active_within="1d")
+names = await datadog.search_metrics("message_count", tag="environment:production")
+```
 
 ### `datadog.describe_metric(name, max_values=20)`
 

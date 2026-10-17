@@ -245,7 +245,7 @@ time. It returns references that hand off to the existing functions.
     including `queue` (48 values), 4 dashboards including "RabbitMQ Queue Worker Dashboard",
     and 2 monitors, in 2,210 characters.
 
-### [ ] M2 — search_metrics tag and active_within
+### [x] M2 — search_metrics tag and active_within
 
 - **Approach:** Add `GET /api/v1/metrics` to the allowlist, plus `validation.tag_filter` and
   `validation.age`. Branch in `search_metrics` per R2. Update its `SKILL.md` section.
@@ -254,7 +254,14 @@ time. It returns references that hand off to the existing functions.
 - **Deliverable:** `search_metrics(tag="queue:*")` returns the `aws.amazonmq.*` names.
 - **Verify:** `uv run pytest -q tests/test_datadog_*` passes. A live `search_metrics(tag="queue:*", active_within="1d")` returns
   `aws.amazonmq.*` names.
-- **Outcome:**
+- **Outcome:** `search_metrics` now takes `tag` and `active_within`, which use
+  `GET /api/v1/metrics` with `from` and an optional `tag_filter`. I split out
+  `search_metric_names` and `list_metric_names` helpers so `search` can reuse them. The
+  allowlist-drive test makes an extra filtered call so the new path is covered.
+  - `uv run pytest -q`: 1616 passed. Ruff check and format are clean.
+  - Live, `search_metrics(tag="queue:*", active_within="1d", limit=5)` returned 5
+    `aws.amazonmq.*` names. `("message_count", tag="environment:production")` returned the 5
+    message_count variants. A name-only `"rabbitmq"` still returns `[]`.
 
 ### [ ] M3 — search() across sources
 

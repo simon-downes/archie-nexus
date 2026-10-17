@@ -390,6 +390,7 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     bodies = {
         "/api/v1/query": {"series": []},
         "/api/v1/search": {"results": {"metrics": []}},
+        "/api/v1/metrics": {"metrics": []},
         "/api/v1/metrics/x": {"type": "gauge"},
         "/api/v2/metrics/x/all-tags": {"data": {"attributes": {"tags": []}}},
         "/api/v2/metrics/x/assets": {"included": []},
@@ -438,6 +439,8 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     assert set(calls) == PUBLIC
     for name, args in calls.items():
         await getattr(package, name)(*args)
+    await package.search_metrics(tag="queue:*", active_within="1d")
+    assert ("GET", "/api/v1/metrics") in seen
     assert seen
     assert all(allowed(method, path) for method, path in seen)
     assert all(method != "DELETE" for method, _ in seen)
