@@ -36,13 +36,20 @@ SITES = frozenset(
 
 _MONITOR = r"[1-9][0-9]{0,18}"
 DASHBOARD_ID = r"[a-z0-9]{3}-[a-z0-9]{3}-[a-z0-9]{3}"
+METRIC = r"[A-Za-z][A-Za-z0-9_.]{0,199}"
 _ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
         ("GET", r"/api/v1/query"),
         ("GET", r"/api/v1/search"),
+        ("GET", r"/api/v1/metrics"),
+        ("GET", rf"/api/v1/metrics/{METRIC}"),
+        ("GET", rf"/api/v2/metrics/{METRIC}/all-tags"),
+        ("GET", rf"/api/v2/metrics/{METRIC}/assets"),
         ("POST", r"/api/v2/logs/events/search"),
+        ("POST", r"/api/v2/logs/analytics/aggregate"),
         ("POST", r"/api/v2/spans/events/search"),
+        ("POST", r"/api/v2/spans/analytics/aggregate"),
         ("GET", r"/api/v2/events"),
         ("GET", r"/api/v1/monitor/search"),
         ("GET", rf"/api/v1/monitor/{_MONITOR}"),

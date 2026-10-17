@@ -7,6 +7,7 @@ from archie_agent.exec.tools import get_all_tools
 from archie_agent.exec.tools.datadog.catalog import list_catalog_entities, list_teams
 from archie_agent.exec.tools.datadog.client import (
     DatadogInputError,
+    DatadogNotFoundError,
     DatadogRateLimitError,
     DatadogRequestRejectedError,
     DatadogResponseError,
@@ -14,7 +15,7 @@ from archie_agent.exec.tools.datadog.client import (
 from archie_agent.exec.tools.datadog.dashboards import get_dashboard, list_dashboards
 from archie_agent.exec.tools.datadog.events import list_events
 from archie_agent.exec.tools.datadog.logs import search_logs
-from archie_agent.exec.tools.datadog.metrics import query_metrics, search_metrics
+from archie_agent.exec.tools.datadog.metrics import describe_metric, query_metrics, search_metrics
 from archie_agent.exec.tools.datadog.monitors import search_monitors
 from archie_agent.exec.tools.datadog.traces import search_spans
 from archie_agent.exec.tools.datadog.validation import time_window
@@ -125,6 +126,215 @@ async def test_search_metrics_limit_validation(dd_fake, limit):
     client = dd_fake({}, "metrics")
     with pytest.raises(DatadogInputError):
         await search_metrics("a", limit=limit)
+    assert client.calls == []
+
+
+LIST = ("GET", "/api/v1/metrics")
+
+
+async def test_search_metrics_by_tag_lists_filters_and_sorts(dd_fake):
+    client = dd_fake(
+        {LIST: {"metrics": ["aws.mq.b", "aws.MQ.a", "system.cpu", 3, "aws.mq.c"]}}, "metrics"
+    )
+    assert await search_metrics("mq", tag=" queue:* ", limit=2) == ["aws.MQ.a", "aws.mq.b"]
+    method, path, params, _ = client.calls[0]
+    assert (method, path) == LIST
+    assert params == {"from": 0, "tag_filter": "queue:*"}
+
+
+@pytest.mark.parametrize("query", [None, "", "  "])
+async def test_search_metrics_filtered_blank_query_means_no_name_filter(dd_fake, query):
+    dd_fake({LIST: {"metrics": ["b", "a"]}}, "metrics")
+    assert await search_metrics(query, tag="queue:*") == ["a", "b"]
+
+
+async def test_search_metrics_active_within_sends_from_without_tag_filter(dd_fake):
+    client = dd_fake({LIST: {"metrics": ["x"]}}, "metrics")
+    before = datetime.now(UTC).timestamp()
+    assert await search_metrics(active_within="2h") == ["x"]
+    params = client.calls[0][2]
+    assert "tag_filter" not in params
+    assert before - 7200 - 5 <= params["from"] <= before - 7200 + 5
+
+
+async def test_search_metrics_tag_and_active_within_together(dd_fake):
+    client = dd_fake({LIST: {"metrics": []}}, "metrics")
+    assert await search_metrics(tag="env:prod,service:api", active_within="30d") == []
+    params = client.calls[0][2]
+    assert params["tag_filter"] == "env:prod,service:api" and params["from"] > 0
+
+
+@pytest.mark.parametrize("data", [{"metrics": None}, {}])
+async def test_search_metrics_filtered_no_matches_returns_empty(dd_fake, data):
+    dd_fake({LIST: data}, "metrics")
+    assert await search_metrics(tag="bogus") == []
+
+
+@pytest.mark.parametrize("data", [[], {"metrics": "x"}])
+async def test_search_metrics_filtered_malformed_response(dd_fake, data):
+    dd_fake({LIST: data}, "metrics")
+    with pytest.raises(DatadogResponseError):
+        await search_metrics(tag="queue:*")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"query": "  "},
+        {"tag": ""},
+        {"tag": "   "},
+        {"tag": "queue:* env:prod"},
+        {"tag": "a" * 501},
+        {"tag": 5},
+        {"active_within": "2"},
+        {"active_within": "1w"},
+        {"active_within": "366d"},
+        {"active_within": "2026-01-01T00:00:00"},
+        {"active_within": 60},
+        {"query": "x" * 2001, "tag": "a:b"},
+    ],
+)
+async def test_search_metrics_rejects_bad_filters(dd_fake, kwargs):
+    client = dd_fake({}, "metrics")
+    with pytest.raises(DatadogInputError):
+        await search_metrics(**kwargs)
+    assert client.calls == []
+
+
+METRIC = "aws.amazonmq.message_count"
+META = ("GET", f"/api/v1/metrics/{METRIC}")
+ALL_TAGS = ("GET", f"/api/v2/metrics/{METRIC}/all-tags")
+ASSETS = ("GET", f"/api/v2/metrics/{METRIC}/assets")
+META_BODY = {
+    "description": "The total number of messages stored on the broker.",
+    "short_name": "message_count",
+    "type": "gauge",
+    "unit": "message",
+    "per_unit": None,
+    "integration": None,
+}
+TAGS_BODY = {
+    "data": {
+        "id": METRIC,
+        "type": "metrics",
+        "attributes": {
+            "tags": [
+                "queue:b",
+                "queue:a",
+                "queue:a",
+                "environment:production",
+                "bare",
+                7,
+                "",
+            ]
+        },
+    }
+}
+ASSETS_BODY = {
+    "data": {"id": METRIC, "type": "metrics", "relationships": {}},
+    "included": [
+        {"id": "wy8-ypb-v2r", "type": "dashboards", "attributes": {"title": "RabbitMQ"}},
+        {"id": "125239081", "type": "monitors", "attributes": {"title": "Queue high"}},
+        {"id": "n1", "type": "notebooks", "attributes": {"title": "ignored"}},
+        "junk",
+    ],
+}
+
+
+async def test_describe_metric_combines_metadata_tags_and_assets(dd_fake):
+    client = dd_fake({META: META_BODY, ALL_TAGS: TAGS_BODY, ASSETS: ASSETS_BODY}, "metrics")
+    result = await describe_metric(f"  {METRIC} ")
+    assert [call[1] for call in client.calls] == [META[1], ALL_TAGS[1], ASSETS[1]]
+    assert result == {
+        "name": METRIC,
+        "type": "gauge",
+        "unit": "message",
+        "per_unit": None,
+        "description": "The total number of messages stored on the broker.",
+        "integration": None,
+        "tags": {
+            "bare": {"values": [], "value_count": 0},
+            "environment": {"values": ["production"], "value_count": 1},
+            "queue": {"values": ["a", "b"], "value_count": 2},
+        },
+        "tag_count": 4,
+        "dashboards": [{"id": "wy8-ypb-v2r", "title": "RabbitMQ"}],
+        "monitors": [{"id": "125239081", "title": "Queue high"}],
+        "truncated": False,
+    }
+
+
+async def test_describe_metric_caps_values_keys_and_assets(dd_fake):
+    tags = [f"queue:q{i:02d}" for i in range(30)] + [f"k{i:03d}:v" for i in range(120)]
+    included = [{"id": f"d{i}", "type": "dashboards", "attributes": {}} for i in range(60)]
+    dd_fake(
+        {
+            META: META_BODY,
+            ALL_TAGS: {"data": {"attributes": {"tags": tags}}},
+            ASSETS: {"included": included},
+        },
+        "metrics",
+    )
+    result = await describe_metric(METRIC, max_values=5)
+    assert len(result["tags"]) == 100
+    assert result["tag_count"] == 150
+    assert len(result["dashboards"]) == 50
+    assert result["truncated"] is True
+    dd_fake(
+        {META: META_BODY, ALL_TAGS: {"data": {"attributes": {"tags": tags[:30]}}}, ASSETS: {}},
+        "metrics",
+    )
+    result = await describe_metric(METRIC, max_values=5)
+    assert result["tags"]["queue"] == {
+        "values": ["q00", "q01", "q02", "q03", "q04"],
+        "value_count": 30,
+    }
+    assert result["truncated"] is True
+    assert result["dashboards"] == [] and result["monitors"] == []
+
+
+async def test_describe_metric_unknown_metric_raises_not_found(dd_fake):
+    client = dd_fake({META: DatadogNotFoundError("Datadog resource was not found")}, "metrics")
+    with pytest.raises(DatadogNotFoundError):
+        await describe_metric(METRIC)
+    assert len(client.calls) == 1
+
+
+async def test_describe_metric_without_tag_data_returns_empty_tags(dd_fake):
+    dd_fake(
+        {
+            META: META_BODY,
+            ALL_TAGS: DatadogNotFoundError("Datadog resource was not found"),
+            ASSETS: ASSETS_BODY,
+        },
+        "metrics",
+    )
+    result = await describe_metric(METRIC)
+    assert result["tags"] == {} and result["tag_count"] == 0
+    assert result["dashboards"] == [{"id": "wy8-ypb-v2r", "title": "RabbitMQ"}]
+
+
+async def test_describe_metric_malformed_metadata(dd_fake):
+    dd_fake({META: [], ALL_TAGS: TAGS_BODY, ASSETS: ASSETS_BODY}, "metrics")
+    with pytest.raises(DatadogResponseError):
+        await describe_metric(METRIC)
+
+
+async def test_describe_metric_bad_max_values_names_the_argument(dd_fake):
+    dd_fake({}, "metrics")
+    with pytest.raises(DatadogInputError, match="max_values"):
+        await describe_metric(METRIC, max_values=101)
+
+
+@pytest.mark.parametrize(
+    ("name", "max_values"),
+    [("a/b", 20), ("1abc", 20), ("", 20), ("a..b/../x", 20), ("a" * 201, 20), (5, 20), ("a", 0)],
+)
+async def test_describe_metric_rejects_bad_input(dd_fake, name, max_values):
+    client = dd_fake({}, "metrics")
+    with pytest.raises(DatadogInputError):
+        await describe_metric(name, max_values=max_values)
     assert client.calls == []
 
 
@@ -372,6 +582,7 @@ async def test_list_events_blank_query_is_no_filter(dd_fake):
 
 
 READS = {
+    "describe_metric",
     "get_dashboard",
     "get_monitor",
     "list_catalog_entities",
@@ -379,6 +590,7 @@ READS = {
     "list_events",
     "list_teams",
     "query_metrics",
+    "search",
     "search_logs",
     "search_metrics",
     "search_monitors",

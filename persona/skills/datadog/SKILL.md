@@ -2,8 +2,9 @@
 name: datadog
 description: >
   Use for Datadog investigation and monitor upkeep through the exec datadog namespace:
-  metric queries and metric search, log and span search, the event stream, monitor search
-  and details, dashboards, the software catalog and teams, and creating or updating
+  discovery search across monitors, dashboards, metrics and services, metric queries,
+  metric search and description (tags, where used), log and span search, the event stream,
+  monitor search and details, dashboards, the software catalog and teams, and creating or updating
   monitors that this tool owns (tagged managedby:archie). Not for deleting anything,
   dashboard edits, downtimes or muting, SLOs, posting events, credentials, or raw Datadog
   API calls.
@@ -39,8 +40,11 @@ description: >
 
 | Need | Function |
 |---|---|
+| Find anything about a term when you don't know what exists | `datadog.search` |
 | A metric's values over time | `datadog.query_metrics` |
 | Find metric names | `datadog.search_metrics` |
+| Metrics that carry a tag (for example every metric with a `queue` tag), or that reported recently | `datadog.search_metrics(tag=..., active_within=...)` |
+| A metric's tag keys and values, and the dashboards and monitors that use it | `datadog.describe_metric` |
 | Error logs or log lines for a service | `datadog.search_logs` |
 | Slow or failing requests (APM spans) | `datadog.search_spans` |
 | Deploys, Kubernetes changes, integration and alert events | `datadog.list_events` |
@@ -52,13 +56,31 @@ description: >
 | Services, APIs and other catalog entities | `datadog.list_catalog_entities` |
 | Datadog teams | `datadog.list_teams` |
 
-For an investigation, start with `search_monitors("status:alert")`. Then use `query_metrics` on the monitor's query, `search_logs` and `search_spans` for the service in the same window, and `list_events` for deploys or changes just before the problem started.
+For an investigation, start with `search_monitors("status:alert")`. Then use `query_metrics` on the monitor's query, `search_logs` and `search_spans` for the service in the same window, and `list_events` for deploys or changes just before the problem started. If you only have a name or a technology ("rabbitmq", "payments"), start with `search` instead; see "Discovering what exists".
+
+## Discovering what exists
+
+Use this when you don't know the metric names, tag keys or services yet.
+
+1. Run `datadog.search("<term>")`. It returns monitors, dashboards, metrics and the services that log the term, each with a `handoff` naming the function to call next.
+2. If it returns metrics, call `describe_metric` on the one or two that look right. Use its tag keys and values to build the query, and its dashboards and monitors to see working queries.
+3. If it returns no metrics but does return monitors or dashboards, open one with `get_monitor` or `get_dashboard` and reuse its query. Metric names often differ from the product name: RabbitMQ on Amazon MQ is `aws.amazonmq.*`.
+4. If you know a tag key, list the metrics that carry it with `search_metrics(tag="<key>:*")`, or call `search("<key>:<value>")`.
+5. Query with `query_metrics`, grouping by a tag (`by {queue}`) to see its live values. Narrow the query one filter at a time. An empty result means the metric, a tag or the window is wrong, but it doesn't say which.
+
+```python
+async def main():
+    found = await datadog.search("rabbitmq", limit=5)
+    metrics = [r["id"] for r in found["results"] if r["type"] == "metric"]
+    detail = await datadog.describe_metric(metrics[0], max_values=10) if metrics else None
+    return {"skipped": found["skipped"], "metrics": metrics, "detail": detail}
+```
 
 ## Shared input rules
 
 - **Query strings** use Datadog's own syntax, the same as in the Datadog UI: metric queries (`avg:system.cpu.user{env:prod} by {host}`), log and span search (`service:api status:error @http.status_code:502`), event search, and monitor search (`status:alert tag:service:api`). They are 1–2,000 characters. Optional queries may be `None` or blank, meaning no filter.
 - **Times** (`start`, `end`): an ISO-8601 datetime (naive means UTC), or a relative age `<n>m`, `<n>h` or `<n>d` meaning that long ago. `start` defaults to `1h` and `end` to now. `end` must be after `start`, and the window can be at most 31 days. Output timestamps are UTC strings.
-- **Limit:** an integer `1..100` (`bool` is invalid).
+- **Limit:** an integer `1..100` (`bool` is invalid). For `search`, `1..50` per source.
 - **Monitor ID:** a positive integer. **Dashboard ID:** the `abc-def-ghi` form from `list_dashboards` or a dashboard URL.
 - **Sort** (logs, spans): `newest` (default) or `oldest`.
 - Invalid input raises `DatadogInputError` before any request.
@@ -67,13 +89,47 @@ For an investigation, start with `search_monitors("status:alert")`. Then use `qu
 
 Datadog limits each endpoint separately, and some limits are tight:
 
-- `search_spans`: 5 calls per minute. Make one well-filtered call, not a loop.
+- `search_spans`: 5 calls per minute. Make one well-filtered call, not a loop. `search(sources=[..., "spans"])` uses a span endpoint with a similarly tight limit, which is why spans are not searched by default.
 - `search_logs`: 10 calls per 10 seconds.
+- `describe_metric` makes three requests per call. Describe the metrics you need, not every search result.
 - Other reads have higher limits, but don't call them in tight loops.
 
 Nothing retries automatically. On `DatadogRateLimitError`, wait `retry_after_seconds` before one retry.
 
 ## Functions
+
+### `datadog.search(query, sources=None, start="1h", limit=10)`
+
+Searches several sources for one term at the same time, and returns references to follow up with other functions:
+
+```json
+{
+  "results": [
+    {"type": "monitor", "id": 123, "title": "RabbitMQ high CPU", "source": "monitors", "matched_on": "monitor search", "count": null, "handoff": "datadog.get_monitor"},
+    {"type": "dashboard", "id": "abc-def-ghi", "title": "RabbitMQ Queue Worker Dashboard", "source": "dashboards", "matched_on": "title", "count": null, "handoff": "datadog.get_dashboard"},
+    {"type": "metric", "id": "aws.amazonmq.system_cpu_utilization", "title": "aws.amazonmq.system_cpu_utilization", "source": "monitors", "matched_on": "monitor 123", "count": null, "handoff": "datadog.describe_metric"},
+    {"type": "service", "id": "core-worker", "title": "core-worker", "source": "logs", "matched_on": "log content", "count": 3, "handoff": "datadog.search_logs"}
+  ],
+  "skipped": {"spans": "DatadogRateLimitError: Datadog rate limit reached; retry after 30 seconds"}
+}
+```
+
+What each source matches:
+
+| Source | Matches | Result |
+|---|---|---|
+| `monitors` | Monitor search: name, query and tags | `monitor`. Metric names used in metric-monitor queries also come back as `metric` results with `matched_on: "monitor <id>"`, and this is often the only route from a product name to its metrics. |
+| `dashboards` | Title or description (case-insensitive; widgets are not searched) | `dashboard`, with `matched_on` `title` or `description` |
+| `metrics` | Metric names containing the term. A single `key:value` term (such as `queue:audit*`) instead matches metrics that carry that tag. Any other term containing `:` finds no metrics. | `metric`, with `matched_on` `name` or `tag` |
+| `logs` | Log search over `start` to now, grouped by service | `service`, with `count` = matching log events. No log content is returned. |
+| `spans` | Span search over `start` to now, grouped by service. A single word also matches `service` and `resource_name`. Not searched by default. | `service`, with `count` = matching spans |
+
+- `sources`: a list from `monitors`, `dashboards`, `metrics`, `logs` and `spans`. The default is every source except `spans`.
+- `query` uses each source's own syntax, so a plain word is the most portable choice. Logs get the query as given.
+- `limit` applies to each source separately (1–50). Metric results can be up to twice `limit`: name and tag matches, plus metrics taken from monitor queries. A metric found more than once appears once.
+- `start` only affects `logs` and `spans`.
+- A source that fails is listed in `skipped` with its error, and the other results are still returned. If every source fails, the first source's error is raised. Authentication, configuration and policy errors are always raised.
+- Each source has a 25-second limit. A slow source is skipped with `DatadogTransportError`.
 
 ### `datadog.query_metrics(query, start="1h", end=None)`
 
@@ -105,11 +161,49 @@ Runs a metric query and returns:
 
 At most 20 series are returned. Each keeps its **last** 300 points; `point_count` is the full count. A point value can be `null`. A query that Datadog cannot parse raises `DatadogRequestRejectedError` with Datadog's message.
 
-### `datadog.search_metrics(query, limit=50)`
+### `datadog.search_metrics(query=None, limit=50, tag=None, active_within=None)`
 
-Returns metric names that contain `query`, for example `["aws.ec2.cpuutilization", ...]`. Returns `[]` when nothing matches.
+Returns metric names, for example `["aws.ec2.cpuutilization", ...]`. Returns `[]` when nothing matches.
 
-Matching is a substring match on the metric **name** only, and it does not search tags or integration names. A search for `rabbitmq` finds nothing if RabbitMQ metrics are named `aws.amazonmq.*`. If a search returns `[]`, try the provider prefix (`aws.amazonmq`), a single name fragment (`message_count`), or read the query from an existing dashboard with `datadog.get_dashboard`.
+**By name** (only `query`): a substring match on the metric **name**, which does not search tags or integration names. `query` is required in this form. A search for `rabbitmq` finds nothing if RabbitMQ metrics are named `aws.amazonmq.*`. If a name search returns `[]`, try the provider prefix (`aws.amazonmq`) or a single name fragment (`message_count`), or filter by tag instead.
+
+**By tag or recency** (`tag` or `active_within` set):
+
+- `tag` keeps metrics that carry a tag: `queue:*` (any value of `queue`), `queue:audit*` (a value prefix), `queue:audit-log`, or several tags separated by commas (`environment:production,queue:*`). It cannot match a bare word across all tags (`*rabbitmq*` finds nothing), so you need to know the tag key. Get keys from `describe_metric` on a related metric.
+- `active_within` (`15m`, `2h`, `30d`, at most `365d`) keeps metrics that reported within that age. Without it, a `tag` search includes quiet metrics too.
+- `query` is optional here and keeps names that contain it (case-insensitive). Results are sorted by name.
+
+```python
+names = await datadog.search_metrics(tag="queue:*", active_within="1d")
+names = await datadog.search_metrics("message_count", tag="environment:production")
+```
+
+### `datadog.describe_metric(name, max_values=20)`
+
+Describes one metric so you can write a correct query. It makes three requests, so describe the one or two metrics you will use, not every search result.
+
+```json
+{
+  "name": "aws.amazonmq.message_count",
+  "type": "gauge",
+  "unit": "message",
+  "per_unit": null,
+  "description": "The total number of messages stored on the broker.",
+  "integration": null,
+  "tags": {
+    "environment": {"values": ["dev", "production", "staging"], "value_count": 3},
+    "queue": {"values": ["asset-processing", "audit-log", "..."], "value_count": 59}
+  },
+  "tag_count": 111,
+  "dashboards": [{"id": "abc-def-ghi", "title": "RabbitMQ Queue Worker Dashboard"}],
+  "monitors": [{"id": "125239081", "title": "Core Queue Job Count High ({{value}} jobs)"}],
+  "truncated": false
+}
+```
+
+- `tags` maps each tag key to its sorted values, at most `max_values` (1–100) per key and 100 keys. `value_count` is the full number of values for that key, and `tag_count` is the number of distinct tags. A tag with no `:` appears as a key with no values. Use the keys in `{...}` filters and `by {...}` groupings.
+- `dashboards` and `monitors` (at most 50 each) are where the metric is already used. Pass a dashboard `id` to `get_dashboard`, or a monitor `id` (as an integer) to `get_monitor`, to see working queries.
+- `name` is a metric name: a letter, then letters, digits, `_` or `.`. An unknown metric raises `DatadogNotFoundError`. A metric with no tag data returns `tags` as `{}`.
 
 ### `datadog.search_logs(query, start="1h", end=None, limit=20, sort="newest")`
 
@@ -245,7 +339,7 @@ Errors are sanitized and never contain keys. Some carry Datadog's error message,
 - `DatadogRequestRejectedError`: Datadog rejected the query or definition (HTTP 400/422, or a metric query error). Fix it using the message; do not retry unchanged.
 - `DatadogAuthenticationError`: the keys were rejected. Do not retry.
 - `DatadogAuthorizationError`: the application key lacks a permission for this call. Do not retry; report which function failed.
-- `DatadogNotFoundError`: the monitor or dashboard does not exist.
+- `DatadogNotFoundError`: the monitor, dashboard or metric does not exist.
 - `DatadogRateLimitError`: throttled. `retry_after_seconds` is an integer or `None`. Wait at least that long before one retry.
 - `DatadogTransportError`: the network failed or the 60-second call limit expired. Reads are safe to retry once.
 - `DatadogResponseError`: Datadog returned something unexpected. Report it; retry a read at most once. After `update_monitor`, the message says the update was applied; check the monitor with `get_monitor` instead of retrying.

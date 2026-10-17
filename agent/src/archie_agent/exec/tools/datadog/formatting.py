@@ -17,6 +17,8 @@ MAX_TITLE = 500
 MAX_WIDGETS = 100
 MAX_WIDGET_QUERIES = 10
 MAX_WIDGET_QUERY = 500
+MAX_TAG_KEYS = 100
+MAX_ASSETS = 50
 
 
 def text(value: Any, maximum: int = MAX_TEXT) -> tuple[str | None, bool]:
@@ -275,6 +277,67 @@ def dashboard_detail(item: dict[str, Any]) -> dict[str, Any]:
         record["truncated"] or len(widgets) > MAX_WIDGETS or len(variables) > MAX_TAGS
     )
     return record
+
+
+def _grouped_tags(tags: Any, max_values: int) -> tuple[dict[str, dict[str, Any]], int, bool]:
+    """Group ``key:value`` tags by key; a bare tag becomes a key with no values.
+
+    The returned count is the number of distinct tags.
+    """
+    unique = (
+        {tag for tag in tags if isinstance(tag, str) and tag} if isinstance(tags, list) else set()
+    )
+    groups: dict[str, list[str]] = {}
+    for tag in unique:
+        key, _, value = tag.partition(":")
+        values = groups.setdefault(key, [])
+        if value:
+            values.append(value)
+    truncated = len(groups) > MAX_TAG_KEYS
+    result: dict[str, dict[str, Any]] = {}
+    for key in sorted(groups)[:MAX_TAG_KEYS]:
+        values = sorted(groups[key])
+        truncated = truncated or len(values) > max_values
+        result[key] = {"values": values[:max_values], "value_count": len(values)}
+    return result, len(unique), truncated
+
+
+def _assets(assets: Any, kind: str) -> tuple[list[dict[str, Any]], bool]:
+    included = assets.get("included") if isinstance(assets, dict) else None
+    found = []
+    for item in included if isinstance(included, list) else []:
+        if not isinstance(item, dict) or item.get("type") != kind:
+            continue
+        attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+        found.append({"id": item.get("id"), "title": attrs.get("title")})
+    return found[:MAX_ASSETS], len(found) > MAX_ASSETS
+
+
+def metric_description(
+    name: str, meta: Any, tags: Any, assets: Any, max_values: int
+) -> dict[str, Any]:
+    """Combine metric metadata, its tags and the dashboards and monitors that use it."""
+    meta = meta if isinstance(meta, dict) else {}
+    attrs = (tags.get("data") or {}).get("attributes") if isinstance(tags, dict) else None
+    grouped, tag_count, tags_cut = _grouped_tags(
+        attrs.get("tags") if isinstance(attrs, dict) else None, max_values
+    )
+    description, description_cut = text(meta.get("description"), MAX_TITLE)
+    dashboards, dashboards_cut = _assets(assets, "dashboards")
+    monitors, monitors_cut = _assets(assets, "monitors")
+    return {
+        "name": name,
+        "type": meta.get("type"),
+        "unit": meta.get("unit"),
+        "per_unit": meta.get("per_unit"),
+        "description": description,
+        "integration": meta.get("integration"),
+        "tags": grouped,
+        "tag_count": tag_count,
+        "dashboards": dashboards,
+        "monitors": monitors,
+        "truncated": tags_cut or description_cut or dashboards_cut or monitors_cut,
+    }
 
 
 def catalog_entity(item: dict[str, Any]) -> dict[str, Any]:

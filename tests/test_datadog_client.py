@@ -59,6 +59,13 @@ async def test_request_sends_keys_as_headers_to_host():
         ("GET", "/api/v1/monitor/1/../../dashboard"),
         ("GET", "/api/v2/downtime"),
         ("POST", "/api/v1/monitor/1/mute"),
+        ("PUT", "/api/v1/metrics/x"),
+        ("DELETE", "/api/v2/metrics/x/tags"),
+        ("GET", "/api/v1/metrics/a/../b"),
+        ("GET", "/api/v1/metrics/a%2Fb"),
+        ("GET", "/api/v2/metrics/x/tags"),
+        ("GET", "/api/v2/metrics/x/volumes"),
+        ("GET", "/api/v1/metrics/1abc"),
     ],
 )
 async def test_requests_outside_allowlist_are_refused_without_sending(method, path):

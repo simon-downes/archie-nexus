@@ -353,6 +353,7 @@ async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
 
 PUBLIC = {
     "create_monitor",
+    "describe_metric",
     "get_dashboard",
     "get_monitor",
     "list_catalog_entities",
@@ -360,6 +361,7 @@ PUBLIC = {
     "list_events",
     "list_teams",
     "query_metrics",
+    "search",
     "search_logs",
     "search_metrics",
     "search_monitors",
@@ -383,13 +385,20 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     import httpx
     from archie_agent.exec.tools import datadog as package
     from archie_agent.exec.tools.datadog.client import DatadogClient, allowed
+    from archie_agent.exec.tools.datadog.discovery import SOURCES
 
     policy(WRITE)
     seen = []
     bodies = {
         "/api/v1/query": {"series": []},
         "/api/v1/search": {"results": {"metrics": []}},
+        "/api/v1/metrics": {"metrics": []},
+        "/api/v1/metrics/x": {"type": "gauge"},
+        "/api/v2/metrics/x/all-tags": {"data": {"attributes": {"tags": []}}},
+        "/api/v2/metrics/x/assets": {"included": []},
         "/api/v2/logs/events/search": {"data": []},
+        "/api/v2/logs/analytics/aggregate": {"data": {"buckets": []}},
+        "/api/v2/spans/analytics/aggregate": {"data": []},
         "/api/v2/spans/events/search": {"data": []},
         "/api/v2/events": {"data": []},
         "/api/v1/monitor/search": {"monitors": []},
@@ -410,13 +419,15 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     async def factory():
         yield DatadogClient("k", "a", "https://api.datadoghq.eu", httpx.MockTransport(handler))
 
-    for module in ("metrics", "logs", "traces", "events", "monitors", "dashboards", "catalog"):
+    modules = ("metrics", "logs", "traces", "events", "monitors", "dashboards", "catalog")
+    for module in (*modules, "discovery"):
         monkeypatch.setattr(
             sys.modules[f"archie_agent.exec.tools.datadog.{module}"], "datadog_client", factory
         )
     calls = {
         "query_metrics": ("avg:x{*}",),
         "search_metrics": ("x",),
+        "describe_metric": ("x",),
         "search_logs": ("*",),
         "search_spans": ("*",),
         "list_events": (),
@@ -429,10 +440,14 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "get_dashboard": ("abc-def-ghi",),
         "list_catalog_entities": (),
         "list_teams": (),
+        "search": ("queue:x", list(SOURCES)),
     }
     assert set(calls) == PUBLIC
     for name, args in calls.items():
         await getattr(package, name)(*args)
+    await package.search_metrics(tag="queue:*", active_within="1d")
+    for path in ("/api/v1/metrics", "/api/v2/logs/analytics/aggregate"):
+        assert ("GET", path) in seen or ("POST", path) in seen
     assert seen
     assert all(allowed(method, path) for method, path in seen)
     assert all(method != "DELETE" for method, _ in seen)
