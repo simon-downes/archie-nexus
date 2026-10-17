@@ -1,6 +1,6 @@
 # 069 — Datadog discovery: search(), describe_metric(), search_metrics filters
 
-Status: building
+Status: reviewing
 Branch: build-it/069-datadog-discovery (base: main @ fc5545d)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/069-datadog-discovery
 
@@ -62,7 +62,7 @@ and the tags that filter them.
 | D6 | Monitor → metric pivot | Extract metric names from matched metric/query-alert monitor queries and return them as metric results | Don't pivot | This is what links `rabbitmq` to `aws.amazonmq.*` | self |
 | D7 | Logs/spans in `search` | Aggregate by `service`, return service references with counts | Return log/span records | No customer data in discovery output; records are one handoff away | self |
 | D8 | Span query from a bare word | `service:*<w>* OR resource_name:*<w>*` for a single bare word; other queries as-is | Pass through always | Bare-word span search returned nothing live; resource match worked | self |
-| D9 | Metric tag match in `search` | Only when the query looks like a tag (`key:value`, no whitespace): one extra `GET /api/v1/metrics` with `tag_filter=<query>`, `from=0`, names sorted and cut to `limit` | Always; never | Tag filters need a key; `*rabbitmq*` returned nothing live | self |
+| D9 | Metric tag match in `search` | Only when the query looks like a tag (`key:value`, no whitespace): `GET /api/v1/metrics` (replacing name search; see Deviations) with `tag_filter=<query>`, `from=0`, names sorted and cut to `limit` | Always; never | Tag filters need a key; `*rabbitmq*` returned nothing live | self |
 | D10 | `search_metrics` with tag/active_within | `GET /api/v1/metrics` with `from` + `tag_filter`, then case-insensitive name substring filter | `v2/metrics` with cursor paging | One request, no paging; v1 accepts both filters | self |
 | D11 | `active_within` unset but `tag` set | `from=0` (any metric Datadog still lists) | Default 1d | Doesn't silently drop quiet metrics; `active_within` is the explicit way to require recency | self |
 | D12 | `active_within` format | Relative age only (`15m`, `2h`, `30d`), max 365d | ISO datetimes too | `validation._RELATIVE` already parses this form; `/api/v1/metrics` only takes a `from` epoch, so ISO adds nothing | self |
@@ -132,13 +132,13 @@ and the tags that filter them.
   always get the query as given.
   - AC: `search("rabbitmq", sources=["spans"])` sends that rewritten filter query.
 - The metrics source MUST use the existing name search (`GET /api/v1/search`,
-  `q=metrics:<query>`) and, for a tag-shaped query, the extra list call (D9). Name matches
-  come first and then tag matches; a name in both keeps `matched_on: "name"`. The combined
-  list is cut to `limit`. A dashboard matching both title and description gets
+  `q=metrics:<query>`). For a tag-shaped query it MUST use the list call (D9) instead, because
+  name search rejects `:` (see Deviations). The list is cut to `limit`. A dashboard matching both title and description gets
   `matched_on: "title"`.
-- MUST make the extra tag-filtered metric list call (D9) only for a tag-shaped query.
-  - AC: `search("queue:foo", sources=["metrics"])` makes the `/api/v1/metrics` call with
-    `tag_filter=queue:foo`; `search("rabbitmq", sources=["metrics"])` does not.
+- MUST make the tag-filtered metric list call (D9) only for a tag-shaped query.
+  - AC: `search("queue:foo", sources=["metrics"])` makes only the `/api/v1/metrics` call with
+    `tag_filter=queue:foo`; `search("rabbitmq", sources=["metrics"])` makes only the name
+    search.
 - MUST put a failed source in `skipped` as `"<ErrorClass>: <message>"` and return the other
   results. This covers any `Exception` from a source, including unexpected response shapes. A
   source timeout is converted to `DatadogTransportError("Datadog source exceeded 25s")`. If
@@ -263,7 +263,7 @@ time. It returns references that hand off to the existing functions.
     `aws.amazonmq.*` names. `("message_count", tag="environment:production")` returned the 5
     message_count variants. A name-only `"rabbitmq"` still returns `[]`.
 
-### [ ] M3 — search() across sources
+### [x] M3 — search() across sources
 
 - **Approach:** Add the two aggregate POSTs to the allowlist and `validation.sources`. Write
   `discovery.py` per Design: per-source coroutines run with `asyncio.gather`, monitor query
@@ -283,9 +283,31 @@ time. It returns references that hand off to the existing functions.
 - **Verify:** `uv run pytest -q`, `uv run ruff check .` and `uv run ruff format --check .`
   pass. A live `search("rabbitmq")` includes a metric starting
   `aws.amazonmq.`.
-- **Outcome:**
+- **Outcome:** Built `discovery.py` and the two aggregate allowlist entries. The SKILL.md
+  `search` section and the "Discovering what exists" playbook are written, and the function
+  table, investigation paragraph, limit rule and rate-limit notes are updated. 40 tests are
+  in `tests/test_datadog_discovery.py`, and the registration and allowlist-drive tests now
+  cover 16 functions.
+  - `uv run pytest -q`: 1656 passed. `ruff check` and `ruff format --check` are clean.
+  - Live `search("rabbitmq", limit=5)` took 0.6s with nothing skipped (2,493 characters). It
+    returned 5 monitors, 1 dashboard, 4 log services, and 3 `aws.amazonmq.*` metrics taken
+    from monitor queries (`system_cpu_utilization`, `rabbit_mqmem_used`, `rabbit_mqmem_limit`).
+  - Live `search("queue:audit-log", sources=["metrics"])` returned `aws.amazonmq.*` tag
+    matches.
+  - Live `search("rabbitmq", sources=["spans","dashboards"])` returned span service
+    `core-worker` (488 spans) with nothing skipped.
+  - Deviation below: tag-shaped queries skip the name search.
+  - The monitor-query regex now requires an `<aggregator>:` prefix. A test caught `by {host}`
+    being read as metric `by`.
 
 ## Deviations
+
+- M3: For a tag-shaped query, `search`'s metrics source now uses only the tag listing, not
+  name search plus tag listing. Live, Datadog's name search returned HTTP 400 (`bad query:
+  metrics:queue:audit-log`) for a query containing `:`, which would have skipped the whole
+  metrics source. Metric names can't contain `:`, so no results are lost. R3's merge rule
+  ("name matches first, then tag matches") no longer applies, and `matched_on` for these
+  results is always `"tag"`.
 
 ## Risks
 
