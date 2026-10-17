@@ -41,6 +41,7 @@ description: >
 |---|---|
 | A metric's values over time | `datadog.query_metrics` |
 | Find metric names | `datadog.search_metrics` |
+| A metric's tag keys and values, and the dashboards and monitors that use it | `datadog.describe_metric` |
 | Error logs or log lines for a service | `datadog.search_logs` |
 | Slow or failing requests (APM spans) | `datadog.search_spans` |
 | Deploys, Kubernetes changes, integration and alert events | `datadog.list_events` |
@@ -110,6 +111,33 @@ At most 20 series are returned. Each keeps its **last** 300 points; `point_count
 Returns metric names that contain `query`, for example `["aws.ec2.cpuutilization", ...]`. Returns `[]` when nothing matches.
 
 Matching is a substring match on the metric **name** only, and it does not search tags or integration names. A search for `rabbitmq` finds nothing if RabbitMQ metrics are named `aws.amazonmq.*`. If a search returns `[]`, try the provider prefix (`aws.amazonmq`), a single name fragment (`message_count`), or read the query from an existing dashboard with `datadog.get_dashboard`.
+
+### `datadog.describe_metric(name, max_values=20)`
+
+Describes one metric so you can write a correct query. It makes three requests, so describe the one or two metrics you will use, not every search result.
+
+```json
+{
+  "name": "aws.amazonmq.message_count",
+  "type": "gauge",
+  "unit": "message",
+  "per_unit": null,
+  "description": "The total number of messages stored on the broker.",
+  "integration": null,
+  "tags": {
+    "environment": {"values": ["dev", "production", "staging"], "value_count": 3},
+    "queue": {"values": ["asset-processing", "audit-log", "..."], "value_count": 59}
+  },
+  "tag_count": 111,
+  "dashboards": [{"id": "abc-def-ghi", "title": "RabbitMQ Queue Worker Dashboard"}],
+  "monitors": [{"id": "125239081", "title": "Core Queue Job Count High ({{value}} jobs)"}],
+  "truncated": false
+}
+```
+
+- `tags` maps each tag key to its sorted values, at most `max_values` (1–100) per key and 100 keys. `value_count` is the full number of values for that key. A tag with no `:` appears as a key with no values. Use the keys in `{...}` filters and `by {...}` groupings.
+- `dashboards` and `monitors` (at most 50 each) are where the metric is already used. Pass a dashboard `id` to `get_dashboard`, or a monitor `id` (as an integer) to `get_monitor`, to see working queries.
+- `name` is a metric name: a letter, then letters, digits, `_` or `.`. An unknown metric raises `DatadogNotFoundError`. A metric with no tag data returns `tags` as `{}`.
 
 ### `datadog.search_logs(query, start="1h", end=None, limit=20, sort="newest")`
 
@@ -245,7 +273,7 @@ Errors are sanitized and never contain keys. Some carry Datadog's error message,
 - `DatadogRequestRejectedError`: Datadog rejected the query or definition (HTTP 400/422, or a metric query error). Fix it using the message; do not retry unchanged.
 - `DatadogAuthenticationError`: the keys were rejected. Do not retry.
 - `DatadogAuthorizationError`: the application key lacks a permission for this call. Do not retry; report which function failed.
-- `DatadogNotFoundError`: the monitor or dashboard does not exist.
+- `DatadogNotFoundError`: the monitor, dashboard or metric does not exist.
 - `DatadogRateLimitError`: throttled. `retry_after_seconds` is an integer or `None`. Wait at least that long before one retry.
 - `DatadogTransportError`: the network failed or the 60-second call limit expired. Reads are safe to retry once.
 - `DatadogResponseError`: Datadog returned something unexpected. Report it; retry a read at most once. After `update_monitor`, the message says the update was applied; check the monitor with `get_monitor` instead of retrying.

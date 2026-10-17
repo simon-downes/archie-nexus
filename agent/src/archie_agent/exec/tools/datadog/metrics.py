@@ -5,8 +5,14 @@ from __future__ import annotations
 from archie_agent.exec.tools import tool
 
 from . import validation
-from .client import MAX_ERROR, DatadogRequestRejectedError, DatadogResponseError, datadog_client
-from .formatting import metric_result
+from .client import (
+    MAX_ERROR,
+    DatadogNotFoundError,
+    DatadogRequestRejectedError,
+    DatadogResponseError,
+    datadog_client,
+)
+from .formatting import metric_description, metric_result
 from .policy import require_read
 
 
@@ -47,3 +53,21 @@ async def search_metrics(query: str, limit: int = 50) -> list[str]:
     if not isinstance(names, list):
         raise DatadogResponseError("Datadog returned a malformed metric search response")
     return [name for name in names if isinstance(name, str)][:count]
+
+
+@tool(native=False, exec_docs=False, namespace="datadog")
+async def describe_metric(name: str, max_values: int = 20) -> dict:
+    """Describe one metric: type and unit, tag keys with sample values, and where it is used."""
+    metric = validation.metric_name(name)
+    per_key = validation.limit(max_values)
+    require_read()
+    async with datadog_client() as client:
+        meta = await client.request("GET", f"/api/v1/metrics/{metric}")
+        try:
+            tags = await client.request("GET", f"/api/v2/metrics/{metric}/all-tags")
+        except DatadogNotFoundError:
+            tags = None
+        assets = await client.request("GET", f"/api/v2/metrics/{metric}/assets")
+    if not isinstance(meta, dict):
+        raise DatadogResponseError("Datadog returned malformed metric metadata")
+    return metric_description(metric, meta, tags, assets, per_key)

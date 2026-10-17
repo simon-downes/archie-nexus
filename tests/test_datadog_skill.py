@@ -15,7 +15,7 @@ SKILL = ROOT / "persona" / "skills" / "datadog" / "SKILL.md"
 def test_skill_documents_every_public_function():
     text = SKILL.read_text(encoding="utf-8")
     functions = sorted(key for key in get_all_tools() if key.startswith("datadog."))
-    assert len(functions) == 14
+    assert len(functions) == 15
     for function in functions:
         assert f"`{function}(" in text, function
 

@@ -6,17 +6,20 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .client import DASHBOARD_ID, DatadogInputError
+from .client import DASHBOARD_ID, METRIC, DatadogInputError
 
 MAX_QUERY = 2_000
 MAX_TEXT = 4_000
 _RELATIVE = re.compile(r"^([1-9][0-9]{0,5})([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
 _MAX_WINDOW = timedelta(days=31)
+_MAX_AGE = timedelta(days=365)
 _DASHBOARD = re.compile(DASHBOARD_ID)
+_METRIC = re.compile(METRIC)
 _KIND = re.compile(r"^[a-z0-9_.-]{1,64}$")
 MAX_TAGS = 50
 _MAX_TAG = 200
+_MAX_TAG_FILTER = 500
 
 OWNERSHIP_TAG = "managedby:archie"
 SORTS = {"newest": "-timestamp", "oldest": "timestamp"}
@@ -139,6 +142,60 @@ def dashboard_id(value: Any) -> str:
     if not isinstance(value, str) or not _DASHBOARD.fullmatch(value.strip()):
         raise DatadogInputError("dashboard_id must look like abc-def-ghi")
     return value.strip()
+
+
+def metric_name(value: Any) -> str:
+    """A metric name: a letter, then letters, digits, ``_`` or ``.``; at most 200 characters."""
+    if not isinstance(value, str) or not _METRIC.fullmatch(value.strip()):
+        raise DatadogInputError(
+            "name must be a metric name: a letter, then letters, digits, '_' or '.' (max 200)"
+        )
+    return value.strip()
+
+
+def tag_filter(value: Any) -> str | None:
+    """An optional metric tag filter such as ``queue:*`` or ``env:prod,service:api``."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > _MAX_TAG_FILTER
+        or any(char.isspace() for char in value.strip())
+    ):
+        raise DatadogInputError(
+            f"tag must be 1-{_MAX_TAG_FILTER} characters with no whitespace, such as queue:*"
+        )
+    return value.strip()
+
+
+def age(value: Any, name: str = "active_within") -> timedelta | None:
+    """An optional relative age (``15m``, ``2h``, ``30d``) of at most 365 days."""
+    if value is None:
+        return None
+    match = _RELATIVE.fullmatch(value.strip()) if isinstance(value, str) else None
+    if not match:
+        raise DatadogInputError(f"{name} must be a relative age such as 15m, 2h or 30d")
+    span = timedelta(**{_UNITS[match.group(2)]: int(match.group(1))})
+    if span > _MAX_AGE:
+        raise DatadogInputError(f"{name} must be at most 365d")
+    return span
+
+
+def sources(value: Any, options: tuple[str, ...], default: tuple[str, ...]) -> list[str]:
+    """A non-empty list of unique source names from ``options``, kept in the caller's order."""
+    if value is None:
+        return list(default)
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or item not in options for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise DatadogInputError(
+            f"sources must be a non-empty list of unique values from: {', '.join(options)}"
+        )
+    return list(value)
 
 
 def kind(value: Any) -> str | None:

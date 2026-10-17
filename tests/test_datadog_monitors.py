@@ -353,6 +353,7 @@ async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
 
 PUBLIC = {
     "create_monitor",
+    "describe_metric",
     "get_dashboard",
     "get_monitor",
     "list_catalog_entities",
@@ -389,6 +390,9 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     bodies = {
         "/api/v1/query": {"series": []},
         "/api/v1/search": {"results": {"metrics": []}},
+        "/api/v1/metrics/x": {"type": "gauge"},
+        "/api/v2/metrics/x/all-tags": {"data": {"attributes": {"tags": []}}},
+        "/api/v2/metrics/x/assets": {"included": []},
         "/api/v2/logs/events/search": {"data": []},
         "/api/v2/spans/events/search": {"data": []},
         "/api/v2/events": {"data": []},
@@ -417,6 +421,7 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     calls = {
         "query_metrics": ("avg:x{*}",),
         "search_metrics": ("x",),
+        "describe_metric": ("x",),
         "search_logs": ("*",),
         "search_spans": ("*",),
         "list_events": (),

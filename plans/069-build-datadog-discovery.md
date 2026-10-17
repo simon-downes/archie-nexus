@@ -221,7 +221,7 @@ time. It returns references that hand off to the existing functions.
 
 ## Milestones
 
-### [ ] M1 — describe_metric end to end
+### [x] M1 — describe_metric end to end
 
 - **Approach:** Add `METRIC` and the three per-metric allowlist entries to `client.py`, plus
   `validation.metric_name`. Add `formatting.metric_description`, then `describe_metric` in
@@ -235,7 +235,15 @@ time. It returns references that hand off to the existing functions.
   and linked assets.
 - **Verify:** `uv run pytest -q tests/test_datadog_*` passes. A live call returns the `queue`
   key with values and the "RabbitMQ Queue Worker Dashboard".
-- **Outcome:**
+- **Outcome:** Built `describe_metric` with `formatting.metric_description`, and added
+  `validation.metric_name` and the three per-metric allowlist entries. I also added
+  `validation.tag_filter`, `age` and `sources` now, for M2 and M3. The tests cover grouping,
+  caps, an unknown metric, an `all-tags` 404, malformed metadata, bad names, and refused
+  metric paths in the client.
+  - `uv run pytest -q`: 1593 passed. Ruff check and format are clean.
+  - Live `describe_metric("aws.amazonmq.message_count", max_values=3)` returned 18 tag keys,
+    including `queue` (48 values), 4 dashboards including "RabbitMQ Queue Worker Dashboard",
+    and 2 monitors, in 2,210 characters.
 
 ### [ ] M2 — search_metrics tag and active_within
 
