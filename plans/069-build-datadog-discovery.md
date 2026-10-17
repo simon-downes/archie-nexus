@@ -1,6 +1,6 @@
 # 069 — Datadog discovery: search(), describe_metric(), search_metrics filters
 
-Status: planning
+Status: building
 Branch: build-it/069-datadog-discovery (base: main @ fc5545d)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/069-datadog-discovery
 
@@ -62,10 +62,13 @@ and the tags that filter them.
 | D6 | Monitor → metric pivot | Extract metric names from matched metric/query-alert monitor queries and return them as metric results | Don't pivot | This is what links `rabbitmq` to `aws.amazonmq.*` | self |
 | D7 | Logs/spans in `search` | Aggregate by `service`, return service references with counts | Return log/span records | No customer data in discovery output; records are one handoff away | self |
 | D8 | Span query from a bare word | `service:*<w>* OR resource_name:*<w>*` for a single bare word; other queries as-is | Pass through always | Bare-word span search returned nothing live; resource match worked | self |
-| D9 | Metric tag match in `search` | Only when the query looks like a tag (`key:value`, no whitespace) | Always; never | `v2` tag filters need a key; `*rabbitmq*` returned nothing | self |
+| D9 | Metric tag match in `search` | Only when the query looks like a tag (`key:value`, no whitespace): one extra `GET /api/v1/metrics` with `tag_filter=<query>`, `from=0`, names sorted and cut to `limit` | Always; never | Tag filters need a key; `*rabbitmq*` returned nothing live | self |
+| D16 | Dashboard matching in `search` | `GET /api/v1/dashboard`, case-insensitive substring on title or description | Title only (as `list_dashboards`); fetch each dashboard's widgets | One request; description matched 1 of 84 for `queue` live; widget fetch is 84 requests | self |
+| D17 | Which sources use `start` | Logs and spans only; monitors, dashboards and metric names ignore it | Apply to all | Only the aggregate endpoints take a time window | self |
+| D18 | Client per source | Each source opens its own `datadog_client()` (own 60s deadline) inside a 25s per-source timeout | One shared client | A shared client's 60s deadline would fail the whole call, not skip the slow source | self |
 | D10 | `search_metrics` with tag/active_within | `GET /api/v1/metrics` with `from` + `tag_filter`, then case-insensitive name substring filter | `v2/metrics` with cursor paging | One request, no paging; v1 accepts both filters | self |
 | D11 | `active_within` unset but `tag` set | `from=0` (any metric Datadog still lists) | Default 1d | Doesn't silently drop quiet metrics; `active_within` is the explicit way to require recency | self |
-| D12 | `active_within` format | Relative age only (`15m`, `2h`, `30d`), max 365d | ISO datetimes too | It's a duration; matches the existing relative-age syntax | self |
+| D12 | `active_within` format | Relative age only (`15m`, `2h`, `30d`), max 365d | ISO datetimes too | `validation._RELATIVE` already parses this form; `/api/v1/metrics` only takes a `from` epoch, so ISO adds nothing | self |
 | D13 | Tag values in `describe_metric` | Grouped by key; `max_values` per key (default 20, 1–100); each key reports its total count | Flat list | 111+ tags per metric; 357 over 30 days | self |
 | D14 | Metric name validation | `^[A-Za-z][A-Za-z0-9_.]{0,199}$`, used in the allowlist path patterns too | Free text | Datadog's metric-name charset; no `/` means no path traversal | self |
 | D15 | Variant grouping (`.maximum` etc.) | Not built; Follow-up | Build now | Not in the user's list for this build | self |
@@ -83,8 +86,9 @@ and the tags that filter them.
   - AC: 30 values for one key with `max_values=5` → 5 values, `value_count` 30, `truncated` true.
 - MUST reject an invalid name or `max_values` with `DatadogInputError` before any request.
   - AC: `"a/b"`, `"1abc"`, `""`, and `max_values=0` each raise and make no call.
-- MUST raise `DatadogNotFoundError` for an unknown metric.
-  - AC: a metadata 404 propagates as `DatadogNotFoundError`.
+- MUST raise `DatadogNotFoundError` for an unknown metric. If metadata succeeds but `all-tags`
+  returns 404, it MUST return empty `tags` instead of raising.
+  - AC: a metadata 404 propagates as `DatadogNotFoundError`. An `all-tags` 404 gives `tags == {}`.
 
 **R2 `search_metrics(query=None, limit=50, tag=None, active_within=None)`**
 - MUST keep the current behaviour when only `query` is given (`/api/v1/search`, `[]` on no match).
@@ -93,30 +97,52 @@ and the tags that filter them.
   `tag_filter=tag` and `from=now - active_within` (or `0`). It then keeps names containing
   `query` (case-insensitive), sorts them and cuts to `limit`.
   - AC: the fake sees `tag_filter` and `from` as specified; the names are filtered and limited.
+- In the filtered path a blank or `None` `query` MUST mean no name filter.
+  - AC: `search_metrics("", tag="queue:*")` returns every listed name, cut to `limit`.
 - MUST raise `DatadogInputError` if none of the three is given, or if `tag` is blank, has
   whitespace or exceeds 500 characters, or if `active_within` isn't a relative age up to 365d.
   - AC: each case raises with no call.
 
 **R3 `search(query, sources=None, start="1h", limit=10)`**
-- MUST return `{"results": [...], "skipped": {...}}`. Each result has `type`
-  (`monitor|dashboard|metric|service`), `id`, `title`, `source`, `matched_on`, `count`
-  (services only, otherwise `None`) and `handoff` (a `datadog.*` function name).
-  - AC: a fake-backed search over all default sources returns each type with the right handoff.
+- MUST return `{"results": [...], "skipped": {...}}`. Every result has exactly these keys:
+
+  | type | `id` | `title` | `source` | `matched_on` | `count` | `handoff` |
+  |---|---|---|---|---|---|---|
+  | `monitor` | monitor id (int) | monitor name | `monitors` | `"monitor search"` | `None` | `datadog.get_monitor` |
+  | `dashboard` | dashboard id | title | `dashboards` | `"title"` or `"description"` | `None` | `datadog.get_dashboard` |
+  | `metric` | metric name | metric name | `metrics` or `monitors` | `"name"`, `"tag"`, or `"monitor <id>"` | `None` | `datadog.describe_metric` |
+  | `service` | service name | service name | `logs` or `spans` | `"log content"` or `"span attributes"` | events in window | `datadog.search_logs` / `datadog.search_spans` |
+
+  - AC: a fake-backed search over all default sources returns each type with exactly these
+    values.
 - MUST search the sources in D3, each limited to `limit`, with `spans` only when requested.
+  Metric results can number up to 2×`limit`: up to `limit` from name/tag search plus up to
+  `limit` extracted from monitors.
   - AC: default sources make no spans call; `sources=["spans"]` makes only the spans call.
-- MUST add metric results extracted from matched metric/query-alert monitor queries, with
-  `matched_on` naming the monitor, and dedupe metrics by name.
+- MUST add metric results extracted from matched `query alert`/`metric alert` monitor queries,
+  with `matched_on` naming the monitor, and dedupe metrics by name (name search wins).
   - AC: a monitor `max(last_5m):max:aws.amazonmq.x{broker:dev} > 1` yields metric
-    `aws.amazonmq.x`. The same name from the name search appears once.
-- MUST put a failed source in `skipped` with the error class and message, and return the other
-  results. If every selected source fails, it MUST raise the first error.
+    `aws.amazonmq.x`. The same name from the name search appears once. A `log alert` yields none.
+- MUST, for a single bare word (`^[A-Za-z0-9_.-]+$`), send spans the query
+  `service:*<w>* OR resource_name:*<w>*` (D8). Other queries pass through unchanged. Logs
+  always get the query as given.
+  - AC: `search("rabbitmq", sources=["spans"])` sends that rewritten filter query.
+- MUST make the extra tag-filtered metric list call (D9) only for a tag-shaped query.
+  - AC: `search("queue:foo", sources=["metrics"])` makes the `/api/v1/metrics` call with
+    `tag_filter=queue:foo`; `search("rabbitmq", sources=["metrics"])` does not.
+- MUST put a failed source in `skipped` as `"<ErrorClass>: <message>"` and return the other
+  results. A timeout reads `"TimeoutError: source exceeded 25s"`. If every selected source
+  fails, it MUST raise the error from the first source in selection order.
   - AC: spans raising `DatadogRateLimitError` → `skipped["spans"]` set, other results present.
-    All sources failing → raises.
-- MUST validate `query` (required), `sources` (non-empty unique subset), `start` (relative age or
-  ISO, as `time_window`) and `limit` (1–50) before any request.
+    All sources failing → raises the first source's error.
+- MUST re-raise `DatadogPolicyError`, `DatadogConfigurationError` and
+  `DatadogAuthenticationError` from any source, because they mean every source would fail.
+  - AC: a source raising `DatadogAuthenticationError` makes `search` raise it.
+- MUST validate `query` (required), `sources` (non-empty unique subset), `start` (as
+  `time_window`) and `limit` (1–50) before any request.
   - AC: each invalid input raises `DatadogInputError` with no call.
-- MUST bound each source with its own timeout under the client deadline, so a slow source is
-  skipped rather than failing the call.
+- MUST bound each source with its own 25s timeout and its own client, so a slow source is
+  skipped rather than failing the call (D18).
   - AC: a source raising `TimeoutError` is reported in `skipped`.
 
 **R4 Interface and safety**
@@ -154,17 +180,21 @@ time. It returns references that hand off to the existing functions.
 - `formatting.py`: `metric_description(meta, tags, assets, max_values)`.
 - `discovery.py` (new): `search` and one private coroutine per source. It follows
   `tools/discovery.py` for the reference shape and `monitors.py` for the request pattern.
-- `__init__.py`: export both; tests updated in `test_datadog_reads.py` (new functions),
-  `test_datadog_monitors.py` (PUBLIC/allowlist drive), `test_datadog_client.py` (allowlist),
-  `test_datadog_skill.py` (count 16). New `tests/test_datadog_discovery.py` for `search`.
+- `__init__.py`: export both. Tests: `test_datadog_reads.py` (describe_metric, search_metrics,
+  READS set); `test_datadog_monitors.py` (PUBLIC set, `calls` dict, the patched module tuple
+  gains `discovery`, `bodies` gains every new path); `test_datadog_client.py` (allowlist);
+  `test_datadog_skill.py` (function count). New `tests/test_datadog_discovery.py` for `search`.
+- The function count rises one per milestone that adds a function: 15 after M1, 16 after M3.
 
 ### Error handling
 
 - `describe_metric`: errors propagate (404 → `DatadogNotFoundError`).
-- `search`: each source runs as `asyncio.timeout(25)` → its coroutine. A `DatadogError` or
-  `TimeoutError` becomes `skipped[source] = "<Class>: <message>"`. `DatadogPolicyError`,
-  `DatadogConfigurationError` and `DatadogAuthenticationError` re-raise, because they mean
-  every source would fail. If every source is skipped, it raises the first error.
+- `describe_metric`: an `all-tags` 404 after successful metadata → empty `tags`.
+- `search`: each source runs in `asyncio.timeout(25)` and opens its own `datadog_client()`
+  (D18). A `DatadogError` or `TimeoutError` becomes `skipped[source] = "<Class>: <message>"`,
+  with a fixed message for timeouts. `DatadogPolicyError`, `DatadogConfigurationError` and
+  `DatadogAuthenticationError` re-raise. If every source is skipped, it raises the first
+  source's error in selection order. `require_read()` runs once before the fan-out.
 
 ### Non-functional
 
@@ -180,8 +210,9 @@ time. It returns references that hand off to the existing functions.
 - **Approach:** Add `METRIC` and the three per-metric allowlist entries to `client.py`, plus
   `validation.metric_name`. Add `formatting.metric_description`, then `describe_metric` in
   `metrics.py` (three sequential requests in one `datadog_client()`). Export it, add it to the
-  PUBLIC/READS sets and the allowlist-drive test, and document it in `SKILL.md`.
-- **Test seam:** `describe_metric` via `dd_fake("metrics")`; client allowlist via `allowed()`.
+  PUBLIC/READS sets and the allowlist-drive test, and document it in `SKILL.md`. The skill
+  test's function count becomes 15.
+- **Test seam:** `describe_metric` via `dd_fake({...}, "metrics")`; client allowlist via `allowed()`.
 - **Edge cases:** bare tag without `:` → key with no values; non-string tags ignored; assets
   missing `included` → empty lists.
 - **Deliverable:** `datadog.describe_metric("aws.amazonmq.message_count")` returns grouped tags
@@ -194,10 +225,10 @@ time. It returns references that hand off to the existing functions.
 
 - **Approach:** Add `GET /api/v1/metrics` to the allowlist, plus `validation.tag_filter` and
   `validation.age`. Branch in `search_metrics` per R2. Update its `SKILL.md` section.
-- **Test seam:** `search_metrics` via `dd_fake("metrics")`.
+- **Test seam:** `search_metrics` via `dd_fake({...}, "metrics")`.
 - **Edge cases:** `metrics: null` → `[]`; non-list → `DatadogResponseError`.
 - **Deliverable:** `search_metrics(tag="queue:*")` returns the `aws.amazonmq.*` names.
-- **Verify:** tests pass. A live `search_metrics(tag="queue:*", active_within="1d")` returns
+- **Verify:** `uv run pytest -q tests/test_datadog_*` passes. A live `search_metrics(tag="queue:*", active_within="1d")` returns
   `aws.amazonmq.*` names.
 - **Outcome:**
 
@@ -207,14 +238,15 @@ time. It returns references that hand off to the existing functions.
   `discovery.py` per Design: per-source coroutines run with `asyncio.gather`, monitor query
   metric extraction (regex for a metric token directly before `{`, only for `query alert` and
   `metric alert` monitors), dedupe and the skipped map. Export it, update the registration
-  tests, and add the `SKILL.md` section plus a "Discovering what exists" playbook.
-- **Test seam:** `search` via `dd_fake("discovery")`.
+  tests (count 16), and add the `SKILL.md` section plus a "Discovering what exists" playbook.
+- **Test seam:** `search` via `dd_fake({...}, "discovery")`.
 - **Edge cases:** one source raises a rate-limit error → skipped; all fail → raise; a monitor
   with no `{` → no extraction; a log-alert monitor → no extraction; dashboards matched by
   description.
 - **Deliverable:** `datadog.search("rabbitmq")` returns RabbitMQ monitors, the dashboard,
   `aws.amazonmq.*` metrics with handoff `datadog.describe_metric`, and log services.
-- **Verify:** all checks pass. A live `search("rabbitmq")` includes a metric starting
+- **Verify:** `uv run pytest -q`, `uv run ruff check .` and `uv run ruff format --check .`
+  pass. A live `search("rabbitmq")` includes a metric starting
   `aws.amazonmq.`.
 - **Outcome:**
 
@@ -228,6 +260,17 @@ time. It returns references that hand off to the existing functions.
   tokens, and these are filtered by `METRIC`.
 
 ## Review
+
+- Plan review: 1 pass. I fixed the one ❌: D9 now names the extra request, its `from` and its
+  limit. I fixed every ⚠️ and ℹ️:
+  - R3 gives the full result-shape table, the D8/D9 ACs, the first-error ordering and the
+    2×`limit` metric bound.
+  - New D16 (dashboard matching), D17 (`start` scope) and D18 (client per source).
+  - R1 gives the `all-tags` 404 response; R2 gives the blank-query response.
+  - D12's Why is now specific to this codebase.
+  - The timeout message is fixed.
+  - The test seams use the right `dd_fake` signature.
+  - The registration-test details are listed, and the function count rises per milestone.
 
 ## Outcome
 
