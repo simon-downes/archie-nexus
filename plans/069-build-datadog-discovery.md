@@ -63,15 +63,15 @@ and the tags that filter them.
 | D7 | Logs/spans in `search` | Aggregate by `service`, return service references with counts | Return log/span records | No customer data in discovery output; records are one handoff away | self |
 | D8 | Span query from a bare word | `service:*<w>* OR resource_name:*<w>*` for a single bare word; other queries as-is | Pass through always | Bare-word span search returned nothing live; resource match worked | self |
 | D9 | Metric tag match in `search` | Only when the query looks like a tag (`key:value`, no whitespace): one extra `GET /api/v1/metrics` with `tag_filter=<query>`, `from=0`, names sorted and cut to `limit` | Always; never | Tag filters need a key; `*rabbitmq*` returned nothing live | self |
-| D16 | Dashboard matching in `search` | `GET /api/v1/dashboard`, case-insensitive substring on title or description | Title only (as `list_dashboards`); fetch each dashboard's widgets | One request; description matched 1 of 84 for `queue` live; widget fetch is 84 requests | self |
-| D17 | Which sources use `start` | Logs and spans only; monitors, dashboards and metric names ignore it | Apply to all | Only the aggregate endpoints take a time window | self |
-| D18 | Client per source | Each source opens its own `datadog_client()` (own 60s deadline) inside a 25s per-source timeout | One shared client | A shared client's 60s deadline would fail the whole call, not skip the slow source | self |
 | D10 | `search_metrics` with tag/active_within | `GET /api/v1/metrics` with `from` + `tag_filter`, then case-insensitive name substring filter | `v2/metrics` with cursor paging | One request, no paging; v1 accepts both filters | self |
 | D11 | `active_within` unset but `tag` set | `from=0` (any metric Datadog still lists) | Default 1d | Doesn't silently drop quiet metrics; `active_within` is the explicit way to require recency | self |
 | D12 | `active_within` format | Relative age only (`15m`, `2h`, `30d`), max 365d | ISO datetimes too | `validation._RELATIVE` already parses this form; `/api/v1/metrics` only takes a `from` epoch, so ISO adds nothing | self |
 | D13 | Tag values in `describe_metric` | Grouped by key; `max_values` per key (default 20, 1–100); each key reports its total count | Flat list | 111+ tags per metric; 357 over 30 days | self |
 | D14 | Metric name validation | `^[A-Za-z][A-Za-z0-9_.]{0,199}$`, used in the allowlist path patterns too | Free text | Datadog's metric-name charset; no `/` means no path traversal | self |
 | D15 | Variant grouping (`.maximum` etc.) | Not built; Follow-up | Build now | Not in the user's list for this build | self |
+| D16 | Dashboard matching in `search` | `GET /api/v1/dashboard`, case-insensitive substring on title or description | Title only (as `list_dashboards`); fetch each dashboard's widgets | One request; description matched 1 of 84 for `queue` live; widget fetch is 84 requests | self |
+| D17 | Which sources use `start` | Logs and spans only; monitors, dashboards and metric names ignore it | Apply to all | Only the aggregate endpoints take a time window | self |
+| D18 | Client per source | Each source opens its own `datadog_client()` (own 60s deadline) inside a 25s per-source timeout | One shared client | A shared client's 60s deadline would fail the whole call, not skip the slow source | self |
 
 ## Requirements
 
@@ -97,8 +97,12 @@ and the tags that filter them.
   `tag_filter=tag` and `from=now - active_within` (or `0`). It then keeps names containing
   `query` (case-insensitive), sorts them and cuts to `limit`.
   - AC: the fake sees `tag_filter` and `from` as specified; the names are filtered and limited.
-- In the filtered path a blank or `None` `query` MUST mean no name filter.
+- In the filtered path a blank or `None` `query` MUST mean no name filter. `tag_filter` is
+  sent only when `tag` is set.
   - AC: `search_metrics("", tag="queue:*")` returns every listed name, cut to `limit`.
+    `search_metrics(active_within="1h")` sends `from` and no `tag_filter`.
+- With neither `tag` nor `active_within`, a blank or `None` `query` MUST raise
+  `DatadogInputError`, as today.
 - MUST raise `DatadogInputError` if none of the three is given, or if `tag` is blank, has
   whitespace or exceeds 500 characters, or if `active_within` isn't a relative age up to 365d.
   - AC: each case raises with no call.
@@ -127,12 +131,20 @@ and the tags that filter them.
   `service:*<w>* OR resource_name:*<w>*` (D8). Other queries pass through unchanged. Logs
   always get the query as given.
   - AC: `search("rabbitmq", sources=["spans"])` sends that rewritten filter query.
+- The metrics source MUST use the existing name search (`GET /api/v1/search`,
+  `q=metrics:<query>`) and, for a tag-shaped query, the extra list call (D9). Name matches
+  come first and then tag matches; a name in both keeps `matched_on: "name"`. The combined
+  list is cut to `limit`. A dashboard matching both title and description gets
+  `matched_on: "title"`.
 - MUST make the extra tag-filtered metric list call (D9) only for a tag-shaped query.
   - AC: `search("queue:foo", sources=["metrics"])` makes the `/api/v1/metrics` call with
     `tag_filter=queue:foo`; `search("rabbitmq", sources=["metrics"])` does not.
 - MUST put a failed source in `skipped` as `"<ErrorClass>: <message>"` and return the other
-  results. A timeout reads `"TimeoutError: source exceeded 25s"`. If every selected source
-  fails, it MUST raise the error from the first source in selection order.
+  results. This covers any `Exception` from a source, including unexpected response shapes. A
+  source timeout is converted to `DatadogTransportError("Datadog source exceeded 25s")`. If
+  every selected source fails, it MUST raise the first source's error in selection order:
+  the converted `DatadogTransportError` for a timeout, or `DatadogResponseError` wrapping a
+  non-Datadog exception.
   - AC: spans raising `DatadogRateLimitError` → `skipped["spans"]` set, other results present.
     All sources failing → raises the first source's error.
 - MUST re-raise `DatadogPolicyError`, `DatadogConfigurationError` and
@@ -191,10 +203,14 @@ time. It returns references that hand off to the existing functions.
 - `describe_metric`: errors propagate (404 → `DatadogNotFoundError`).
 - `describe_metric`: an `all-tags` 404 after successful metadata → empty `tags`.
 - `search`: each source runs in `asyncio.timeout(25)` and opens its own `datadog_client()`
-  (D18). A `DatadogError` or `TimeoutError` becomes `skipped[source] = "<Class>: <message>"`,
-  with a fixed message for timeouts. `DatadogPolicyError`, `DatadogConfigurationError` and
-  `DatadogAuthenticationError` re-raise. If every source is skipped, it raises the first
-  source's error in selection order. `require_read()` runs once before the fan-out.
+  (D18). Sources run under `asyncio.gather(..., return_exceptions=True)`, so every source
+  finishes or fails before classification and nothing is left running. Each `TimeoutError`
+  becomes `DatadogTransportError`, and other non-Datadog exceptions become
+  `DatadogResponseError`. Then `DatadogPolicyError`, `DatadogConfigurationError` and
+  `DatadogAuthenticationError` re-raise (first in selection order). Any other error goes to
+  `skipped`. If every source is skipped, it raises the first source's error.
+  `require_read()` runs once before the fan-out. `search` therefore only raises
+  `DatadogError` subclasses, matching the documented contract.
 
 ### Non-functional
 
@@ -239,6 +255,10 @@ time. It returns references that hand off to the existing functions.
   metric extraction (regex for a metric token directly before `{`, only for `query alert` and
   `metric alert` monitors), dedupe and the skipped map. Export it, update the registration
   tests (count 16), and add the `SKILL.md` section plus a "Discovering what exists" playbook.
+  Also update the "Choose the right function" table and the investigation paragraph to start
+  from `search`. Note in "Shared input rules" that `search` limits are 1–50, and in "Rate
+  limits that matter" that `search(sources=["spans"])` shares the span limit. M1 and M2 add
+  their rows to the "Choose the right function" table.
 - **Test seam:** `search` via `dd_fake({...}, "discovery")`.
 - **Edge cases:** one source raises a rate-limit error → skipped; all fail → raise; a monitor
   with no `{` → no extraction; a log-alert monitor → no extraction; dashboards matched by
@@ -271,6 +291,14 @@ time. It returns references that hand off to the existing functions.
   - The timeout message is fixed.
   - The test seams use the right `dd_fake` signature.
   - The registration-test details are listed, and the function count rises per milestone.
+- Plan review pass 2: no ❌. I fixed every ⚠️ and ℹ️:
+  - Timeouts and unexpected exceptions map to `DatadogError` subclasses, so `search` keeps the
+    error contract.
+  - The fan-out uses `gather(return_exceptions=True)`, so nothing is left running.
+  - R2 now covers the blank query and when `tag_filter` is sent.
+  - The metrics base request and the merge order are named, as is the dashboard `matched_on`
+    tie.
+  - The SKILL.md sections to update are listed, and D16–D18 are reordered.
 
 ## Outcome
 
