@@ -383,8 +383,8 @@ Not verified:
 - `search(..., sources=["spans"])` under load: it worked live once and was not
   rate-limited.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/7
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
