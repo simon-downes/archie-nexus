@@ -2,6 +2,7 @@
 
 from .catalog import list_catalog_entities, list_teams
 from .dashboards import get_dashboard, list_dashboards
+from .discovery import search
 from .events import list_events
 from .logs import search_logs
 from .metrics import describe_metric, query_metrics, search_metrics
@@ -24,6 +25,7 @@ __all__ = [
     "list_events",
     "list_teams",
     "query_metrics",
+    "search",
     "search_logs",
     "search_metrics",
     "search_monitors",

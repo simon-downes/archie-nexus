@@ -584,6 +584,7 @@ READS = {
     "list_events",
     "list_teams",
     "query_metrics",
+    "search",
     "search_logs",
     "search_metrics",
     "search_monitors",
