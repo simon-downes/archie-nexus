@@ -37,9 +37,12 @@ MAX_LIMIT = 50
 _FATAL = (DatadogPolicyError, DatadogConfigurationError, DatadogAuthenticationError)
 _WORD = re.compile(r"^[A-Za-z0-9_.-]+$")
 _TAG_QUERY = re.compile(r"^[^\s:]+:\S+$")
-# A metric after its aggregator and before its scope, e.g. ``max:aws.amazonmq.x{broker:dev}``.
-# Requiring the ``<aggregator>:`` prefix skips ``by {host}`` groupings and tag values in scopes.
-_QUERY_METRIC = re.compile(rf"\b(?:avg|sum|min|max|count):({METRIC})\s*\{{")
+# A metric after its aggregator and before its scope, e.g. ``max:aws.amazonmq.x{broker:dev}`` or
+# ``p95:trace.http.request{service:api}``. Requiring the ``<aggregator>:`` prefix skips
+# ``by {host}`` groupings and tag values inside scopes.
+_QUERY_METRIC = re.compile(
+    rf"\b(?:avg|sum|min|max|count|p[0-9]{{1,3}}(?:\.[0-9]+)?):({METRIC})\s*\{{"
+)
 _METRIC_MONITOR_TYPES = frozenset({"query alert", "metric alert"})
 
 Result = dict[str, Any]
@@ -151,11 +154,14 @@ async def _dashboards(query: str, limit: int) -> list[Result]:
 async def _metrics(query: str, limit: int) -> list[Result]:
     """Metric names containing the query; for a ``key:value`` query, metrics with that tag.
 
-    Datadog's name search rejects a ``:`` (HTTP 400), and metric names cannot contain one, so a
-    tag-shaped query uses only the tag listing.
+    Datadog's name search rejects a ``:`` (HTTP 400), and metric names cannot contain one. So a
+    single ``key:value`` query uses the tag listing, and any other query with ``:`` (such as
+    ``service:api env:prod``) finds no metrics without sending a request bound to fail.
     """
     if _TAG_QUERY.fullmatch(query):
         names = [(name, "tag") for name in sorted(await list_metric_names(query, None))]
+    elif ":" in query:
+        return []
     else:
         names = [(name, "name") for name in await search_metric_names(query)]
     found: list[Result] = []

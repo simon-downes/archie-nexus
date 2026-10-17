@@ -280,13 +280,15 @@ def dashboard_detail(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _grouped_tags(tags: Any, max_values: int) -> tuple[dict[str, dict[str, Any]], int, bool]:
-    """Group ``key:value`` tags by key; a bare tag becomes a key with no values."""
+    """Group ``key:value`` tags by key; a bare tag becomes a key with no values.
+
+    The returned count is the number of distinct tags.
+    """
+    unique = (
+        {tag for tag in tags if isinstance(tag, str) and tag} if isinstance(tags, list) else set()
+    )
     groups: dict[str, list[str]] = {}
-    count = 0
-    for tag in tags if isinstance(tags, list) else []:
-        if not isinstance(tag, str) or not tag:
-            continue
-        count += 1
+    for tag in unique:
         key, _, value = tag.partition(":")
         values = groups.setdefault(key, [])
         if value:
@@ -294,10 +296,10 @@ def _grouped_tags(tags: Any, max_values: int) -> tuple[dict[str, dict[str, Any]]
     truncated = len(groups) > MAX_TAG_KEYS
     result: dict[str, dict[str, Any]] = {}
     for key in sorted(groups)[:MAX_TAG_KEYS]:
-        values = sorted(set(groups[key]))
+        values = sorted(groups[key])
         truncated = truncated or len(values) > max_values
         result[key] = {"values": values[:max_values], "value_count": len(values)}
-    return result, count, truncated
+    return result, len(unique), truncated
 
 
 def _assets(assets: Any, kind: str) -> tuple[list[dict[str, Any]], bool]:

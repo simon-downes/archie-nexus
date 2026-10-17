@@ -258,7 +258,7 @@ async def test_describe_metric_combines_metadata_tags_and_assets(dd_fake):
             "environment": {"values": ["production"], "value_count": 1},
             "queue": {"values": ["a", "b"], "value_count": 2},
         },
-        "tag_count": 5,
+        "tag_count": 4,
         "dashboards": [{"id": "wy8-ypb-v2r", "title": "RabbitMQ"}],
         "monitors": [{"id": "125239081", "title": "Queue high"}],
         "truncated": False,
@@ -319,6 +319,12 @@ async def test_describe_metric_malformed_metadata(dd_fake):
     dd_fake({META: [], ALL_TAGS: TAGS_BODY, ASSETS: ASSETS_BODY}, "metrics")
     with pytest.raises(DatadogResponseError):
         await describe_metric(METRIC)
+
+
+async def test_describe_metric_bad_max_values_names_the_argument(dd_fake):
+    dd_fake({}, "metrics")
+    with pytest.raises(DatadogInputError, match="max_values"):
+        await describe_metric(METRIC, max_values=101)
 
 
 @pytest.mark.parametrize(

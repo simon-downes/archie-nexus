@@ -69,9 +69,9 @@ MONITOR_OPTIONS = frozenset(
 )
 
 
-def limit(value: Any, maximum: int = 100) -> int:
+def limit(value: Any, maximum: int = 100, name: str = "limit") -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
-        raise DatadogInputError(f"limit must be an integer 1-{maximum}")
+        raise DatadogInputError(f"{name} must be an integer 1-{maximum}")
     return value
 
 

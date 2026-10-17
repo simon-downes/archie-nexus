@@ -120,7 +120,7 @@ What each source matches:
 |---|---|---|
 | `monitors` | Monitor search: name, query and tags | `monitor`. Metric names used in metric-monitor queries also come back as `metric` results with `matched_on: "monitor <id>"`, and this is often the only route from a product name to its metrics. |
 | `dashboards` | Title or description (case-insensitive; widgets are not searched) | `dashboard`, with `matched_on` `title` or `description` |
-| `metrics` | Metric names containing the term. A `key:value` term (such as `queue:audit*`) instead matches metrics that carry that tag. | `metric`, with `matched_on` `name` or `tag` |
+| `metrics` | Metric names containing the term. A single `key:value` term (such as `queue:audit*`) instead matches metrics that carry that tag. Any other term containing `:` finds no metrics. | `metric`, with `matched_on` `name` or `tag` |
 | `logs` | Log search over `start` to now, grouped by service | `service`, with `count` = matching log events. No log content is returned. |
 | `spans` | Span search over `start` to now, grouped by service. A single word also matches `service` and `resource_name`. Not searched by default. | `service`, with `count` = matching spans |
 
@@ -201,7 +201,7 @@ Describes one metric so you can write a correct query. It makes three requests, 
 }
 ```
 
-- `tags` maps each tag key to its sorted values, at most `max_values` (1–100) per key and 100 keys. `value_count` is the full number of values for that key. A tag with no `:` appears as a key with no values. Use the keys in `{...}` filters and `by {...}` groupings.
+- `tags` maps each tag key to its sorted values, at most `max_values` (1–100) per key and 100 keys. `value_count` is the full number of values for that key, and `tag_count` is the number of distinct tags. A tag with no `:` appears as a key with no values. Use the keys in `{...}` filters and `by {...}` groupings.
 - `dashboards` and `monitors` (at most 50 each) are where the metric is already used. Pass a dashboard `id` to `get_dashboard`, or a monitor `id` (as an integer) to `get_monitor`, to see working queries.
 - `name` is a metric name: a letter, then letters, digits, `_` or `.`. An unknown metric raises `DatadogNotFoundError`. A metric with no tag data returns `tags` as `{}`.
 

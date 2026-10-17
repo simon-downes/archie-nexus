@@ -209,6 +209,14 @@ async def test_bare_word_query_does_not_list_metrics_by_tag(dd_fake):
     assert _paths(client) == [NAMES]
 
 
+async def test_multi_term_query_with_colon_skips_metric_requests(dd_fake):
+    client = _default_fake(dd_fake)
+    result = await search("service:api env:prod", sources=["metrics", "logs"])
+    assert _paths(client) == [LOGS]
+    assert result["skipped"] == {}
+    assert {r["source"] for r in result["results"]} == {"logs"}
+
+
 async def test_metric_results_are_limited_per_part(dd_fake):
     client = _default_fake(dd_fake)
     client.responses[NAMES] = {"results": {"metrics": [f"m{i}" for i in range(5)]}}
@@ -254,19 +262,27 @@ async def test_unexpected_source_exception_is_skipped_as_response_error(dd_fake)
     }
 
 
+def _slow(client, slow_path):
+    """Make one path slow at the fake network boundary."""
+    original = client.request
+
+    async def request(method, path, **kwargs):
+        if path == slow_path:
+            await asyncio.sleep(1)
+        return await original(method, path, **kwargs)
+
+    client.request = request
+
+
 async def test_source_timeout_is_skipped(dd_fake, monkeypatch):
     client = _default_fake(dd_fake)
     monkeypatch.setattr(discovery, "SOURCE_TIMEOUT", 0.01)
-
-    async def slow(*args, **kwargs):
-        await asyncio.sleep(1)
-
-    monkeypatch.setattr(discovery, "_dashboards", slow)
+    _slow(client, DASHBOARDS[1])
     result = await search("rabbitmq", sources=["dashboards", "monitors"])
     assert result["skipped"] == {
         "dashboards": "DatadogTransportError: Datadog source exceeded 0.01s"
     }
-    assert client.calls
+    assert [r["id"] for r in result["results"] if r["type"] == "monitor"] == [11, 12, 13]
 
 
 async def test_all_sources_failing_raises_first_in_selection_order(dd_fake):
@@ -280,13 +296,9 @@ async def test_all_sources_failing_raises_first_in_selection_order(dd_fake):
 
 
 async def test_all_sources_timing_out_raises_transport_error(dd_fake, monkeypatch):
-    _default_fake(dd_fake)
+    client = _default_fake(dd_fake)
     monkeypatch.setattr(discovery, "SOURCE_TIMEOUT", 0.01)
-
-    async def slow(*args, **kwargs):
-        await asyncio.sleep(1)
-
-    monkeypatch.setattr(discovery, "_dashboards", slow)
+    _slow(client, DASHBOARDS[1])
     with pytest.raises(DatadogTransportError):
         await search("rabbitmq", sources=["dashboards"])
 
@@ -347,6 +359,11 @@ async def test_search_rejects_bad_input_before_any_call(dd_fake, kwargs):
         ("avg(last_5m):avg:a.b{env:prod,queue:x.y} by {queue} > 0", ["a.b"]),
         ("sum(last_5m):sum:a.b{x}.as_count() / sum:a.b{y}.as_count() > 1", ["a.b"]),
         ("avg(last_5m):anomalies(avg:system.load.1{*}, 'basic', 2) >= 1", ["system.load.1"]),
+        (
+            "percentile(last_5m):p95:trace.http.request{service:checkout} > 2",
+            ["trace.http.request"],
+        ),
+        ("avg(last_5m):p99.9:x.y{*} > 1", ["x.y"]),
         ("no scope here > 1", []),
         (None, []),
     ],

@@ -98,7 +98,7 @@ async def list_metric_names(tag: str | None, window: timedelta | None) -> list[s
 async def describe_metric(name: str, max_values: int = 20) -> dict:
     """Describe one metric: type and unit, tag keys with sample values, and where it is used."""
     metric = validation.metric_name(name)
-    per_key = validation.limit(max_values)
+    per_key = validation.limit(max_values, name="max_values")
     require_read()
     async with datadog_client() as client:
         meta = await client.request("GET", f"/api/v1/metrics/{metric}")
