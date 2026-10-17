@@ -1,6 +1,6 @@
 # 069 — Datadog discovery: search(), describe_metric(), search_metrics filters
 
-Status: reviewing
+Status: done
 Branch: build-it/069-datadog-discovery (base: main @ fc5545d)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/069-datadog-discovery
 
@@ -336,8 +336,52 @@ time. It returns references that hand off to the existing functions.
   - The metrics base request and the merge order are named, as is the dashboard `matched_on`
     tie.
   - The SKILL.md sections to update are listed, and D16–D18 are reordered.
+- Code review: I ran the `general` and `risk` roles in parallel, for 1 round. There were no ❌, so I ran no second round. I fixed every finding:
+  - general ⚠️: monitor-query extraction missed percentile aggregators (`p95:`). The regex
+    now accepts `p<n>` and `p<n>.<n>`, with tests for `p95` and `p99.9`.
+  - general ℹ️: a bad `max_values` error said "limit". `validation.limit` now takes `name`,
+    and a test checks the message.
+  - general ℹ️: `tag_count` counted duplicate tags. It now counts distinct tags, which the
+    test and SKILL.md reflect.
+  - general ℹ️: the timeout tests patched the private `_dashboards`. They now slow the fake
+    client at the network boundary and check the monitor results by id.
+  - risk ℹ️: a multi-term query containing `:` sent a name search that always fails with 400.
+    The metrics source now returns no metrics for such a query without sending the request.
+    A test covers it, and SKILL.md says so.
+  - general ❓ (`status:alert` taking the tag path): intended. Metric names can't contain
+    `:`, so a tag listing is the only metric lookup such a term can do. A non-metric tag key
+    returns `[]` cheaply.
+  - risk ❓ (`from=0` payload size for a broad tag): accepted. The live unfiltered list was
+    3,791 names and 148 KB in one request. Results are cut to `limit` before output, and
+    `search_metrics(tag=..., active_within=...)` is the recency-bounded option.
+- Merge risk: Low. Every change is a new read-only function or an optional argument. The
+  allowlist gains six read entries and no DELETE. The worst realistic failure is a wrong or
+  missing discovery result, which the agent sees and can route around with the existing
+  functions.
 
 ## Outcome
+
+Delivered three discovery functions:
+- `datadog.describe_metric`
+- `tag` and `active_within` filters on `datadog.search_metrics`
+- `datadog.search`, across monitors, dashboards, metrics, logs and spans
+
+SKILL.md now documents all three and has a "Discovering what exists" playbook. The tool
+exposes 16 functions.
+
+Evidence:
+- `uv run pytest -q`: 1660 passed. `ruff check` and `ruff format --check` are clean.
+- Live against the configured account:
+  - `search("rabbitmq")` returned 5 monitors, a dashboard, 4 log services and 3
+    `aws.amazonmq.*` metrics in 0.5s.
+  - `describe_metric("aws.amazonmq.message_count")` returned 18 tag keys, 4 dashboards and
+    2 monitors.
+  - `search_metrics(tag="queue:*", active_within="1d")` returned `aws.amazonmq.*` names.
+
+Not verified:
+- Rate limits for `all-tags`, `assets` and the aggregate endpoints under sustained use.
+- `search(..., sources=["spans"])` under load: it worked live once and was not
+  rate-limited.
 
 PR: pending
 CI: pending
