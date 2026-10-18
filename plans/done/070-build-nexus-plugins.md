@@ -397,7 +397,7 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 Delivered all 13 milestones: integrations under `plugins/` (datadog, incident_io, jira, notion, slack, google with code; aws with a startup hook; github and scalr manifest-only), manifest-driven providers and credentials, a `plugins:` config with `archie config migrate`, `PluginContext` for credentials/policy/settings/cache/workspace, exec-only plugin tools, and docs (`docs/plugins.md`). Verification: 2022 tests pass (baseline 1660), ruff clean, real runner subprocess smoke tests per integration, and migrate on a temp copy of the live config. Not verified: a real container session (no docker in this sandbox) and real API calls with live credentials.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/8
-CI: pending
+CI: none
 
 ## Follow-ups
 
