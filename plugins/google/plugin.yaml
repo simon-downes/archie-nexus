@@ -15,3 +15,6 @@ credential:
   extra_params:
     access_type: offline
     prompt: consent
+policy:
+  read: {enabled: true}
+  write: {enabled: false}

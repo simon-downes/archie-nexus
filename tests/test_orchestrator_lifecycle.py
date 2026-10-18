@@ -155,6 +155,8 @@ def test_start_session_correct_docker_command(config, workspace, tmp_path):
     assert f"{REPO_ROOT / 'persona'}:/opt/archie/persona:rw" in captured_cmd
     # Plugins mount (repo-tracked plugin packages), read-only
     assert f"{REPO_ROOT / 'plugins'}:/opt/archie/plugins:ro" in captured_cmd
+    # gh wrapper bind-mounted over the image copy (D18)
+    assert f"{REPO_ROOT / 'container' / 'bin' / 'gh'}:/usr/local/bin/gh:ro" in captured_cmd
 
     # Return value
     assert descriptor.port == 32771

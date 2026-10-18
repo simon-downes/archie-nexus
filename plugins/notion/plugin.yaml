@@ -4,3 +4,11 @@ credential:
   kind: oauth
   # Endpoints are discovered from the resource server at login time (RFC 9470).
   server_url: https://mcp.notion.com
+policy:
+  read: {enabled: true}
+  write: {enabled: false}
+  scope:
+    type: object
+    fields:
+      pages: {type: "list[str]"}
+      databases: {type: "list[str]"}

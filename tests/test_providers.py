@@ -52,14 +52,13 @@ def test_incident_io_uses_api_key_only():
     incident_io = PROVIDERS["incident_io"]
     assert isinstance(incident_io, StaticProvider)
     assert incident_io.fields == ["api_key"]
-    assert incident_io.site is None
 
 
-def test_datadog_uses_eu_site_and_key_fields():
+def test_datadog_uses_key_fields_and_site_is_not_a_provider_field():
     datadog = PROVIDERS["datadog"]
     assert isinstance(datadog, StaticProvider)
     assert datadog.fields == ["api_key", "app_key"]
-    assert datadog.site == "app.datadoghq.eu"
+    assert "site" not in StaticProvider.__struct_fields__
 
 
 def test_bedrock_not_refreshable():
@@ -177,9 +176,7 @@ EXPECTED_PROVIDERS = {
         set_env=True,
         login="aws_chain",
     ),
-    "datadog": StaticProvider(
-        name="datadog", fields=["api_key", "app_key"], site="app.datadoghq.eu"
-    ),
+    "datadog": StaticProvider(name="datadog", fields=["api_key", "app_key"]),
     "github": StaticProvider(name="github", fields=["personal_token", "work_token"]),
     "google": OAuthProvider(
         name="google",

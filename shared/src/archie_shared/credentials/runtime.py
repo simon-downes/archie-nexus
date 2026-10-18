@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from archie_shared.schemas import NexusConfig
 
+from archie_shared.credentials.api import provider_override
 from archie_shared.credentials.models import CREDENTIAL_TYPES
 from archie_shared.credentials.providers import PROVIDERS, StaticProvider, effective_provider
 from archie_shared.credentials.store import get_credential
@@ -24,8 +25,7 @@ def runtime_environment(config: NexusConfig) -> dict[str, str]:
     result: dict[str, str] = {}
     owners: dict[str, str] = {}
     for name in PROVIDERS:
-        override = config.auth.providers.get(name)
-        provider = effective_provider(name, override)
+        provider = effective_provider(name, provider_override(config, name))
         if not isinstance(provider, StaticProvider) or not provider.set_env:
             continue
         for field, env_name in provider.env.items():

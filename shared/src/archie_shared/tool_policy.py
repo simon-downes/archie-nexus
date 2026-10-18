@@ -1,36 +1,14 @@
-"""Non-secret tool policy configuration and per-exec snapshots."""
+"""Per-exec tool-policy snapshots.
+
+Snapshots are built from ``plugins.<id>.policy`` and manifest defaults by
+``archie_shared.plugins.config.policy_snapshot``; this module installs them for an
+exec call and resolves one provider's read/write blocks.
+"""
 
 from __future__ import annotations
 
 import contextvars
 from typing import Any
-
-import msgspec
-
-
-class ToolPolicy(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """One enabled flag and an opaque provider-specific scope."""
-
-    enabled: bool = True
-    scope: Any = None
-
-
-class ProviderToolPolicy(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Independent read/write policy blocks for one provider."""
-
-    read: ToolPolicy = msgspec.field(default_factory=ToolPolicy)
-    write: ToolPolicy = msgspec.field(default_factory=lambda: ToolPolicy(enabled=False))
-
-
-class ToolsConfig(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Provider policies keyed by provider name."""
-
-    providers: dict[str, ProviderToolPolicy] = msgspec.field(default_factory=dict)
-
-    def for_provider(self, provider: str) -> ProviderToolPolicy:
-        """Return policy blocks, applying read-only defaults when absent."""
-        return self.providers.get(provider, ProviderToolPolicy())
-
 
 _CURRENT_SNAPSHOT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "archie_tool_policy", default=None
@@ -50,17 +28,6 @@ def reset_policy_snapshot(token: contextvars.Token) -> None:
 def current_policy_snapshot() -> dict[str, Any]:
     """Return the current non-secret invocation snapshot."""
     return _CURRENT_SNAPSHOT.get() or {}
-
-
-def policy_snapshot(config: ToolsConfig) -> dict[str, dict[str, dict[str, Any]]]:
-    """Make a detached non-secret snapshot for an exec runner."""
-    return {
-        name: {
-            "read": {"enabled": value.read.enabled, "scope": value.read.scope},
-            "write": {"enabled": value.write.enabled, "scope": value.write.scope},
-        }
-        for name, value in config.providers.items()
-    }
 
 
 def resolve_provider_policy(

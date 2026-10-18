@@ -146,11 +146,12 @@ def api_host(site: Any) -> str:
 
 def _site() -> str:
     try:
-        from archie_shared.credentials.providers import effective_provider
+        from archie_shared.plugins.config import resolved_settings
+        from archie_shared.plugins.manifest import load_manifests
         from archie_shared.schemas import load_nexus_config
 
-        override = load_nexus_config().auth.providers.get("datadog")
-        return effective_provider("datadog", override).site
+        # M6 reads this from the plugin context instead.
+        return resolved_settings("datadog", load_nexus_config().plugins, load_manifests())["site"]
     except Exception as exc:
         raise DatadogConfigurationError("Datadog site configuration could not be read") from exc
 

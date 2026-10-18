@@ -56,7 +56,7 @@ def test_minimal_manifest(tmp_path):
     m = loaded.manifest
     assert m.name == "demo" and loaded.name == "demo"
     assert m.namespaces == [] and m.entry is None and m.credential is None
-    assert m.policy.read.enabled is True and m.policy.write is None
+    assert m.policy is None and loaded.policy is None  # no entry, no policy key
     assert m.cache.max_bytes == 262144
     assert loaded.root == tmp_path / "demo"
     assert loaded.skills_dir == tmp_path / "demo" / "skills"

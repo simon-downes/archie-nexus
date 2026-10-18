@@ -3,3 +3,5 @@ name: incident_io
 credential:
   kind: static
   fields: [api_key]
+policy:
+  read: {enabled: true}

@@ -9,7 +9,9 @@ Provides:
 """
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import msgspec
 import yaml
@@ -61,12 +63,16 @@ def plugins_dir() -> Path:
     return _REPO_ROOT / "plugins"
 
 
-def load_config[T](path: str | Path, schema: type[T]) -> T:
+def load_config[T](
+    path: str | Path, schema: type[T], *, raw_check: Callable[[Any], None] | None = None
+) -> T:
     """Load a YAML file and validate against a msgspec Struct schema.
 
     Args:
         path: Path to the YAML file.
         schema: A msgspec Struct type (or dict type) to validate against.
+        raw_check: Optional callback run on the parsed YAML before conversion;
+            it may raise ConfigError to reject the file.
 
     Returns:
         A validated instance of the schema type.
@@ -91,6 +97,9 @@ def load_config[T](path: str | Path, schema: type[T]) -> T:
     # Empty file (YAML loads as None) → treat as empty mapping
     if data is None:
         data = {}
+
+    if raw_check is not None:
+        raw_check(data)
 
     try:
         return msgspec.convert(data, schema, strict=False)

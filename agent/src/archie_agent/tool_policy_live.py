@@ -12,8 +12,9 @@ from collections.abc import Callable
 from typing import Any
 
 from archie_shared.events import ErrorNotice
+from archie_shared.plugins.config import policy_snapshot
+from archie_shared.plugins.manifest import load_manifests
 from archie_shared.schemas import load_nexus_config
-from archie_shared.tool_policy import ToolsConfig, policy_snapshot
 from ulid import ULID
 
 RELOAD_FAILED_KIND = "tool_policy_reload_failed"
@@ -24,7 +25,7 @@ Snapshot = dict[str, Any]
 
 def load_policy_snapshot() -> Snapshot:
     """Read ``config.yaml`` now and return its detached tool-policy snapshot."""
-    return policy_snapshot(ToolsConfig(providers=load_nexus_config().tools))
+    return policy_snapshot(load_nexus_config().plugins, load_manifests())
 
 
 class LiveToolPolicy:

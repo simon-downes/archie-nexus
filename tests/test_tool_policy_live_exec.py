@@ -23,7 +23,7 @@ SOURCE = "async def main():\n    return _tool_policy\n"
 
 def _config(write_enabled: bool) -> str:
     flag = "true" if write_enabled else "false"
-    return f"tools:\n  notion:\n    write:\n      enabled: {flag}\n"
+    return f"plugins:\n  notion:\n    policy:\n      write:\n        enabled: {flag}\n"
 
 
 def _model() -> ModelEntry:
@@ -97,7 +97,7 @@ async def test_invalid_config_keeps_last_policy_with_one_notice(tmp_path, home):
     ws = FakeWebSocket()
     await harness.event_bus.register_client(ws, ())
 
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     for _ in range(3):
         assert _notion_write(await _exec(harness._execute_tool)) is True
     notices = ws.notices()

@@ -32,3 +32,10 @@ credential:
       search:read.files search:read.users
       reactions:read reactions:write
       chat:write
+policy:
+  read: {enabled: true}
+  write: {enabled: false}
+  scope:
+    type: object
+    fields:
+      deny: {type: "list[str]"}

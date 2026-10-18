@@ -23,6 +23,7 @@ from archie_shared.session.log import SessionLog
 from archie_orchestrator.docker import (
     CONTAINER_AGENT_DIR,
     CONTAINER_AGENTS_HOME,
+    CONTAINER_GH_WRAPPER,
     CONTAINER_NEXUS_HOME,
     CONTAINER_PERSONA_DIR,
     CONTAINER_PLUGINS_DIR,
@@ -156,6 +157,9 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         f"{persona_dir_host}:{CONTAINER_PERSONA_DIR}:rw",
         "-v",
         f"{plugins_dir_host}:{CONTAINER_PLUGINS_DIR}:ro",
+        # gh wrapper over the image's copy, so wrapper changes ship without a rebuild.
+        "-v",
+        f"{REPO_ROOT / 'container' / 'bin' / 'gh'}:{CONTAINER_GH_WRAPPER}:ro",
         "-v",
         f"{resolved}:{CONTAINER_WORKSPACE_DIR}:rw",
         "-v",

@@ -53,7 +53,8 @@ def test_static_provider_and_struct(tmp_path):
         msgspec.convert({"api_key": "k", "stale": "x"}, cls)
 
 
-def test_static_site_setting_default_becomes_provider_site(tmp_path):
+def test_static_provider_has_no_site(tmp_path):
+    """D8: site is a plugin setting, never a provider field."""
     loaded = _plugin(
         tmp_path,
         "demo",
@@ -62,17 +63,9 @@ def test_static_site_setting_default_becomes_provider_site(tmp_path):
         "settings:\n"
         "  site: {type: str, default: example.eu}\n",
     )
-    assert provider_from_manifest(loaded).site == "example.eu"
-
-
-def test_static_without_site_setting_has_no_site(tmp_path):
-    loaded = _plugin(
-        tmp_path,
-        "demo",
-        "name: demo\ncredential: {kind: static, fields: [api_key]}\n"
-        "settings:\n  region: {type: str, default: eu}\n",
-    )
-    assert provider_from_manifest(loaded).site is None
+    provider = provider_from_manifest(loaded)
+    assert "site" not in provider.__struct_fields__
+    assert provider.fields == ["api_key"]
 
 
 def test_oauth_provider_and_struct(tmp_path):

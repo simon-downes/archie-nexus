@@ -34,15 +34,9 @@ def provider_from_manifest(loaded: LoadedPlugin) -> StaticProvider | OAuthProvid
 
     spec = _credential_spec(loaded)
     if spec.kind == "static":
-        # M4 moves site to plugins.<id>.settings
-        site_setting = loaded.manifest.settings.get("site")
-        site = None
-        if site_setting is not None and isinstance(site_setting.default, str):
-            site = site_setting.default
         return StaticProvider(
             name=loaded.name,
             fields=list(spec.fields),
-            site=site,
             env=dict(spec.env),
             set_env=spec.set_env,
             login=spec.login,

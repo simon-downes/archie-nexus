@@ -1,8 +1,8 @@
 import httpx
 import pytest
 from archie_orchestrator.auth import AuthError, AuthService, ProviderUnavailableError
-from archie_shared.credentials.api import AuthConfig, AuthProviderOverride
 from archie_shared.credentials.store import replace_credential
+from archie_shared.plugins.config import PluginAuthConfig, PluginConfig
 from archie_shared.schemas import NexusConfig
 
 
@@ -69,7 +69,7 @@ async def test_google_login_requires_client_id(monkeypatch, tmp_path):
 async def test_token_exchange_preserves_sanitized_provider_error(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = NexusConfig(
-        auth=AuthConfig(providers={"google": AuthProviderOverride(client_id="client")})
+        plugins={"google": PluginConfig(auth=PluginAuthConfig(client_id="client"))}
     )
     service = AuthService(config, transport=FailingTokenTransport())
     flow, _ = await service.start_login("google", "http://test/auth/callback/google")
@@ -81,7 +81,7 @@ async def test_token_exchange_preserves_sanitized_provider_error(monkeypatch, tm
 async def test_login_callback_contract_persists_normalized_tokens(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     config = NexusConfig(
-        auth=AuthConfig(providers={"google": AuthProviderOverride(client_id="client")})
+        plugins={"google": PluginConfig(auth=PluginAuthConfig(client_id="client"))}
     )
     service = AuthService(config, transport=FakeTransport())
     flow, url = await service.start_login("google", "http://test/auth/callback/google")
@@ -96,9 +96,7 @@ async def test_login_callback_contract_persists_normalized_tokens(monkeypatch, t
 @pytest.mark.asyncio
 async def test_refresh_converts_transport_failure_to_concise_error(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    config = NexusConfig(
-        auth=AuthConfig(providers={"slack": AuthProviderOverride(client_id="client")})
-    )
+    config = NexusConfig(plugins={"slack": PluginConfig(auth=PluginAuthConfig(client_id="client"))})
     replace_credential(
         "slack",
         {"access_token": "old-access", "refresh_token": "old-refresh", "client_id": "client"},
@@ -115,9 +113,7 @@ async def test_refresh_converts_transport_failure_to_concise_error(monkeypatch, 
 @pytest.mark.asyncio
 async def test_refresh_preserves_provider_error_message(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    config = NexusConfig(
-        auth=AuthConfig(providers={"slack": AuthProviderOverride(client_id="client")})
-    )
+    config = NexusConfig(plugins={"slack": PluginConfig(auth=PluginAuthConfig(client_id="client"))})
     replace_credential(
         "slack",
         {"access_token": "old-access", "refresh_token": "old-refresh", "client_id": "client"},
@@ -131,9 +127,7 @@ async def test_refresh_preserves_provider_error_message(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_refresh_accepts_slack_top_level_token_response(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    config = NexusConfig(
-        auth=AuthConfig(providers={"slack": AuthProviderOverride(client_id="client")})
-    )
+    config = NexusConfig(plugins={"slack": PluginConfig(auth=PluginAuthConfig(client_id="client"))})
     replace_credential(
         "slack",
         {

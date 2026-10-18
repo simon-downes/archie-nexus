@@ -109,7 +109,8 @@ class PluginManifest(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     entry: str | None = None
     hooks: HooksSpec = HooksSpec()
     credential: CredentialSpec | None = None
-    policy: PolicySpec = PolicySpec()
+    # None = no ``policy:`` key; see ``LoadedPlugin.policy`` for the effective value.
+    policy: PolicySpec | None = None
     settings: dict[str, FieldSpec] = {}
     cache: CacheSpec = CacheSpec()
     context: list[str] = []
@@ -127,6 +128,17 @@ class LoadedPlugin:
     @property
     def name(self) -> str:
         return self.manifest.name
+
+    @property
+    def policy(self) -> PolicySpec | None:
+        """Effective tool policy defaults; None = the plugin has no tool policy.
+
+        A manifest without a ``policy:`` key gets the read-only default when it
+        has an ``entry`` (it registers tools), and no tool policy otherwise.
+        """
+        if self.manifest.policy is not None:
+            return self.manifest.policy
+        return PolicySpec() if self.manifest.entry is not None else None
 
     @property
     def skills_dir(self) -> Path:
@@ -181,7 +193,7 @@ def load_manifest(plugin_dir: Path) -> LoadedPlugin:
     base = "".join(p.capitalize() for p in manifest.name.split("_"))
     try:
         settings_type = compile_struct(f"{base}Settings", manifest.settings)
-        scope = manifest.policy.scope
+        scope = None if manifest.policy is None else manifest.policy.scope
         scope_type = None if scope is None else compile_type(scope, f"{base}Scope", allow_env=False)
     except PluginManifestError as e:
         raise PluginManifestError(f"{plugin_dir}: {e}") from None

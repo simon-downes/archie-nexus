@@ -156,7 +156,7 @@ async def test_default_site_sends_to_eu_host(monkeypatch):
 
 async def test_configured_site_override_changes_host(monkeypatch, tmp_path):
     (tmp_path / "config.yaml").write_text(
-        "auth:\n  providers:\n    datadog:\n      site: us5.datadoghq.com\n"
+        "plugins:\n  datadog:\n    settings:\n      site: us5.datadoghq.com\n"
     )
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     assert client_module.api_host(client_module._site()) == "https://api.us5.datadoghq.com"

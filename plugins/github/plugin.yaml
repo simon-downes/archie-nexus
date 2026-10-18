@@ -5,3 +5,5 @@ name: github
 credential:
   kind: static
   fields: [personal_token, work_token]
+settings:
+  work_orgs: {type: "list[str]"}  # owners whose repos use github.work_token

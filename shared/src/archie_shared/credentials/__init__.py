@@ -13,13 +13,12 @@ httpx which is a CLI-only dependency. Import directly:
 """
 
 from archie_shared.credentials.api import (
-    AuthConfig,
-    AuthProviderOverride,
     CredentialStatus,
     OAuthFlowStatus,
     OAuthLoginResponse,
     OAuthProviderResponse,
     StaticProviderResponse,
+    provider_override,
 )
 from archie_shared.credentials.models import (
     CREDENTIAL_TYPES,
@@ -52,8 +51,6 @@ from archie_shared.credentials.store import (
 )
 
 __all__ = [
-    "AuthConfig",
-    "AuthProviderOverride",
     "CredentialStatus",
     "OAuthFlowStatus",
     "OAuthLoginResponse",
@@ -71,6 +68,7 @@ __all__ = [
     "delete_credential",
     "effective_provider",
     "extract_nested",
+    "provider_override",
     "get_credential",
     "is_expired",
     "load_store",

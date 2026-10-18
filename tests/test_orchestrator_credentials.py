@@ -47,9 +47,9 @@ async def test_provider_discovery_is_complete_and_secret_free():
         "incident_io",
     }
     assert providers["datadog"]["fields"] == ["api_key", "app_key"]
-    assert providers["datadog"]["site"] == "app.datadoghq.eu"
+    assert "site" not in providers["datadog"]  # D8: site is plugins.datadog.settings.site
     assert providers["incident_io"]["fields"] == ["api_key"]
-    assert providers["incident_io"]["site"] is None
+    assert "site" not in providers["incident_io"]
     assert providers["bedrock"]["fields"] == [
         "aws_access_key_id",
         "aws_secret_access_key",

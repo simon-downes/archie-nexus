@@ -81,7 +81,7 @@ Credential values are never returned by status or provider-description APIs. The
 
 ## Provider metadata and configuration
 
-Provider behavior is defined in the shared provider registry. A provider descriptor identifies its auth type, required fields, and non-secret service configuration such as a site. OAuth descriptors additionally define:
+Provider behavior is defined by the `credential` block of each plugin's `plugins/<id>/plugin.yaml`; `bedrock` is the one core provider defined in code. A provider descriptor identifies its auth type and required fields. OAuth descriptors additionally define:
 
 - authorization and token endpoints, when fixed;
 - a discovery `server_url`, when endpoints must be discovered;
@@ -101,18 +101,19 @@ For example:
   `archie auth login slack` adds newly requested scopes to the existing token.
 - Google requests offline access with consent.
 
-OAuth overrides are configured globally for the running orchestrator under `auth.providers` in `config.yaml`. Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `auth.providers.google.client_id` is required before `nexus auth login google` can start:
+Overrides are configured for the running orchestrator under `plugins.<id>.auth` in `config.yaml` and read at startup (see [Configuration](config.md)). Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `plugins.google.auth.client_id` is required before `archie auth login google` can start. Slack takes its `client_id` the same way:
 
 ```yaml
-auth:
-  providers:
-    google:
+plugins:
+  google:
+    auth:
       # Required: OAuth client ID from the Google Cloud OAuth client.
       client_id: your-client-id.apps.googleusercontent.com
-      authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth
-      token_endpoint: https://oauth2.googleapis.com/token
       scopes:
         - https://www.googleapis.com/auth/gmail.readonly
+  slack:
+    auth:
+      client_id: "111.222"
 ```
 
 To pin the callback origin explicitly, add:
@@ -132,7 +133,7 @@ The exact Google redirect URI is then:
 http://127.0.0.1:7600/auth/callback/google
 ```
 
-Supported override fields include static-provider site, OAuth client ID, endpoints, discovery server URL, scopes, token paths, expiry path, and authorization parameters. Client secrets are credential-store data, not public provider configuration.
+Supported override fields are OAuth `client_id`, `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `server_url`, `scopes`, `token_path`, `refresh_token_path`, `expires_in_path` and `extra_params`, plus `env` and `set_env` for static providers. Bedrock has no config overrides. Client secrets are credential-store data, not public provider configuration.
 
 Effective OAuth values are resolved in this order:
 
@@ -188,7 +189,14 @@ and maps them to `hostname`, `token`, and `account`.
 
 For other static providers, the CLI accepts a JSON object on stdin. If stdin is not a non-empty pipe, it prompts interactively for the provider’s declared fields. Secret-like fields such as tokens, keys, and passwords are hidden while prompting.
 
-Datadog uses `api_key` and `app_key` as secrets. Its non-secret `site` configuration defaults to `app.datadoghq.eu`; Datadog API clients derive the API host `https://api.datadoghq.eu` from that site.
+Datadog uses `api_key` and `app_key` as secrets. Its non-secret site is the plugin setting `plugins.datadog.settings.site`, default `app.datadoghq.eu`; Datadog API clients derive the API host (`https://api.datadoghq.eu` by default) from that site:
+
+```yaml
+plugins:
+  datadog:
+    settings:
+      site: datadoghq.com
+```
 
 incident.io uses one `api_key` secret. The API uses the fixed host `https://api.incident.io/` and sends the key as a Bearer token. API keys can have account-level and team-scoped permissions; no additional authentication secret or account identifier is required.
 
@@ -318,13 +326,13 @@ Projection is a startup snapshot. New containers use the latest stored credentia
 GitHub credentials are not projected into the container environment. The image installs the real GitHub CLI as `gh-base` and puts a wrapper at `/usr/local/bin/gh` (source: `container/bin/gh`). On each call the wrapper:
 
 1. Finds the target owner, in this order: a `gh api` endpoint (path or full URL) starting `repos/`, `orgs/` or `users/<owner>`, the repository argument of `gh repo <subcommand>`, or the owner argument of `gh repo list`; then `--owner`; then `-R`/`--repo`; then `GH_REPO`; then the GitHub remote gh treats as the base repository (the one `gh repo set-default` marked, then `upstream`, `github`, `origin`, then the first). Remotes on other hosts are ignored.
-2. Reads `auth.providers.github.work_orgs` from `config.yaml` with `yq`. If the owner matches an entry exactly, ignoring case, it uses `github.work_token`. Otherwise it uses `github.personal_token`.
+2. Reads `plugins.github.settings.work_orgs` from `config.yaml` with `yq`. If the owner matches an entry exactly, ignoring case, it uses `github.work_token`. Otherwise it uses `github.personal_token`.
 3. Reads that one token from `credentials.yaml` with `yq` and runs `gh-base` with all arguments unchanged and `GH_TOKEN` set only in that process.
 
 ```yaml
-auth:
-  providers:
-    github:
+plugins:
+  github:
+    settings:
       work_orgs: [tillo]
 ```
 
@@ -332,9 +340,9 @@ Both files are read on every call, so changes apply to running sessions. If the 
 
 Owner detection uses argument patterns rather than gh's flag definitions. A `gh repo` argument that directly follows another flag is skipped, because it may be that flag's value (`gh repo view -b feature/x`). The cost is that `gh repo view --web o/r` uses the remote's token. A command that names its repository only through a URL argument (for example `gh pr view https://github.com/o/r/pull/1`) also uses the token for the current directory's remote. Pass `-R owner/repo` in those cases.
 
-`work_orgs` is accepted only under `auth.providers.github`.
+`work_orgs` is accepted only under `plugins.github.settings`.
 
-Upgrading from the single `github.token` field: the old entry fails validation and `archie auth status` reports it as needing reauthentication. Rerun `archie auth login github`. Also remove any `auth.providers.github.env` override from `config.yaml`; mapping the removed `token` field stops containers from starting.
+Upgrading from the single `github.token` field: the old entry fails validation and `archie auth status` reports it as needing reauthentication. Rerun `archie auth login github`. Also remove any `plugins.github.auth.env` override from `config.yaml`; mapping the removed `token` field stops containers from starting.
 
 ## Security model
 

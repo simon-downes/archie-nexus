@@ -9,10 +9,11 @@ from archie_agent.tool_policy_live import (
 )
 
 NOTION_WRITE_ON = """\
-tools:
+plugins:
   notion:
-    write:
-      enabled: true
+    policy:
+      write:
+        enabled: true
 """
 
 
@@ -28,8 +29,22 @@ def test_load_policy_snapshot_reads_config(home):
     assert snapshot["notion"]["write"]["enabled"] is True
 
 
-def test_missing_config_yields_defaults(home):
-    assert load_policy_snapshot() == {}
+def test_missing_config_yields_manifest_defaults(home):
+    snapshot = load_policy_snapshot()
+    assert set(snapshot) == {"datadog", "google", "incident_io", "jira", "notion", "slack"}
+    for entry in snapshot.values():
+        assert entry == {
+            "read": {"enabled": True, "scope": None},
+            "write": {"enabled": False, "scope": None},
+        }
+
+
+def test_old_tools_section_fails_reload_and_keeps_last_valid(home):
+    live = LiveToolPolicy({"notion": {"write": {"enabled": True}}})
+    (home / "config.yaml").write_text("tools:\n  notion:\n    write: {enabled: false}\n")
+    snapshot, notice = live.refresh()
+    assert snapshot == {"notion": {"write": {"enabled": True}}}
+    assert notice is not None and "archie config migrate" in notice.message
 
 
 def test_refresh_picks_up_file_change(home):
@@ -45,7 +60,7 @@ def test_invalid_config_keeps_last_valid_and_notifies_once(home):
     live = LiveToolPolicy({})
     good, _ = live.refresh()
 
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     results = [live.refresh() for _ in range(3)]
 
     assert all(snapshot == good for snapshot, _ in results)
@@ -57,9 +72,9 @@ def test_invalid_config_keeps_last_valid_and_notifies_once(home):
 
 def test_changed_error_notifies_again(home):
     live = LiveToolPolicy({})
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     _, first = live.refresh()
-    (home / "config.yaml").write_text("tools:\n  notion:\n    bogus: 1\n")
+    (home / "config.yaml").write_text("plugins:\n  notion:\n    bogus: 1\n")
     _, second = live.refresh()
     _, third = live.refresh()
     assert first is not None and second is not None
@@ -70,18 +85,18 @@ def test_changed_error_notifies_again(home):
 
 def test_same_error_after_recovery_notifies_again(home):
     live = LiveToolPolicy({})
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     live.refresh()
     (home / "config.yaml").write_text(NOTION_WRITE_ON)
     live.refresh()
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     _, notice = live.refresh()
     assert notice is not None and notice.kind == RELOAD_FAILED_KIND
 
 
 def test_recovery_notifies_once(home):
     live = LiveToolPolicy({})
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     live.refresh()
     (home / "config.yaml").write_text(NOTION_WRITE_ON)
     snapshot, notice = live.refresh()

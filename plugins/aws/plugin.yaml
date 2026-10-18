@@ -10,3 +10,6 @@ credential:
     session_token: AWS_SESSION_TOKEN
   set_env: true
   login: aws_chain
+settings:
+  region: {type: str, default: eu-west-1}
+  profiles: {type: "dict[str,str]"}

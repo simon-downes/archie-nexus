@@ -33,7 +33,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
 
 CREDENTIALS = "github:\n  personal_token: personal-secret\n  work_token: work-secret\n"
-CONFIG = "auth:\n  providers:\n    github:\n      work_orgs: [tillo]\n"
+CONFIG = "plugins:\n  github:\n    settings:\n      work_orgs: [tillo]\n"
 
 
 @pytest.fixture
@@ -392,7 +392,7 @@ def test_gh_resolved_with_other_value_is_used(env, tmp_path):
 
 def test_malformed_config_warns_and_uses_personal(env, work_repo):
     config = Path(env["ARCHIE_HOME_DIR"]) / "config.yaml"
-    config.write_text("auth: [unclosed\n")
+    config.write_text("plugins: [unclosed\n")
     proc, data = run_gh(env, "pr", "list", cwd=work_repo)
     assert data["GH_TOKEN"] == "personal-secret"
     assert f"gh: could not read {config}" in proc.stderr

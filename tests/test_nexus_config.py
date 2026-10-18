@@ -231,15 +231,177 @@ def test_expand_workspace_root_absolute(tmp_path):
     assert result == tmp_path / "projects"
 
 
-def test_github_work_orgs_config(tmp_path):
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text("auth:\n  providers:\n    github:\n      work_orgs: [tillo, Tillo-Labs]\n")
-    config = load_nexus_config(path=cfg)
-    assert config.auth.providers["github"].work_orgs == ["tillo", "Tillo-Labs"]
+# --- Tests: plugins section ---
 
 
-def test_work_orgs_rejected_for_other_providers(tmp_path):
+def _load(tmp_path, text):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("auth:\n  providers:\n    google:\n      work_orgs: [tillo]\n")
-    with pytest.raises(ConfigError, match="work_orgs"):
-        load_nexus_config(path=cfg)
+    cfg.write_text(text)
+    return load_nexus_config(path=cfg)
+
+
+PLUGINS_YAML = """\
+plugins:
+  github:
+    settings:
+      work_orgs: [tillo, Tillo-Labs]
+  datadog:
+    settings: {site: us5.datadoghq.com}
+  jira:
+    policy:
+      read: {enabled: true, scope: [PLAT]}
+      write: {enabled: true, scope: [PLAT]}
+  notion:
+    policy:
+      write: {enabled: true, scope: {pages: [abc]}}
+  slack:
+    auth: {client_id: client}
+    policy:
+      read: {scope: {deny: ["#hr"]}}
+  scalr:
+    enabled: false
+"""
+
+
+def test_plugins_section_parses(tmp_path):
+    config = _load(tmp_path, PLUGINS_YAML)
+    assert config.plugins["github"].settings == {"work_orgs": ["tillo", "Tillo-Labs"]}
+    assert config.plugins["jira"].policy.write.enabled is True
+    assert config.plugins["jira"].policy.write.scope == ["PLAT"]
+    assert config.plugins["slack"].auth.client_id == "client"
+    assert config.plugins["scalr"].enabled is False
+    assert config.plugins["notion"].policy.read is None
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ("tools:\n  notion:\n    write: {enabled: true}\n", "'tools' section was"),
+        ("auth:\n  providers:\n    github: {work_orgs: [tillo]}\n", "'auth' section was"),
+        ("tools: {}\nauth: {}\n", "'tools' and 'auth' sections were"),
+    ],
+)
+def test_removed_sections_name_migrate(tmp_path, text, names):
+    with pytest.raises(ConfigError, match="archie config migrate") as exc:
+        _load(tmp_path, text)
+    assert names in str(exc.value)
+    assert str(tmp_path / "config.yaml") in str(exc.value)
+
+
+def test_removed_section_checked_before_other_errors(tmp_path):
+    with pytest.raises(ConfigError, match="archie config migrate"):
+        _load(tmp_path, "tools: {}\nbogus_top_level: 1\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("plugins:\n  linear: {}\n", r"plugins\.linear: unknown plugin 'linear'"),
+        ("plugins:\n  bedrock: {}\n", r"plugins\.bedrock: unknown plugin"),
+        (
+            "plugins:\n  datadog:\n    settings: {region: x}\n",
+            r"plugins\.datadog\.settings.*region",
+        ),
+        ("plugins:\n  datadog:\n    settings: {site: 5}\n", r"plugins\.datadog\.settings.*str"),
+        (
+            "plugins:\n  github:\n    settings: {work_orgs: tillo}\n",
+            r"plugins\.github\.settings.*work_orgs",
+        ),
+        (
+            "plugins:\n  incident_io:\n    policy:\n      write: {enabled: true}\n",
+            r"plugins\.incident_io\.policy\.write: plugin 'incident_io' has no write tools",
+        ),
+        (
+            "plugins:\n  datadog:\n    policy:\n      read: {scope: [x]}\n",
+            r"plugins\.datadog\.policy\.read\.scope: plugin 'datadog' has no scope",
+        ),
+        (
+            "plugins:\n  jira:\n    policy:\n      read: {scope: PLAT}\n",
+            r"plugins\.jira\.policy\.read\.scope",
+        ),
+        (
+            "plugins:\n  jira:\n    policy:\n      read: {scope: [1]}\n",
+            r"plugins\.jira\.policy\.read\.scope",
+        ),
+        (
+            "plugins:\n  slack:\n    policy:\n      read: {scope: {allow: [x]}}\n",
+            r"plugins\.slack\.policy\.read\.scope.*allow",
+        ),
+        (
+            "plugins:\n  github:\n    policy:\n      read: {enabled: true}\n",
+            r"plugins\.github\.policy: plugin 'github' has no tool policy",
+        ),
+        (
+            "plugins:\n  datadog:\n    policy:\n      read: {enabled: true, bogus: 1}\n",
+            "bogus",
+        ),
+        ("plugins:\n  github:\n    auth: {site: x}\n", "site"),
+        ("plugins:\n  github:\n    auth: {work_orgs: [tillo]}\n", "work_orgs"),
+        (
+            "plugins:\n  slack:\n    auth: {set_env: true}\n",
+            r"plugins\.slack\.auth: set_env not allowed for an oauth credential",
+        ),
+    ],
+)
+def test_plugins_validation_errors(tmp_path, text, match):
+    with pytest.raises(ConfigError, match=match):
+        _load(tmp_path, text)
+
+
+def test_auth_for_plugin_without_credential(tmp_path, monkeypatch):
+    plugins = tmp_path / "plugins"
+    (plugins / "demo").mkdir(parents=True)
+    (plugins / "demo" / "plugin.yaml").write_text("name: demo\n")
+    monkeypatch.setenv("ARCHIE_PLUGINS_DIR", str(plugins))
+    with pytest.raises(ConfigError, match=r"plugins\.demo\.auth: plugin 'demo' declares no"):
+        _load(tmp_path, "plugins:\n  demo:\n    auth: {client_id: x}\n")
+
+
+def test_empty_scope_allowed_without_scope_schema(tmp_path):
+    config = _load(tmp_path, "plugins:\n  datadog:\n    policy:\n      read: {scope: []}\n")
+    assert config.plugins["datadog"].policy.read.scope == []
+
+
+def test_policy_snapshot_defaults_and_overrides(tmp_path):
+    from archie_shared.plugins.config import policy_snapshot
+    from archie_shared.plugins.manifest import load_manifests
+
+    config = _load(tmp_path, PLUGINS_YAML)
+    snapshot = policy_snapshot(config.plugins, load_manifests())
+    assert set(snapshot) == {"datadog", "google", "incident_io", "jira", "notion", "slack"}
+    assert snapshot["jira"] == {
+        "read": {"enabled": True, "scope": ["PLAT"]},
+        "write": {"enabled": True, "scope": ["PLAT"]},
+    }
+    assert snapshot["notion"]["read"] == {"enabled": True, "scope": None}
+    assert snapshot["notion"]["write"] == {"enabled": True, "scope": {"pages": ["abc"]}}
+    assert snapshot["slack"]["read"] == {"enabled": True, "scope": {"deny": ["#hr"]}}
+    assert snapshot["incident_io"]["write"] == {"enabled": False, "scope": None}
+    assert snapshot["datadog"] == {
+        "read": {"enabled": True, "scope": None},
+        "write": {"enabled": False, "scope": None},
+    }
+
+
+def test_policy_snapshot_disables_both_blocks_for_disabled_plugins(tmp_path):
+    from archie_shared.plugins.config import policy_snapshot
+    from archie_shared.plugins.manifest import load_manifests
+
+    config = _load(tmp_path, "plugins:\n  datadog: {enabled: false}\n")
+    off = {"enabled": False, "scope": None}
+    assert policy_snapshot(config.plugins, load_manifests())["datadog"] == {
+        "read": off,
+        "write": off,
+    }
+
+
+def test_resolved_settings_merges_defaults(tmp_path):
+    from archie_shared.plugins.config import resolved_settings
+    from archie_shared.plugins.manifest import load_manifests
+
+    manifests = load_manifests()
+    assert resolved_settings("datadog", {}, manifests) == {"site": "app.datadoghq.eu"}
+    config = _load(tmp_path, PLUGINS_YAML)
+    assert resolved_settings("datadog", config.plugins, manifests) == {"site": "us5.datadoghq.com"}
+    assert resolved_settings("github", {}, manifests) == {"work_orgs": None}
+    assert resolved_settings("aws", {}, manifests) == {"region": "eu-west-1", "profiles": None}

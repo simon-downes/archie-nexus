@@ -8,7 +8,7 @@ defined here; every other provider comes from a ``plugins/<id>/plugin.yaml``
 
 import msgspec
 
-from archie_shared.credentials.api import AuthProviderOverride
+from archie_shared.plugins.config import PluginAuthConfig
 from archie_shared.plugins.credentials import credential_plugins, provider_from_manifest
 from archie_shared.plugins.manifest import load_manifests
 
@@ -27,7 +27,6 @@ class StaticProvider(msgspec.Struct, forbid_unknown_fields=True):
 
     name: str
     fields: list[str]
-    site: str | None = None
     env: dict[str, str] = msgspec.field(default_factory=dict)
     set_env: bool = False
     login: str | None = None
@@ -68,7 +67,7 @@ class OAuthProvider(msgspec.Struct, forbid_unknown_fields=True):
 
 
 def effective_provider(
-    name: str, override: "AuthProviderOverride | None" = None
+    name: str, override: PluginAuthConfig | None = None
 ) -> StaticProvider | OAuthProvider:
     """Return a code-defined provider with optional typed OAuth overrides."""
     provider = PROVIDERS[name]

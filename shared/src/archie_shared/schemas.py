@@ -11,9 +11,13 @@ from typing import Annotated
 
 import msgspec
 
-from archie_shared.config import home_dir, load_config
-from archie_shared.credentials.api import AuthConfig
-from archie_shared.tool_policy import ProviderToolPolicy
+from archie_shared.config import ConfigError, home_dir, load_config
+from archie_shared.plugins.config import PluginConfig, validate_plugins
+from archie_shared.plugins.errors import PluginManifestError
+from archie_shared.plugins.manifest import load_manifests
+
+# Sections replaced by ``plugins:`` (070 M4); ``archie config migrate`` converts them.
+_REMOVED_SECTIONS = ("tools", "auth")
 
 
 class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
@@ -111,9 +115,32 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     agent: AgentConfig = msgspec.field(default_factory=AgentConfig)
     web: WebConfig = msgspec.field(default_factory=WebConfig)
     orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
-    auth: AuthConfig = msgspec.field(default_factory=AuthConfig)
-    tools: dict[str, ProviderToolPolicy] = msgspec.field(default_factory=dict)
+    plugins: dict[str, PluginConfig] = msgspec.field(default_factory=dict)
     mounts: tuple[MountConfig, ...] = ()
+
+
+def _reject_removed_sections(path: Path, data: object) -> None:
+    if not isinstance(data, dict):
+        return
+    present = [name for name in _REMOVED_SECTIONS if name in data]
+    if present:
+        names = " and ".join(f"'{name}'" for name in present)
+        noun = "sections were" if len(present) > 1 else "section was"
+        raise ConfigError(
+            f"{path}: the {names} {noun} replaced by 'plugins'. "
+            "Run `archie config migrate` to convert this file."
+        )
+
+
+def _load(path: Path) -> NexusConfig:
+    config = load_config(
+        path, NexusConfig, raw_check=lambda data: _reject_removed_sections(path, data)
+    )
+    try:
+        validate_plugins(config.plugins, load_manifests())
+    except (ValueError, PluginManifestError) as e:
+        raise ConfigError(f"Validation error in {path}: {e}") from None
+    return config
 
 
 def load_nexus_config(path: Path | None = None) -> NexusConfig:
@@ -128,16 +155,17 @@ def load_nexus_config(path: Path | None = None) -> NexusConfig:
         Validated NexusConfig instance.
 
     Raises:
-        ConfigError: On explicit path missing, malformed YAML, or validation failure.
+        ConfigError: On explicit path missing, malformed YAML, validation failure,
+            or a removed ``tools``/``auth`` section.
     """
     if path is not None:
-        return load_config(path, NexusConfig)
+        return _load(Path(path))
 
     default_path = home_dir() / "config.yaml"
     if not default_path.exists():
         return NexusConfig()
 
-    return load_config(default_path, NexusConfig)
+    return _load(default_path)
 
 
 def expand_workspace_root(config: NexusConfig) -> Path:

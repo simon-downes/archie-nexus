@@ -1,5 +1,14 @@
 """In-repo plugin manifests (``plugins/<id>/plugin.yaml``), parsed without agent code."""
 
+from archie_shared.plugins.config import (
+    PluginAuthConfig,
+    PluginConfig,
+    PluginPolicyConfig,
+    PolicyBlockConfig,
+    policy_snapshot,
+    resolved_settings,
+    validate_plugins,
+)
 from archie_shared.plugins.errors import PluginManifestError
 from archie_shared.plugins.manifest import (
     MANIFEST_FILE,
@@ -30,14 +39,21 @@ __all__ = [
     "FieldSpec",
     "HooksSpec",
     "LoadedPlugin",
+    "PluginAuthConfig",
+    "PluginConfig",
     "PluginManifest",
     "PluginManifestError",
+    "PluginPolicyConfig",
+    "PolicyBlockConfig",
     "PolicyBlockSpec",
     "PolicySpec",
     "compile_struct",
     "compile_type",
     "load_manifest",
     "load_manifests",
+    "policy_snapshot",
+    "resolved_settings",
     "to_builtins",
+    "validate_plugins",
     "validate_value",
 ]

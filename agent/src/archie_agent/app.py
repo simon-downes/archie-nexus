@@ -28,10 +28,11 @@ from archie_shared.events import (
     encode_event,
 )
 from archie_shared.models import get_model, load_models
+from archie_shared.plugins.config import policy_snapshot
+from archie_shared.plugins.manifest import load_manifests
 from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import load_nexus_config
 from archie_shared.session.log import CursorNotFound
-from archie_shared.tool_policy import ToolsConfig, policy_snapshot
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -125,7 +126,7 @@ async def lifespan(app):
         model_catalog=_catalog,
         region=_config.global_.region,
         subagents=_config.agent.subagents,
-        tool_policy=LiveToolPolicy(policy_snapshot(ToolsConfig(providers=_config.tools))),
+        tool_policy=LiveToolPolicy(policy_snapshot(_config.plugins, load_manifests())),
         turn_cost_limit=_config.agent.turn_cost_limit,
         compaction=_config.agent.compaction,
     )

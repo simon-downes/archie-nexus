@@ -52,9 +52,10 @@ def _set_static_from_login(service: str) -> None:
     provider = PROVIDERS.get(service)
     if provider is None:
         raise click.ClickException(f"Unknown provider: {service}")
+    from archie_shared.credentials.api import provider_override
     from archie_shared.schemas import load_nexus_config
 
-    provider = effective_provider(service, load_nexus_config().auth.providers.get(service))
+    provider = effective_provider(service, provider_override(load_nexus_config(), service))
     if not isinstance(provider, StaticProvider):
         raise click.ClickException(f"{service} requires OAuth login")
     if provider.login == "aws_chain":

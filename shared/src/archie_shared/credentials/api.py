@@ -1,13 +1,21 @@
 """Typed, secret-free auth API models shared by Nexus services."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import msgspec
+
+from archie_shared.plugins.config import PluginAuthConfig
+
+if TYPE_CHECKING:
+    from archie_shared.schemas import NexusConfig
 
 
 class StaticProviderResponse(msgspec.Struct, forbid_unknown_fields=True):
     name: str
     auth_type: str = "static"
     fields: list[str] = msgspec.field(default_factory=list)
-    site: str | None = None
     can_refresh_noninteractive: bool = False
     env: dict[str, str] = msgspec.field(default_factory=dict)
     set_env: bool = False
@@ -53,28 +61,7 @@ class OAuthLoginResponse(msgspec.Struct, forbid_unknown_fields=True):
     redirect_uri: str
 
 
-class AuthProviderOverride(msgspec.Struct, forbid_unknown_fields=True):
-    site: str | None = None
-    client_id: str | None = None
-    authorization_endpoint: str | None = None
-    token_endpoint: str | None = None
-    registration_endpoint: str | None = None
-    server_url: str | None = None
-    scopes: list[str] | None = None
-    token_path: str | None = None
-    refresh_token_path: str | None = None
-    expires_in_path: str | None = None
-    extra_params: dict[str, str] | None = None
-    env: dict[str, str] | None = None
-    set_env: bool | None = None
-    # github only: owners (orgs or users) whose repositories use github.work_token.
-    work_orgs: list[str] | None = None
-
-
-class AuthConfig(msgspec.Struct, forbid_unknown_fields=True):
-    providers: dict[str, AuthProviderOverride] = msgspec.field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        for name, override in self.providers.items():
-            if name != "github" and override.work_orgs is not None:
-                raise ValueError(f"auth.providers.{name}.work_orgs is only valid for github")
+def provider_override(config: NexusConfig, name: str) -> PluginAuthConfig | None:
+    """Return ``plugins.<name>.auth`` from ``config``, or None if not configured."""
+    plugin = config.plugins.get(name)
+    return None if plugin is None else plugin.auth
