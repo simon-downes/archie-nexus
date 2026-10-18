@@ -41,6 +41,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
 from archie_agent.compaction import is_compact_command
+from archie_agent.exec.plugin_loader import PluginLoadError, run_startup_hooks
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
@@ -120,6 +121,11 @@ async def lifespan(app):
 
     manifests = load_manifests()
     settings, enabled = startup_runner_state(_config, manifests)
+    try:
+        run_startup_hooks(manifests, enabled=enabled, settings=settings)
+    except PluginLoadError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
     _agent = AgentHarness(
         session=session,
         llm_client=llm_client,

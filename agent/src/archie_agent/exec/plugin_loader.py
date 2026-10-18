@@ -8,13 +8,14 @@ plugins root — the plugins dir itself is never put on ``sys.path``.
 
 import importlib
 import importlib.machinery
+import inspect
 import sys
 import types
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from archie_shared.config import plugins_dir
-from archie_shared.plugins import PLUGIN_PACKAGE, LoadedPlugin
+from archie_shared.plugins import PLUGIN_PACKAGE, LoadedPlugin, resolved_settings
 
 from archie_agent.exec import plugin as _sdk
 
@@ -116,3 +117,52 @@ def load_plugins(
             )
         result[pid][key] = func
     return result
+
+
+def run_startup_hooks(
+    manifests: dict[str, LoadedPlugin],
+    *,
+    enabled: Iterable[str],
+    settings: dict[str, dict],
+    root: Path | None = None,
+    home: Path | None = None,
+) -> list[str]:
+    """Run each enabled plugin's ``hooks.startup`` (sync, no args) in its own context.
+
+    Returns the ids whose hook ran. Any failure raises ``PluginLoadError`` naming
+    the plugin.
+    """
+    allowed = set(enabled)
+    selected = [
+        pid for pid in sorted(manifests) if pid in allowed and manifests[pid].manifest.hooks.startup
+    ]
+    if not selected:
+        return []
+    install_package(plugins_dir() if root is None else root)
+    ran: list[str] = []
+    for pid in selected:
+        loaded = manifests[pid]
+        hook = loaded.manifest.hooks.startup
+        assert hook is not None
+        module_name, _, func_name = hook.partition(":")
+        try:
+            func = getattr(importlib.import_module(module_name), func_name)
+            values = settings.get(pid) or resolved_settings(pid, {}, manifests)
+            ctx = _sdk.build_context(
+                pid,
+                manifest=loaded,
+                policy_snapshot={},
+                settings=values,
+                home=home,
+                workspace=None,
+            )
+            with _sdk.use_context(ctx):
+                result = func()
+            if inspect.isawaitable(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise PluginLoadError("hooks must be synchronous functions")
+        except Exception as exc:
+            raise PluginLoadError(f"plugin '{pid}' startup hook failed: {exc}") from exc
+        ran.append(pid)
+    return ran

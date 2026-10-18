@@ -88,7 +88,7 @@ def test_persona_skills_holds_only_procedure_skills():
 
 # Plugins whose code takes credentials/policy/settings only from ``context()`` (M6+);
 # append on each conversion.
-CONVERTED = ["datadog"]
+CONVERTED = ["datadog", "aws"]
 
 # Built by concatenation so this file does not match its own patterns.
 FORBIDDEN_READS = (

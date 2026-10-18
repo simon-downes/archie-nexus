@@ -15,6 +15,7 @@ from archie_agent.exec.plugin_loader import (
     _reset_for_tests,
     install_package,
     load_plugins,
+    run_startup_hooks,
 )
 from archie_agent.exec.runner import _build_namespace, run
 from archie_shared.plugins import load_manifests
@@ -216,3 +217,137 @@ def test_runner_without_plugins_dir_is_unchanged(tmp_path, monkeypatch):
     finally:
         _restore_repo_plugins(snapshot)
     assert plugin_loader.RUNNER_BUILTINS == {"asyncio", "os", "json", "re", "Path"}
+
+
+HOOK_CODE = """\
+from archie_agent.exec.plugin import context
+
+CALLS = []
+
+
+def start():
+    ctx = context()
+    CALLS.append((ctx.plugin, dict(ctx.settings), ctx.workspace))
+
+
+def fail():
+    raise RuntimeError("bad profiles")
+
+
+async def start_async():
+    return None
+"""
+
+
+def _write_hook_plugin(root: Path, name: str = "hooky", *, func: str = "start") -> Path:
+    plugin = root / name
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text(
+        f"name: {name}\n"
+        f"hooks: {{startup: 'archie_plugins.{name}.hook:{func}'}}\n"
+        "settings:\n  region: {type: str, default: eu-west-1}\n"
+    )
+    (plugin / "__init__.py").write_text("")
+    (plugin / "hook.py").write_text(HOOK_CODE)
+    return plugin
+
+
+def test_startup_hook_runs_with_its_context(plugins_root, tmp_path):
+    _write_hook_plugin(plugins_root)
+    _write_plugin(plugins_root)  # no hook: not run
+    manifests = load_manifests(plugins_root)
+    ran = run_startup_hooks(
+        manifests,
+        enabled=["demo", "hooky"],
+        settings={"hooky": {"region": "us-east-1"}},
+        root=plugins_root,
+        home=tmp_path,
+    )
+    assert ran == ["hooky"]
+    calls = sys.modules["archie_plugins.hooky.hook"].CALLS
+    assert calls == [("hooky", {"region": "us-east-1"}, None)]
+    with pytest.raises(plugin_sdk.PluginContextError):
+        plugin_sdk.context()
+
+
+def test_startup_hook_defaults_settings_from_manifest(plugins_root, tmp_path):
+    _write_hook_plugin(plugins_root)
+    run_startup_hooks(
+        load_manifests(plugins_root), enabled=["hooky"], settings={}, root=plugins_root
+    )
+    calls = sys.modules["archie_plugins.hooky.hook"].CALLS
+    assert calls == [("hooky", {"region": "eu-west-1"}, None)]
+
+
+def test_startup_hook_skipped_when_disabled(plugins_root):
+    _write_hook_plugin(plugins_root)
+    ran = run_startup_hooks(
+        load_manifests(plugins_root), enabled=[], settings={}, root=plugins_root
+    )
+    assert ran == []
+    assert "archie_plugins.hooky.hook" not in sys.modules
+
+
+def test_hook_plugin_without_entry_loads_no_tools(plugins_root):
+    _write_hook_plugin(plugins_root)
+    assert load_plugins(load_manifests(plugins_root), root=plugins_root) == {"hooky": {}}
+    assert "archie_plugins.hooky.hook" not in sys.modules
+
+
+def test_startup_hook_failure_names_plugin(plugins_root):
+    _write_hook_plugin(plugins_root, func="fail")
+    with pytest.raises(PluginLoadError) as exc:
+        run_startup_hooks(
+            load_manifests(plugins_root), enabled=["hooky"], settings={}, root=plugins_root
+        )
+    assert str(exc.value) == "plugin 'hooky' startup hook failed: bad profiles"
+    assert isinstance(exc.value.__cause__, RuntimeError)
+
+
+def test_startup_hook_missing_function_names_plugin(plugins_root):
+    _write_hook_plugin(plugins_root, func="nope")
+    with pytest.raises(PluginLoadError, match="plugin 'hooky' startup hook failed"):
+        run_startup_hooks(
+            load_manifests(plugins_root), enabled=["hooky"], settings={}, root=plugins_root
+        )
+
+
+def test_async_startup_hook_rejected(plugins_root):
+    _write_hook_plugin(plugins_root, func="start_async")
+    with pytest.raises(PluginLoadError) as exc:
+        run_startup_hooks(
+            load_manifests(plugins_root), enabled=["hooky"], settings={}, root=plugins_root
+        )
+    assert "plugin 'hooky' startup hook failed" in str(exc.value)
+    assert "synchronous" in str(exc.value)
+
+
+def test_app_lifespan_exits_when_startup_hook_fails(plugins_root, tmp_path, monkeypatch, caplog):
+    """A failing hook stops agent startup before the harness is built, naming the plugin."""
+    import asyncio
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    _write_hook_plugin(plugins_root, func="fail")
+    home = tmp_path / "nexus_home"
+    home.mkdir()
+    (home / "config.yaml").write_text('global:\n  model: "bedrock-claude-sonnet-4-6"\n')
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(home))
+    monkeypatch.setenv("ARCHIE_SESSION_ID", "test-session")
+
+    from archie_agent import app as app_module
+
+    async def start():
+        async with app_module.lifespan(app_module.app):
+            pass
+
+    with (
+        patch.object(app_module, "create_llm_client", return_value=MagicMock()),
+        patch.object(app_module, "AgentHarness") as harness,
+        caplog.at_level(logging.ERROR, logger="archie_agent.app"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        asyncio.run(start())
+    assert exc.value.code == 1
+    assert "plugin 'hooky' startup hook failed: bad profiles" in caplog.text
+    harness.assert_not_called()

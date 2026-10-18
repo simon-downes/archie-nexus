@@ -291,22 +291,22 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q tests/test_plugin_enabled.py tests/test_credentials_runtime.py tests/test_credential_refresh.py tests/test_exec_tool.py` passes; full checks pass.
 - **Outcome:** `context.json` is now `{policy, settings, enabled}` (`runner_context` replaces `policy_snapshot` end to end; old shape → empty policy, all enabled). `LiveToolPolicy` holds startup-only settings/enabled. `enabled: false` hides the plugin from `/auth/providers`, `/auth/status`, `provider()`, OAuth refresh, env projection, CLI login, skills and runner imports. Settings with `env` are projected; Scalr `hostname`/`account` are settings. Choice: if config is invalid when skills are discovered, all plugin skills are shown (tools stay policy-gated). Not-yet-moved integrations (jira, notion, slack, google, incident_io) keep their namespace when disabled until they move, but their policy is off. Evidence: `tests/test_plugin_enabled.py` (14 tests) passes; full suite 1823 passed; ruff clean.
 
-### [ ] M6 — `PluginContext`, shared policy gates, Datadog converted
+### [x] M6 — `PluginContext`, shared policy gates, Datadog converted
 
 - **Approach:** Implement `PluginContext`, `CredentialSource` (D13), `context()`/`use_context()`, per-plugin `ToolCache` with `max_bytes` (D14; `exec/tools/cache.py` gains the parameter), shared `require_read/require_write(error=...)`. Runner wraps plugin tools per D12 with `workspace=_subprocess.WORKSPACE`. Convert Datadog: `client.py` credential + site via `context()`, `policy.py` uses the shared gates. Datadog tests build contexts with fake credentials (a `plugin_context` helper fixture in root `conftest.py`) instead of patching `get_credential`. Extend the layout test with the forbidden-read guard for `plugins/`.
 - **Test seam:** SDK functions; Datadog public tools under a test context.
 - **Deliverable:** Datadog takes everything from its context; calling a plugin tool outside a host fails closed.
 - **Verify:** `uv run pytest -q plugins/datadog tests/test_plugin_sdk.py tests/test_plugin_layout.py` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** SDK gained `PluginContext`, `PluginPolicy`/`PolicyBlock`, `CredentialSource` (store read per call, own plugin only), `context()`/`use_context()`/`install_context()`, `require_read/require_write`, `build_context`; `ToolCache(max_bytes=)`; new `exec/plugin_testing.py` `make_plugin_context()` for plugin tests. The runner passes settings explicitly (module global removed) and wraps each plugin tool in its own context. Datadog reads credential/site/policy only from the context, with the same messages. Evidence: `tests/test_plugin_sdk.py` (22 tests, including two plugins called concurrently in one exec, each seeing its own context) passes; the forbidden-read guard passes for datadog; full suite 1847 passed; ruff clean; a real `run_exec` subprocess gives `DatadogConfigurationError: Datadog credentials are incomplete` with no credentials and `DatadogPolicyError: Datadog reads are disabled by policy` with read disabled.
 
-### [ ] M7 — AWS plugin with a startup hook
+### [x] M7 — AWS plugin with a startup hook
 
 - **Approach:** `plugins/aws/profiles.py` `write_config()` reads `context().settings` and writes `~/.aws/config` per the design rules (port from untracked `plans/060-spec-container-aws-profiles.md` rules quoted in the brain document). `run_startup_hooks()` in the loader, skipping disabled plugins; `app.lifespan` calls it after config load. New short skill `plugins/aws/skills/aws-agent-access/SKILL.md` per the design's "AWS plugin" item 4, written fresh.
 - **Test seam:** `write_config()` with a temp home; `run_startup_hooks()`; app lifespan.
 - **Edge cases:** bad profile name / newline in ARN → hook error, old file kept; no profiles → no file; existing dir `0755` → tightened to `0700`.
 - **Deliverable:** A container with `plugins.aws.settings.profiles` gets matching AWS CLI profiles.
 - **Verify:** `uv run pytest -q plugins/aws tests/test_plugin_loader.py tests/test_plugin_enabled.py` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** `run_startup_hooks()` in the loader (enabled only, sync hooks inside the plugin's context, failure `plugin '<id>' startup hook failed: …`); `app.lifespan` runs hooks before building the harness and exits 1 on failure; `plugins/aws/profiles.py` `write_config()` follows every design rule; new 71-line `aws-agent-access` skill. Evidence: 21 AWS tests + 8 loader/lifespan tests pass; full suite 1877 passed; ruff clean; a smoke run with temp HOME/ARCHIE_HOME_DIR wrote the sorted config (file 600, dir 700), `aws configure list-profiles` read both profiles, and a bad profile name failed startup with the old file unchanged.
 
 ### [ ] M8 — incident.io moves and uses the context
 

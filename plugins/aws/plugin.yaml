@@ -13,3 +13,5 @@ credential:
 settings:
   region: {type: str, default: eu-west-1}
   profiles: {type: "dict[str,str]"}
+# Writes container-local ~/.aws/config profiles from `settings.profiles` (no tools).
+hooks: {startup: "archie_plugins.aws.profiles:write_config"}

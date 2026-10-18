@@ -224,7 +224,15 @@ class TestDiscoverSkills:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-INTEGRATION_SKILLS = {"google", "incident-io", "jira", "notion", "slack", "datadog"}
+INTEGRATION_SKILLS = {
+    "google",
+    "incident-io",
+    "jira",
+    "notion",
+    "slack",
+    "datadog",
+    "aws-agent-access",
+}
 
 
 def test_repo_plugins_provide_integration_skills(tmp_path, monkeypatch):
