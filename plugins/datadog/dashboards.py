@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation
 from .client import DatadogResponseError, datadog_client
@@ -10,7 +10,7 @@ from .formatting import dashboard_detail, dashboard_summary
 from .policy import require_read
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def list_dashboards(query: str | None = None, limit: int = 50) -> list[dict]:
     """List dashboards, optionally keeping titles that contain ``query`` (case-insensitive)."""
     text = validation.optional_query(query)
@@ -31,7 +31,7 @@ async def list_dashboards(query: str | None = None, limit: int = 50) -> list[dic
     return [dashboard_summary(item) for item in kept[:count]]
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def get_dashboard(dashboard_id: str) -> dict:
     """Return a dashboard with its top-level widgets and their queries."""
     identifier = validation.dashboard_id(dashboard_id)

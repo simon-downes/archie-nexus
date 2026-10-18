@@ -13,10 +13,9 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+from archie_agent.exec.plugin import ToolError
 from archie_shared.credentials.models import DatadogCredential
 from archie_shared.credentials.store import get_credential
-
-from archie_agent.exec.tools import ToolError
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
 _DEADLINE_SECONDS = 60.0

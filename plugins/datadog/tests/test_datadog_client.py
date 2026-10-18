@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from archie_agent.exec.tools.datadog import client as client_module
-from archie_agent.exec.tools.datadog.client import (
+from archie_plugins.datadog import client as client_module
+from archie_plugins.datadog.client import (
     DatadogAuthenticationError,
     DatadogAuthorizationError,
     DatadogClient,
@@ -21,8 +21,8 @@ from archie_agent.exec.tools.datadog.client import (
     api_host,
     datadog_client,
 )
-from archie_agent.exec.tools.datadog.metrics import query_metrics
-from archie_agent.exec.tools.datadog.policy import require_read, require_write
+from archie_plugins.datadog.metrics import query_metrics
+from archie_plugins.datadog.policy import require_read, require_write
 from archie_shared.credentials.models import DatadogCredential
 
 API_KEY = "api-secret-123"
@@ -290,7 +290,7 @@ async def test_disabled_read_makes_no_request(policy, monkeypatch):
         calls.append(1)
         yield None
 
-    monkeypatch.setattr("archie_agent.exec.tools.datadog.metrics.datadog_client", factory)
+    monkeypatch.setattr("archie_plugins.datadog.metrics.datadog_client", factory)
     with pytest.raises(DatadogPolicyError):
         await query_metrics("avg:system.cpu.user{*}")
     assert calls == []

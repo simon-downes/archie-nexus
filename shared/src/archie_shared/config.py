@@ -3,6 +3,7 @@
 Provides:
 - home_dir(): resolve ARCHIE_HOME_DIR (default ~/.nexus)
 - persona_dir(): resolve ARCHIE_PERSONA_DIR (repo-tracked skills + prompts)
+- plugins_dir(): resolve ARCHIE_PLUGINS_DIR (repo-tracked plugins)
 - load_config(): load YAML file and validate against a msgspec Struct schema
 - ConfigError: custom exception for all config-related failures
 """
@@ -45,6 +46,19 @@ def persona_dir() -> Path:
     if raw:
         return Path(raw).expanduser()
     return _REPO_ROOT / "persona"
+
+
+def plugins_dir() -> Path:
+    """Resolve the plugins directory (repo-tracked ``plugins/<id>/`` packages).
+
+    Reads ARCHIE_PLUGINS_DIR env var. On the host this defaults to
+    ``<repo_root>/plugins``; inside the container the orchestrator sets the env
+    var to the mounted path (``/opt/archie/plugins``).
+    """
+    raw = os.environ.get("ARCHIE_PLUGINS_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    return _REPO_ROOT / "plugins"
 
 
 def load_config[T](path: str | Path, schema: type[T]) -> T:

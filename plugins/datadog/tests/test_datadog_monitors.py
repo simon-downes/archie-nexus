@@ -8,9 +8,10 @@ from contextlib import asynccontextmanager
 
 import pytest
 from archie_agent.exec.envelope import Envelope
+from archie_agent.exec.plugin import plugin_tools
 from archie_agent.exec.runner import run
 from archie_agent.exec.tools import get_all_tools
-from archie_agent.exec.tools.datadog.client import (
+from archie_plugins.datadog.client import (
     DatadogInputError,
     DatadogMutationIndeterminateError,
     DatadogOwnershipError,
@@ -19,7 +20,7 @@ from archie_agent.exec.tools.datadog.client import (
     DatadogResponseError,
     DatadogTransportError,
 )
-from archie_agent.exec.tools.datadog.monitors import (
+from archie_plugins.datadog.monitors import (
     create_monitor,
     get_monitor,
     search_monitors,
@@ -140,7 +141,7 @@ async def test_read_disabled_blocks_validate(dd_fake, policy):
 
 
 def test_runner_exposes_datadog_namespace(tmp_path, monkeypatch):
-    from archie_agent.exec.tools.datadog import monitors as monitors_module
+    from archie_plugins.datadog import monitors as monitors_module
 
     class Client:
         async def request(self, method, path, *, params=None, json=None):
@@ -295,7 +296,7 @@ async def test_update_success_with_odd_body_says_updated(dd_fake, policy):
 
 
 async def test_deadline_during_write_is_indeterminate(monkeypatch, policy):
-    from archie_agent.exec.tools.datadog import client as client_module
+    from archie_plugins.datadog import client as client_module
     from archie_shared.credentials.models import DatadogCredential
 
     policy(WRITE)
@@ -315,9 +316,7 @@ async def test_deadline_during_write_is_indeterminate(monkeypatch, policy):
         async with client_module.datadog_client():
             yield SlowClient()
 
-    monkeypatch.setattr(
-        sys.modules["archie_agent.exec.tools.datadog.monitors"], "datadog_client", factory
-    )
+    monkeypatch.setattr(sys.modules["archie_plugins.datadog.monitors"], "datadog_client", factory)
     with pytest.raises(DatadogMutationIndeterminateError):
         await update_monitor(42, name="y")
     with pytest.raises(DatadogMutationIndeterminateError):
@@ -325,7 +324,7 @@ async def test_deadline_during_write_is_indeterminate(monkeypatch, policy):
 
 
 async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
-    from archie_agent.exec.tools.datadog import client as client_module
+    from archie_plugins.datadog import client as client_module
     from archie_shared.credentials.models import DatadogCredential
 
     policy(WRITE)
@@ -344,9 +343,7 @@ async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
         async with client_module.datadog_client():
             yield SlowGet()
 
-    monkeypatch.setattr(
-        sys.modules["archie_agent.exec.tools.datadog.monitors"], "datadog_client", factory
-    )
+    monkeypatch.setattr(sys.modules["archie_plugins.datadog.monitors"], "datadog_client", factory)
     with pytest.raises(DatadogTransportError):
         await update_monitor(42, name="y")
 
@@ -372,20 +369,21 @@ PUBLIC = {
 
 
 def test_registration_is_exactly_the_public_surface():
-    tools = get_all_tools()
+    tools = plugin_tools()
     keys = {key.removeprefix("datadog.") for key in tools if key.startswith("datadog.")}
     assert keys == PUBLIC
+    core = get_all_tools()
     for name in PUBLIC:
-        assert tools[f"datadog.{name}"]._native is False
-        assert tools[f"datadog.{name}"]._exec_docs is False
+        assert tools[f"datadog.{name}"]._plugin == "datadog"
+        assert f"datadog.{name}" not in core
 
 
 async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, policy):
     """Drive every function through the real client and a recording transport."""
+    import archie_plugins.datadog as package
     import httpx
-    from archie_agent.exec.tools import datadog as package
-    from archie_agent.exec.tools.datadog.client import DatadogClient, allowed
-    from archie_agent.exec.tools.datadog.discovery import SOURCES
+    from archie_plugins.datadog.client import DatadogClient, allowed
+    from archie_plugins.datadog.discovery import SOURCES
 
     policy(WRITE)
     seen = []
@@ -422,7 +420,7 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     modules = ("metrics", "logs", "traces", "events", "monitors", "dashboards", "catalog")
     for module in (*modules, "discovery"):
         monkeypatch.setattr(
-            sys.modules[f"archie_agent.exec.tools.datadog.{module}"], "datadog_client", factory
+            sys.modules[f"archie_plugins.datadog.{module}"], "datadog_client", factory
         )
     calls = {
         "query_metrics": ("avg:x{*}",),

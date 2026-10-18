@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation
 from .client import (
@@ -50,7 +50,7 @@ def definition(
     return body
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def search_monitors(query: str | None = None, limit: int = 20) -> list[dict]:
     """Search monitors with monitor search syntax (for example ``status:alert tag:env:prod``)."""
     text = validation.optional_query(query)
@@ -74,7 +74,7 @@ async def _fetch(client: Any, monitor_id: int) -> dict[str, Any]:
     return data
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def get_monitor(monitor_id: int) -> dict:
     """Return one monitor with its message and allowed options."""
     identifier = validation.monitor_id(monitor_id)
@@ -84,7 +84,7 @@ async def get_monitor(monitor_id: int) -> dict:
     return monitor(data, detail=True)
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def validate_monitor(
     name: str,
     type: str,
@@ -150,7 +150,7 @@ async def _write_client(action: str, target: str):
         raise
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def create_monitor(
     name: str,
     type: str,
@@ -170,7 +170,7 @@ async def create_monitor(
     return monitor(data, detail=True)
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def update_monitor(
     monitor_id: int,
     name: str | None = None,

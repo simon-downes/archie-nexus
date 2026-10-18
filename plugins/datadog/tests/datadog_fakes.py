@@ -6,7 +6,7 @@ import sys
 from contextlib import asynccontextmanager
 
 import pytest
-from archie_agent.exec.tools.datadog.client import allowed
+from archie_plugins.datadog.client import allowed
 from archie_shared.tool_policy import set_policy_snapshot
 
 
@@ -70,7 +70,7 @@ def dd_fake(monkeypatch, policy):
             yield client
 
         for module in modules:
-            target = sys.modules[f"archie_agent.exec.tools.datadog.{module}"]
+            target = sys.modules[f"archie_plugins.datadog.{module}"]
             monkeypatch.setattr(target, "datadog_client", factory)
         return client
 

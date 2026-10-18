@@ -28,6 +28,7 @@ CONTAINER_AGENTS_HOME = f"{CONTAINER_HOME}/.agents"
 CONTAINER_AGENT_DIR = "/opt/archie/agent"
 CONTAINER_SHARED_DIR = "/opt/archie/shared"
 CONTAINER_PERSONA_DIR = "/opt/archie/persona"
+CONTAINER_PLUGINS_DIR = "/opt/archie/plugins"
 CONTAINER_WORKSPACE_DIR = "/workspace"
 IMAGE_TAG = "archie:latest"
 

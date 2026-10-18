@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation
 from .client import (
@@ -19,7 +19,7 @@ from .formatting import metric_description, metric_result
 from .policy import require_read
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def query_metrics(query: str, start: str = "1h", end: str | None = None) -> dict:
     """Run a Datadog metric query (for example ``avg:system.cpu.user{env:prod} by {host}``)."""
     text = validation.query(query)
@@ -38,7 +38,7 @@ async def query_metrics(query: str, start: str = "1h", end: str | None = None) -
     return metric_result(data)
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def search_metrics(
     query: str | None = None,
     limit: int = 50,
@@ -94,7 +94,7 @@ async def list_metric_names(tag: str | None, window: timedelta | None) -> list[s
     return [name for name in names if isinstance(name, str)]
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def describe_metric(name: str, max_values: int = 20) -> dict:
     """Describe one metric: type and unit, tag keys with sample values, and where it is used."""
     metric = validation.metric_name(name)

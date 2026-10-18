@@ -31,5 +31,5 @@ ignore = ["E501"]
 "tests/**" = ["N818"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "plugins"]
 asyncio_mode = "auto"

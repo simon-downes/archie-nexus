@@ -108,7 +108,6 @@ def get_all_tools() -> dict:
         brain,
         calendar,
         code,
-        datadog,
         discovery,
         drive,
         fs,

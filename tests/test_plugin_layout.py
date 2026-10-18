@@ -1,0 +1,63 @@
+"""Layout guards for integrations moved into ``plugins/<id>/`` (plan 070, M1)."""
+
+import re
+from pathlib import Path
+
+import pytest
+from archie_agent.exec.plugin_loader import load_plugins
+from archie_shared.plugins import load_manifests
+
+ROOT = Path(__file__).resolve().parents[1]
+SCANNED = ("agent", "tests", "plugins", "shared", "orchestrator", "cli")
+SKIP_PARTS = {"__pycache__", ".venv"}
+
+# Integrations already moved out of ``agent/src/archie_agent/exec/tools/``; append on each move.
+MOVED = ["datadog"]
+
+
+def _python_files():
+    for top in SCANNED:
+        for path in sorted((ROOT / top).rglob("*.py")):
+            if SKIP_PARTS.isdisjoint(path.relative_to(ROOT).parts):
+                yield path
+
+
+def _patterns(name: str) -> list[re.Pattern[str]]:
+    # Built by concatenation so this file does not match its own patterns.
+    module = re.escape("archie_agent.exec.tools." + name)
+    path = re.escape("exec/tools/" + name)
+    from_tools = re.escape("from archie_agent.exec.tools import") + r"[^\n]*\b" + name + r"\b"
+    return [re.compile(module), re.compile(path), re.compile(from_tools)]
+
+
+@pytest.mark.parametrize("name", MOVED)
+def test_no_references_to_old_integration_location(name):
+    patterns = _patterns(name)
+    offenders = []
+    for path in _python_files():
+        text = path.read_text(encoding="utf-8")
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                line = text.count("\n", 0, match.start()) + 1
+                offenders.append(f"{path.relative_to(ROOT)}:{line}: {match.group(0)}")
+    assert not offenders, "\n".join(offenders)
+
+
+@pytest.mark.parametrize("name", MOVED)
+def test_moved_integration_has_no_core_package(name):
+    assert not (ROOT / "agent" / "src" / "archie_agent" / "exec" / "tools" / name).exists()
+    assert (ROOT / "plugins" / name / "plugin.yaml").is_file()
+
+
+def test_every_plugin_function_is_documented_in_its_skills():
+    manifests = load_manifests(ROOT / "plugins")
+    loaded = load_plugins(manifests, root=ROOT / "plugins")
+    missing = []
+    for pid, tools in loaded.items():
+        skills = sorted(manifests[pid].skills_dir.glob("*/SKILL.md"))
+        text = "\n".join(path.read_text(encoding="utf-8") for path in skills)
+        namespaces = set(manifests[pid].manifest.namespaces)
+        for key in sorted(tools):
+            if key.rsplit(".", 1)[0] in namespaces and f"`{key}(" not in text:
+                missing.append(f"{pid}: {key}")
+    assert not missing, "undocumented plugin functions:\n" + "\n".join(missing)

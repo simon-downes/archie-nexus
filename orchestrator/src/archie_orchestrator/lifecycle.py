@@ -25,6 +25,7 @@ from archie_orchestrator.docker import (
     CONTAINER_AGENTS_HOME,
     CONTAINER_NEXUS_HOME,
     CONTAINER_PERSONA_DIR,
+    CONTAINER_PLUGINS_DIR,
     CONTAINER_PORT,
     CONTAINER_SHARED_DIR,
     CONTAINER_WORKSPACE_DIR,
@@ -123,6 +124,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     shared_dir = REPO_ROOT / "shared"
     persona_dir_host = REPO_ROOT / "persona"
     container_persona = "/opt/archie/persona"
+    plugins_dir_host = REPO_ROOT / "plugins"
     configured_brain = os.environ.get("ARCHIE_BRAIN_DIR")
     credential_env = runtime_environment(config)
 
@@ -141,6 +143,8 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         "-e",
         f"ARCHIE_PERSONA_DIR={container_persona}",
         "-e",
+        f"ARCHIE_PLUGINS_DIR={CONTAINER_PLUGINS_DIR}",
+        "-e",
         f"ARCHIE_SESSION_ID={session_id}",
         *(["-e", f"ARCHIE_BRAIN_DIR={configured_brain}"] if configured_brain else []),
         *[arg for name, value in credential_env.items() for arg in ("-e", f"{name}={value}")],
@@ -150,6 +154,8 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         f"{shared_dir}:{CONTAINER_SHARED_DIR}:ro",
         "-v",
         f"{persona_dir_host}:{CONTAINER_PERSONA_DIR}:rw",
+        "-v",
+        f"{plugins_dir_host}:{CONTAINER_PLUGINS_DIR}:ro",
         "-v",
         f"{resolved}:{CONTAINER_WORKSPACE_DIR}:rw",
         "-v",

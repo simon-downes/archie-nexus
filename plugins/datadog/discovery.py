@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation
 from .client import (
@@ -260,7 +260,7 @@ async def _bounded(run: Callable[[], Awaitable[Any]]) -> Any:
         raise DatadogResponseError("Datadog returned an unexpected response") from exc
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def search(
     query: str,
     sources: list[str] | None = None,

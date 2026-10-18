@@ -3,24 +3,24 @@
 from datetime import UTC, datetime
 
 import pytest
+from archie_agent.exec.plugin import plugin_tools
 from archie_agent.exec.tools import get_all_tools
-from archie_agent.exec.tools.datadog.catalog import list_catalog_entities, list_teams
-from archie_agent.exec.tools.datadog.client import (
+from archie_plugins.datadog.catalog import list_catalog_entities, list_teams
+from archie_plugins.datadog.client import (
     DatadogInputError,
     DatadogNotFoundError,
     DatadogRateLimitError,
     DatadogRequestRejectedError,
     DatadogResponseError,
 )
-from archie_agent.exec.tools.datadog.dashboards import get_dashboard, list_dashboards
-from archie_agent.exec.tools.datadog.events import list_events
-from archie_agent.exec.tools.datadog.logs import search_logs
-from archie_agent.exec.tools.datadog.metrics import describe_metric, query_metrics, search_metrics
-from archie_agent.exec.tools.datadog.monitors import search_monitors
-from archie_agent.exec.tools.datadog.traces import search_spans
-from archie_agent.exec.tools.datadog.validation import time_window
-
-from tests.datadog_fakes import Seq
+from archie_plugins.datadog.dashboards import get_dashboard, list_dashboards
+from archie_plugins.datadog.events import list_events
+from archie_plugins.datadog.logs import search_logs
+from archie_plugins.datadog.metrics import describe_metric, query_metrics, search_metrics
+from archie_plugins.datadog.monitors import search_monitors
+from archie_plugins.datadog.traces import search_spans
+from archie_plugins.datadog.validation import time_window
+from datadog_fakes import Seq
 
 NOW = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 QUERY = ("GET", "/api/v1/query")
@@ -414,7 +414,7 @@ async def test_log_record_is_bounded(dd_fake):
 
 
 def test_log_attributes_replace_nested_values():
-    from archie_agent.exec.tools.datadog.formatting import log
+    from archie_plugins.datadog.formatting import log
 
     record = log(_log(1, attributes={"nested": {"a": 1}, "list": [1], "n": 3, "s": "y" * 300}))
     assert record["attributes"] == {"nested": "…", "list": "…", "n": 3, "s": "y" * 200}
@@ -553,7 +553,7 @@ async def test_optional_queries_reject_bad_values(dd_fake, module, call):
 
 
 def test_truncation_is_flagged_on_every_bounded_record():
-    from archie_agent.exec.tools.datadog.formatting import catalog_entity, dashboard_detail, span
+    from archie_plugins.datadog.formatting import catalog_entity, dashboard_detail, span
 
     long_error = {"attributes": {"custom": {"error": {"type": "E", "message": "m" * 900}}}}
     assert span(long_error)["truncated"] is True
@@ -600,12 +600,14 @@ READS = {
 
 
 def test_registration_contains_read_functions():
-    tools = get_all_tools()
+    tools = plugin_tools()
     keys = {key.removeprefix("datadog.") for key in tools if key.startswith("datadog.")}
     assert READS <= keys
+    core = get_all_tools()
     for name in READS:
         fn = tools[f"datadog.{name}"]
-        assert fn._native is False and fn._exec_docs is False
+        assert fn._plugin == "datadog" and fn._namespace == "datadog"
+        assert f"datadog.{name}" not in core
 
 
 DASHBOARDS = ("GET", "/api/v1/dashboard")

@@ -142,6 +142,31 @@ class TestScanDirectory:
 class TestDiscoverSkills:
     """Tests for discover_skills — integration with agents + persona scanning."""
 
+    @pytest.fixture(autouse=True)
+    def _no_repo_plugins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ARCHIE_PLUGINS_DIR", str(tmp_path / "plugins"))
+
+    def test_discovers_plugin_skill_with_context(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
+        plugin = _write_plugin(tmp_path / "plugins", "demo", context=("services/demo.md",))
+        path = _write_skill(plugin / "skills", "demo-skill", VALID_SKILL)
+
+        catalog = discover_skills()
+        assert catalog["test-skill"].path == path
+        assert catalog["test-skill"].context == ("services/demo.md",)
+
+    def test_plugin_skills_follow_persona(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
+        _write_skill(tmp_path / "persona" / "skills", "persona", VALID_SKILL)
+        plugin = _write_plugin(tmp_path / "plugins", "demo")
+        plugin_path = _write_skill(plugin / "skills", "demo-skill", VALID_SKILL)
+
+        catalog = discover_skills()
+        assert catalog["test-skill"].path == plugin_path
+        assert catalog["test-skill"].context == ()
+
     def test_discovers_from_agents_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(tmp_path / "persona"))
@@ -196,6 +221,16 @@ class TestDiscoverSkills:
         catalog = discover_skills()
         assert "test-skill" in catalog
         assert "another-skill" in catalog
+
+
+def _write_plugin(root: Path, name: str, *, context: tuple[str, ...] = ()) -> Path:
+    plugin = root / name
+    plugin.mkdir(parents=True)
+    lines = [f"name: {name}"]
+    if context:
+        lines.append("context: [" + ", ".join(context) + "]")
+    (plugin / "plugin.yaml").write_text("\n".join(lines) + "\n")
+    return plugin
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +321,47 @@ class TestSkillTool:
         assert "This is the body of the test skill." in result
         assert ("test-skill", "__body__") in loaded
         assert "system prompt" not in result
+
+    @pytest.mark.asyncio
+    async def test_missing_context_warns_before_skill(self, tmp_path, monkeypatch):
+        brain = tmp_path / "brain"
+        (brain / "services").mkdir(parents=True)
+        (brain / "services" / "present.md").write_text("x")
+        monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(brain))
+        path = _write_skill(tmp_path, "my-skill", VALID_SKILL)
+        context = ("services/present.md", "services/a.md", "b.md")
+        catalog = {"test-skill": SkillEntry("test-skill", "A test skill.", path, context)}
+        spec = create_skill_tool(catalog, set())
+
+        result = await spec.handler(name="test-skill")
+        first, rest = result.split("\n", 1)
+        assert first == (
+            "Warning: brain entries this skill depends on are missing: services/a.md, b.md"
+        )
+        assert rest.startswith("Skill 'test-skill' loaded.")
+        assert '<skill name="test-skill">' in result
+
+    @pytest.mark.asyncio
+    async def test_missing_brain_root_counts_as_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path / "no-brain"))
+        path = _write_skill(tmp_path, "my-skill", VALID_SKILL)
+        catalog = {"test-skill": SkillEntry("test-skill", "A test skill.", path, ("a.md",))}
+        result = await create_skill_tool(catalog, set()).handler(name="test-skill")
+        assert result.startswith("Warning: brain entries this skill depends on are missing: a.md")
+
+    @pytest.mark.asyncio
+    async def test_present_context_has_no_warning(self, tmp_path, monkeypatch):
+        brain = tmp_path / "brain"
+        (brain / "services").mkdir(parents=True)
+        (brain / "services" / "demo.md").write_text("x")
+        monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(brain))
+        path = _write_skill(tmp_path, "my-skill", VALID_SKILL)
+        catalog = {
+            "test-skill": SkillEntry("test-skill", "A test skill.", path, ("services/demo.md",))
+        }
+        result = await create_skill_tool(catalog, set()).handler(name="test-skill")
+        assert "Warning" not in result
+        assert result.startswith("Skill 'test-skill' loaded.")
 
     @pytest.mark.asyncio
     async def test_load_lists_reference_files(self, tmp_path):

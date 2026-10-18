@@ -54,7 +54,11 @@ PERSISTENT_PATHS: tuple[tuple[str, str], ...] = (
     ("~/.agents", "shared agent skills"),
 )
 # The agent's own runtime: mounted from the host but off-limits unless asked.
-ARCHIE_SELF_PATHS: tuple[str, ...] = ("/opt/archie/agent", "/opt/archie/persona")
+ARCHIE_SELF_PATHS: tuple[str, ...] = (
+    "/opt/archie/agent",
+    "/opt/archie/persona",
+    "/opt/archie/plugins",
+)
 
 _VERSION = re.compile(r"(\d+)\.(\d+)")
 
@@ -235,8 +239,10 @@ def render(
 
     lines.append("")
     if env.archie_self:
+        paths = list(env.archie_self)
+        joined = paths[0] if len(paths) == 1 else f"{', '.join(paths[:-1])} and {paths[-1]}"
         lines.append(
-            f"{' and '.join(env.archie_self)} hold this agent's own code and prompts "
+            f"{joined} hold this agent's own code and prompts "
             "(host-mounted) — don't edit unless asked."
         )
     lines.append(

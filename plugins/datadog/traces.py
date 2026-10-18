@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation
 from .client import datadog_client
@@ -11,7 +11,7 @@ from .paging import collection, iso
 from .policy import require_read
 
 
-@tool(native=False, exec_docs=False, namespace="datadog")
+@tool(namespace="datadog")
 async def search_spans(
     query: str,
     start: str = "1h",

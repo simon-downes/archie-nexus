@@ -127,6 +127,7 @@ async def test_calendar_reference_rejects_tied_recurring_records(monkeypatch):
 
     monkeypatch.setattr("archie_agent.exec.tools.calendar.get_event", fake_event)
     monkeypatch.setattr(meet, "meet_request", fake_request)
+    monkeypatch.setattr(meet, "credential", lambda: type("C", (), {"access_token": "t"})())
     with pytest.raises(GoogleValidationError, match="multiple Meet conferences"):
         await meet.notes("calendar:event-1")
 

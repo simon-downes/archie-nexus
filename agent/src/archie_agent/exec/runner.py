@@ -99,12 +99,39 @@ def _build_namespace(calls: list[CallRecord], policy_snapshot: dict | None = Non
                 setattr(service, name, wrapped)
             else:
                 namespace[name] = wrapped
+        _add_plugin_tools(service_namespaces, calls)
         namespace.update(service_namespaces)
         namespace["_tool_policy"] = policy_snapshot or {}
     except ImportError as exc:
         raise RuntimeError("Failed to load exec tools") from exc
 
     return namespace
+
+
+def _add_plugin_tools(service_namespaces: dict[str, object], calls: list[CallRecord]) -> None:
+    """Load plugin tools into their own namespaces; failures name the plugin."""
+    import types as _types
+
+    from archie_shared.plugins import PluginManifestError, load_manifests
+
+    from archie_agent.exec.plugin_loader import PluginLoadError, load_plugins
+
+    try:
+        loaded = load_plugins(load_manifests())
+    except (PluginManifestError, PluginLoadError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    core_namespaces = set(service_namespaces)
+    for plugin_id, tools in loaded.items():
+        for key, func in tools.items():
+            namespace_name, name = key.rsplit(".", 1)
+            if namespace_name in core_namespaces:
+                raise RuntimeError(
+                    f"Plugin '{plugin_id}' namespace '{namespace_name}' collides with a core "
+                    "exec namespace"
+                )
+            service = service_namespaces.setdefault(namespace_name, _types.SimpleNamespace())
+            setattr(service, name, _wrap_for_audit(func, key, calls))
 
 
 def _wrap_for_audit(fn, name: str, calls: list[CallRecord]):
@@ -183,7 +210,11 @@ def run(run_dir: Path) -> None:
             policy_snapshot = json.loads(context_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError):
             policy_snapshot = None
-    namespace = _build_namespace(calls, policy_snapshot)
+    try:
+        namespace = _build_namespace(calls, policy_snapshot)
+    except Exception as e:
+        Envelope.error_envelope(type(e).__name__, str(e), tb=traceback.format_exc()).write(run_dir)
+        return
 
     # Run model code from the workspace root so plain open()/Path resolve
     # relative paths the same way the helpers do. Done here (not at spawn) so

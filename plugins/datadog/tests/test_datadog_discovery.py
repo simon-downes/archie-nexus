@@ -3,8 +3,8 @@
 import asyncio
 
 import pytest
-from archie_agent.exec.tools.datadog import discovery
-from archie_agent.exec.tools.datadog.client import (
+from archie_plugins.datadog import discovery
+from archie_plugins.datadog.client import (
     DatadogAuthenticationError,
     DatadogAuthorizationError,
     DatadogConfigurationError,
@@ -14,7 +14,7 @@ from archie_agent.exec.tools.datadog.client import (
     DatadogResponseError,
     DatadogTransportError,
 )
-from archie_agent.exec.tools.datadog.discovery import query_metrics_in, search, span_query
+from archie_plugins.datadog.discovery import query_metrics_in, search, span_query
 
 MONITORS = ("GET", "/api/v1/monitor/search")
 DASHBOARDS = ("GET", "/api/v1/dashboard")

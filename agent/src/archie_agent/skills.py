@@ -7,6 +7,7 @@ from pathlib import Path, PureWindowsPath
 
 import yaml
 from archie_shared.config import persona_dir
+from archie_shared.plugins import PluginManifestError, load_manifests
 
 from archie_agent.tools import ToolSpec
 
@@ -21,16 +22,28 @@ class SkillEntry:
     name: str
     description: str
     path: Path
+    context: tuple[str, ...] = ()  # brain-relative paths the skill depends on
 
 
 def discover_skills() -> dict[str, SkillEntry]:
+    """Scan ~/.agents/skills, persona skills, then each plugin's skills (by plugin id)."""
     catalog: dict[str, SkillEntry] = {}
     _scan_directory(Path.home() / ".agents" / "skills", catalog)
     _scan_directory(persona_dir() / "skills", catalog)
+    try:
+        plugins = load_manifests()
+    except PluginManifestError as error:
+        log.warning("Failed to load plugin manifests for skills: %s", error)
+        plugins = {}
+    for plugin_id in sorted(plugins):
+        loaded = plugins[plugin_id]
+        _scan_directory(loaded.skills_dir, catalog, context=tuple(loaded.manifest.context))
     return catalog
 
 
-def _scan_directory(skills_dir: Path, catalog: dict[str, SkillEntry]) -> None:
+def _scan_directory(
+    skills_dir: Path, catalog: dict[str, SkillEntry], *, context: tuple[str, ...] = ()
+) -> None:
     if not skills_dir.is_dir():
         return
     try:
@@ -43,6 +56,8 @@ def _scan_directory(skills_dir: Path, catalog: dict[str, SkillEntry]) -> None:
         if skill_dir.is_dir() and skill_file.is_file():
             entry = _parse_skill_file(skill_file)
             if entry is not None:
+                if context:
+                    entry = SkillEntry(entry.name, entry.description, entry.path, context)
                 catalog[entry.name] = entry
 
 
@@ -128,14 +143,14 @@ def create_skill_tool(
 
             parts: list[str] = []
             if body_needed:
-                parts.append(
-                    _format_skill(
-                        name,
-                        body,
-                        _list_reference_files(entry.path.parent),
-                        entry.path.parent.resolve(),
-                    )
+                formatted = _format_skill(
+                    name,
+                    body,
+                    _list_reference_files(entry.path.parent),
+                    entry.path.parent.resolve(),
                 )
+                warning = _missing_context_warning(entry.context)
+                parts.append(f"{warning}\n{formatted}" if warning else formatted)
             for reference in new_references:
                 parts.append(_format_reference(name, reference, reference_contents[reference]))
 
@@ -233,6 +248,29 @@ def _read_reference(entry: SkillEntry, reference: str) -> tuple[str, str | None]
         return "", f"Error: binary file: {reference}"
     except OSError as error:
         return "", f"Error: failed to read file {reference}: {error}"
+
+
+def _missing_context_warning(context: tuple[str, ...]) -> str:
+    """Return a warning line naming missing brain entries, or "" when all exist."""
+    if not context:
+        return ""
+    from archie_shared.brain import brain_root
+
+    try:
+        root = brain_root()
+    except Exception:  # noqa: BLE001 — an unresolvable brain root counts as missing
+        root = None
+    missing = []
+    for path in context:
+        try:
+            present = root is not None and (root / path).exists()
+        except OSError:
+            present = False
+        if not present:
+            missing.append(path)
+    if not missing:
+        return ""
+    return f"Warning: brain entries this skill depends on are missing: {', '.join(missing)}"
 
 
 def _format_skill(name: str, body: str, references: list[str], skill_dir: Path) -> str:
