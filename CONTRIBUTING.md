@@ -4,7 +4,7 @@ See [README.md](README.md) for setup and the repository map. See [docs/architect
 
 ## Development setup
 
-archie-nexus is a `uv` workspace containing `cli`, `agent`, `shared`, and `orchestrator`. It requires Python 3.13.
+archie-nexus is a `uv` workspace containing `cli`, `agent`, `shared`, and `orchestrator`; integrations under `plugins/` are imported as `archie_plugins.<id>` rather than installed as packages. It requires Python 3.13.
 
 ```bash
 uv sync
@@ -28,7 +28,8 @@ The session log viewer's syntax-highlighting stylesheet is generated. After a Py
 
 ## Change guidance
 
-- Put behavior tests in `tests/` and update tests with behavior changes.
+- Put behavior tests in `tests/` and update tests with behavior changes. A plugin's own tests live in `plugins/<id>/tests/`.
+- Put integration code, skills, and credential/policy/settings declarations in its plugin directory, not in `agent/`, `shared/`, or `persona/`; see [docs/plugins.md](docs/plugins.md).
 - Treat `shared/` changes as cross-package contract changes. Check both agent and CLI/orchestrator consumers.
 - Keep host-only concerns in `cli`/`orchestrator`; keep container-side execution in `agent`.
 - Keep reusable schemas, serialization, configuration, and accounting in `shared` rather than duplicating them in a presentation layer.

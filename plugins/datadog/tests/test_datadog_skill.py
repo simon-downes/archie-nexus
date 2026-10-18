@@ -1,23 +1,17 @@
-"""Consumer-facing Datadog skill contract tests."""
+"""Consumer-facing Datadog skill contract tests.
+
+Function coverage, frontmatter and generic leak checks live in tests/test_plugin_layout.py.
+"""
 
 import inspect
 from pathlib import Path
 
-from archie_agent.exec.plugin import plugin_tools
 from archie_agent.skills import _scan_directory
 from archie_plugins.datadog import client as client_module
 from archie_plugins.datadog.client import DatadogError
 
 SKILLS = Path(__file__).resolve().parents[1] / "skills"
 SKILL = SKILLS / "datadog" / "SKILL.md"
-
-
-def test_skill_documents_every_public_function():
-    text = SKILL.read_text(encoding="utf-8")
-    functions = sorted(key for key in plugin_tools() if key.startswith("datadog."))
-    assert len(functions) == 16
-    for function in functions:
-        assert f"`{function}(" in text, function
 
 
 def test_skill_documents_every_error_class():
@@ -51,8 +45,6 @@ def test_skill_contains_no_credentials_or_raw_api_details():
         "api.datadoghq",
         "DD-API-KEY",
         "DD-APPLICATION-KEY",
-        "ARCHIE_HOME_DIR",
-        "credentials.yaml",
         "/api/v1",
         "/api/v2",
     ):

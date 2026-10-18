@@ -178,23 +178,11 @@ def test_namespace_colliding_with_runner_builtin_rejected(plugins_root):
         load_plugins(load_manifests(plugins_root), root=plugins_root)
 
 
-@pytest.fixture
-def core_namespace():
-    """Register a core namespaced exec tool ``corefixture.ping``; remove it afterwards."""
-    from archie_agent.exec import tools as core_tools
-
-    async def ping():
-        return "core"
-
-    core_tools.tool(namespace="corefixture")(ping)
-    yield "corefixture"
-    core_tools._TOOLS.pop("corefixture.ping", None)
-
-
-def test_runner_rejects_plugin_namespace_shadowing_core_namespace(plugins_root, core_namespace):
-    code = DEMO_CODE.replace('namespace="demo"', f'namespace="{core_namespace}"')
-    _write_plugin(plugins_root, namespaces=(core_namespace,), code=code)
-    with pytest.raises(RuntimeError, match=f"'{core_namespace}'"):
+def test_runner_rejects_plugin_namespace_shadowing_core_tool(plugins_root):
+    """Core tools are flat; the loader's reserved-name check surfaces as a runner error."""
+    code = DEMO_CODE.replace('namespace="demo"', 'namespace="read"')
+    _write_plugin(plugins_root, namespaces=("read",), code=code)
+    with pytest.raises(RuntimeError, match="namespace 'read' collides with a core exec name"):
         contextvars.copy_context().run(_build_namespace, [])
 
 

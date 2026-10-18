@@ -1,23 +1,15 @@
-"""Consumer-facing Slack skill contract tests."""
+"""Consumer-facing Slack skill contract tests.
+
+Function coverage, frontmatter and generic leak checks live in tests/test_plugin_layout.py.
+"""
 
 from pathlib import Path
 
 
-def test_slack_skill_documents_public_contract_and_safety_rules():
+def test_slack_skill_documents_safety_rules_and_hides_api_details():
     skill = Path(__file__).resolve().parents[1] / "skills" / "slack" / "SKILL.md"
     text = skill.read_text(encoding="utf-8")
     assert "name: slack" in text
-    for function in (
-        "slack.search",
-        "slack.conversations",
-        "slack.users",
-        "slack.messages",
-        "slack.thread",
-        "slack.send_message",
-        "slack.react",
-        "slack.reactions",
-    ):
-        assert function in text
     for term in (
         "SlackRateLimitError",
         "retry_after_seconds",
@@ -34,7 +26,6 @@ def test_slack_skill_documents_public_contract_and_safety_rules():
         "conversations.history",
         "conversations.replies",
         "results.messages",
-        "ARCHIE_HOME_DIR",
     ):
         assert leaked_detail not in text
     for block in ("header", "section", "context", "divider"):

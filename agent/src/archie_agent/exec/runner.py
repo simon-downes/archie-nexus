@@ -104,23 +104,14 @@ def _build_namespace(calls: list[CallRecord], context: dict | None = None) -> di
     }
 
     try:
-        import types as _types
-
         from archie_shared.tool_policy import set_policy_snapshot
 
         from archie_agent.exec.tools import get_all_tools
 
         set_policy_snapshot(policy)
+        for name, func in get_all_tools().items():
+            namespace[name] = _wrap_for_audit(func, name, calls)
         service_namespaces: dict[str, object] = {}
-        for key, func in get_all_tools().items():
-            name = key.rsplit(".", 1)[-1]
-            namespace_name = getattr(func, "_namespace", None)
-            wrapped = _wrap_for_audit(func, key, calls)
-            if namespace_name:
-                service = service_namespaces.setdefault(namespace_name, _types.SimpleNamespace())
-                setattr(service, name, wrapped)
-            else:
-                namespace[name] = wrapped
         _add_plugin_tools(service_namespaces, calls, enabled, policy=policy, settings=settings)
         namespace.update(service_namespaces)
         namespace["_tool_policy"] = policy
@@ -142,7 +133,8 @@ def _add_plugin_tools(
 
     Each plugin gets one ``PluginContext`` built from the runner context's policy and
     settings; each of its tools runs inside that context (D12). Settings missing from
-    the runner context fall back to the manifest defaults.
+    the runner context fall back to the manifest defaults. Collisions between plugin
+    namespaces and core tool names or runner builtins are rejected by ``load_plugins``.
     """
     import types as _types
 
@@ -160,7 +152,6 @@ def _add_plugin_tools(
     except (PluginManifestError, PluginLoadError) as exc:
         raise RuntimeError(str(exc)) from exc
 
-    core_namespaces = set(service_namespaces)
     for plugin_id, tools in loaded.items():
         plugin_settings = settings.get(plugin_id)
         if not isinstance(plugin_settings, dict):
@@ -174,11 +165,6 @@ def _add_plugin_tools(
         )
         for key, func in tools.items():
             namespace_name, name = key.rsplit(".", 1)
-            if namespace_name in core_namespaces:
-                raise RuntimeError(
-                    f"Plugin '{plugin_id}' namespace '{namespace_name}' collides with a core "
-                    "exec namespace"
-                )
             service = service_namespaces.setdefault(namespace_name, _types.SimpleNamespace())
             setattr(service, name, _wrap_for_audit(func, key, calls, plugin_context=ctx))
 

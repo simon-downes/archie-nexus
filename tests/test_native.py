@@ -10,6 +10,19 @@ from archie_agent.exec.native import (
 )
 from archie_agent.exec.tool import _MAX_RESULT_CHARS
 
+CORE_TOOL_NAMES = [
+    "brain_search",
+    "code",
+    "edit",
+    "glob",
+    "grep",
+    "read",
+    "shell",
+    "web_fetch",
+    "web_search",
+    "write",
+]
+
 # ---------------------------------------------------------------------------
 # _schema_from_signature tests
 # ---------------------------------------------------------------------------
@@ -272,23 +285,48 @@ class TestMakeNativeSpecs:
             assert "type" in spec.schema
             assert "properties" in spec.schema
 
-    def test_native_false_excluded(self):
-        """Tools marked native=False are not included."""
-        from archie_agent.exec.tools import _TOOLS, tool
+    def test_native_specs_are_exactly_the_core_tools(self):
+        """Every core tool is native; plugin tools never are."""
+        assert sorted(s.name for s in make_native_specs()) == CORE_TOOL_NAMES
 
-        # Register a test-only tool with native=False
-        @tool(native=False)
-        async def _test_only_internal() -> str:
-            """Internal tool."""
-            return ""
+    def test_core_tool_decorator_has_no_plugin_flags(self):
+        import inspect
 
-        try:
-            specs = make_native_specs()
-            names = {s.name for s in specs}
-            assert "_test_only_internal" not in names
-        finally:
-            # Clean up
-            del _TOOLS["_test_only_internal"]
+        from archie_agent.exec.tools import tool
+
+        params = set(inspect.signature(tool).parameters)
+        assert params.isdisjoint({"native", "exec_enabled", "exec_docs", "namespace"})
+        assert params == {"fn", "guidelines"}
+
+    def test_exec_description_has_no_plugin_namespaces(self):
+        from archie_agent.exec.tool import _build_exec_description
+        from archie_shared.plugins import load_manifests
+
+        description = _build_exec_description()
+        namespaces = {
+            ns for loaded in load_manifests().values() for ns in loaded.manifest.namespaces
+        }
+        assert namespaces, "expected plugin namespaces from plugins/"
+        leaked = sorted(ns for ns in namespaces if f"{ns}." in description)
+        assert not leaked
+
+    def test_runner_namespace_has_every_plugin_namespace(self):
+        import contextvars
+
+        from archie_agent.exec.runner import _build_namespace
+        from archie_shared.plugins import load_manifests
+
+        namespace = contextvars.copy_context().run(_build_namespace, [])
+        namespaces = {
+            ns
+            for loaded in load_manifests().values()
+            if loaded.manifest.entry
+            for ns in loaded.manifest.namespaces
+        }
+        assert namespaces
+        assert sorted(ns for ns in namespaces if ns not in namespace) == []
+        for name in CORE_TOOL_NAMES:
+            assert callable(namespace[name])
 
     def test_exec_not_in_native_specs(self):
         """exec is not a native spec — it's registered separately."""

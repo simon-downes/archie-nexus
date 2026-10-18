@@ -348,13 +348,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q plugins/google tests/test_plugin_layout.py`; full checks.
 - **Outcome:** Google's six flat files moved to `plugins/google/` (`google_common` → `common`); five namespaces registered from one entry; credential, policy, `timezone` setting (replacing `ARCHIE_TIMEZONE`) and the label cache all come from the context; the unused module-global `ToolCache` instance is gone; `get_all_tools()` now imports core modules only. Evidence: the 32 original tests are still collected, plus 17 new; full suite 1978 passed; ruff clean; a real `run_exec` with read disabled raises `GoogleAuthorizationError` for one call in each of `mail`, `calendar`, `drive`, `meet` and `google`.
 
-### [ ] M13 — Core `@tool` loses plugin flags; contract tests; docs
+### [x] M13 — Core `@tool` loses plugin flags; contract tests; docs
 
 - **Approach:** Remove `native`/`exec_enabled`/`exec_docs` from `exec/tools/__init__.py` `tool`; `native.py` and `tool.py` read the core registry; generic per-plugin skill/namespace contract test replaces the hand-written ones where they only checked coverage (keep plugin-specific safety-rule assertions). Write `docs/plugins.md`; update `README.md`/`AGENTS.md` layout lines.
 - **Test seam:** `tool` signature; `make_native_specs()`; contract test.
 - **Deliverable:** The core/plugin split is structural and documented.
 - **Verify:** full checks pass; `grep -rn "native=\|exec_docs\|exec_enabled" agent plugins --include=*.py` finds nothing.
-- **Outcome:**
+- **Outcome:** Core `tool` is now `tool(fn=None, *, guidelines=())`, with no `native`/`exec_*`/`namespace`. The runner adds core tools flat, and the loader's reserved-name check is the one collision check. Generic contract tests: skill ↔ namespace coverage, declared ↔ registered namespaces, a skill for each plugin with code, frontmatter, no internals in skills. Per-plugin skill tests lost only assertions duplicated by the generic ones. Docs: new `docs/plugins.md`; README, AGENTS, CONTRIBUTING, architecture and config updated (I corrected config.md, which wrongly said `enabled` is live). Evidence: the flag grep is empty; native specs are exactly the 10 core tools; full suite 1995 passed; ruff clean.
 
 ## Deviations
 

@@ -153,7 +153,8 @@ def format_result(envelope: Envelope) -> str:
 def _generate_tool_docs() -> str:
     """Generate exec tool docs from introspection.
 
-    Returns a concise signature list for inclusion in the exec tool description.
+    Returns a concise signature list of core tools for inclusion in the exec
+    tool description. Plugin tools are documented by their skills instead.
     """
     from archie_agent.exec.tools import get_all_tools
 
@@ -165,8 +166,6 @@ def _generate_tool_docs() -> str:
     for name in sorted(tools):
         fn = tools[name]
         sig = inspect.signature(fn)
-        if not getattr(fn, "_exec_docs", True) or getattr(fn, "_namespace", None):
-            continue
         doc = inspect.getdoc(fn) or ""
         first_line = doc.split("\n")[0].strip() if doc else ""
         lines.append(f"  {name}{sig} — {first_line}")

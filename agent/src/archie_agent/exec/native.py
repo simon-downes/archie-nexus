@@ -299,7 +299,7 @@ def _native_handler(fn: Callable) -> Callable:
 
 
 def make_native_specs() -> list[ToolSpec]:
-    """Generate ToolSpecs for all tools marked as native.
+    """Generate ToolSpecs for every core tool (plugin tools are never native).
 
     Each spec has:
     - name: the function name
@@ -312,9 +312,6 @@ def make_native_specs() -> list[ToolSpec]:
 
     for name in sorted(tools):
         fn = tools[name]
-        if not getattr(fn, "_native", True):
-            continue
-
         specs.append(
             ToolSpec(
                 name=name,

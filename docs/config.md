@@ -29,24 +29,28 @@ orchestrator:
 plugins: {}
 ```
 
-Each section is read at startup, except `plugins.<id>.enabled` and `plugins.<id>.policy`
-(see below). `cli` and `web` are currently reserved for future settings.
+Each section is read at startup, except `plugins.<id>.policy` (see below). `cli` and `web` are currently reserved for future settings.
 
 ## Plugins
 
 The `plugins` section configures each plugin under `plugins/<id>/` by its id. Every key is
 optional, and an unknown plugin id or field is a load error:
 
-- `enabled` (default `true`): `false` turns off the plugin's tools.
+- `enabled` (default `true`): `false` hides the plugin everywhere: its namespaces, skills,
+  credential login and refresh, environment variables and startup hook.
 - `policy`: overrides the `read` and `write` blocks of the plugin's tool policy. Each block
   takes `enabled` and, where the plugin supports one, a `scope`.
 - `auth`: overrides for the plugin's credential provider, such as an OAuth `client_id`. See
   [Authentication and credentials](auth-credentials.md).
 - `settings`: values the plugin's code reads, declared in its `plugin.yaml`.
 
-The agent re-reads `enabled` and `policy` before each exec call, so those edits apply to
-running sessions; if the file is invalid, the last valid policy stays in force and the TUI
-shows a warning. `auth` and `settings` are read at startup.
+The manifest keys behind each of these are described in [Plugins](plugins.md).
+
+The agent re-reads `policy` before each exec call, so policy edits apply to running
+sessions; if the file is invalid, the last valid policy stays in force and the TUI shows a
+warning. `enabled`, `auth` and `settings` are read when a session starts. Setting
+`enabled: false` in a running session also turns both policy blocks off from the next exec
+call; the rest takes effect in the next session.
 
 ```yaml
 plugins:

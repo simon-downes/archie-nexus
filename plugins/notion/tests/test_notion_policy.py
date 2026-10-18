@@ -1,7 +1,6 @@
 """Notion policy gates and credentials read the plugin context, messages unchanged (070 M10)."""
 
 import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,7 +22,6 @@ from archie_shared.credentials.models import OAuthCredential
 
 PAGE = "11111111-1111-1111-1111-111111111111"
 DB = "33333333-3333-3333-3333-333333333333"
-SKILL = Path(__file__).resolve().parents[1] / "skills" / "notion" / "SKILL.md"
 
 
 def test_default_policy_allows_reads_and_blocks_writes():
@@ -115,9 +113,3 @@ def test_session_sends_the_context_access_token(policy):
         with pytest.raises(NotionTransportError, match="could not be completed"):
             asyncio.run(_session().__aenter__())
     assert seen == {"url": "https://mcp.notion.com/mcp", "headers": {"Authorization": "Bearer tok"}}
-
-
-def test_skill_names_every_read_function():
-    text = SKILL.read_text(encoding="utf-8")
-    for name in ("search", "get_page", "get_database", "query_database", "get_comments"):
-        assert f"`notion.{name}(" in text

@@ -7,6 +7,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 - [Architecture](docs/architecture.md) — components, lifecycle, data flows, HTTP/WebSocket routes, event layers, logs, accounting, and security boundaries.
 - [Configuration](docs/config.md) — application settings and host bind mounts, including wildcard Git and SSH mounts.
 - [Authentication and credentials](docs/auth-credentials.md) — provider configuration, credential storage, CLI workflows, OAuth, and agent access.
+- [Plugins](docs/plugins.md) — integration layout, `plugin.yaml` reference, plugin SDK, and testing.
 - [Contributing](CONTRIBUTING.md) — development workflow, checks, and invariants for changing the system.
 - [Agent-session guidance](AGENTS.md) — short context and reading order for coding agents.
 
@@ -16,11 +17,12 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 | --- | --- |
 | `cli/` | `archie` command, Textual TUI, orchestrator client, auth commands |
 | `orchestrator/` | Host-side HTTP/WebSocket service, Docker lifecycle, session proxy, metrics |
-| `agent/` | Container-side Starlette service, agent loop, providers, tools, subagents |
-| `shared/` | Configuration, models, public commands/events, session-log persistence, credentials |
-| `persona/` | Repository-tracked prompts, agents, and skills mounted into sessions |
+| `agent/` | Container-side Starlette service, agent loop, providers, core tools, plugin SDK, subagents |
+| `shared/` | Configuration, models, public commands/events, session-log persistence, credentials, plugin manifests |
+| `plugins/` | One directory per integration: `plugin.yaml`, code, skills, tests ([Plugins](docs/plugins.md)) |
+| `persona/` | Repository-tracked prompts, agents, and procedure skills mounted into sessions |
 | `container/` | Files copied into the agent image, such as the `gh` wrapper |
-| `tests/` | Cross-package and component tests |
+| `tests/` | Cross-package and component tests (plugin tests live in `plugins/<id>/tests/`) |
 | `plans/` | Design and implementation records; consult relevant plans when changing a contract |
 
 ## Quick start
@@ -46,13 +48,13 @@ archie start <profile>/<workspace>
 archie attach <profile>/<session-id-or-prefix>
 ```
 
-Build the image again after changing Dockerfile or dependency layers. Source for `agent`, `shared`, and `persona` is mounted for development.
+Build the image again after changing Dockerfile or dependency layers. Source for `agent`, `shared`, `persona`, and `plugins` is mounted for development.
 
 ## Configuration and data
 
-The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), named `orchestrator.profiles`, and top-level `mounts` for host bind mounts. See [Configuration](docs/config.md) for the complete schema and mount examples.
+The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), named `orchestrator.profiles`, per-integration `plugins.<id>` sections, and top-level `mounts` for host bind mounts. See [Configuration](docs/config.md) for the complete schema and mount examples.
 
-Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; aggregate request metrics are stored in `~/.nexus/metrics.db`. Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
+Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; aggregate request metrics are stored in `~/.nexus/metrics.db`. Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory and `ARCHIE_PLUGINS_DIR` the plugins directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
 
 For multiple orchestrators, define named profiles under `orchestrator.profiles` and use `profile/value` arguments. `ARCHIE_HOST=host[:port]` overrides profile selection for CLI commands; the default port is 7600. The `serve` command binds to the configured default profile, so binding it to a non-loopback host exposes the orchestrator to that network.
 

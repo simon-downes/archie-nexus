@@ -66,11 +66,14 @@ def _reset_for_tests() -> None:
 
 
 def _reserved_names() -> set[str]:
-    """Top-level exec names (and core service namespaces) a plugin namespace must not shadow."""
+    """Top-level exec names (core tools and runner builtins) a plugin namespace must not shadow.
+
+    Core tools are flat, so this is the one collision check between plugin namespaces
+    and the rest of the exec namespace.
+    """
     from archie_agent.exec.tools import get_all_tools
 
-    core = {getattr(func, "_namespace", None) or key for key, func in get_all_tools().items()}
-    return core | RUNNER_BUILTINS
+    return set(get_all_tools()) | RUNNER_BUILTINS
 
 
 def load_plugins(
