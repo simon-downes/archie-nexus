@@ -358,6 +358,8 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 ## Deviations
 
+- After delivery (Simon's request): each plugin got a `README.md` covering namespaces, credential, configuration, how it works and tests, plus a layout test that it mentions every namespace, setting and credential field. The five integration skills' example config was still in the old `tools:` shape and now uses `plugins.<id>.policy`.
+
 - M1: Datadog's provider/credential generation from its manifest moved to M3 with every other provider, so `PROVIDERS` switches source once and Datadog `site` isn't split across two mechanisms. No scope change.
 
 ## Risks
@@ -400,5 +402,8 @@ PR: https://github.com/simon-downes/archie-nexus/pull/8
 CI: none
 
 ## Follow-ups
+
+- Slack read deny list (`policy.read.scope.deny`) only filters `slack.conversations` and `slack.search`; `slack.messages`, `slack.thread` and `slack.reactions` read a denied conversation when given its ID. The gap was already on `main` at 4fa2df9 and was not introduced by this build. The Slack README documents current behaviour.
+- The `gh` wrapper ignores `plugins.github.enabled`.
 
 - Mark untracked `plans/060-spec-container-aws-profiles.md` dropped and remove `persona/skills/aws-agent-access/` in the main checkout (both untracked, outside this branch).

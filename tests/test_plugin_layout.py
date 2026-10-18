@@ -200,3 +200,32 @@ def test_converted_plugin_code_reads_nothing_directly(name):
                 line = text.count("\n", 0, match.start()) + 1
                 offenders.append(f"{path.relative_to(ROOT)}:{line}: {needle}")
     assert not offenders, "plugin code must use context():\n" + "\n".join(offenders)
+
+
+def _plugin_ids() -> list[str]:
+    return sorted(p.name for p in (ROOT / "plugins").iterdir() if (p / "plugin.yaml").is_file())
+
+
+def _names(key: str, text: str) -> bool:
+    """``key`` appears as code: `` `key` ``, ``.key``, ``key:`` or a quoted JSON key."""
+    return re.search(rf"(`|\.|\"){re.escape(key)}\b|\b{re.escape(key)}:", text) is not None
+
+
+@pytest.mark.parametrize("pid", _plugin_ids())
+def test_plugin_has_readme_covering_its_manifest(pid):
+    """Each plugin root has a README naming its namespaces, settings and credential fields."""
+    readme = ROOT / "plugins" / pid / "README.md"
+    assert readme.is_file(), f"plugins/{pid} has no README.md"
+    text = readme.read_text(encoding="utf-8")
+    manifest = _manifests()[pid].manifest
+    missing = [
+        f"namespace {ns}"
+        for ns in manifest.namespaces
+        if f"`{ns}`" not in text and f"{ns}." not in text
+    ]
+    missing += [f"setting {key}" for key in manifest.settings if not _names(key, text)]
+    fields = manifest.credential.fields if manifest.credential is not None else []
+    missing += [f"credential field {field}" for field in fields if not _names(field, text)]
+    if "](../../docs/plugins.md)" not in text:
+        missing.append("link to docs/plugins.md")
+    assert not missing, f"plugins/{pid}/README.md is missing: {', '.join(missing)}"

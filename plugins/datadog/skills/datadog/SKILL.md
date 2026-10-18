@@ -21,12 +21,13 @@ description: >
 - Reads are enabled by default; writes are disabled by default. Policy:
 
   ```yaml
-  tools:
+  plugins:
     datadog:
-      read:
-        enabled: true
-      write:
-        enabled: true   # needed for create_monitor and update_monitor
+      policy:
+        read:
+          enabled: true
+        write:
+          enabled: true   # needed for create_monitor and update_monitor
   ```
 
   A `scope` in either block is not supported; setting one makes every Datadog call fail with `DatadogPolicyError`.

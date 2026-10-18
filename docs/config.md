@@ -78,7 +78,8 @@ plugins:
         scope: {pages: [page-id], databases: [database-id]}
 ```
 
-Per-plugin notes:
+Per-plugin notes (each plugin's full settings, policy and scope rules are in its
+`plugins/<id>/README.md`; see the [index](../plugins/README.md)):
 
 - `jira` takes a list of project keys as its scope.
 - `notion` takes `pages` and `databases` lists of root IDs as its scope; a resource is in

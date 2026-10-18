@@ -17,16 +17,17 @@ description: >
 - The configured Slack policy uses the shared tool envelope:
 
   ```yaml
-  tools:
+  plugins:
     slack:
-      read:
-        enabled: true
-        scope:
-          deny: []
-      write:
-        enabled: false
-        scope:
-          deny: []
+      policy:
+        read:
+          enabled: true
+          scope:
+            deny: []
+        write:
+          enabled: false
+          scope:
+            deny: []
   ```
 
 - `scope.deny` entries are independent for reads and writes. They may identify a canonical `C...`, `G...`, or `D...` conversation ID, or a channel as `#name`. Denied targets and identities must not be disclosed.

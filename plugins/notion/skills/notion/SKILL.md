@@ -38,18 +38,19 @@ description: >
 The configured scope has this shape:
 
 ```yaml
-tools:
+plugins:
   notion:
-    read:
-      enabled: true
-      scope:
-        pages: ["<page-id>"]
-        databases: ["<database-or-data-source-id>"]
-    write:
-      enabled: false
-      scope:
-        pages: []
-        databases: []
+    policy:
+      read:
+        enabled: true
+        scope:
+          pages: ["<page-id>"]
+          databases: ["<database-or-data-source-id>"]
+      write:
+        enabled: false
+        scope:
+          pages: []
+          databases: []
 ```
 
 - A page root authorizes that page, descendant pages, and nested databases/database items when ancestor metadata proves the relationship.

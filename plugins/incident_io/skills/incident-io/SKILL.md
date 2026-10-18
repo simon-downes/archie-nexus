@@ -18,10 +18,11 @@ description: >
 - Reads are enabled by default. Policy can disable them:
 
   ```yaml
-  tools:
+  plugins:
     incident_io:
-      read:
-        enabled: false
+      policy:
+        read:
+          enabled: false
   ```
 
   A `read.scope` is not supported; setting one makes every call fail with `IncidentIoPolicyError`.

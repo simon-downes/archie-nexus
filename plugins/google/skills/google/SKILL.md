@@ -18,12 +18,13 @@ description: >
 - Google tool policy is controlled only by these flags:
 
   ```yaml
-  tools:
+  plugins:
     google:
-      read:
-        enabled: true
-      write:
-        enabled: false
+      policy:
+        read:
+          enabled: true
+        write:
+          enabled: false
   ```
 
 - Reads default to enabled when omitted. Writes default to disabled when omitted. The agent re-reads `config.yaml` before each exec call, so a policy change takes effect on the next call without a new session. If `config.yaml` is invalid, the last valid policy stays in force and the TUI shows a warning when the error first appears or changes.
@@ -183,7 +184,7 @@ Inspect `type`, `id`, and `handoff` before calling a detail tool. Never pass a t
 
 ## Gmail
 
-All Gmail reads require `tools.google.read.enabled`. Gmail mutations require `tools.google.write.enabled`. Mutation functions accept 1–500 message IDs; callers must batch larger sets themselves. `mail.label` may require Google read access on a cache miss while resolving USER label names. Dedicated system mutations do not require Google read access.
+All Gmail reads require `plugins.google.policy.read.enabled`. Gmail mutations require `plugins.google.policy.write.enabled`. Mutation functions accept 1–500 message IDs; callers must batch larger sets themselves. `mail.label` may require Google read access on a cache miss while resolving USER label names. Dedicated system mutations do not require Google read access.
 
 ### Read functions
 

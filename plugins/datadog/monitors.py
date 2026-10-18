@@ -1,7 +1,7 @@
 """Monitor reads, validation and ownership-guarded writes.
 
-Writes need ``tools.datadog.write.enabled``. Creates always carry ``managedby:archie``; updates
-are refused unless the monitor already carries it. There is no delete.
+Writes need ``plugins.datadog.policy.write.enabled``. Creates always carry ``managedby:archie``;
+updates are refused unless the monitor already carries it. There is no delete.
 """
 
 from __future__ import annotations

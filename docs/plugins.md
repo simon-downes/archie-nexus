@@ -23,6 +23,7 @@ model provider is also core and defined in `shared/src/archie_shared/credentials
 ```text
 plugins/<id>/
   plugin.yaml              # manifest (required)
+  README.md                # maintainer doc for this plugin (required; see below)
   __init__.py              # package archie_plugins.<id>; present when the plugin has Python code
   *.py                     # more modules, imported relatively or as archie_plugins.<id>.<mod>
   skills/<name>/SKILL.md   # one or more skills
@@ -38,7 +39,15 @@ root, so `plugins/` itself is never on `sys.path`. `plugins_dir()` resolves the 
 `ARCHIE_PLUGINS_DIR`, defaulting to `<repo>/plugins`. In a container the directory is
 mounted read-only at `/opt/archie/plugins`.
 
-Plugins without code (`github`, `scalr`) have only `plugin.yaml`.
+Plugins without code (`github`, `scalr`) have only `plugin.yaml` and `README.md`.
+
+Each plugin's `README.md` covers what is specific to it: what it does and how it talks to the
+service, its namespaces and functions grouped read vs write, its credential and
+`archie auth login` behaviour (and any environment variables it projects), a `plugins.<id>`
+config snippet with every setting and policy default and the scope semantics, how the code
+works (module layout, safety rules, caching, hooks), and how to run its tests. It links back
+here instead of repeating the manifest format, SDK or testing conventions. Skills are read
+only from `skills/<name>/SKILL.md`, so the README is never loaded as a skill.
 
 ## `plugin.yaml` reference
 
@@ -259,6 +268,8 @@ Generic contract tests in `tests/test_plugin_layout.py` check every plugin:
 - every tool appears as `` `<ns>.<fn>(`` in one of its skills;
 - every tool's namespace is declared and every declared namespace has a tool;
 - a plugin with code has at least one skill;
+- every plugin has a `README.md` that names each of its namespaces, settings keys and
+  credential fields and links to this document;
 - every skill has a `SKILL.md` with `name` and `description` frontmatter;
 - no skill mentions `ARCHIE_HOME_DIR`, `credentials.yaml` or `archie_agent.`;
 - plugin code reads nothing directly.
@@ -276,6 +287,10 @@ details.
 4. Write `skills/<name>/SKILL.md` documenting each function as `` `<ns>.<fn>(...)` ``,
    its errors and safety rules.
 5. Add `tests/` with `<id>_fakes.py`, `conftest.py` and `test_<id>_*.py`.
-6. Document the plugin's config in [Configuration](config.md) and, for a credential,
+6. Write `plugins/<id>/README.md` with the sections described under
+   [Directory layout](#directory-layout) (overview, namespaces and functions, credential,
+   configuration, how it works, tests), ending with a link to this document; add it to
+   `plugins/README.md`.
+7. Document the plugin's config in [Configuration](config.md) and, for a credential,
    [Authentication and credentials](auth-credentials.md).
-7. Run `uv run pytest`, `uv run ruff check .` and `uv run ruff format --check .`.
+8. Run `uv run pytest`, `uv run ruff check .` and `uv run ruff format --check .`.
