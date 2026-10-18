@@ -21,7 +21,7 @@ from archie_agent.exec.tools.incident_io.client import (
 )
 from archie_agent.exec.tools.incident_io.incidents import list_incidents
 from archie_agent.exec.tools.incident_io.policy import require_read
-from archie_shared.credentials.models import IncidentIoCredential
+from archie_shared.credentials.models import CREDENTIAL_TYPES
 from archie_shared.tool_policy import reset_policy_snapshot, set_policy_snapshot
 
 KEY = "secret-test-key-123"
@@ -180,7 +180,11 @@ async def test_paginate_rejects_missing_collection():
 
 
 def test_missing_or_blank_credential_is_configuration_error():
-    for value in (None, IncidentIoCredential(api_key=None), IncidentIoCredential(api_key="  ")):
+    for value in (
+        None,
+        CREDENTIAL_TYPES["incident_io"](api_key=None),
+        CREDENTIAL_TYPES["incident_io"](api_key="  "),
+    ):
         with patch.object(client_module, "get_credential", return_value=value):
             with pytest.raises(IncidentIoConfigurationError):
                 client_module._credential()

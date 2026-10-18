@@ -7,10 +7,9 @@ from archie_shared.credentials.api import (
 )
 from archie_shared.credentials.models import (
     CREDENTIAL_TYPES,
-    AwsCredential,
     BedrockCredential,
-    DatadogCredential,
-    IncidentIoCredential,
+    OAuthCredential,
+    credential_type,
 )
 
 
@@ -29,12 +28,36 @@ def test_all_agent_kit_providers_have_typed_definitions():
         "datadog",
         "incident_io",
     }
-    assert CREDENTIAL_TYPES["datadog"] is DatadogCredential
-    assert CREDENTIAL_TYPES["incident_io"] is IncidentIoCredential
-    assert CREDENTIAL_TYPES["aws"] is AwsCredential
+    assert set(CREDENTIAL_TYPES) == set(PROVIDERS)
     assert CREDENTIAL_TYPES["bedrock"] is BedrockCredential
+    for name in ("notion", "slack", "google"):
+        assert CREDENTIAL_TYPES[name] is OAuthCredential
+    assert CREDENTIAL_TYPES["datadog"].__struct_fields__ == ("api_key", "app_key")
+    assert CREDENTIAL_TYPES["incident_io"].__struct_fields__ == ("api_key",)
+    assert CREDENTIAL_TYPES["aws"].__struct_fields__ == (
+        "access_key_id",
+        "secret_access_key",
+        "session_token",
+    )
+    assert CREDENTIAL_TYPES["jira"].__struct_fields__ == ("email", "token", "cloud_id")
+    assert CREDENTIAL_TYPES["github"].__struct_fields__ == ("personal_token", "work_token")
     assert "account" in CREDENTIAL_TYPES["scalr"].__struct_fields__
     assert CREDENTIAL_TYPES["aws"] is not CREDENTIAL_TYPES["bedrock"]
+    assert CREDENTIAL_TYPES["incident_io"].__name__ == "IncidentIoCredential"
+
+
+def test_credential_type_helper():
+    assert credential_type("jira") is CREDENTIAL_TYPES["jira"]
+    with pytest.raises(KeyError):
+        credential_type("nope")
+
+
+def test_generated_credentials_have_static_provider_fields():
+    from archie_shared.credentials.providers import PROVIDERS, StaticProvider
+
+    for name, provider in PROVIDERS.items():
+        if isinstance(provider, StaticProvider):
+            assert list(CREDENTIAL_TYPES[name].__struct_fields__) == provider.fields, name
 
 
 def test_provider_and_status_responses_are_secret_free_and_strict():

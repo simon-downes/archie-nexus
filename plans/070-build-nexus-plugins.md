@@ -266,13 +266,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** full checks pass; `grep -rn "ARCHIE_TOOL_POLICY\|linear" agent shared cli orchestrator tests --include=*.py` finds nothing.
 - **Outcome:** Removed Jira's `ARCHIE_TOOL_POLICY` fallback and shim (7 tests now set the runner snapshot inline; a sync fixture can't reset a contextvar token across pytest-asyncio's copied context), Slack's root `enabled` (also read in `slack/writes.py`), and `linear` everywhere including `docs/auth-credentials.md`. Evidence: the M2 grep returns nothing; full suite 1736 passed; ruff check/format clean.
 
-### [ ] M3 — Every integration has a manifest and plugin skill
+### [x] M3 — Every integration has a manifest and plugin skill
 
 - **Approach:** Add `plugin.yaml` for incident_io, jira, notion, slack, google (no `entry` yet; code still in `exec/tools`), aws (`login: aws_chain`, `set_env`), scalr, github. Move their skills from `persona/skills/` to `plugins/<id>/skills/`. Generate all non-bedrock `PROVIDERS`/`CREDENTIAL_TYPES` from manifests; delete the hand-written credential classes except `BedrockCredential` and `OAuthCredential`, and update imports (`jira/client.py`, `incident_io/client.py`, tests). Derive the CLI static set from provider kind and the AWS-chain case from `provider.login` (D21). Move Slack scopes and Google scopes into YAML; update skill-path constants in skill tests.
 - **Test seam:** `PROVIDERS`, `CREDENTIAL_TYPES`, `/auth/providers`, `archie auth login`, `discover_skills()`.
 - **Deliverable:** Credentials and skills come only from manifests; `persona/skills` holds procedure skills only.
 - **Verify:** `uv run pytest -q tests/test_providers.py tests/test_credentials_models.py tests/test_orchestrator_auth_discovery.py tests/test_cli_auth_login.py tests/test_skills.py` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** Manifests for aws, datadog, github, google, incident_io, jira, notion, scalr, slack; generator `shared/plugins/credentials.py`; `PROVIDERS`/`CREDENTIAL_TYPES` = core bedrock + generated (hand-written classes except Bedrock/OAuth deleted); `StaticProvider.login` (D21) and CLI dispatch by provider kind/login with no literal sets; integration skills moved to `plugins/*/skills/`. Datadog `site` bridged from its setting default until M4. Evidence: an exact-match test of every provider against today's values passes; `list(PROVIDERS)` = bedrock, aws, datadog, github, google, incident_io, jira, notion, scalr, slack; full suite 1754 passed; ruff clean.
 
 ### [ ] M4 — `plugins:` config replaces `tools:` and `auth:`
 
@@ -361,6 +361,8 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - M1: Datadog's provider/credential generation from its manifest moved to M3 with every other provider, so `PROVIDERS` switches source once and Datadog `site` isn't split across two mechanisms. No scope change.
 
 ## Risks
+
+- `PROVIDERS`/`CREDENTIAL_TYPES` are built from manifests at import. A process whose `plugins_dir()` is wrong sees bedrock only. Host processes run from the repo; in the container `_REPO_ROOT` is `/opt/archie`, so the default matches the new mount.
 
 - `plugins/` is mounted read-only, so sessions can no longer edit integration skills in place as they can `persona/skills`. Accepted in design resolved decision 3.
 - Dropping Jira guidelines from the system prompt relies on the model loading the Jira skill.

@@ -223,6 +223,24 @@ class TestDiscoverSkills:
         assert "another-skill" in catalog
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+INTEGRATION_SKILLS = {"google", "incident-io", "jira", "notion", "slack", "datadog"}
+
+
+def test_repo_plugins_provide_integration_skills(tmp_path, monkeypatch):
+    """Integration skills come from the repo's plugins dir, not persona/skills (070 M3)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(REPO_ROOT / "persona"))
+    monkeypatch.setenv("ARCHIE_PLUGINS_DIR", str(REPO_ROOT / "plugins"))
+    catalog = discover_skills()
+    assert INTEGRATION_SKILLS <= set(catalog)
+    plugins_root = REPO_ROOT / "plugins"
+    for name in INTEGRATION_SKILLS:
+        assert catalog[name].path.is_relative_to(plugins_root), name
+    persona_skills = {p.name for p in (REPO_ROOT / "persona" / "skills").iterdir()}
+    assert not persona_skills & INTEGRATION_SKILLS
+
+
 def _write_plugin(root: Path, name: str, *, context: tuple[str, ...] = ()) -> Path:
     plugin = root / name
     plugin.mkdir(parents=True)

@@ -297,12 +297,14 @@ async def test_update_success_with_odd_body_says_updated(dd_fake, policy):
 
 async def test_deadline_during_write_is_indeterminate(monkeypatch, policy):
     from archie_plugins.datadog import client as client_module
-    from archie_shared.credentials.models import DatadogCredential
+    from archie_shared.credentials.models import CREDENTIAL_TYPES
 
     policy(WRITE)
     monkeypatch.setattr(client_module, "_DEADLINE_SECONDS", 0.05)
     monkeypatch.setattr(
-        client_module, "get_credential", lambda *a: DatadogCredential(api_key="k", app_key="a")
+        client_module,
+        "get_credential",
+        lambda *a: CREDENTIAL_TYPES["datadog"](api_key="k", app_key="a"),
     )
 
     class SlowClient:
@@ -325,12 +327,14 @@ async def test_deadline_during_write_is_indeterminate(monkeypatch, policy):
 
 async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
     from archie_plugins.datadog import client as client_module
-    from archie_shared.credentials.models import DatadogCredential
+    from archie_shared.credentials.models import CREDENTIAL_TYPES
 
     policy(WRITE)
     monkeypatch.setattr(client_module, "_DEADLINE_SECONDS", 0.05)
     monkeypatch.setattr(
-        client_module, "get_credential", lambda *a: DatadogCredential(api_key="k", app_key="a")
+        client_module,
+        "get_credential",
+        lambda *a: CREDENTIAL_TYPES["datadog"](api_key="k", app_key="a"),
     )
 
     class SlowGet:

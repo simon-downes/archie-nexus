@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from archie_shared.credentials.models import JiraCredential
+from archie_shared.credentials.models import CREDENTIAL_TYPES
 from archie_shared.credentials.store import get_credential
 
 from archie_agent.exec.tools import ToolError
@@ -57,7 +57,7 @@ _CLOUD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
 
 
-def _credential() -> JiraCredential:
+def _credential() -> Any:
     try:
         value = get_credential("jira")
     except Exception as exc:
@@ -67,11 +67,11 @@ def _credential() -> JiraCredential:
     email, token, cloud_id = value.email.strip(), value.token.strip(), value.cloud_id.strip()
     if not email or not token or not _CLOUD_ID.fullmatch(cloud_id):
         raise JiraConfigurationError("Jira credentials are invalid")
-    return JiraCredential(email=email, token=token, cloud_id=cloud_id)
+    return CREDENTIAL_TYPES["jira"](email=email, token=token, cloud_id=cloud_id)
 
 
 class JiraClient:
-    def __init__(self, credential: JiraCredential):
+    def __init__(self, credential: Any):
         self.base_url = f"https://api.atlassian.com/ex/jira/{credential.cloud_id}/rest/api/3"
         raw = f"{credential.email}:{credential.token}".encode()
         self.headers = {

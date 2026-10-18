@@ -140,3 +140,105 @@ def test_notion_uses_discovery():
     assert notion.server_url is not None
     assert notion.authorization_endpoint is None  # discovered at login time
     assert notion.server_url == "https://mcp.notion.com"
+
+
+_SLACK_USER_SCOPE = (
+    "channels:read groups:read im:read mpim:read "
+    "channels:history groups:history im:history mpim:history "
+    "users:read users:read.email "
+    "search:read.public search:read.private search:read.im search:read.mpim "
+    "search:read.files search:read.users "
+    "reactions:read reactions:write "
+    "chat:write"
+)
+
+# Hard-coded snapshot of the hand-written registry before plan 070 M3; the
+# manifest-generated registry must reproduce it exactly.
+EXPECTED_PROVIDERS = {
+    "bedrock": StaticProvider(
+        name="bedrock",
+        fields=["aws_access_key_id", "aws_secret_access_key", "aws_session_token"],
+        env={
+            "aws_access_key_id": "AWS_ACCESS_KEY_ID",
+            "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "aws_session_token": "AWS_SESSION_TOKEN",
+        },
+        set_env=False,
+        login="aws_chain",
+    ),
+    "aws": StaticProvider(
+        name="aws",
+        fields=["access_key_id", "secret_access_key", "session_token"],
+        env={
+            "access_key_id": "AWS_ACCESS_KEY_ID",
+            "secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "session_token": "AWS_SESSION_TOKEN",
+        },
+        set_env=True,
+        login="aws_chain",
+    ),
+    "datadog": StaticProvider(
+        name="datadog", fields=["api_key", "app_key"], site="app.datadoghq.eu"
+    ),
+    "github": StaticProvider(name="github", fields=["personal_token", "work_token"]),
+    "google": OAuthProvider(
+        name="google",
+        authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint="https://oauth2.googleapis.com/token",
+        scopes=[
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/meetings.space.readonly",
+            "https://www.googleapis.com/auth/drive.meet.readonly",
+        ],
+        extra_params={"access_type": "offline", "prompt": "consent"},
+    ),
+    "incident_io": StaticProvider(name="incident_io", fields=["api_key"]),
+    "jira": StaticProvider(name="jira", fields=["email", "token", "cloud_id"]),
+    "notion": OAuthProvider(name="notion", server_url="https://mcp.notion.com"),
+    "scalr": StaticProvider(
+        name="scalr",
+        fields=["token", "hostname", "account"],
+        env={"token": "SCALR_TOKEN", "hostname": "SCALR_HOSTNAME", "account": "SCALR_ACCOUNT"},
+        set_env=True,
+    ),
+    "slack": OAuthProvider(
+        name="slack",
+        authorization_endpoint="https://slack.com/oauth/v2/authorize",
+        token_endpoint="https://slack.com/api/oauth.v2.access",
+        token_path="authed_user.access_token",
+        refresh_token_path="authed_user.refresh_token",
+        expires_in_path="authed_user.expires_in",
+        extra_params={"user_scope": _SLACK_USER_SCOPE},
+    ),
+}
+
+
+def test_generated_providers_match_previous_registry_exactly():
+    """Manifest-generated PROVIDERS reproduce every pre-M3 value, field by field."""
+    assert list(PROVIDERS) == list(EXPECTED_PROVIDERS)  # bedrock first, then plugin ids sorted
+    for name, expected in EXPECTED_PROVIDERS.items():
+        actual = PROVIDERS[name]
+        assert type(actual) is type(expected), name
+        for field in expected.__struct_fields__:
+            assert getattr(actual, field) == getattr(expected, field), f"{name}.{field}"
+
+
+def test_only_bedrock_is_hand_written():
+    """Every non-bedrock provider has a plugin manifest declaring its credential."""
+    from archie_shared.plugins import load_manifests
+
+    with_credential = {
+        pid for pid, loaded in load_manifests().items() if loaded.manifest.credential
+    }
+    assert set(PROVIDERS) - with_credential == {"bedrock"}
+
+
+def test_aws_chain_login_providers():
+    assert {n for n, p in PROVIDERS.items() if getattr(p, "login", None) == "aws_chain"} == {
+        "aws",
+        "bedrock",
+    }

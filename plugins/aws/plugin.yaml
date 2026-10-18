@@ -1,0 +1,12 @@
+name: aws
+# Generic AWS credentials (for non-Bedrock AWS services); `archie auth login aws`
+# reads them from the standard AWS credential chain.
+credential:
+  kind: static
+  fields: [access_key_id, secret_access_key, session_token]
+  env:
+    access_key_id: AWS_ACCESS_KEY_ID
+    secret_access_key: AWS_SECRET_ACCESS_KEY
+    session_token: AWS_SESSION_TOKEN
+  set_env: true
+  login: aws_chain

@@ -57,8 +57,8 @@ def _set_static_from_login(service: str) -> None:
     provider = effective_provider(service, load_nexus_config().auth.providers.get(service))
     if not isinstance(provider, StaticProvider):
         raise click.ClickException(f"{service} requires OAuth login")
-    if service in {"bedrock", "aws"}:
-        _set_aws_from_chain(service)
+    if provider.login == "aws_chain":
+        _set_aws_from_chain(service, provider)
         return
     if provider.env:
         fields = {field: os.environ.get(env_name) for field, env_name in provider.env.items()}
@@ -95,7 +95,13 @@ def _set_static_from_login(service: str) -> None:
     click.echo(f"✓ Credentials saved for {service}.")
 
 
-def _set_aws_from_chain(service: str) -> None:
+def _set_aws_from_chain(service: str, provider: StaticProvider) -> None:
+    """Store AWS chain credentials into ``provider.fields`` (access key, secret, token order)."""
+    if len(provider.fields) != 3:
+        raise click.ClickException(
+            f"{service} uses aws_chain login but does not declare exactly three fields"
+        )
+    access_key_field, secret_key_field, session_token_field = provider.fields
     try:
         import boto3
         import botocore.exceptions
@@ -108,11 +114,9 @@ def _set_aws_from_chain(service: str) -> None:
             raise click.ClickException("No AWS credentials found in the standard chain")
         resolved = credentials.get_frozen_credentials()
         fields = {
-            "access_key_id" if service == "aws" else "aws_access_key_id": resolved.access_key,
-            "secret_access_key"
-            if service == "aws"
-            else "aws_secret_access_key": resolved.secret_key,
-            "session_token" if service == "aws" else "aws_session_token": resolved.token,
+            access_key_field: resolved.access_key,
+            secret_key_field: resolved.secret_key,
+            session_token_field: resolved.token,
         }
         identity = session.client("sts").get_caller_identity()
         click.echo(f"  Account: {identity.get('Account', 'unknown')}")
@@ -132,7 +136,7 @@ def _set_aws_from_chain(service: str) -> None:
 @click.argument("service")
 def login(service: str):
     """Authenticate an OAuth or static provider through the local orchestrator."""
-    if service in {"github", "aws", "scalr", "jira", "bedrock", "datadog", "incident_io"}:
+    if isinstance(PROVIDERS.get(service), StaticProvider):
         _set_static_from_login(service)
         return
     try:

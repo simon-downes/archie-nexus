@@ -11,6 +11,18 @@ ROOT = Path(__file__).resolve().parents[1]
 SCANNED = ("agent", "tests", "plugins", "shared", "orchestrator", "cli")
 SKIP_PARTS = {"__pycache__", ".venv"}
 
+# Procedure skills stay in ``persona/skills``; integration skills live in their plugin (M3).
+PROCEDURE_SKILLS = {
+    "build-it",
+    "council",
+    "create-skill",
+    "research",
+    "review-plan",
+    "workflow-implement",
+    "workflow-plan",
+    "workflow-review",
+}
+
 # Integrations already moved out of ``agent/src/archie_agent/exec/tools/``; append on each move.
 MOVED = ["datadog"]
 
@@ -61,3 +73,14 @@ def test_every_plugin_function_is_documented_in_its_skills():
             if key.rsplit(".", 1)[0] in namespaces and f"`{key}(" not in text:
                 missing.append(f"{pid}: {key}")
     assert not missing, "undocumented plugin functions:\n" + "\n".join(missing)
+
+
+def test_persona_skills_holds_only_procedure_skills():
+    present = {
+        p.name
+        for p in (ROOT / "persona" / "skills").iterdir()
+        if p.is_dir() and SKIP_PARTS.isdisjoint({p.name})
+    }
+    assert present <= PROCEDURE_SKILLS, (
+        f"integration skills belong in plugins/<id>/skills: {sorted(present - PROCEDURE_SKILLS)}"
+    )

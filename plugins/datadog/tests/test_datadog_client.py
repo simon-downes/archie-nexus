@@ -23,11 +23,12 @@ from archie_plugins.datadog.client import (
 )
 from archie_plugins.datadog.metrics import query_metrics
 from archie_plugins.datadog.policy import require_read, require_write
-from archie_shared.credentials.models import DatadogCredential
+from archie_shared.credentials.models import CREDENTIAL_TYPES
 
 API_KEY = "api-secret-123"
 APP_KEY = "app-secret-456"
 HOST = "https://api.datadoghq.eu"
+DatadogCredential = CREDENTIAL_TYPES["datadog"]
 
 
 def _client(handler, seen=None) -> DatadogClient:

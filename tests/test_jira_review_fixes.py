@@ -6,14 +6,18 @@ import httpx
 import pytest
 from archie_agent.exec.tools.jira.client import JiraClient, JiraValidationError
 from archie_agent.exec.tools.jira.issues import JiraInputError, create_issue, update_issue
-from archie_shared.credentials.models import JiraCredential
+from archie_shared.credentials.models import CREDENTIAL_TYPES
 from archie_shared.tool_policy import reset_policy_snapshot, set_policy_snapshot
+
+
+def _credential():
+    return CREDENTIAL_TYPES["jira"](email="a@example.com", token="secret", cloud_id="cloud")
 
 
 @pytest.mark.asyncio
 async def test_client_accepts_empty_success_response():
     response = httpx.Response(204, request=httpx.Request("PUT", "https://jira.invalid"))
-    client = JiraClient(JiraCredential(email="a@example.com", token="secret", cloud_id="cloud"))
+    client = JiraClient(_credential())
     session = AsyncMock()
     session.__aenter__.return_value.request.return_value = response
     with patch.object(client, "session", return_value=session):
@@ -23,7 +27,7 @@ async def test_client_accepts_empty_success_response():
 @pytest.mark.asyncio
 async def test_client_maps_validation_response():
     response = httpx.Response(422, request=httpx.Request("POST", "https://jira.invalid"))
-    client = JiraClient(JiraCredential(email="a@example.com", token="secret", cloud_id="cloud"))
+    client = JiraClient(_credential())
     session = AsyncMock()
     session.__aenter__.return_value.request.return_value = response
     with patch.object(client, "session", return_value=session):

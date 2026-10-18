@@ -6,7 +6,7 @@ from archie_agent.exec.tools import get_all_tools
 from archie_agent.skills import _scan_directory
 
 ROOT = Path(__file__).parents[1]
-SKILL = ROOT / "persona" / "skills" / "incident-io" / "SKILL.md"
+SKILL = ROOT / "plugins" / "incident_io" / "skills" / "incident-io" / "SKILL.md"
 
 
 def test_skill_documents_every_public_function_and_error():
@@ -42,6 +42,6 @@ def test_skill_contains_no_credentials_or_raw_api_details():
 
 def test_skill_is_discovered():
     catalog = {}
-    _scan_directory(ROOT / "persona" / "skills", catalog)
+    _scan_directory(ROOT / "plugins" / "incident_io" / "skills", catalog)
     assert "incident-io" in catalog
     assert "read-only" in catalog["incident-io"].description

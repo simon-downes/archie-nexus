@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_slack_skill_documents_public_contract_and_safety_rules():
-    skill = Path(__file__).parents[1] / "persona" / "skills" / "slack" / "SKILL.md"
+    skill = Path(__file__).parents[1] / "plugins" / "slack" / "skills" / "slack" / "SKILL.md"
     text = skill.read_text(encoding="utf-8")
     assert "name: slack" in text
     for function in (

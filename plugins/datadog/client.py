@@ -14,7 +14,6 @@ from typing import Any
 
 import httpx
 from archie_agent.exec.plugin import ToolError
-from archie_shared.credentials.models import DatadogCredential
 from archie_shared.credentials.store import get_credential
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
@@ -158,7 +157,7 @@ def _site() -> str:
 
 def _credential() -> tuple[str, str]:
     try:
-        value = get_credential("datadog", DatadogCredential)
+        value = get_credential("datadog")
     except Exception as exc:
         raise DatadogConfigurationError("Datadog credentials are unavailable or invalid") from exc
     api_key = value.api_key.strip() if value and isinstance(value.api_key, str) else ""
