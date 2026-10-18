@@ -362,6 +362,8 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 ## Risks
 
+- `pr.py` reported a file-list mismatch. The cause is GitHub's PR files API returning only the first 100 files: `gh pr view 8` shows `changedFiles: 211`, the same as `git diff --name-only`.
+
 - `archie config migrate` replaces a symlinked `config.yaml` with a regular file (the backup keeps the content). Simon's is a regular file today.
 - The AWS hook refuses to run (and session startup fails) if a container mounts `~/.aws`; the message names the fix.
 
@@ -394,7 +396,7 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 Delivered all 13 milestones: integrations under `plugins/` (datadog, incident_io, jira, notion, slack, google with code; aws with a startup hook; github and scalr manifest-only), manifest-driven providers and credentials, a `plugins:` config with `archie config migrate`, `PluginContext` for credentials/policy/settings/cache/workspace, exec-only plugin tools, and docs (`docs/plugins.md`). Verification: 2022 tests pass (baseline 1660), ruff clean, real runner subprocess smoke tests per integration, and migrate on a temp copy of the live config. Not verified: a real container session (no docker in this sandbox) and real API calls with live credentials.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/8
 CI: pending
 
 ## Follow-ups
