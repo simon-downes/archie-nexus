@@ -1,5 +1,6 @@
 name: slack
-# Code still lives in agent/src/archie_agent/exec/tools/slack (moves in a later milestone).
+namespaces: [slack]
+entry: archie_plugins.slack
 credential:
   kind: oauth
   authorization_endpoint: https://slack.com/oauth/v2/authorize
@@ -39,3 +40,4 @@ policy:
     type: object
     fields:
       deny: {type: "list[str]"}
+cache: {max_bytes: 1048576}

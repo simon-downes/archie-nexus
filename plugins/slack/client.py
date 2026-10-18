@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from archie_agent.exec.plugin import context
 from archie_shared.credentials.models import OAuthCredential
-from archie_shared.credentials.store import get_credential
 
 from .errors import (
     SlackAuthenticationError,
@@ -33,11 +33,16 @@ def parse_retry_after(value: Any) -> int | None:
 
 
 def _credential() -> OAuthCredential:
+    credentials = context().credentials  # no context fails closed with PluginContextError
     try:
-        credential = get_credential("slack", OAuthCredential)
+        credential = credentials.get()
     except Exception as exc:
         raise SlackConfigurationError("Slack credentials are unavailable or invalid") from exc
-    if not credential or not credential.access_token or not credential.access_token.strip():
+    if (
+        not isinstance(credential, OAuthCredential)
+        or not credential.access_token
+        or not credential.access_token.strip()
+    ):
         raise SlackConfigurationError("Slack credentials are incomplete")
     return credential
 

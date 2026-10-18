@@ -114,7 +114,6 @@ def get_all_tools() -> dict:
         mail,
         meet,
         shell,
-        slack,
         web,
     )
 

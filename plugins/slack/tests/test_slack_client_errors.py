@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from archie_agent.exec.tools.slack.client import api_call
-from archie_agent.exec.tools.slack.errors import (
+from archie_plugins.slack.client import api_call
+from archie_plugins.slack.errors import (
     SlackAuthenticationError,
     SlackReauthorizationRequiredError,
 )
@@ -16,7 +16,7 @@ async def test_authentication_errors_are_typed(error):
     response = httpx.Response(200, json={"ok": False, "error": error})
     with (
         patch(
-            "archie_agent.exec.tools.slack.client._credential",
+            "archie_plugins.slack.client._credential",
             return_value=type("C", (), {"access_token": "token"})(),
         ),
         patch("httpx.AsyncClient.get", new=AsyncMock(return_value=response)),
@@ -31,7 +31,7 @@ async def test_missing_scope_is_typed_reauthorization_error():
     )
     with (
         patch(
-            "archie_agent.exec.tools.slack.client._credential",
+            "archie_plugins.slack.client._credential",
             return_value=type("C", (), {"access_token": "token"})(),
         ),
         patch("httpx.AsyncClient.get", new=AsyncMock(return_value=response)),

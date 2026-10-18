@@ -1,10 +1,10 @@
-"""Authoritative Slack read/write policy validation."""
+"""Authoritative Slack read/write policy validation; policy comes from the plugin context."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from archie_shared.tool_policy import current_policy_snapshot
+from archie_agent.exec import plugin as sdk
 
 from .errors import SlackPolicyError, SlackValidationError
 
@@ -30,20 +30,28 @@ def _block(value: Any, *, write: bool) -> dict[str, Any]:
     return {"enabled": enabled, "scope": {"deny": list(deny)}}
 
 
-def policy(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
-    root = (snapshot if snapshot is not None else current_policy_snapshot()).get("slack") or {}
-    if not isinstance(root, dict) or set(root) - {"read", "write"}:
-        raise SlackValidationError("Invalid Slack policy")
+def _raw(block: sdk.PolicyBlock | None) -> dict[str, Any] | None:
+    """A context policy block in the shape ``_block`` validates (None: the block is absent)."""
+    if block is None:
+        return None
+    return {"enabled": block.enabled, "scope": block.scope}
+
+
+def policy() -> dict[str, Any]:
+    """Return the validated read and write policy from the plugin context.
+
+    Both blocks are validated on every call, so an invalid scope in either fails closed.
+    """
+    active = sdk.context().policy
     return {
-        "read": _block(root.get("read"), write=False),
-        "write": _block(root.get("write"), write=True),
+        "read": _block(_raw(active.read), write=False),
+        "write": _block(_raw(active.write), write=True),
     }
 
 
-def require_read(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
-    result = policy(snapshot)
-    if not result["read"]["enabled"]:
-        raise SlackPolicyError("Slack reads are disabled by policy")
+def require_read() -> dict[str, Any]:
+    result = policy()
+    sdk.require_read(SlackPolicyError, "Slack reads are disabled by policy", scope_supported=True)
     return result
 
 

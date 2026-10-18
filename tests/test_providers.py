@@ -107,7 +107,7 @@ def test_slack_requests_scopes_for_every_tool():
 
 def test_slack_search_scopes_are_requested():
     """Every scope the search tool can require is in the OAuth request."""
-    from archie_agent.exec.tools.slack.search import required_scopes
+    from archie_plugins.slack.search import required_scopes
 
     requested = set(PROVIDERS["slack"].extra_params["user_scope"].split(" "))
     needed = required_scopes(

@@ -332,13 +332,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q plugins/notion tests/test_plugin_layout.py`; full checks.
 - **Outcome:** Notion code and tests moved to `plugins/notion/`; OAuth credential and page/database scope via the context, MCP session state still inside the plugin, policy functions no longer take a snapshot argument (only tests passed one). Evidence: the 26 original tests are still collected, plus 15 new; full suite 1917 passed; ruff clean; a real `run_exec` of `notion.search('x')` gives `NotionConfigurationError: Notion credentials are incomplete`, and with read disabled `NotionPolicyError`.
 
-### [ ] M11 — Slack moves, uses the context and the plugin cache
+### [x] M11 — Slack moves, uses the context and the plugin cache
 
 - **Approach:** As M8; scope `object{deny: list[str]}`; delete `slack/cache.py`; users/conversations use `context().cache` keys `slack.users`/`slack.conversations` storing `{"records": [...]}` only when complete; manifest `cache.max_bytes: 1048576`.
 - **Test seam:** `slack.*` public tools; cache files under a temp home.
 - **Deliverable:** `slack.*` served from `plugins/slack`; one cache implementation.
 - **Verify:** `uv run pytest -q plugins/slack tests/test_tool_cache.py tests/test_plugin_layout.py`; full checks.
-- **Outcome:**
+- **Outcome:** Slack code and tests moved to `plugins/slack/`; credential and deny-list policy via the context; `MetadataCache` deleted and users/conversations cached in the plugin `ToolCache` (`cache/slack/slack.{users,conversations}.json`, 1 MB limit, values over the limit are returned but not cached). The old `~/.nexus/slack/*.json` files are ignored and refill once. Evidence: the 42 original tests are still collected, plus 28 new (policy, cache TTL/refresh/expiry/oversize); full suite 1948 passed; ruff clean; a real `run_exec` of `slack.users()` gives `SlackConfigurationError: Slack credentials are incomplete`.
 
 ### [ ] M12 — Google moves and uses the context
 
@@ -366,6 +366,7 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 - `plugins/` is mounted read-only, so sessions can no longer edit integration skills in place as they can `persona/skills`. Accepted in design resolved decision 3.
 - Dropping Jira guidelines from the system prompt relies on the model loading the Jira skill.
+- Slack's old cache files under `~/.nexus/slack/` are no longer read or removed; they can be deleted by hand.
 - Moving Google's mail cache root to `cache/google/` makes the first label lookup after deploy cold.
 - Deploy needs the documented sequence; a session started on new code against an unmigrated config fails at startup with the migrate instruction.
 

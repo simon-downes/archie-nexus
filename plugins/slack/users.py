@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import context, tool
 
-from .cache import MetadataCache
 from .client import api_call
 from .errors import SlackResponseError, SlackValidationError
 from .policy import require_read
+from .records import cached_records, store_records
+
+_CACHE_KEY = "slack.users"
+_CACHE_TTL = 24 * 60 * 60
 
 
 def normalize_user(record: dict[str, Any]) -> dict[str, Any]:
@@ -60,7 +61,7 @@ async def _enumerate() -> list[dict]:
     raise SlackResponseError("Slack user pagination did not complete")
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def users(
     query: str | None = None, *, refresh: bool = False, include_deleted: bool = False
 ) -> list[dict]:
@@ -70,13 +71,11 @@ async def users(
     if not isinstance(refresh, bool) or not isinstance(include_deleted, bool):
         raise SlackValidationError("refresh and include_deleted must be booleans")
     require_read()
-    cache = MetadataCache(
-        Path(os.environ["ARCHIE_HOME_DIR"]) if os.environ.get("ARCHIE_HOME_DIR") else None
-    )
-    records = None if refresh else cache.load("users", ttl=24 * 60 * 60)
+    cache = context().cache
+    records = None if refresh else cached_records(cache, _CACHE_KEY)
     if records is None:
         records = await _enumerate()
-        cache.save("users", records, ttl=24 * 60 * 60)
+        store_records(cache, _CACHE_KEY, records, ttl=_CACHE_TTL)
     needle = query.strip().casefold() if query else ""
     result = []
     for record in records:

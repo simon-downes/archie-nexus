@@ -3,24 +3,21 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from archie_agent.exec.tools.slack.errors import (
+from archie_plugins.slack.errors import (
     SlackMutationIndeterminateError,
     SlackPolicyError,
     SlackValidationError,
 )
-from archie_agent.exec.tools.slack.writes import react, send_message
+from archie_plugins.slack.writes import react, send_message
 
-_WRITE_POLICY = {
-    "read": {"enabled": True, "scope": {"deny": []}},
-    "write": {"enabled": True, "scope": {"deny": []}},
-}
+_WRITE_POLICY = {"slack": {"write": {"enabled": True}}}
 
 
-async def test_send_message_exact_payload_and_projection():
+async def test_send_message_exact_payload_and_projection(policy):
+    policy(_WRITE_POLICY)
     with (
-        patch("archie_agent.exec.tools.slack.writes.policy", return_value=_WRITE_POLICY),
         patch(
-            "archie_agent.exec.tools.slack.writes.api_call",
+            "archie_plugins.slack.writes.api_call",
             new=AsyncMock(
                 return_value={"ok": True, "ts": "1.000001", "permalink": "https://slack.test/p/1"}
             ),
@@ -49,11 +46,11 @@ async def test_send_message_exact_payload_and_projection():
     }
 
 
-async def test_react_exact_add_and_result():
+async def test_react_exact_add_and_result(policy):
+    policy(_WRITE_POLICY)
     with (
-        patch("archie_agent.exec.tools.slack.writes.policy", return_value=_WRITE_POLICY),
         patch(
-            "archie_agent.exec.tools.slack.writes.api_call",
+            "archie_plugins.slack.writes.api_call",
             new=AsyncMock(return_value={"ok": True}),
         ) as call,
     ):
@@ -72,24 +69,24 @@ async def test_react_exact_add_and_result():
 
 @pytest.mark.parametrize("value", [":thumbsup:", " bad", "bad ", "bad/name"])
 async def test_invalid_reaction_makes_no_request(value):
-    with patch("archie_agent.exec.tools.slack.writes.api_call", new=AsyncMock()) as call:
+    with patch("archie_plugins.slack.writes.api_call", new=AsyncMock()) as call:
         with pytest.raises(SlackValidationError):
             await react("C1", "1.000001", value)
     call.assert_not_awaited()
 
 
 async def test_disabled_write_fails_before_provider():
-    with patch("archie_agent.exec.tools.slack.writes.api_call", new=AsyncMock()) as call:
+    with patch("archie_plugins.slack.writes.api_call", new=AsyncMock()) as call:
         with pytest.raises(SlackPolicyError):
             await send_message("C1", "hello")
     call.assert_not_awaited()
 
 
-async def test_malformed_send_success_is_indeterminate():
+async def test_malformed_send_success_is_indeterminate(policy):
+    policy(_WRITE_POLICY)
     with (
-        patch("archie_agent.exec.tools.slack.writes.policy", return_value=_WRITE_POLICY),
         patch(
-            "archie_agent.exec.tools.slack.writes.api_call",
+            "archie_plugins.slack.writes.api_call",
             new=AsyncMock(return_value={"ok": True}),
         ),
     ):

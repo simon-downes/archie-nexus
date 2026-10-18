@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import Literal
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from .client import search_context
 from .errors import SlackValidationError
@@ -108,7 +108,7 @@ def build_rts_request(
     return request, after_dt, before_dt
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def search(
     query: str,
     *,

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from archie_agent.exec.tools.slack.client import api_call
+from archie_plugins.slack.client import api_call
 
 
 @pytest.mark.parametrize(
@@ -22,7 +22,7 @@ async def test_read_endpoints_use_get_query_parameters(method, payload):
     transport = AsyncMock(return_value=response)
     with (
         patch(
-            "archie_agent.exec.tools.slack.client._credential",
+            "archie_plugins.slack.client._credential",
             return_value=type("C", (), {"access_token": "token"})(),
         ),
         patch("httpx.AsyncClient.get", transport),
@@ -48,7 +48,7 @@ async def test_search_and_mutations_use_post_json(method):
     transport = AsyncMock(return_value=response)
     with (
         patch(
-            "archie_agent.exec.tools.slack.client._credential",
+            "archie_plugins.slack.client._credential",
             return_value=type("C", (), {"access_token": "token"})(),
         ),
         patch("httpx.AsyncClient.post", transport),

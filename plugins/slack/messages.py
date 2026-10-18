@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from .client import api_call
 from .errors import SlackResponseError, SlackValidationError
@@ -52,7 +52,7 @@ def _project(record: dict) -> dict:
     }
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def messages(
     conversation: str, *, after: str | None = None, before: str | None = None, limit: int = 50
 ) -> list[dict]:

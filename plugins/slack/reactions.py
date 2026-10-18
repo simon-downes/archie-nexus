@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from .client import api_call
 from .errors import SlackResponseError, SlackValidationError
@@ -15,7 +15,7 @@ from .resolver import resolve_conversation_reference
 _TIMESTAMP = re.compile(r"^[0-9]{1,20}\.[0-9]{6}$")
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def reactions(conversation: str, timestamp: str) -> dict[str, Any]:
     """Read normalized reactions from one known Slack message."""
     if not isinstance(conversation, str) or not conversation.strip() or len(conversation) > 200:

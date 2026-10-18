@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Literal
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from .client import api_call
 from .errors import (
@@ -105,7 +105,7 @@ def _validate_target(value: str) -> str:
     return value
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def send_message(
     conversation: str,
     text: str,
@@ -154,7 +154,7 @@ async def send_message(
     }
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def react(
     conversation: str, timestamp: str, reaction: str, *, action: Literal["add", "remove"] = "add"
 ) -> dict[str, str]:

@@ -1,6 +1,6 @@
 """Sanitized Slack tool errors."""
 
-from archie_agent.exec.tools import ToolError
+from archie_agent.exec.plugin import ToolError
 
 
 class SlackError(ToolError):

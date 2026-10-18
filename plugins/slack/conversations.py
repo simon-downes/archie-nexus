@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Literal
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import context, tool
 
-from .cache import MetadataCache
 from .client import api_call
 from .errors import SlackResponseError, SlackValidationError
 from .policy import deny_conversation, require_read
+from .records import cached_records, store_records
+
+_CACHE_KEY = "slack.conversations"
+_CACHE_TTL = 15 * 60
 
 _TYPES = ("channel", "dm", "group_dm")
 _PROVIDER_TYPES = "public_channel,private_channel,im,mpim"
@@ -78,7 +79,7 @@ async def _enumerate() -> list[dict]:
     raise SlackResponseError("Slack conversation pagination did not complete")
 
 
-@tool(native=False, exec_docs=False, namespace="slack")
+@tool(namespace="slack")
 async def conversations(
     *,
     types: list[Literal["channel", "dm", "group_dm"]] | None = None,
@@ -98,13 +99,11 @@ async def conversations(
     if not isinstance(refresh, bool):
         raise SlackValidationError("refresh must be a boolean")
     active = require_read()
-    cache = MetadataCache(
-        Path(os.environ["ARCHIE_HOME_DIR"]) if os.environ.get("ARCHIE_HOME_DIR") else None
-    )
-    records = None if refresh else cache.load("conversations", ttl=15 * 60)
+    cache = context().cache
+    records = None if refresh else cached_records(cache, _CACHE_KEY)
     if records is None:
         records = await _enumerate()
-        cache.save("conversations", records, ttl=15 * 60)
+        store_records(cache, _CACHE_KEY, records, ttl=_CACHE_TTL)
     selected = types or list(_TYPES)
     needle = query.strip().casefold() if query else None
     result = []

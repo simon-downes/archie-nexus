@@ -24,7 +24,7 @@ PROCEDURE_SKILLS = {
 }
 
 # Integrations already moved out of ``agent/src/archie_agent/exec/tools/``; append on each move.
-MOVED = ["datadog", "incident_io", "jira", "notion"]
+MOVED = ["datadog", "incident_io", "jira", "notion", "slack"]
 
 
 def _python_files():
@@ -88,7 +88,7 @@ def test_persona_skills_holds_only_procedure_skills():
 
 # Plugins whose code takes credentials/policy/settings only from ``context()`` (M6+);
 # append on each conversion.
-CONVERTED = ["datadog", "aws", "incident_io", "jira", "notion"]
+CONVERTED = ["datadog", "aws", "incident_io", "jira", "notion", "slack"]
 
 # Built by concatenation so this file does not match its own patterns.
 FORBIDDEN_READS = (
