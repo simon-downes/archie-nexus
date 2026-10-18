@@ -1,6 +1,6 @@
 # 070 — Nexus plugins
 
-Status: building
+Status: reviewing
 Branch: build-it/070-nexus-plugins (base: main @ 4fa2df9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/070-nexus-plugins
 
