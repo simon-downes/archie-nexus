@@ -48,7 +48,6 @@ async def test_direct_deny_makes_no_request():
         with patch(
             "archie_agent.exec.tools.slack.search.require_read",
             return_value={
-                "enabled": True,
                 "read": {"enabled": True, "scope": {"deny": ["c123"]}},
                 "write": {"enabled": False, "scope": {"deny": []}},
             },

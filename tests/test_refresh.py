@@ -59,7 +59,7 @@ def test_can_refresh_bedrock():
 
 def test_can_refresh_static_providers():
     """Static providers cannot be refreshed."""
-    for service in ["linear", "github", "aws", "scalr", "jira"]:
+    for service in ["github", "aws", "scalr", "jira"]:
         assert can_refresh_noninteractive(service) is False
 
 

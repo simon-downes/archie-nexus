@@ -32,13 +32,9 @@ def _block(value: Any, *, write: bool) -> dict[str, Any]:
 
 def policy(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     root = (snapshot if snapshot is not None else current_policy_snapshot()).get("slack") or {}
-    if not isinstance(root, dict) or set(root) - {"enabled", "read", "write"}:
-        raise SlackValidationError("Invalid Slack policy")
-    enabled = root.get("enabled", True)
-    if not isinstance(enabled, bool):
+    if not isinstance(root, dict) or set(root) - {"read", "write"}:
         raise SlackValidationError("Invalid Slack policy")
     return {
-        "enabled": enabled,
         "read": _block(root.get("read"), write=False),
         "write": _block(root.get("write"), write=True),
     }
@@ -46,7 +42,7 @@ def policy(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def require_read(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     result = policy(snapshot)
-    if not result["enabled"] or not result["read"]["enabled"]:
+    if not result["read"]["enabled"]:
         raise SlackPolicyError("Slack reads are disabled by policy")
     return result
 

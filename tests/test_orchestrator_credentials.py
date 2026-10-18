@@ -36,7 +36,6 @@ async def test_provider_discovery_is_complete_and_secret_free():
     providers = {item["name"]: item for item in response.json()}
     assert set(providers) == {
         "notion",
-        "linear",
         "slack",
         "github",
         "aws",
@@ -65,7 +64,7 @@ async def test_static_credential_replacement_and_deletion_preserve_other_entries
         response = await http.put("/auth/credential/github", json=GITHUB)
         assert response.status_code == 200
         assert response.json()["state"] == "configured"
-        response = await http.put("/auth/credential/linear", json={"token": "other"})
+        response = await http.put("/auth/credential/incident_io", json={"api_key": "other"})
         assert response.status_code == 200
         response = await http.put(
             "/auth/credential/github", json={"personal_token": "p2", "work_token": "w2"}
@@ -75,7 +74,7 @@ async def test_static_credential_replacement_and_deletion_preserve_other_entries
         assert response.status_code == 200
         assert response.json()["state"] == "missing"
 
-    assert (tmp_path / "credentials.yaml").read_text() == "linear:\n  token: other\n"
+    assert (tmp_path / "credentials.yaml").read_text() == "incident_io:\n  api_key: other\n"
 
 
 @pytest.mark.asyncio

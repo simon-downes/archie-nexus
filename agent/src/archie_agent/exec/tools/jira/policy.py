@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from typing import Any
 
-from archie_shared.tool_policy import current_policy_snapshot, resolve_provider_policy
+from archie_shared.tool_policy import resolve_provider_policy
 
 from archie_agent.exec.tools import ToolError
 
@@ -23,23 +21,6 @@ class JiraValidationError(ToolError):
 
 class JiraWritePolicyError(ToolError):
     pass
-
-
-def set_policy_snapshot(snapshot: dict[str, Any]) -> None:
-    """Compatibility shim; the runner now installs the shared context."""
-    from archie_shared.tool_policy import set_policy_snapshot as install_snapshot
-
-    install_snapshot(snapshot)
-
-
-def _snapshot() -> dict[str, Any]:
-    snapshot = current_policy_snapshot()
-    if snapshot:
-        return snapshot
-    try:
-        return json.loads(os.environ.get("ARCHIE_TOOL_POLICY", "{}"))
-    except (TypeError, ValueError):
-        raise JiraValidationError("Invalid Jira tool policy") from None
 
 
 def project_key(value: str) -> str:
@@ -66,7 +47,7 @@ def _scope(value: Any) -> set[str] | None:
 
 
 def policies() -> tuple[dict[str, Any], dict[str, Any]]:
-    read, write = resolve_provider_policy(_snapshot(), "jira")
+    read, write = resolve_provider_policy(None, "jira")
     return (
         {"enabled": bool(read["enabled"]), "scope": _scope(read.get("scope"))},
         {"enabled": bool(write["enabled"]), "scope": _scope(write.get("scope"))},

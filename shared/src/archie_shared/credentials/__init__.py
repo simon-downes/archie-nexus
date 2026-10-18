@@ -28,7 +28,6 @@ from archie_shared.credentials.models import (
     GithubCredential,
     IncidentIoCredential,
     JiraCredential,
-    LinearCredential,
     OAuthCredential,
     ScalrCredential,
 )
@@ -72,7 +71,6 @@ __all__ = [
     "IncidentIoCredential",
     "InteractiveReauthRequired",
     "JiraCredential",
-    "LinearCredential",
     "OAuthCredential",
     "OAuthProvider",
     "PROVIDERS",

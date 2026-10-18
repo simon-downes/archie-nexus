@@ -19,7 +19,6 @@ def test_all_agent_kit_providers_have_typed_definitions():
 
     assert set(PROVIDERS) == {
         "notion",
-        "linear",
         "slack",
         "github",
         "aws",

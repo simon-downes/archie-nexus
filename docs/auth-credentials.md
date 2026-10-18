@@ -31,7 +31,6 @@ By default:
 | `notion` | OAuth | access/refresh token and OAuth metadata | Browser OAuth flow |
 | `slack` | OAuth | access/refresh token and OAuth metadata | Browser OAuth flow |
 | `google` | OAuth | access/refresh token and OAuth metadata | Browser OAuth flow |
-| `linear` | Static | `token` | Prompt or JSON stdin |
 | `github` | Static | `personal_token`, `work_token` | Prompt or JSON stdin |
 | `aws` | Static | `access_key_id`, `secret_access_key`, `session_token` | AWS credential chain plus STS validation |
 | `scalr` | Static | `token`, `hostname`, `account` | `SCALR_TOKEN`, `SCALR_HOSTNAME`, `SCALR_ACCOUNT` |

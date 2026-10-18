@@ -132,7 +132,7 @@ def _set_aws_from_chain(service: str) -> None:
 @click.argument("service")
 def login(service: str):
     """Authenticate an OAuth or static provider through the local orchestrator."""
-    if service in {"linear", "github", "aws", "scalr", "jira", "bedrock", "datadog", "incident_io"}:
+    if service in {"github", "aws", "scalr", "jira", "bedrock", "datadog", "incident_io"}:
         _set_static_from_login(service)
         return
     try:

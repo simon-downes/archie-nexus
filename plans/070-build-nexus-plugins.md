@@ -249,22 +249,22 @@ Implementation is delegated to subagents in pieces of one module or one integrat
 Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff check .` and
 `uv run ruff format --check .` passing.
 
-### [ ] M1 — Datadog runs as a plugin (tracer)
+### [x] M1 — Datadog runs as a plugin (tracer)
 
-- **Approach:** Add `plugins_dir()`, `shared/plugins/manifest.py` and `schema.py`, the SDK `exec/plugin.py` (`tool`, `ToolError` re-export; plugin registry), `exec/plugin_loader.py` (D2/D3/D6). Per D22, `get_all_tools()` stays core-only and the runner merges `load_plugins()` tools when building namespaces (Datadog's `@tool(native=False, ...)` registrations switch to `exec.plugin.tool`). `skills.py` scans plugin skills. Move `exec/tools/datadog/*` → `plugins/datadog/` (imports become relative or `archie_agent.exec.plugin`), `persona/skills/datadog` → `plugins/datadog/skills/datadog`, Datadog tests + `datadog_fakes.py` → `plugins/datadog/tests/` with a local `conftest.py` (D16). `PROVIDERS["datadog"]`/`CREDENTIAL_TYPES["datadog"]` are generated from the manifest (static fields → `msgspec.defstruct`); other providers stay hand-written for now. Add root `conftest.py` (installs `archie_plugins`; D20 home-isolation fixture), `testpaths`, the plugins mount and `ARCHIE_PLUGINS_DIR` (the `gh` mount is M4), `docker.py` constant, `ARCHIE_SELF_PATHS`. Add `tests/test_plugin_layout.py` with the dotted-path guard for `datadog`. The `context:` warning in the skill tool lands here.
-- **Test seam:** `load_manifests()`, `load_plugins()`, runner `_build_namespace`, `discover_skills()`, `/auth/providers`, docker command.
+- **Approach:** Add `plugins_dir()`, `shared/plugins/manifest.py` and `schema.py`, the SDK `exec/plugin.py` (`tool`, `ToolError` re-export; plugin registry), `exec/plugin_loader.py` (D2/D3/D6). Per D22, `get_all_tools()` stays core-only and the runner merges `load_plugins()` tools when building namespaces (Datadog's `@tool(native=False, ...)` registrations switch to `exec.plugin.tool`). `skills.py` scans plugin skills. Move `exec/tools/datadog/*` → `plugins/datadog/` (imports become relative or `archie_agent.exec.plugin`), `persona/skills/datadog` → `plugins/datadog/skills/datadog`, Datadog tests + `datadog_fakes.py` → `plugins/datadog/tests/` with a local `conftest.py` (D16). Add root `conftest.py` (installs `archie_plugins`; D20 home-isolation fixture), `testpaths`, the plugins mount and `ARCHIE_PLUGINS_DIR` (the `gh` mount is M4), `docker.py` constant, `ARCHIE_SELF_PATHS`. Add `tests/test_plugin_layout.py` with the dotted-path guard for `datadog`. The `context:` warning in the skill tool lands here.
+- **Test seam:** `load_manifests()`, `load_plugins()`, runner `_build_namespace`, `discover_skills()`, docker command.
 - **Edge cases:** manifest id ≠ dir → error; undeclared namespace → error; entry import error → `RuntimeError` naming the plugin.
 - **Deliverable:** `datadog.*` works in exec from `plugins/datadog`, with its skill.
 - **Verify:** `uv run pytest -q plugins/datadog tests/test_plugin_manifest.py tests/test_plugin_loader.py tests/test_plugin_layout.py tests/test_runner.py tests/test_skills.py tests/test_native.py` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** Built `shared/plugins/` (manifest, schema; 52 tests), `exec/plugin.py` SDK, `exec/plugin_loader.py`, runner `_add_plugin_tools` (build failures now write an error envelope), plugin skill discovery with `context:` warnings, plugins mount + `ARCHIE_PLUGINS_DIR`, root `conftest.py` (package install, `pytest_collect_directory` so plugin dirs aren't imported as top-level packages, D20 home isolation), and moved Datadog code/skill/tests to `plugins/datadog/`. Evidence: full suite 1736 passed (232 Datadog tests collected from `plugins/datadog`); ruff check/format clean; a real `run_exec` subprocess lists 16 `datadog.*` functions, the exec description has no `datadog.`, native specs are the 10 core tools, and an unconfigured call raises `DatadogConfigurationError`. Home isolation exposed one test (`test_google_meet.py`) that read the real Google credential; it now stubs `credential` like its siblings. Deviation logged.
 
-### [ ] M2 — Trace cleanups (prefactor)
+### [x] M2 — Trace cleanups (prefactor)
 
 - **Approach:** Remove the `ARCHIE_TOOL_POLICY` fallback and `set_policy_snapshot` shim from `exec/tools/jira/policy.py` and update the tests that set the env var. Remove the top-level `enabled` key from `exec/tools/slack/policy.py`. Drop the `linear` provider and `LinearCredential` (providers, models, `credentials/__init__.py`, CLI set, tests).
 - **Test seam:** `require_read/require_write` of each policy module; `/auth/providers`.
 - **Deliverable:** No dead policy paths; no `linear`.
 - **Verify:** full checks pass; `grep -rn "ARCHIE_TOOL_POLICY\|linear" agent shared cli orchestrator tests --include=*.py` finds nothing.
-- **Outcome:**
+- **Outcome:** Removed Jira's `ARCHIE_TOOL_POLICY` fallback and shim (7 tests now set the runner snapshot inline; a sync fixture can't reset a contextvar token across pytest-asyncio's copied context), Slack's root `enabled` (also read in `slack/writes.py`), and `linear` everywhere including `docs/auth-credentials.md`. Evidence: the M2 grep returns nothing; full suite 1736 passed; ruff check/format clean.
 
 ### [ ] M3 — Every integration has a manifest and plugin skill
 
@@ -357,6 +357,8 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Outcome:**
 
 ## Deviations
+
+- M1: Datadog's provider/credential generation from its manifest moved to M3 with every other provider, so `PROVIDERS` switches source once and Datadog `site` isn't split across two mechanisms. No scope change.
 
 ## Risks
 

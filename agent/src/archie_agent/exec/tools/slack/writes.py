@@ -121,7 +121,7 @@ async def send_message(
         raise SlackValidationError("thread_ts must be a Slack timestamp")
     validated_blocks = validate_blocks(blocks)
     active = policy()
-    if not active["enabled"] or not active["write"]["enabled"]:
+    if not active["write"]["enabled"]:
         raise SlackPolicyError("Slack writes are disabled by policy")
     target = await resolve_conversation_reference(conversation)
     if deny_conversation(target, active["write"]["scope"]["deny"]):
@@ -167,7 +167,7 @@ async def react(
     if not isinstance(action, str) or action not in ("add", "remove"):
         raise SlackValidationError("action must be add or remove")
     active = policy()
-    if not active["enabled"] or not active["write"]["enabled"]:
+    if not active["write"]["enabled"]:
         raise SlackPolicyError("Slack writes are disabled by policy")
     target = await resolve_conversation_reference(conversation)
     if deny_conversation(target, active["write"]["scope"]["deny"]):

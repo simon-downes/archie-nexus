@@ -32,12 +32,6 @@ class OAuthCredential(msgspec.Struct, forbid_unknown_fields=True):
     registration_endpoint: str | None = None
 
 
-class LinearCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Linear API token."""
-
-    token: str | None = None
-
-
 class GithubCredential(msgspec.Struct, forbid_unknown_fields=True):
     """GitHub fine-grained tokens: one for work organisations, one for everything else.
 
@@ -91,7 +85,6 @@ CREDENTIAL_TYPES: dict[str, type] = {
     "notion": OAuthCredential,
     "slack": OAuthCredential,
     "google": OAuthCredential,
-    "linear": LinearCredential,
     "github": GithubCredential,
     "scalr": ScalrCredential,
     "jira": JiraCredential,

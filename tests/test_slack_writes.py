@@ -11,7 +11,6 @@ from archie_agent.exec.tools.slack.errors import (
 from archie_agent.exec.tools.slack.writes import react, send_message
 
 _WRITE_POLICY = {
-    "enabled": True,
     "read": {"enabled": True, "scope": {"deny": []}},
     "write": {"enabled": True, "scope": {"deny": []}},
 }

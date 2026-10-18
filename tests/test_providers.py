@@ -8,7 +8,6 @@ def test_all_services_present():
     expected = {
         "bedrock",
         "notion",
-        "linear",
         "slack",
         "github",
         "aws",
@@ -25,7 +24,6 @@ def test_static_providers():
     """Static providers have correct type and fields."""
     static_services = {
         "bedrock",
-        "linear",
         "github",
         "aws",
         "scalr",
