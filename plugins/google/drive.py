@@ -5,8 +5,9 @@ from __future__ import annotations
 import builtins
 from typing import Any
 
-from archie_agent.exec.tools import tool
-from archie_agent.exec.tools.google_common import (
+from archie_agent.exec.plugin import tool
+
+from .common import (
     GoogleNotFoundError,
     GoogleValidationError,
     bounded_limit,
@@ -77,24 +78,20 @@ def _normalize(raw: Any, limit: int) -> list[dict[str, Any]]:
     ][:limit]
 
 
-async def search_references(
-    query: str, limit: int, policy_snapshot: dict[str, Any] | None = None
-) -> list[dict[str, Any]]:
+async def search_references(query: str, limit: int) -> list[dict[str, Any]]:
     query = text(query, "query")
     limit = bounded_limit(limit, maximum=50)
-    require_read(policy_snapshot)
+    require_read()
     raw = await drive_request(
         "search", {"q": query, "pageSize": limit}, credential().access_token or ""
     )
     return _normalize(raw, limit)
 
 
-async def read_reference(
-    file_id: str, purpose: str, policy_snapshot: dict[str, Any] | None = None
-) -> dict[str, Any]:
+async def read_reference(file_id: str, purpose: str) -> dict[str, Any]:
     file_id = safe_id(file_id, "file_id")
     purpose = text(purpose, "purpose", maximum=128)
-    require_read(policy_snapshot)
+    require_read()
     result = _metadata(
         await drive_request(
             "metadata", {"id": file_id, "purpose": purpose}, credential().access_token or ""
@@ -141,12 +138,12 @@ async def read_reference(
     return envelope
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="drive")
+@tool(namespace="drive")
 async def search(query: str, limit: int = 20) -> list[dict[str, Any]]:
     return await search_references(query, limit)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="drive")
+@tool(namespace="drive")
 async def list(limit: int = 100) -> list[dict[str, Any]]:
     limit = bounded_limit(limit, maximum=100)
     require_read()
@@ -154,7 +151,7 @@ async def list(limit: int = 100) -> list[dict[str, Any]]:
     return _normalize(raw, limit)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="drive")
+@tool(namespace="drive")
 async def metadata(file_id: str) -> dict[str, Any]:
     return await read_reference(file_id, "metadata")
 
@@ -162,15 +159,14 @@ async def metadata(file_id: str) -> dict[str, Any]:
 async def read_content(
     file_id: str,
     format: str = "auto",
-    policy_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if format not in {"auto", "text", "csv", "reference"}:
         raise ValueError("Unsupported Drive format")
     purpose = "read" if format in {"auto", "text"} else f"read:{format}"
-    return await read_reference(file_id, purpose, policy_snapshot)
+    return await read_reference(file_id, purpose)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="drive")
+@tool(namespace="drive")
 async def read(file_id: str, format: str = "auto") -> dict[str, Any]:
     return await read_content(file_id, format)
 

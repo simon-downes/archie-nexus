@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import tool
-from archie_agent.exec.tools.google_common import (
+from archie_agent.exec.plugin import tool
+
+from .common import (
     GoogleConfigurationError,
     GoogleTransportError,
     GoogleValidationError,
@@ -126,7 +127,7 @@ async def search_sources(
     return results[: limit * 2]
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="google")
+@tool(namespace="google")
 async def search(
     query: str, types: list[str] | None = None, limit: int = 20
 ) -> list[dict[str, Any]]:

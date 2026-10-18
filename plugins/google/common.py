@@ -7,11 +7,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from archie_agent.exec import plugin as sdk
+from archie_agent.exec.plugin import ToolError
 from archie_shared.credentials.models import OAuthCredential
-from archie_shared.credentials.store import get_credential
-from archie_shared.tool_policy import current_policy_snapshot, resolve_provider_policy
-
-from archie_agent.exec.tools import ToolError
 
 
 class GoogleError(ToolError):
@@ -68,26 +66,25 @@ def safe_id(value: Any, name: str = "id", maximum: int = 256) -> str:
     return text(value, name, maximum=maximum)
 
 
-def policy(snapshot: dict[str, Any] | None = None) -> tuple[bool, bool]:
-    read, write = resolve_provider_policy(
-        snapshot if snapshot is not None else current_policy_snapshot(), "google"
-    )
-    return bool(read["enabled"]), bool(write["enabled"])
+def policy() -> tuple[bool, bool]:
+    """Return ``(read_enabled, write_enabled)`` from the current plugin context."""
+    current = sdk.context().policy
+    write = current.write
+    return bool(current.read.enabled), bool(write is not None and write.enabled)
 
 
-def require_read(snapshot: dict[str, Any] | None = None) -> None:
-    if not policy(snapshot)[0]:
-        raise GoogleAuthorizationError("Google reads are disabled by policy")
+def require_read() -> None:
+    sdk.require_read(GoogleAuthorizationError, "Google reads are disabled by policy")
 
 
-def require_write(snapshot: dict[str, Any] | None = None) -> None:
-    if not policy(snapshot)[1]:
-        raise GoogleAuthorizationError("Google writes are disabled by policy")
+def require_write() -> None:
+    sdk.require_write(GoogleAuthorizationError, "Google writes are disabled by policy")
 
 
 def credential() -> OAuthCredential:
+    credentials = sdk.context().credentials  # no context fails closed with PluginContextError
     try:
-        value = get_credential("google")
+        value = credentials.get()
     except Exception as exc:
         raise GoogleConfigurationError("Google credentials are unavailable or invalid") from exc
     if not isinstance(value, OAuthCredential) or not value.access_token:

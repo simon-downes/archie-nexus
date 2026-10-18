@@ -1,17 +1,24 @@
+import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from archie_agent.exec.tools import get_all_tools, mail
-from archie_agent.exec.tools.google_common import (
+from archie_agent.exec.plugin import context, plugin_tools
+from archie_plugins.google import mail
+from archie_plugins.google.common import (
     GoogleAuthorizationError,
     GoogleTransportError,
     GoogleValidationError,
 )
-from archie_shared.tool_policy import reset_policy_snapshot, set_policy_snapshot
+
+
+def _warm_labels(labels):
+    """Store ``labels`` in the installed context's cache under the mail key."""
+    context().cache.set("google.labels", {"labels": labels}, 60)
 
 
 async def test_mail_surface_uses_bulk_mutation_names():
-    tools = get_all_tools()
+    tools = plugin_tools()
     expected = {
         "mail.search",
         "mail.read",
@@ -28,28 +35,20 @@ async def test_mail_surface_uses_bulk_mutation_names():
     assert "mail.modify_labels" not in tools
 
 
-async def test_mail_read_write_gates(monkeypatch):
+async def test_mail_read_write_gates(monkeypatch, policy):
     calls = AsyncMock(return_value=[{"id": "m1", "subject": "Hi", "labelIds": ["INBOX"]}])
     monkeypatch.setattr(mail, "gmail_request", calls)
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
     assert (await mail.search("hi"))[0]["id"] == "m1"
-    token = set_policy_snapshot({"google": {"read": {"enabled": False}}})
-    try:
-        with pytest.raises(GoogleAuthorizationError):
-            await mail.search("hi")
-    finally:
-        reset_policy_snapshot(token)
+    policy({"google": {"read": {"enabled": False}}})
+    with pytest.raises(GoogleAuthorizationError):
+        await mail.search("hi")
 
 
-async def test_archive_uses_one_batch_request(monkeypatch):
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
+async def test_archive_uses_one_batch_request(monkeypatch, policy):
     calls = AsyncMock(return_value=None)
     monkeypatch.setattr(mail, "gmail_request", calls)
-    token = set_policy_snapshot({"google": {"write": {"enabled": True}}})
-    try:
-        result = await mail.archive(["m1", "m2"])
-    finally:
-        reset_policy_snapshot(token)
+    policy({"google": {"write": {"enabled": True}}})
+    result = await mail.archive(["m1", "m2"])
     assert result == {"count": 2, "complete": True}
     assert calls.await_args.args == (
         "batch_modify",
@@ -58,19 +57,15 @@ async def test_archive_uses_one_batch_request(monkeypatch):
     )
 
 
-async def test_system_operations_use_fixed_batch_labels(monkeypatch):
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
+async def test_system_operations_use_fixed_batch_labels(monkeypatch, policy):
     calls = AsyncMock(return_value=None)
     monkeypatch.setattr(mail, "gmail_request", calls)
-    token = set_policy_snapshot({"google": {"write": {"enabled": True}}})
-    try:
-        await mail.unarchive(["m1"])
-        await mail.mark_read(["m1"])
-        await mail.mark_unread(["m1"])
-        await mail.star(["m1"])
-        await mail.unstar(["m1"])
-    finally:
-        reset_policy_snapshot(token)
+    policy({"google": {"write": {"enabled": True}}})
+    await mail.unarchive(["m1"])
+    await mail.mark_read(["m1"])
+    await mail.mark_unread(["m1"])
+    await mail.star(["m1"])
+    await mail.unstar(["m1"])
     payloads = [call.args[1] for call in calls.await_args_list]
     assert payloads == [
         {"ids": ["m1"], "addLabelIds": ["INBOX"], "removeLabelIds": []},
@@ -90,8 +85,7 @@ async def test_mutation_ids_validate_before_policy_or_provider(monkeypatch):
     assert calls.await_count == 0
 
 
-async def test_label_resolves_user_names_and_uses_one_batch(monkeypatch):
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
+async def test_label_resolves_user_names_and_uses_one_batch(monkeypatch, policy):
     calls = AsyncMock(
         side_effect=[
             [{"id": "Label_1", "name": "Projects", "type": "USER"}],
@@ -99,13 +93,8 @@ async def test_label_resolves_user_names_and_uses_one_batch(monkeypatch):
         ]
     )
     monkeypatch.setattr(mail, "gmail_request", calls)
-    monkeypatch.setattr(mail.cache, "get", lambda key: None)
-    monkeypatch.setattr(mail.cache, "set", lambda *args: None)
-    token = set_policy_snapshot({"google": {"read": {"enabled": True}, "write": {"enabled": True}}})
-    try:
-        result = await mail.label(["m1", "m2"], add=["Projects"])
-    finally:
-        reset_policy_snapshot(token)
+    policy({"google": {"read": {"enabled": True}, "write": {"enabled": True}}})
+    result = await mail.label(["m1", "m2"], add=["Projects"])
     assert result == {"count": 2, "complete": True}
     assert calls.await_args_list[1].args[1] == {
         "ids": ["m1", "m2"],
@@ -114,24 +103,34 @@ async def test_label_resolves_user_names_and_uses_one_batch(monkeypatch):
     }
 
 
-async def test_label_rejects_system_labels_and_unknown_names(monkeypatch):
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
+async def test_label_rejects_system_labels_and_unknown_names(monkeypatch, policy):
     calls = AsyncMock(return_value=None)
     monkeypatch.setattr(mail, "gmail_request", calls)
-    monkeypatch.setattr(
-        mail.cache,
-        "get",
-        lambda key: {"labels": [{"id": "INBOX", "name": "INBOX", "type": "SYSTEM"}]},
-    )
-    token = set_policy_snapshot({"google": {"read": {"enabled": True}, "write": {"enabled": True}}})
-    try:
-        with pytest.raises(GoogleValidationError):
-            await mail.label(["m1"], add=["INBOX"])
-        with pytest.raises(GoogleValidationError):
-            await mail.label(["m1"], add=["Missing"])
-    finally:
-        reset_policy_snapshot(token)
+    _warm_labels([{"id": "INBOX", "name": "INBOX", "type": "SYSTEM"}])
+    policy({"google": {"read": {"enabled": True}, "write": {"enabled": True}}})
+    with pytest.raises(GoogleValidationError):
+        await mail.label(["m1"], add=["INBOX"])
+    with pytest.raises(GoogleValidationError):
+        await mail.label(["m1"], add=["Missing"])
     assert calls.await_count == 0
+
+
+async def test_label_lookup_is_cached_in_the_plugin_cache(monkeypatch, google_context_installed):
+    calls = AsyncMock(return_value=[{"id": "Label_1", "name": "Projects", "type": "USER"}])
+    monkeypatch.setattr(mail, "gmail_request", calls)
+    assert await mail.list_labels() == [{"name": "Projects", "type": "USER"}]
+    assert await mail.list_labels() == [{"name": "Projects", "type": "USER"}]
+    assert calls.await_count == 1
+    cache = context().cache
+    assert cache.root == google_context_installed / "cache" / "google"
+    assert (cache.root / "google.labels.json").is_file()
+    assert cache.get("google.labels") == {
+        "labels": [{"id": "Label_1", "name": "Projects", "type": "USER"}]
+    }
+    ttl = datetime.fromisoformat(
+        json.loads((cache.root / "google.labels.json").read_text())["expires"]
+    ) - datetime.now(UTC)
+    assert timedelta(hours=23) < ttl <= timedelta(hours=24)
 
 
 async def test_label_rejects_empty_or_duplicate_inputs(monkeypatch):
@@ -141,28 +140,17 @@ async def test_label_rejects_empty_or_duplicate_inputs(monkeypatch):
         await mail.label(["m1", "m1"], add=["Projects"])
 
 
-async def test_warm_label_cache_works_without_read_policy(monkeypatch):
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
+async def test_warm_label_cache_works_without_read_policy(monkeypatch, policy):
     calls = AsyncMock(return_value=None)
     monkeypatch.setattr(mail, "gmail_request", calls)
-    monkeypatch.setattr(
-        mail.cache,
-        "get",
-        lambda key: {"labels": [{"id": "Label_1", "name": "Projects", "type": "USER"}]},
-    )
-    token = set_policy_snapshot(
-        {"google": {"read": {"enabled": False}, "write": {"enabled": True}}}
-    )
-    try:
-        result = await mail.label(["m1"], add=["Projects"])
-    finally:
-        reset_policy_snapshot(token)
+    _warm_labels([{"id": "Label_1", "name": "Projects", "type": "USER"}])
+    policy({"google": {"read": {"enabled": False}, "write": {"enabled": True}}})
+    result = await mail.label(["m1"], add=["Projects"])
     assert result == {"count": 1, "complete": True}
     assert calls.await_args.args[0] == "batch_modify"
 
 
-async def test_malformed_label_cache_refreshes_before_resolution(monkeypatch):
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
+async def test_malformed_label_cache_refreshes_before_resolution(monkeypatch, policy):
     calls = AsyncMock(
         side_effect=[
             [{"id": "Label_1", "name": "Projects", "type": "USER"}],
@@ -170,17 +158,9 @@ async def test_malformed_label_cache_refreshes_before_resolution(monkeypatch):
         ]
     )
     monkeypatch.setattr(mail, "gmail_request", calls)
-    monkeypatch.setattr(
-        mail.cache,
-        "get",
-        lambda key: {"labels": [{"id": "", "name": "Projects", "type": "USER"}]},
-    )
-    monkeypatch.setattr(mail.cache, "set", lambda *args: None)
-    token = set_policy_snapshot({"google": {"read": {"enabled": True}, "write": {"enabled": True}}})
-    try:
-        await mail.label(["m1"], add=["Projects"])
-    finally:
-        reset_policy_snapshot(token)
+    _warm_labels([{"id": "", "name": "Projects", "type": "USER"}])
+    policy({"google": {"read": {"enabled": True}, "write": {"enabled": True}}})
+    await mail.label(["m1"], add=["Projects"])
     assert [call.args[0] for call in calls.await_args_list] == ["labels", "batch_modify"]
 
 
@@ -193,15 +173,11 @@ async def test_oversized_batch_rejects_before_write_policy(monkeypatch):
     assert calls.await_count == 0
 
 
-async def test_exact_500_ids_are_accepted(monkeypatch):
+async def test_exact_500_ids_are_accepted(monkeypatch, policy):
     calls = AsyncMock(return_value=None)
     monkeypatch.setattr(mail, "gmail_request", calls)
-    monkeypatch.setattr(mail, "credential", lambda: type("C", (), {"access_token": "t"})())
-    token = set_policy_snapshot({"google": {"write": {"enabled": True}}})
-    try:
-        result = await mail.archive([f"m{i}" for i in range(500)])
-    finally:
-        reset_policy_snapshot(token)
+    policy({"google": {"write": {"enabled": True}}})
+    result = await mail.archive([f"m{i}" for i in range(500)])
     assert result == {"count": 500, "complete": True}
     assert calls.await_count == 1
 

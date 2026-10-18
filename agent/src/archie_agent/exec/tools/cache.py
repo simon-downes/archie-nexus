@@ -114,6 +114,5 @@ class ToolCache:
 
 
 setattr(ToolCache, "del", ToolCache.delete)
-cache = ToolCache()
 
-__all__ = ["ToolCache", "cache"]
+__all__ = ["ToolCache"]

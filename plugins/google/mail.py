@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from archie_agent.exec.tools import tool
-from archie_agent.exec.tools.cache import cache
-from archie_agent.exec.tools.google_common import (
+from archie_agent.exec.plugin import context, tool
+
+from .common import (
     GoogleTransportError,
     GoogleValidationError,
     bounded_limit,
@@ -123,7 +123,7 @@ def _message(raw: Any) -> dict[str, Any] | None:
     }
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def search(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """Search bounded Gmail message metadata and body text."""
     query = text(query, "query")
@@ -139,7 +139,7 @@ async def search(query: str, limit: int = 20) -> list[dict[str, Any]]:
     ][:limit]
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def read(message_id: str) -> dict[str, Any]:
     """Read one bounded Gmail message."""
     message_id = safe_id(message_id, "message_id")
@@ -153,6 +153,7 @@ async def read(message_id: str) -> dict[str, Any]:
 
 
 async def _load_labels() -> list[dict[str, str]]:
+    cache = context().cache
     cached = cache.get("google.labels")
     if cached is not None and _valid_cached_labels(cached.get("labels")):
         return cached["labels"]
@@ -171,7 +172,7 @@ async def _load_labels() -> list[dict[str, str]]:
     return labels
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def list_labels() -> list[dict[str, str]]:
     """List normalized Gmail label names and types without exposing IDs."""
     return [{"name": item["name"], "type": item["type"]} for item in await _load_labels()]
@@ -226,7 +227,7 @@ def _resolve_user_labels(names: list[str], labels: list[dict[str, str]]) -> list
     return [by_name[value]["id"] for value in names]
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def label(
     message_ids: list[str], add: list[str] | None = None, remove: list[str] | None = None
 ) -> dict[str, Any]:
@@ -251,37 +252,37 @@ async def _system(
     return await _batch_modify(ids, add=[add] if add else [], remove=[remove] if remove else [])
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def archive(message_ids: list[str]) -> dict[str, Any]:
     """Archive up to 500 Gmail messages."""
     return await _system(message_ids, remove="INBOX")
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def unarchive(message_ids: list[str]) -> dict[str, Any]:
     """Unarchive up to 500 Gmail messages."""
     return await _system(message_ids, add="INBOX")
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def mark_read(message_ids: list[str]) -> dict[str, Any]:
     """Mark up to 500 Gmail messages read."""
     return await _system(message_ids, remove="UNREAD")
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def mark_unread(message_ids: list[str]) -> dict[str, Any]:
     """Mark up to 500 Gmail messages unread."""
     return await _system(message_ids, add="UNREAD")
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def star(message_ids: list[str]) -> dict[str, Any]:
     """Star up to 500 Gmail messages."""
     return await _system(message_ids, add="STARRED")
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="mail")
+@tool(namespace="mail")
 async def unstar(message_ids: list[str]) -> dict[str, Any]:
     """Unstar up to 500 Gmail messages."""
     return await _system(message_ids, remove="STARRED")

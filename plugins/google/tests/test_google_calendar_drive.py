@@ -1,14 +1,15 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from archie_agent.exec.tools import calendar, drive, get_all_tools
-from archie_agent.exec.tools.google_common import GoogleValidationError
+from archie_agent.exec.plugin import plugin_tools
+from archie_plugins.google import calendar, drive
+from archie_plugins.google.common import GoogleValidationError
 
 
 async def test_calendar_drive_exact_surfaces():
-    tools = get_all_tools()
+    tools = plugin_tools()
     assert {"calendar." + name for name in calendar.__all__} <= tools.keys()
     assert {"drive." + name for name in drive.__all__} <= tools.keys()
 
@@ -22,7 +23,6 @@ async def test_calendar_bounds_before_provider(monkeypatch):
 
 
 async def test_calendar_normalizes_google_times_and_organizer(monkeypatch):
-    monkeypatch.setattr(calendar, "credential", lambda: type("C", (), {"access_token": "t"})())
     monkeypatch.setattr(
         calendar,
         "calendar_request",
@@ -56,7 +56,6 @@ async def test_calendar_today_uses_uk_calendar_day(monkeypatch):
         "_now",
         lambda: datetime(2026, 9, 23, 23, 30, tzinfo=ZoneInfo("Europe/London")),
     )
-    monkeypatch.setattr(calendar, "credential", lambda: type("C", (), {"access_token": "t"})())
     request = AsyncMock(return_value=[])
     monkeypatch.setattr(calendar, "calendar_request", request)
     await calendar.today()
@@ -65,8 +64,42 @@ async def test_calendar_today_uses_uk_calendar_day(monkeypatch):
     assert payload["timeMax"] == "2026-09-24T00:00:00+01:00"
 
 
+class _FixedDatetime(datetime):
+    """``datetime`` whose ``now()`` is 2026-09-23T23:30Z (00:30 on the 24th in London)."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 9, 23, 23, 30, tzinfo=UTC).astimezone(tz)
+
+
+@pytest.mark.parametrize(
+    ("timezone", "start", "end"),
+    [
+        ("UTC", "2026-09-23T00:00:00+00:00", "2026-09-24T00:00:00+00:00"),
+        ("Europe/London", "2026-09-24T00:00:00+01:00", "2026-09-25T00:00:00+01:00"),
+        # An unknown zone keeps the old fallback to Europe/London.
+        ("Not/AZone", "2026-09-24T00:00:00+01:00", "2026-09-25T00:00:00+01:00"),
+    ],
+)
+async def test_calendar_today_follows_timezone_setting(
+    monkeypatch, google_settings, timezone, start, end
+):
+    google_settings({"timezone": timezone})
+    monkeypatch.setattr(calendar, "datetime", _FixedDatetime)
+    request = AsyncMock(return_value=[])
+    monkeypatch.setattr(calendar, "calendar_request", request)
+    await calendar.today()
+    payload = request.await_args.args[1]
+    assert (payload["timeMin"], payload["timeMax"]) == (start, end)
+
+
+async def test_calendar_timezone_ignores_the_environment(monkeypatch, google_settings):
+    monkeypatch.setenv("ARCHIE_TIMEZONE", "Asia/Tokyo")
+    google_settings({"timezone": "UTC"})
+    assert calendar._timezone() == ZoneInfo("UTC")
+
+
 async def test_calendar_search_supports_past_date_and_shared_shape(monkeypatch):
-    monkeypatch.setattr(calendar, "credential", lambda: type("C", (), {"access_token": "t"})())
     request = AsyncMock(
         return_value=[
             {
@@ -110,7 +143,6 @@ async def test_calendar_search_supports_past_date_and_shared_shape(monkeypatch):
 
 
 async def test_drive_read_exports_google_doc_content(monkeypatch):
-    monkeypatch.setattr(drive, "credential", lambda: type("C", (), {"access_token": "t"})())
     calls = []
 
     async def fake_request(operation, payload, token):

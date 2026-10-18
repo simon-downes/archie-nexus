@@ -340,13 +340,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q plugins/slack tests/test_tool_cache.py tests/test_plugin_layout.py`; full checks.
 - **Outcome:** Slack code and tests moved to `plugins/slack/`; credential and deny-list policy via the context; `MetadataCache` deleted and users/conversations cached in the plugin `ToolCache` (`cache/slack/slack.{users,conversations}.json`, 1 MB limit, values over the limit are returned but not cached). The old `~/.nexus/slack/*.json` files are ignored and refill once. Evidence: the 42 original tests are still collected, plus 28 new (policy, cache TTL/refresh/expiry/oversize); full suite 1948 passed; ruff clean; a real `run_exec` of `slack.users()` gives `SlackConfigurationError: Slack credentials are incomplete`.
 
-### [ ] M12 — Google moves and uses the context
+### [x] M12 — Google moves and uses the context
 
 - **Approach:** Move `mail.py`, `calendar.py`, `drive.py`, `meet.py`, `discovery.py` and `google_common.py` (→ `common.py`) into `plugins/google/`; five namespaces in the manifest; timezone setting replaces `ARCHIE_TIMEZONE`; mail uses `context().cache`.
 - **Test seam:** `mail/calendar/drive/meet/google.*` public tools.
 - **Deliverable:** All Google namespaces served from `plugins/google`.
 - **Verify:** `uv run pytest -q plugins/google tests/test_plugin_layout.py`; full checks.
-- **Outcome:**
+- **Outcome:** Google's six flat files moved to `plugins/google/` (`google_common` → `common`); five namespaces registered from one entry; credential, policy, `timezone` setting (replacing `ARCHIE_TIMEZONE`) and the label cache all come from the context; the unused module-global `ToolCache` instance is gone; `get_all_tools()` now imports core modules only. Evidence: the 32 original tests are still collected, plus 17 new; full suite 1978 passed; ruff clean; a real `run_exec` with read disabled raises `GoogleAuthorizationError` for one call in each of `mail`, `calendar`, `drive`, `meet` and `google`.
 
 ### [ ] M13 — Core `@tool` loses plugin flags; contract tests; docs
 

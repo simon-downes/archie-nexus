@@ -6,8 +6,9 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
-from archie_agent.exec.tools import tool
-from archie_agent.exec.tools.google_common import (
+from archie_agent.exec.plugin import tool
+
+from .common import (
     GoogleValidationError,
     credential,
     google_json,
@@ -102,11 +103,9 @@ def _select_record(
     raise GoogleValidationError("Calendar event did not resolve to a Meet conference")
 
 
-async def resolve_meeting(
-    meeting_id: str, policy_snapshot: dict[str, Any] | None = None
-) -> dict[str, Any]:
+async def resolve_meeting(meeting_id: str) -> dict[str, Any]:
     meeting_id = safe_id(meeting_id, "meeting_id", maximum=500)
-    require_read(policy_snapshot)
+    require_read()
     if ":" not in meeting_id:
         raise GoogleValidationError("meeting_id must use a canonical prefix")
     kind, value = meeting_id.split(":", 1)
@@ -115,9 +114,9 @@ async def resolve_meeting(
             raise GoogleValidationError("meet reference must name a conference record ID")
         return {"kind": kind, "id": value}
     if kind == "calendar" and value:
-        from archie_agent.exec.tools.calendar import get_event
+        from .calendar import get_event
 
-        event = await get_event(value, policy_snapshot)
+        event = await get_event(value)
         code = _meet_code(event.get("meet_url"))
         if not code:
             raise GoogleValidationError("Calendar event has no safe Google Meet URL")
@@ -146,9 +145,9 @@ async def resolve_meeting(
             raise GoogleValidationError("Meet conference record was malformed")
         return {"kind": "meet", "id": name.removeprefix("conferenceRecords/")}
     if kind == "drive" and value:
-        from archie_agent.exec.tools.drive import read_reference
+        from .drive import read_reference
 
-        result = await read_reference(value, "metadata", policy_snapshot)
+        result = await read_reference(value, "metadata")
         file_info = result.get("file", {})
         if file_info.get("mime_type") != "application/vnd.google-apps.document":
             raise GoogleValidationError("Drive Meet artifact is not a Google Doc")
@@ -207,7 +206,7 @@ async def _notes_from_drive(raw: dict[str, Any]) -> dict[str, Any] | None:
     document_id = destination.get("document") if isinstance(destination, dict) else None
     if not isinstance(document_id, str) or not document_id:
         return None
-    from archie_agent.exec.tools.drive import read_reference
+    from .drive import read_reference
 
     result = await read_reference(document_id, "read")
     content = result.get("content") if isinstance(result, dict) else None
@@ -225,7 +224,7 @@ async def _read(kind: str, meeting_id: str) -> dict[str, Any]:
         record = f"conferenceRecords/{resolved['id']}"
         artifacts = await meet_request(kind, {"record": record}, token)
     elif resolved["kind"] == "drive" and kind == "notes":
-        from archie_agent.exec.tools.drive import read_reference
+        from .drive import read_reference
 
         result = await read_reference(resolved["id"], "read")
         content = result.get("content")
@@ -254,17 +253,17 @@ async def _read(kind: str, meeting_id: str) -> dict[str, Any]:
     return _artifact(artifact)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="meet")
+@tool(namespace="meet")
 async def notes(meeting_id: str) -> dict[str, Any]:
     return await _read("notes", meeting_id)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="meet")
+@tool(namespace="meet")
 async def transcript(meeting_id: str) -> dict[str, Any]:
     return await _read("transcript", meeting_id)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="meet")
+@tool(namespace="meet")
 async def recording(meeting_id: str) -> dict[str, Any]:
     result = await _read("recording", meeting_id)
     result["content"] = None

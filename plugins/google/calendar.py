@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from archie_agent.exec.tools import tool
-from archie_agent.exec.tools.google_common import (
+from archie_agent.exec.plugin import context, tool
+
+from .common import (
     GoogleValidationError,
     bounded_limit,
     clean,
@@ -44,7 +44,7 @@ async def calendar_request(operation: str, payload: dict[str, Any], token: str) 
 
 
 def _timezone() -> ZoneInfo:
-    configured = os.environ.get("ARCHIE_TIMEZONE", "Europe/London")
+    configured = context().settings.get("timezone", "Europe/London")
     try:
         return ZoneInfo(configured)
     except ZoneInfoNotFoundError:
@@ -157,10 +157,10 @@ def _normalize(raw: Any, limit: int) -> list[dict[str, Any]]:
     ][:limit]
 
 
-async def get_event(event_id: str, policy_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+async def get_event(event_id: str) -> dict[str, Any]:
     """Private normalized event lookup for sibling Google tools."""
     event_id = safe_id(event_id, "event_id")
-    require_read(policy_snapshot)
+    require_read()
     result = _event(
         await calendar_request("get", {"id": event_id}, credential().access_token or "")
     )
@@ -174,13 +174,12 @@ async def search_events(
     start: datetime,
     end: datetime,
     limit: int,
-    policy_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     query = text(query, "query") if query else ""
     limit = bounded_limit(limit, maximum=50)
     if start.tzinfo is None or end.tzinfo is None or start >= end:
         raise GoogleValidationError("invalid event range")
-    require_read(policy_snapshot)
+    require_read()
     raw = await calendar_request(
         "search",
         {
@@ -194,7 +193,7 @@ async def search_events(
     return _normalize(raw, limit)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="calendar")
+@tool(namespace="calendar")
 async def today() -> list[dict[str, Any]]:
     """Return events intersecting today in the configured local timezone."""
     require_read()
@@ -207,7 +206,7 @@ async def today() -> list[dict[str, Any]]:
     return _normalize(raw, 50)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="calendar")
+@tool(namespace="calendar")
 async def upcoming(days: int = 7, limit: int = 50) -> list[dict[str, Any]]:
     """Return events in the next bounded timezone-aware window."""
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 31:
@@ -223,13 +222,13 @@ async def upcoming(days: int = 7, limit: int = 50) -> list[dict[str, Any]]:
     return _normalize(raw, limit)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="calendar")
+@tool(namespace="calendar")
 async def event(event_id: str) -> dict[str, Any]:
     """Return one normalized Calendar event."""
     return await get_event(event_id)
 
 
-@tool(exec_enabled=True, native=False, exec_docs=False, namespace="calendar")
+@tool(namespace="calendar")
 async def search(
     start: str,
     end: str,

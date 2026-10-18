@@ -24,7 +24,16 @@ PROCEDURE_SKILLS = {
 }
 
 # Integrations already moved out of ``agent/src/archie_agent/exec/tools/``; append on each move.
-MOVED = ["datadog", "incident_io", "jira", "notion", "slack"]
+# Maps plugin id -> the old core module names under ``archie_agent.exec.tools``.
+MOVED = {
+    "datadog": ["datadog"],
+    "incident_io": ["incident_io"],
+    "jira": ["jira"],
+    "notion": ["notion"],
+    "slack": ["slack"],
+    "google": ["mail", "calendar", "drive", "meet", "discovery", "google_common"],
+}
+OLD_MODULES = [(pid, name) for pid, names in MOVED.items() for name in names]
 
 
 def _python_files():
@@ -42,8 +51,8 @@ def _patterns(name: str) -> list[re.Pattern[str]]:
     return [re.compile(module), re.compile(path), re.compile(from_tools)]
 
 
-@pytest.mark.parametrize("name", MOVED)
-def test_no_references_to_old_integration_location(name):
+@pytest.mark.parametrize(("plugin", "name"), OLD_MODULES)
+def test_no_references_to_old_integration_location(plugin, name):
     patterns = _patterns(name)
     offenders = []
     for path in _python_files():
@@ -55,10 +64,12 @@ def test_no_references_to_old_integration_location(name):
     assert not offenders, "\n".join(offenders)
 
 
-@pytest.mark.parametrize("name", MOVED)
-def test_moved_integration_has_no_core_package(name):
-    assert not (ROOT / "agent" / "src" / "archie_agent" / "exec" / "tools" / name).exists()
-    assert (ROOT / "plugins" / name / "plugin.yaml").is_file()
+@pytest.mark.parametrize(("plugin", "name"), OLD_MODULES)
+def test_moved_integration_has_no_core_package(plugin, name):
+    tools = ROOT / "agent" / "src" / "archie_agent" / "exec" / "tools"
+    assert not (tools / name).exists()
+    assert not (tools / f"{name}.py").exists()
+    assert (ROOT / "plugins" / plugin / "plugin.yaml").is_file()
 
 
 def test_every_plugin_function_is_documented_in_its_skills():
@@ -88,7 +99,7 @@ def test_persona_skills_holds_only_procedure_skills():
 
 # Plugins whose code takes credentials/policy/settings only from ``context()`` (M6+);
 # append on each conversion.
-CONVERTED = ["datadog", "aws", "incident_io", "jira", "notion", "slack"]
+CONVERTED = ["datadog", "aws", "incident_io", "jira", "notion", "slack", "google"]
 
 # Built by concatenation so this file does not match its own patterns.
 FORBIDDEN_READS = (

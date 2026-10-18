@@ -1,12 +1,12 @@
 import pytest
-from archie_agent.exec.tools import get_all_tools, meet
-from archie_agent.exec.tools.google_common import GoogleValidationError
+from archie_agent.exec.plugin import plugin_tools
+from archie_plugins.google import meet
+from archie_plugins.google.common import GoogleValidationError
 
 
 async def test_meet_exact_surface_and_recording_has_no_content(monkeypatch):
-    tools = get_all_tools()
+    tools = plugin_tools()
     assert {"meet." + name for name in meet.__all__} <= tools.keys()
-    monkeypatch.setattr(meet, "credential", lambda: type("C", (), {"access_token": "t"})())
 
     async def fake_request(*args):
         return [{"state": "available", "content": b"secret", "url": "https://meet.google.com/x"}]
@@ -18,7 +18,6 @@ async def test_meet_exact_surface_and_recording_has_no_content(monkeypatch):
 
 
 async def test_calendar_reference_resolves_before_artifact_fetch(monkeypatch):
-    monkeypatch.setattr(meet, "credential", lambda: type("C", (), {"access_token": "t"})())
     calendar_event = {
         "id": "event-1",
         "start": "2026-09-23T08:30:00+00:00",
@@ -27,7 +26,7 @@ async def test_calendar_reference_resolves_before_artifact_fetch(monkeypatch):
     }
     calls = []
 
-    async def fake_event(event_id, policy_snapshot=None):
+    async def fake_event(event_id):
         assert event_id == "event-1"
         return calendar_event
 
@@ -48,7 +47,7 @@ async def test_calendar_reference_resolves_before_artifact_fetch(monkeypatch):
             ]
         return [{"state": "available", "content": "Notes", "url": None}]
 
-    monkeypatch.setattr("archie_agent.exec.tools.calendar.get_event", fake_event)
+    monkeypatch.setattr("archie_plugins.google.calendar.get_event", fake_event)
     monkeypatch.setattr(meet, "meet_request", fake_request)
     result = await meet.notes("calendar:event-1")
     assert result["state"] == "available"
@@ -59,7 +58,6 @@ async def test_calendar_reference_resolves_before_artifact_fetch(monkeypatch):
 
 
 async def test_smart_notes_reads_google_doc_destination(monkeypatch):
-    monkeypatch.setattr(meet, "credential", lambda: type("C", (), {"access_token": "t"})())
 
     async def fake_request(operation, payload, token):
         if operation == "records":
@@ -80,7 +78,7 @@ async def test_smart_notes_reads_google_doc_destination(monkeypatch):
             }
         ]
 
-    async def fake_event(event_id, policy_snapshot=None):
+    async def fake_event(event_id):
         return {
             "id": event_id,
             "start": "2026-09-23T08:30:00+00:00",
@@ -88,7 +86,7 @@ async def test_smart_notes_reads_google_doc_destination(monkeypatch):
             "meet_url": "https://meet.google.com/abc-defg-hij",
         }
 
-    async def fake_read_reference(file_id, purpose, policy_snapshot=None):
+    async def fake_read_reference(file_id, purpose):
         assert file_id == "doc-1"
         assert purpose == "read"
         return {
@@ -96,9 +94,9 @@ async def test_smart_notes_reads_google_doc_destination(monkeypatch):
             "file": {"mime_type": "application/vnd.google-apps.document"},
         }
 
-    monkeypatch.setattr("archie_agent.exec.tools.calendar.get_event", fake_event)
+    monkeypatch.setattr("archie_plugins.google.calendar.get_event", fake_event)
     monkeypatch.setattr(meet, "meet_request", fake_request)
-    monkeypatch.setattr("archie_agent.exec.tools.drive.read_reference", fake_read_reference)
+    monkeypatch.setattr("archie_plugins.google.drive.read_reference", fake_read_reference)
     result = await meet.notes("calendar:event-1")
     assert result == {
         "state": "available",
@@ -109,7 +107,7 @@ async def test_smart_notes_reads_google_doc_destination(monkeypatch):
 
 
 async def test_calendar_reference_rejects_tied_recurring_records(monkeypatch):
-    async def fake_event(event_id, policy_snapshot=None):
+    async def fake_event(event_id):
         return {
             "id": event_id,
             "start": "2026-09-23T08:30:00+00:00",
@@ -125,9 +123,8 @@ async def test_calendar_reference_rejects_tied_recurring_records(monkeypatch):
             ]
         return []
 
-    monkeypatch.setattr("archie_agent.exec.tools.calendar.get_event", fake_event)
+    monkeypatch.setattr("archie_plugins.google.calendar.get_event", fake_event)
     monkeypatch.setattr(meet, "meet_request", fake_request)
-    monkeypatch.setattr(meet, "credential", lambda: type("C", (), {"access_token": "t"})())
     with pytest.raises(GoogleValidationError, match="multiple Meet conferences"):
         await meet.notes("calendar:event-1")
 

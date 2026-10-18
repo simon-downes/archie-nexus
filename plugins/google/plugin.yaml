@@ -1,5 +1,6 @@
 name: google
-# Code still lives in agent/src/archie_agent/exec/tools/google (moves in a later milestone).
+namespaces: [mail, calendar, drive, meet, google]
+entry: archie_plugins.google
 credential:
   kind: oauth
   authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth
@@ -18,3 +19,5 @@ credential:
 policy:
   read: {enabled: true}
   write: {enabled: false}
+settings:
+  timezone: {type: str, default: Europe/London}

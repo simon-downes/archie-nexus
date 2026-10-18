@@ -106,13 +106,8 @@ def get_all_tools() -> dict:
     # Import submodules to trigger @tool registration
     from archie_agent.exec.tools import (  # noqa: F401
         brain,
-        calendar,
         code,
-        discovery,
-        drive,
         fs,
-        mail,
-        meet,
         shell,
         web,
     )

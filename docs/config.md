@@ -85,6 +85,10 @@ Per-plugin notes:
 - `datadog` takes `policy.read.enabled` (default `true`) and `policy.write.enabled`
   (default `false`, needed to create or update monitors tagged `managedby:archie`); a
   `scope` is not supported.
+- `google` takes `policy.read.enabled` (default `true`) and `policy.write.enabled`
+  (default `false`, needed for mail label/archive changes); a `scope` is not supported.
+  `settings.timezone` (default `Europe/London`) sets the day boundaries for
+  `calendar.today()` and `calendar.upcoming()`; an unknown zone falls back to the default.
 
 ## Migrating an old config
 
