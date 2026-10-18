@@ -16,6 +16,7 @@ Usage: python -m archie_agent.exec.runner <run-dir>
 
 import ast
 import asyncio
+import contextlib
 import functools
 import inspect
 import io
@@ -62,11 +63,6 @@ def _validate_contract(source: str) -> str | None:
     return "ContractError: source must define `async def main()`"
 
 
-# Startup-only resolved plugin settings from context.json, set by run(); M6 builds each
-# plugin's PluginContext from them.
-_RUNNER_SETTINGS: dict[str, dict] = {}
-
-
 def _parse_context(raw: object) -> tuple[dict, dict, list[str] | None]:
     """Split a ``context.json`` payload into ``(policy, settings, enabled)`` (D11).
 
@@ -92,7 +88,7 @@ def _build_namespace(calls: list[CallRecord], context: dict | None = None) -> di
     is the runner context (``{"policy", "settings", "enabled"}``); plugin
     entries are imported only for ``enabled`` ids (None = all).
     """
-    policy, _settings, enabled = _parse_context(context)
+    policy, settings, enabled = _parse_context(context)
     import json as _json
     import os as _os
     import re as _re
@@ -125,7 +121,7 @@ def _build_namespace(calls: list[CallRecord], context: dict | None = None) -> di
                 setattr(service, name, wrapped)
             else:
                 namespace[name] = wrapped
-        _add_plugin_tools(service_namespaces, calls, enabled)
+        _add_plugin_tools(service_namespaces, calls, enabled, policy=policy, settings=settings)
         namespace.update(service_namespaces)
         namespace["_tool_policy"] = policy
     except ImportError as exc:
@@ -138,21 +134,44 @@ def _add_plugin_tools(
     service_namespaces: dict[str, object],
     calls: list[CallRecord],
     enabled: list[str] | None = None,
+    *,
+    policy: dict | None = None,
+    settings: dict | None = None,
 ) -> None:
-    """Load enabled plugins' tools into their own namespaces; failures name the plugin."""
+    """Load enabled plugins' tools into their own namespaces; failures name the plugin.
+
+    Each plugin gets one ``PluginContext`` built from the runner context's policy and
+    settings; each of its tools runs inside that context (D12). Settings missing from
+    the runner context fall back to the manifest defaults.
+    """
     import types as _types
 
-    from archie_shared.plugins import PluginManifestError, load_manifests
+    from archie_shared.plugins import PluginManifestError, load_manifests, resolved_settings
 
+    from archie_agent.exec.plugin import build_context
     from archie_agent.exec.plugin_loader import PluginLoadError, load_plugins
+    from archie_agent.exec.tools import _subprocess
 
+    policy = policy or {}
+    settings = settings or {}
     try:
-        loaded = load_plugins(load_manifests(), enabled=enabled)
+        manifests = load_manifests()
+        loaded = load_plugins(manifests, enabled=enabled)
     except (PluginManifestError, PluginLoadError) as exc:
         raise RuntimeError(str(exc)) from exc
 
     core_namespaces = set(service_namespaces)
     for plugin_id, tools in loaded.items():
+        plugin_settings = settings.get(plugin_id)
+        if not isinstance(plugin_settings, dict):
+            plugin_settings = resolved_settings(plugin_id, {}, manifests)
+        ctx = build_context(
+            plugin_id,
+            manifest=manifests[plugin_id],
+            policy_snapshot=policy,
+            settings=plugin_settings,
+            workspace=_subprocess.WORKSPACE,
+        )
         for key, func in tools.items():
             namespace_name, name = key.rsplit(".", 1)
             if namespace_name in core_namespaces:
@@ -161,19 +180,30 @@ def _add_plugin_tools(
                     "exec namespace"
                 )
             service = service_namespaces.setdefault(namespace_name, _types.SimpleNamespace())
-            setattr(service, name, _wrap_for_audit(func, key, calls))
+            setattr(service, name, _wrap_for_audit(func, key, calls, plugin_context=ctx))
 
 
-def _wrap_for_audit(fn, name: str, calls: list[CallRecord]):
-    """Wrap an exec tool function to record audit log entries."""
+def _wrap_for_audit(fn, name: str, calls: list[CallRecord], plugin_context=None):
+    """Wrap an exec tool function to record audit log entries.
+
+    With ``plugin_context`` the call runs with that context installed (D12); the
+    token is set and reset inside this coroutine, so concurrent calls into
+    different plugins each see their own context.
+    """
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         args_summary = _summarise_args(args, kwargs)
         t0 = time.time()
         ok = True
+        scope = contextlib.nullcontext()
+        if plugin_context is not None:
+            from archie_agent.exec.plugin import use_context
+
+            scope = use_context(plugin_context)
         try:
-            result = await fn(*args, **kwargs)
+            with scope:
+                result = await fn(*args, **kwargs)
         except Exception:
             ok = False
             raise
@@ -240,8 +270,6 @@ def run(run_dir: Path) -> None:
             context = json.loads(context_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError):
             context = None
-    global _RUNNER_SETTINGS
-    _RUNNER_SETTINGS = _parse_context(context)[1]
     try:
         namespace = _build_namespace(calls, context)
     except Exception as e:

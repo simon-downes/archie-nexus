@@ -84,3 +84,36 @@ def test_persona_skills_holds_only_procedure_skills():
     assert present <= PROCEDURE_SKILLS, (
         f"integration skills belong in plugins/<id>/skills: {sorted(present - PROCEDURE_SKILLS)}"
     )
+
+
+# Plugins whose code takes credentials/policy/settings only from ``context()`` (M6+);
+# append on each conversion.
+CONVERTED = ["datadog"]
+
+# Built by concatenation so this file does not match its own patterns.
+FORBIDDEN_READS = (
+    "get_" + "credential",
+    "current_" + "policy_snapshot",
+    "load_" + "nexus_config",
+    "os." + "environ",
+    "os." + "getenv",
+    "resolve_" + "provider_policy",
+)
+
+
+@pytest.mark.parametrize("name", CONVERTED)
+def test_converted_plugin_code_reads_nothing_directly(name):
+    plugin = ROOT / "plugins" / name
+    offenders = []
+    for path in sorted(plugin.rglob("*")):
+        rel = path.relative_to(plugin)
+        if not path.is_file() or rel.parts[0] == "tests" or not SKIP_PARTS.isdisjoint(rel.parts):
+            continue
+        if path.suffix not in {".py", ".yaml", ".md"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for needle in FORBIDDEN_READS:
+            for match in re.finditer(re.escape(needle), text):
+                line = text.count("\n", 0, match.start()) + 1
+                offenders.append(f"{path.relative_to(ROOT)}:{line}: {needle}")
+    assert not offenders, "plugin code must use context():\n" + "\n".join(offenders)

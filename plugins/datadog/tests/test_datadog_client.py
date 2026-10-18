@@ -2,10 +2,11 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from unittest.mock import patch
+from dataclasses import replace
 
 import httpx
 import pytest
+from archie_agent.exec.plugin import CredentialSource, PluginContextError, install_context
 from archie_plugins.datadog import client as client_module
 from archie_plugins.datadog.client import (
     DatadogAuthenticationError,
@@ -24,6 +25,7 @@ from archie_plugins.datadog.client import (
 from archie_plugins.datadog.metrics import query_metrics
 from archie_plugins.datadog.policy import require_read, require_write
 from archie_shared.credentials.models import CREDENTIAL_TYPES
+from datadog_fakes import datadog_context
 
 API_KEY = "api-secret-123"
 APP_KEY = "app-secret-456"
@@ -107,33 +109,38 @@ def test_unknown_site_is_configuration_error(site):
     "credential",
     [None, DatadogCredential(api_key="a"), DatadogCredential(api_key=" ", app_key="b")],
 )
-async def test_missing_credentials_fail_before_request(credential):
-    with patch.object(client_module, "get_credential", return_value=credential):
-        with pytest.raises(DatadogConfigurationError):
-            async with datadog_client():
-                pass
+async def test_missing_credentials_fail_before_request(credential, tmp_path):
+    install_context(_with_loader(tmp_path, lambda: credential))
+    with pytest.raises(DatadogConfigurationError, match="incomplete"):
+        async with datadog_client():
+            pass
 
 
-async def test_unreadable_credential_store_is_configuration_error():
-    with patch.object(client_module, "get_credential", side_effect=RuntimeError("bad")):
-        with pytest.raises(DatadogConfigurationError):
-            async with datadog_client():
-                pass
+def _with_loader(tmp_path, loader):
+    """A default Datadog context whose credential comes from ``loader``."""
+    return replace(
+        datadog_context(tmp_path), credentials=CredentialSource("datadog", loader=loader)
+    )
 
 
-async def test_config_load_failure_is_configuration_error():
-    credential = DatadogCredential(api_key=API_KEY, app_key=APP_KEY)
-    with (
-        patch.object(client_module, "get_credential", return_value=credential),
-        patch("archie_shared.schemas.load_nexus_config", side_effect=ValueError("broken yaml")),
-    ):
-        with pytest.raises(DatadogConfigurationError, match="site configuration"):
-            async with datadog_client():
-                pass
+async def test_unreadable_credential_store_is_configuration_error(tmp_path):
+    def broken():
+        raise RuntimeError("bad")
+
+    install_context(_with_loader(tmp_path, broken))
+    with pytest.raises(DatadogConfigurationError, match="unavailable or invalid"):
+        async with datadog_client():
+            pass
+
+
+async def test_no_context_fails_closed_before_request():
+    install_context(None)
+    with pytest.raises(PluginContextError):
+        async with datadog_client():
+            pass
 
 
 async def test_default_site_sends_to_eu_host(monkeypatch):
-    credential = DatadogCredential(api_key=API_KEY, app_key=APP_KEY)
     seen = []
     real = client_module.DatadogClient
 
@@ -148,18 +155,21 @@ async def test_default_site_sends_to_eu_host(monkeypatch):
         )
 
     monkeypatch.setattr(client_module, "DatadogClient", build)
-    with patch.object(client_module, "get_credential", return_value=credential):
-        async with datadog_client() as client:
-            await client.request("GET", "/api/v2/team")
+    async with datadog_client() as client:
+        await client.request("GET", "/api/v2/team")
     assert seen == [f"{HOST}/api/v2/team"]
 
 
-async def test_configured_site_override_changes_host(monkeypatch, tmp_path):
-    (tmp_path / "config.yaml").write_text(
-        "plugins:\n  datadog:\n    settings:\n      site: us5.datadoghq.com\n"
-    )
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+def test_configured_site_override_changes_host(tmp_path):
+    install_context(datadog_context(tmp_path, settings={"site": "us5.datadoghq.com"}))
     assert client_module.api_host(client_module._site()) == "https://api.us5.datadoghq.com"
+
+
+async def test_unknown_site_setting_fails_before_request(tmp_path):
+    install_context(datadog_context(tmp_path, settings={"site": "evil.example"}))
+    with pytest.raises(DatadogConfigurationError, match="known Datadog site"):
+        async with datadog_client():
+            pass
 
 
 @pytest.mark.parametrize(
@@ -241,12 +251,10 @@ async def test_read_error_is_transmitted_transport_error():
 
 
 async def test_overall_deadline_is_transport_error(monkeypatch):
-    credential = DatadogCredential(api_key=API_KEY, app_key=APP_KEY)
     monkeypatch.setattr(client_module, "_DEADLINE_SECONDS", 0.01)
-    with patch.object(client_module, "get_credential", return_value=credential):
-        with pytest.raises(DatadogTransportError, match="time limit"):
-            async with datadog_client():
-                await asyncio.sleep(1)
+    with pytest.raises(DatadogTransportError, match="time limit"):
+        async with datadog_client():
+            await asyncio.sleep(1)
 
 
 def test_policy_defaults_read_on_write_off(policy):

@@ -283,13 +283,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q tests/test_nexus_config.py tests/test_config_migrate.py tests/test_gh_wrapper.py tests/test_tool_policy_live.py tests/test_tool_policy_live_exec.py` passes; a migrate run on a temp copy of the live config shape produces the expected `plugins:` YAML; full checks pass.
 - **Outcome:** `shared/plugins/config.py` (structs, `validate_plugins`, `resolved_settings`, `policy_snapshot`), `NexusConfig.plugins` replacing `tools`/`auth` with a hard error naming `archie config migrate`, `PluginAuthConfig` overrides via `provider_override()`, Datadog `site` as a setting, gh wrapper on `plugins.github.settings.work_orgs` plus the `container/bin/gh` bind mount, `shared/plugins/migrate.py` + `archie config migrate`, docs rewritten. Fixed while reviewing: `policy_snapshot` omitted disabled plugins, which `resolve_provider_policy` would read as read-enabled; disabled plugins now get both blocks off. Evidence: full suite 1804 passed; ruff clean; migrate on a temp copy of the live config produced the expected `plugins:` YAML, a byte-identical backup, "already migrated" on the second run, and a file that loads with plugins github, google, jira, notion, slack.
 
-### [ ] M5 — `enabled: false` and settings-driven env
+### [x] M5 — `enabled: false` and settings-driven env
 
 - **Approach:** Apply `enabled` (startup) in `runtime_environment()`, `credential_refresh.py`, orchestrator `providers()`/`provider()`, CLI login, runner entry import and `discover_skills()` (hooks get the filter in M7). `runtime_environment()` also projects settings fields that declare `env` (D9); move Scalr `hostname`/`account` to settings. Extend `LiveToolPolicy` and `run_exec` to carry `{"policy", "settings", "enabled"}` (D11) through `harness.py` and `agents.py`.
 - **Test seam:** each listed surface; `context.json` content written by `run_exec`.
 - **Deliverable:** A disabled plugin disappears everywhere; Scalr hostname/account come from settings.
 - **Verify:** `uv run pytest -q tests/test_plugin_enabled.py tests/test_credentials_runtime.py tests/test_credential_refresh.py tests/test_exec_tool.py` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** `context.json` is now `{policy, settings, enabled}` (`runner_context` replaces `policy_snapshot` end to end; old shape → empty policy, all enabled). `LiveToolPolicy` holds startup-only settings/enabled. `enabled: false` hides the plugin from `/auth/providers`, `/auth/status`, `provider()`, OAuth refresh, env projection, CLI login, skills and runner imports. Settings with `env` are projected; Scalr `hostname`/`account` are settings. Choice: if config is invalid when skills are discovered, all plugin skills are shown (tools stay policy-gated). Not-yet-moved integrations (jira, notion, slack, google, incident_io) keep their namespace when disabled until they move, but their policy is off. Evidence: `tests/test_plugin_enabled.py` (14 tests) passes; full suite 1823 passed; ruff clean.
 
 ### [ ] M6 — `PluginContext`, shared policy gates, Datadog converted
 

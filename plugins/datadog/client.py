@@ -13,8 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from archie_agent.exec.plugin import ToolError
-from archie_shared.credentials.store import get_credential
+from archie_agent.exec.plugin import ToolError, context
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
 _DEADLINE_SECONDS = 60.0
@@ -145,24 +144,19 @@ def api_host(site: Any) -> str:
 
 
 def _site() -> str:
-    try:
-        from archie_shared.plugins.config import resolved_settings
-        from archie_shared.plugins.manifest import load_manifests
-        from archie_shared.schemas import load_nexus_config
-
-        # M6 reads this from the plugin context instead.
-        return resolved_settings("datadog", load_nexus_config().plugins, load_manifests())["site"]
-    except Exception as exc:
-        raise DatadogConfigurationError("Datadog site configuration could not be read") from exc
+    return context().settings.get("site")
 
 
 def _credential() -> tuple[str, str]:
+    source = context().credentials
     try:
-        value = get_credential("datadog")
+        value = source.get()
     except Exception as exc:
         raise DatadogConfigurationError("Datadog credentials are unavailable or invalid") from exc
-    api_key = value.api_key.strip() if value and isinstance(value.api_key, str) else ""
-    app_key = value.app_key.strip() if value and isinstance(value.app_key, str) else ""
+    api_key = getattr(value, "api_key", None) if value is not None else None
+    app_key = getattr(value, "app_key", None) if value is not None else None
+    api_key = api_key.strip() if isinstance(api_key, str) else ""
+    app_key = app_key.strip() if isinstance(app_key, str) else ""
     if not api_key or not app_key:
         raise DatadogConfigurationError("Datadog credentials are incomplete")
     return api_key, app_key

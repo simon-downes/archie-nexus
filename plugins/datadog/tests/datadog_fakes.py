@@ -6,8 +6,30 @@ import sys
 from contextlib import asynccontextmanager
 
 import pytest
+from archie_agent.exec.plugin import install_context
+from archie_agent.exec.plugin_testing import make_plugin_context
 from archie_plugins.datadog.client import allowed
-from archie_shared.tool_policy import set_policy_snapshot
+from archie_shared.credentials.models import CREDENTIAL_TYPES
+
+API_KEY = "fake-api-key"
+APP_KEY = "fake-app-key"
+
+
+def fake_credential(api_key=API_KEY, app_key=APP_KEY):
+    """A Datadog credential struct (complete by default)."""
+    return CREDENTIAL_TYPES["datadog"](api_key=api_key, app_key=app_key)
+
+
+def datadog_context(tmp_path, *, policy=None, settings=None, credential=None, **kwargs):
+    """A Datadog ``PluginContext``; defaults: manifest policy/settings, a complete credential."""
+    return make_plugin_context(
+        "datadog",
+        tmp_path=tmp_path,
+        policy=policy,
+        settings=settings,
+        credential=fake_credential() if credential is None else credential,
+        **kwargs,
+    )
 
 
 class Seq(list):
@@ -37,25 +59,25 @@ class FakeClient:
 
 
 @pytest.fixture(autouse=True)
-def datadog_home(monkeypatch, tmp_path_factory, request):
-    """Point ARCHIE_HOME_DIR at an empty directory for Datadog tests.
+def datadog_context_installed(tmp_path_factory):
+    """Install a default Datadog context (manifest policy/settings, fake complete credential).
 
-    The real client reads the Datadog site from ``config.yaml``; without this a developer's own
-    config could change the host the tests expect.
+    Installed and cleared by value, not by token, because async tests run in a copied context.
     """
-    if "datadog" in request.node.nodeid:
-        monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path_factory.mktemp("datadog-home")))
+    root = tmp_path_factory.mktemp("datadog-ctx")
+    install_context(datadog_context(root))
+    yield root
+    install_context(None)
 
 
 @pytest.fixture
-def policy():
-    """Install a tool-policy snapshot; an empty one is installed before and after each test.
+def policy(datadog_context_installed):
+    """``policy(snapshot)`` installs a Datadog context with that runner policy snapshot."""
 
-    The snapshot is reset by value, not by token, because async tests run in a copied context.
-    """
-    set_policy_snapshot({})
-    yield set_policy_snapshot
-    set_policy_snapshot({})
+    def install(snapshot):
+        install_context(datadog_context(datadog_context_installed, policy=snapshot))
+
+    return install
 
 
 @pytest.fixture

@@ -15,14 +15,20 @@ from typing import Any
 from archie_shared.config import home_dir
 
 _KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{1,64}$")
-_MAX_BYTES = 256 * 1024
+DEFAULT_MAX_BYTES = 256 * 1024
 _ENVELOPE_KEYS = {"expires", "data"}
 
 
 class ToolCache:
-    def __init__(self, root: Path | None = None, clock: Callable[[], datetime] | None = None):
+    def __init__(
+        self,
+        root: Path | None = None,
+        clock: Callable[[], datetime] | None = None,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+    ):
         self.root = root if root is not None else home_dir() / "cache"
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.max_bytes = max_bytes
 
     def _path(self, key: str) -> Path:
         if not isinstance(key, str) or not _KEY.fullmatch(key):
@@ -87,7 +93,7 @@ class ToolCache:
             separators=(",", ":"),
             allow_nan=False,
         )
-        if len(payload.encode("utf-8")) > _MAX_BYTES:
+        if len(payload.encode("utf-8")) > self.max_bytes:
             raise ValueError("cache value is too large")
         try:
             self.root.mkdir(parents=True, exist_ok=True)
