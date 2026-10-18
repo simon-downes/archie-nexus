@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .client import notion_call
 from .normalization import normalize_comments, normalize_fetch
@@ -45,7 +45,7 @@ def _validate_sort(value: list[dict[str, str]] | None) -> list[dict[str, str]] |
     ]
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def query_database(
     id_or_url: str,
     *,
@@ -100,7 +100,7 @@ async def query_database(
     return [row for row in rows[:limit] if isinstance(row, dict)]
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def get_comments(id_or_url: str, *, limit: int = 50) -> list[dict[str, Any]]:
     """Fetch bounded comments for a policy-authorized page."""
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:

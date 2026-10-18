@@ -1,6 +1,6 @@
 """Tests for live Notion MCP envelope normalization."""
 
-from archie_agent.exec.tools.notion.normalization import normalize_comments, normalize_fetch
+from archie_plugins.notion.normalization import normalize_comments, normalize_fetch
 
 PAGE = "3de8a35c22c380c580def0f67737abc7"
 PARENT = "2798a35c22c380fab63bcfb22110c4d5"

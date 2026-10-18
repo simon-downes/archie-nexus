@@ -8,10 +8,8 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any
 
+from archie_agent.exec.plugin import ToolError, context
 from archie_shared.credentials.models import OAuthCredential
-from archie_shared.credentials.store import get_credential
-
-from archie_agent.exec.tools import ToolError
 
 NOTION_MCP_URL = "https://mcp.notion.com/mcp"
 
@@ -38,8 +36,9 @@ class NotionResponseError(ToolError):
 
 @asynccontextmanager
 async def _session():
+    credentials = context().credentials  # no context fails closed with PluginContextError
     try:
-        credential = get_credential("notion")
+        credential = credentials.get()
     except Exception as exc:
         raise NotionConfigurationError("Notion credentials are unavailable or invalid") from exc
     if (

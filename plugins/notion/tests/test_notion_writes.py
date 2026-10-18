@@ -3,8 +3,8 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from archie_agent.exec.tools.notion.policy import NotionWritePolicyError
-from archie_agent.exec.tools.notion.writes import add_comment, create_page, update_page
+from archie_plugins.notion.policy import NotionWritePolicyError
+from archie_plugins.notion.writes import add_comment, create_page, update_page
 
 ROOT = "11111111-1111-1111-1111-111111111111"
 
@@ -12,14 +12,14 @@ ROOT = "11111111-1111-1111-1111-111111111111"
 async def test_create_page_requires_write_and_calls_provider():
     with (
         patch(
-            "archie_agent.exec.tools.notion.writes.require_write",
+            "archie_plugins.notion.writes.require_write",
             return_value={
                 "enabled": True,
                 "scope": {"pages": {ROOT.replace("-", "")}, "databases": set()},
             },
         ),
         patch(
-            "archie_agent.exec.tools.notion.writes.notion_call",
+            "archie_plugins.notion.writes.notion_call",
             new=AsyncMock(return_value={"id": ROOT, "type": "page"}),
         ) as call,
     ):
@@ -31,10 +31,10 @@ async def test_create_page_requires_write_and_calls_provider():
 async def test_create_page_denied_before_mutation():
     with (
         patch(
-            "archie_agent.exec.tools.notion.writes.require_write",
+            "archie_plugins.notion.writes.require_write",
             side_effect=NotionWritePolicyError("disabled"),
         ),
-        patch("archie_agent.exec.tools.notion.writes.notion_call", new=AsyncMock()) as call,
+        patch("archie_plugins.notion.writes.notion_call", new=AsyncMock()) as call,
     ):
         with pytest.raises(NotionWritePolicyError):
             await create_page(ROOT, title="New")
@@ -43,7 +43,7 @@ async def test_create_page_denied_before_mutation():
 
 async def test_update_requires_a_change():
     with patch(
-        "archie_agent.exec.tools.notion.writes.require_write",
+        "archie_plugins.notion.writes.require_write",
         return_value={"enabled": True, "scope": None},
     ):
         with pytest.raises(Exception, match="requires"):
@@ -53,11 +53,11 @@ async def test_update_requires_a_change():
 async def test_comment_payload_is_bounded_and_explicit():
     with (
         patch(
-            "archie_agent.exec.tools.notion.writes.require_write",
+            "archie_plugins.notion.writes.require_write",
             return_value={"enabled": True, "scope": None},
         ),
         patch(
-            "archie_agent.exec.tools.notion.writes.notion_call",
+            "archie_plugins.notion.writes.notion_call",
             new=AsyncMock(return_value={"id": "comment"}),
         ) as call,
     ):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .client import notion_call
 from .policy import NotionValidationError, in_scope, require_write
@@ -38,7 +38,7 @@ def _content(value: str | None) -> str | None:
     return value
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def create_page(
     parent_id_or_url: str,
     *,
@@ -71,7 +71,7 @@ async def create_page(
     return result
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def update_page(
     id_or_url: str,
     *,
@@ -110,7 +110,7 @@ async def update_page(
     return result
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def add_comment(id_or_url: str, body: str) -> dict[str, Any]:
     """Add a bounded comment to a write-authorized page."""
     page_id = resource_id(id_or_url)

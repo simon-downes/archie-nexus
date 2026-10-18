@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .policy import NotionValidationError, in_scope, require_read
 
@@ -15,7 +15,7 @@ class NotionResponseError(ToolError):
     pass
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def search(
     query: str, *, limit: int = 10, resource_type: str | None = None
 ) -> list[dict[str, Any]]:

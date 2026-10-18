@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from archie_agent.exec.tools.notion.client import NotionResponseError, NotionToolError, _call
+from archie_plugins.notion.client import NotionResponseError, NotionToolError, _call
 
 
 @pytest.mark.asyncio

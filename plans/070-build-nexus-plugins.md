@@ -324,13 +324,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q plugins/jira tests/test_prompt.py tests/test_plugin_layout.py`; full checks.
 - **Outcome:** Jira code and tests moved to `plugins/jira/`; credential, policy and attachment workspace come from the context (no workspace fails closed); the three guideline lines are now skill rules and the system prompt has none. Evidence: the 15 original tests are still collected, plus 15 new skill/policy/attachment tests; full suite 1899 passed; ruff clean; a real `run_exec` of `jira.get_issue('ABC-1')` gives `JiraConfigurationError: Jira credentials are incomplete`, and with read disabled `JiraPolicyError: Jira reads are disabled by policy`.
 
-### [ ] M10 — Notion moves and uses the context
+### [x] M10 — Notion moves and uses the context
 
 - **Approach:** As M8; scope `object{pages: list[str], databases: list[str]}`; MCP session state stays plugin-internal; OAuth credential through the context.
 - **Test seam:** `notion.*` public tools.
 - **Deliverable:** `notion.*` served from `plugins/notion`.
 - **Verify:** `uv run pytest -q plugins/notion tests/test_plugin_layout.py`; full checks.
-- **Outcome:**
+- **Outcome:** Notion code and tests moved to `plugins/notion/`; OAuth credential and page/database scope via the context, MCP session state still inside the plugin, policy functions no longer take a snapshot argument (only tests passed one). Evidence: the 26 original tests are still collected, plus 15 new; full suite 1917 passed; ruff clean; a real `run_exec` of `notion.search('x')` gives `NotionConfigurationError: Notion credentials are incomplete`, and with read disabled `NotionPolicyError`.
 
 ### [ ] M11 — Slack moves, uses the context and the plugin cache
 

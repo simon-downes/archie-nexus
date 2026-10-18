@@ -1,5 +1,6 @@
 name: notion
-# Code still lives in agent/src/archie_agent/exec/tools/notion (moves in a later milestone).
+namespaces: [notion]
+entry: archie_plugins.notion
 credential:
   kind: oauth
   # Endpoints are discovered from the resource server at login time (RFC 9470).

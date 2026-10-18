@@ -113,7 +113,6 @@ def get_all_tools() -> dict:
         fs,
         mail,
         meet,
-        notion,
         shell,
         slack,
         web,

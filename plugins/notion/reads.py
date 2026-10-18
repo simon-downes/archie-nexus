@@ -6,7 +6,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .client import notion_call
 from .normalization import normalize_fetch
@@ -80,7 +80,7 @@ def _project(value: dict[str, Any], *, include_properties: bool = False) -> dict
     return result
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def get_page(id_or_url: str, *, include_properties: bool = False) -> dict[str, Any]:
     """Fetch one policy-authorized Notion page."""
     identifier = resource_id(id_or_url)
@@ -94,7 +94,7 @@ async def get_page(id_or_url: str, *, include_properties: bool = False) -> dict[
     return _project(raw, include_properties=include_properties)
 
 
-@tool(native=False, exec_docs=False, namespace="notion")
+@tool(namespace="notion")
 async def get_database(id_or_url: str, *, include_views: bool = True) -> dict[str, Any]:
     """Fetch one policy-authorized Notion database or data source."""
     identifier = resource_id(id_or_url)
