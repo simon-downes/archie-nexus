@@ -166,7 +166,7 @@ class AgentHarness:
 
         # Agent and skill catalogs are session-constant.
         self._agent_catalog: dict[str, AgentEntry] = discover_agents()
-        self._skill_catalog = discover_skills()
+        self._skill_catalog = discover_skills(self._tool_policy.enabled)
         self._loaded_content_keys: set[tuple[str, str]] = set()
         # Project rules are session-constant. Loaded skill bodies remain dynamic.
         self._agents_context = read_agents_context()
@@ -190,7 +190,7 @@ class AgentHarness:
                 emit=self._emit_event,
                 exec_python=self._exec_python,
                 exec_run_root=self._exec_run_root,
-                tool_policy=self._current_tool_policy,
+                runner_context=self._current_runner_context,
                 turn_cost_limit=self._turn_cost_limit,
                 max_concurrent=self._subagents.max_concurrent,
                 live_children=self._children,
@@ -950,7 +950,7 @@ class AgentHarness:
                     kwargs["python"] = self._exec_python
                 if self._exec_run_root:
                     kwargs["run_root"] = self._exec_run_root
-                kwargs["policy_snapshot"] = await self._current_tool_policy()
+                kwargs["runner_context"] = await self._current_runner_context()
                 envelope = await run_exec(source, **kwargs)
                 content = format_result(envelope)
                 is_error = not envelope.ok
@@ -1018,15 +1018,18 @@ class AgentHarness:
         if proc.returncode is None:
             kill_process_group(proc, signal.SIGKILL)
 
-    async def _current_tool_policy(self) -> dict:
-        """Reload tool policy for one exec call; show a live notice on state change."""
+    async def _current_runner_context(self) -> dict:
+        """Runner context for one exec call: live-reloaded policy plus startup settings.
+
+        Shows a live notice when the policy reload changes state.
+        """
         snapshot, notice = self._tool_policy.refresh()
         if notice is not None:
             try:
                 await self._event_bus.emit(notice)
             except Exception:  # noqa: BLE001 — a notice must never fail the exec call
                 pass
-        return snapshot
+        return self._tool_policy.runner_context(snapshot)
 
     async def _emit_event(self, event: SessionEvent) -> None:
         """Submit a typed child event through the session event bus."""

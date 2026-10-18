@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from archie_shared.credentials.models import CREDENTIAL_TYPES
 from archie_shared.credentials.providers import PROVIDERS, OAuthProvider
 from archie_shared.credentials.store import get_credential
+from archie_shared.plugins.config import is_enabled
 
 from archie_orchestrator.auth import AuthError, AuthService
 
@@ -39,11 +40,15 @@ async def refresh_expiring_credentials(
 
     A failed provider refresh does not prevent other providers from being
     checked, and the existing credential remains untouched by AuthService.
+    Providers of plugins disabled in ``auth_service.config`` are skipped.
     """
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
     refreshed: list[str] = []
+    config = getattr(auth_service, "config", None)
     for name, provider in PROVIDERS.items():
         if not isinstance(provider, OAuthProvider):
+            continue
+        if config is not None and not is_enabled(name, config):
             continue
         try:
             credential = get_credential(name, CREDENTIAL_TYPES[name])

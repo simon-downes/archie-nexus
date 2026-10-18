@@ -196,11 +196,9 @@ EXPECTED_PROVIDERS = {
     "incident_io": StaticProvider(name="incident_io", fields=["api_key"]),
     "jira": StaticProvider(name="jira", fields=["email", "token", "cloud_id"]),
     "notion": OAuthProvider(name="notion", server_url="https://mcp.notion.com"),
+    # D9: hostname/account moved to plugins.scalr.settings (env-projected).
     "scalr": StaticProvider(
-        name="scalr",
-        fields=["token", "hostname", "account"],
-        env={"token": "SCALR_TOKEN", "hostname": "SCALR_HOSTNAME", "account": "SCALR_ACCOUNT"},
-        set_env=True,
+        name="scalr", fields=["token"], env={"token": "SCALR_TOKEN"}, set_env=True
     ),
     "slack": OAuthProvider(
         name="slack",

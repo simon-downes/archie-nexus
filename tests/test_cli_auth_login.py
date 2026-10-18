@@ -91,7 +91,7 @@ def test_github_login_prompts_for_both_tokens_hidden(monkeypatch):
 
 
 def test_scalr_login_uses_environment(monkeypatch):
-    monkeypatch.setenv("SCALR_HOSTNAME", "scalr.example")
+    monkeypatch.setenv("SCALR_HOSTNAME", "scalr.example")  # a setting now (D9); not read
     monkeypatch.setenv("SCALR_TOKEN", "scalr-secret")
     monkeypatch.setenv("SCALR_ACCOUNT", "account-1")
     response = _response()
@@ -100,11 +100,7 @@ def test_scalr_login_uses_environment(monkeypatch):
         patch("archie_cli.auth.httpx.put", return_value=response) as put,
     ):
         _set_static_from_login("scalr")
-    assert put.call_args.kwargs["json"] == {
-        "hostname": "scalr.example",
-        "token": "scalr-secret",
-        "account": "account-1",
-    }
+    assert put.call_args.kwargs["json"] == {"token": "scalr-secret"}
 
 
 def test_static_login_passes_json_stdin(monkeypatch):

@@ -34,7 +34,7 @@ async def run_exec(
     run_root: Path = _RUNS_ROOT,
     python: str = PYTHON,
     on_start: Callable[[asyncio.subprocess.Process], Any] | None = None,
-    policy_snapshot: dict | None = None,
+    runner_context: dict | None = None,
 ) -> Envelope:
     """Execute model-authored Python via the runner subprocess.
 
@@ -44,6 +44,8 @@ async def run_exec(
         python: Path to Python interpreter.
         on_start: Optional callback invoked with the Process after spawn,
             used by the harness to capture the handle for cancellation.
+        runner_context: Non-secret ``{"policy", "settings", "enabled"}`` written
+            to ``context.json`` for the runner (D11); None writes no file.
 
     Returns:
         Result Envelope (structured dataclass).
@@ -55,8 +57,8 @@ async def run_exec(
 
     # Write model source and the explicit non-secret runner context.
     (run_dir / "main.py").write_text(source, encoding="utf-8")
-    if policy_snapshot is not None:
-        (run_dir / "context.json").write_text(json.dumps(policy_snapshot), encoding="utf-8")
+    if runner_context is not None:
+        (run_dir / "context.json").write_text(json.dumps(runner_context), encoding="utf-8")
 
     # Spawn the runner subprocess.
     env = os.environ.copy()

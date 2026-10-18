@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 import yaml
-from archie_shared.config import persona_dir
-from archie_shared.plugins import PluginManifestError, load_manifests
+from archie_shared.config import ConfigError, persona_dir
+from archie_shared.plugins import PluginManifestError, enabled_plugins, load_manifests
+from archie_shared.schemas import load_nexus_config
 
 from archie_agent.tools import ToolSpec
 
@@ -25,8 +27,13 @@ class SkillEntry:
     context: tuple[str, ...] = ()  # brain-relative paths the skill depends on
 
 
-def discover_skills() -> dict[str, SkillEntry]:
-    """Scan ~/.agents/skills, persona skills, then each plugin's skills (by plugin id)."""
+def discover_skills(enabled: Iterable[str] | None = None) -> dict[str, SkillEntry]:
+    """Scan ~/.agents/skills, persona skills, then each plugin's skills (by plugin id).
+
+    Plugin skills are limited to ``enabled`` plugin ids; ``None`` reads the
+    enabled set from ``config.yaml``. If that config is invalid, a warning is
+    logged and every plugin's skills are included (tools stay policy-gated).
+    """
     catalog: dict[str, SkillEntry] = {}
     _scan_directory(Path.home() / ".agents" / "skills", catalog)
     _scan_directory(persona_dir() / "skills", catalog)
@@ -35,10 +42,23 @@ def discover_skills() -> dict[str, SkillEntry]:
     except PluginManifestError as error:
         log.warning("Failed to load plugin manifests for skills: %s", error)
         plugins = {}
+    allowed = _enabled_plugin_ids(plugins) if enabled is None else set(enabled)
     for plugin_id in sorted(plugins):
+        if allowed is not None and plugin_id not in allowed:
+            continue
         loaded = plugins[plugin_id]
         _scan_directory(loaded.skills_dir, catalog, context=tuple(loaded.manifest.context))
     return catalog
+
+
+def _enabled_plugin_ids(plugins: dict) -> set[str] | None:
+    """Enabled plugin ids from ``config.yaml``; None (= all) if the config is invalid."""
+    try:
+        config = load_nexus_config()
+    except ConfigError as error:
+        log.warning("Invalid config; including skills of every plugin: %s", error)
+        return None
+    return enabled_plugins(config.plugins, plugins)
 
 
 def _scan_directory(

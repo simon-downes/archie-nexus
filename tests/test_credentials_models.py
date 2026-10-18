@@ -41,7 +41,7 @@ def test_all_agent_kit_providers_have_typed_definitions():
     )
     assert CREDENTIAL_TYPES["jira"].__struct_fields__ == ("email", "token", "cloud_id")
     assert CREDENTIAL_TYPES["github"].__struct_fields__ == ("personal_token", "work_token")
-    assert "account" in CREDENTIAL_TYPES["scalr"].__struct_fields__
+    assert CREDENTIAL_TYPES["scalr"].__struct_fields__ == ("token",)
     assert CREDENTIAL_TYPES["aws"] is not CREDENTIAL_TYPES["bedrock"]
     assert CREDENTIAL_TYPES["incident_io"].__name__ == "IncidentIoCredential"
 

@@ -44,7 +44,7 @@ from archie_agent.compaction import is_compact_command
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
-from archie_agent.tool_policy_live import LiveToolPolicy
+from archie_agent.tool_policy_live import LiveToolPolicy, startup_runner_state
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -118,6 +118,8 @@ async def lifespan(app):
         session_id=session_id,
     )
 
+    manifests = load_manifests()
+    settings, enabled = startup_runner_state(_config, manifests)
     _agent = AgentHarness(
         session=session,
         llm_client=llm_client,
@@ -126,7 +128,9 @@ async def lifespan(app):
         model_catalog=_catalog,
         region=_config.global_.region,
         subagents=_config.agent.subagents,
-        tool_policy=LiveToolPolicy(policy_snapshot(_config.plugins, load_manifests())),
+        tool_policy=LiveToolPolicy(
+            policy_snapshot(_config.plugins, manifests), settings=settings, enabled=enabled
+        ),
         turn_cost_limit=_config.agent.turn_cost_limit,
         compaction=_config.agent.compaction,
     )

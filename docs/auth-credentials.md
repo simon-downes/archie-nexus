@@ -33,7 +33,7 @@ By default:
 | `google` | OAuth | access/refresh token and OAuth metadata | Browser OAuth flow |
 | `github` | Static | `personal_token`, `work_token` | Prompt or JSON stdin |
 | `aws` | Static | `access_key_id`, `secret_access_key`, `session_token` | AWS credential chain plus STS validation |
-| `scalr` | Static | `token`, `hostname`, `account` | `SCALR_TOKEN`, `SCALR_HOSTNAME`, `SCALR_ACCOUNT` |
+| `scalr` | Static | `token` | `SCALR_TOKEN`; hostname/account are settings (`plugins.scalr.settings`) |
 | `jira` | Static | `email`, `token`, `cloud_id` | Prompt or JSON stdin |
 | `bedrock` | Static | `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token` | AWS credential chain plus STS validation |
 | `datadog` | Static | `api_key`, `app_key` | Prompt or JSON stdin; site defaults to `app.datadoghq.eu` |
@@ -57,8 +57,6 @@ github:
 
 scalr:
   token: ...
-  hostname: scalr.example.com
-  account: account-name
 
 google:
   access_token: ...
@@ -177,15 +175,17 @@ bedrock → aws_access_key_id, aws_secret_access_key, aws_session_token
 aws     → access_key_id, secret_access_key, session_token
 ```
 
-For Scalr, the CLI reads:
+For Scalr, the CLI reads `SCALR_TOKEN` into `token`. The non-secret hostname and account are plugin settings, projected into new agent containers as `SCALR_HOSTNAME` and `SCALR_ACCOUNT`:
 
-```text
-SCALR_HOSTNAME
-SCALR_TOKEN
-SCALR_ACCOUNT
+```yaml
+plugins:
+  scalr:
+    settings:
+      hostname: scalr.example.com
+      account: account-name
 ```
 
-and maps them to `hostname`, `token`, and `account`.
+A stored `scalr` entry that still has `hostname`/`account` fields (pre-settings shape) fails validation as unknown fields; move the values to `plugins.scalr.settings` and re-run `archie auth login scalr`.
 
 For other static providers, the CLI accepts a JSON object on stdin. If stdin is not a non-empty pipe, it prompts interactively for the provider’s declared fields. Secret-like fields such as tokens, keys, and passwords are hidden while prompting.
 
@@ -313,9 +313,11 @@ Current mappings are:
 | --- | --- | --- |
 | `bedrock` | `aws_access_key_id` → `AWS_ACCESS_KEY_ID`, `aws_secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `aws_session_token` → `AWS_SESSION_TOKEN` | `false` |
 | `aws` | `access_key_id` → `AWS_ACCESS_KEY_ID`, `secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `session_token` → `AWS_SESSION_TOKEN` | `true` |
-| `scalr` | `token` → `SCALR_TOKEN`, `hostname` → `SCALR_HOSTNAME`, `account` → `SCALR_ACCOUNT` | `true` |
+| `scalr` | `token` → `SCALR_TOKEN` | `true` |
 
 This preserves the distinction between Bedrock and general AWS credentials: Bedrock integrations read the typed `bedrock` entry, while the general `aws` entry supplies standard AWS environment variables for shell commands, the AWS CLI, and `exec`.
+
+Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`. Non-scalar settings cannot be projected. A plugin with `enabled: false` projects neither credentials nor settings.
 
 Only explicitly enabled providers are projected. Missing providers are skipped, and mapping errors such as unknown credential fields, invalid environment names, or duplicate environment ownership fail container startup before Docker is invoked. Environment values are never logged.
 

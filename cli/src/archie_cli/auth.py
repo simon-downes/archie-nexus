@@ -137,6 +137,13 @@ def _set_aws_from_chain(service: str, provider: StaticProvider) -> None:
 @click.argument("service")
 def login(service: str):
     """Authenticate an OAuth or static provider through the local orchestrator."""
+    from archie_shared.plugins.config import is_enabled
+    from archie_shared.schemas import load_nexus_config
+
+    if not is_enabled(service, load_nexus_config()):
+        raise click.ClickException(
+            f"{service} is disabled in config (plugins.{service}.enabled: false)"
+        )
     if isinstance(PROVIDERS.get(service), StaticProvider):
         _set_static_from_login(service)
         return

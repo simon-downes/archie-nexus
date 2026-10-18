@@ -26,7 +26,7 @@ from archie_shared.credentials.store import (
     get_credential,
     replace_credential,
 )
-from archie_shared.plugins.config import PluginAuthConfig
+from archie_shared.plugins.config import PluginAuthConfig, is_enabled
 from archie_shared.schemas import NexusConfig
 
 
@@ -393,16 +393,17 @@ class AuthService:
         return flow
 
     def provider(self, name: str):
-        if name not in PROVIDERS:
+        if name not in PROVIDERS or not is_enabled(name, self.config):
             raise UnknownProviderError(f"Unknown auth provider '{name}'")
         return effective_provider(name, provider_override(self.config, name))
 
     def provider_names(self):
-        return list(PROVIDERS)
+        """Provider ids, omitting plugins disabled in config (startup-only)."""
+        return [name for name in PROVIDERS if is_enabled(name, self.config)]
 
     def providers(self, redirect_uri: str | None = None):
         result = []
-        for name in PROVIDERS:
+        for name in self.provider_names():
             provider = self.provider(name)
             if isinstance(provider, StaticProvider):
                 result.append(

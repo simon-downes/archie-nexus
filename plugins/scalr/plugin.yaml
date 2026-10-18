@@ -1,9 +1,10 @@
 name: scalr
 credential:
   kind: static
-  fields: [token, hostname, account]
+  fields: [token]
   env:
     token: SCALR_TOKEN
-    hostname: SCALR_HOSTNAME
-    account: SCALR_ACCOUNT
   set_env: true
+settings:
+  hostname: {type: str, env: SCALR_HOSTNAME}
+  account: {type: str, env: SCALR_ACCOUNT}

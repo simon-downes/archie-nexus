@@ -112,6 +112,23 @@ def resolved_settings(
     return to_builtins(msgspec.convert(values, loaded.settings_type))
 
 
+def enabled_plugins(
+    plugins: dict[str, PluginConfig], manifests: dict[str, LoadedPlugin]
+) -> set[str]:
+    """Ids of manifests whose ``plugins.<id>.enabled`` is not false (startup-only)."""
+    return {pid for pid in manifests if (plugins.get(pid) or PluginConfig()).enabled}
+
+
+def is_enabled(name: str, config: Any) -> bool:
+    """Whether ``name`` is enabled in ``config`` (a ``NexusConfig``).
+
+    A name that is not configured as a plugin (e.g. the core ``bedrock``
+    provider) counts as enabled.
+    """
+    plugin = config.plugins.get(name)
+    return plugin is None or plugin.enabled
+
+
 def _block(override: PolicyBlockConfig | None, default_enabled: bool) -> dict[str, Any]:
     if override is None:
         return {"enabled": default_enabled, "scope": None}

@@ -62,11 +62,37 @@ def _validate_contract(source: str) -> str | None:
     return "ContractError: source must define `async def main()`"
 
 
-def _build_namespace(calls: list[CallRecord], policy_snapshot: dict | None = None) -> dict:
+# Startup-only resolved plugin settings from context.json, set by run(); M6 builds each
+# plugin's PluginContext from them.
+_RUNNER_SETTINGS: dict[str, dict] = {}
+
+
+def _parse_context(raw: object) -> tuple[dict, dict, list[str] | None]:
+    """Split a ``context.json`` payload into ``(policy, settings, enabled)`` (D11).
+
+    Any other shape (including the pre-D11 bare policy snapshot) yields
+    ``({}, {}, None)``: empty policy, no settings, every plugin enabled.
+    """
+    if not isinstance(raw, dict) or "policy" not in raw:
+        return {}, {}, None
+    policy = raw.get("policy")
+    settings = raw.get("settings")
+    enabled = raw.get("enabled")
+    return (
+        policy if isinstance(policy, dict) else {},
+        settings if isinstance(settings, dict) else {},
+        [str(pid) for pid in enabled] if isinstance(enabled, list) else None,
+    )
+
+
+def _build_namespace(calls: list[CallRecord], context: dict | None = None) -> dict:
     """Build the namespace injected into model code.
 
-    Imports exec tool functions and wraps each for audit logging.
+    Imports exec tool functions and wraps each for audit logging. ``context``
+    is the runner context (``{"policy", "settings", "enabled"}``); plugin
+    entries are imported only for ``enabled`` ids (None = all).
     """
+    policy, _settings, enabled = _parse_context(context)
     import json as _json
     import os as _os
     import re as _re
@@ -88,7 +114,7 @@ def _build_namespace(calls: list[CallRecord], policy_snapshot: dict | None = Non
 
         from archie_agent.exec.tools import get_all_tools
 
-        set_policy_snapshot(policy_snapshot or {})
+        set_policy_snapshot(policy)
         service_namespaces: dict[str, object] = {}
         for key, func in get_all_tools().items():
             name = key.rsplit(".", 1)[-1]
@@ -99,17 +125,21 @@ def _build_namespace(calls: list[CallRecord], policy_snapshot: dict | None = Non
                 setattr(service, name, wrapped)
             else:
                 namespace[name] = wrapped
-        _add_plugin_tools(service_namespaces, calls)
+        _add_plugin_tools(service_namespaces, calls, enabled)
         namespace.update(service_namespaces)
-        namespace["_tool_policy"] = policy_snapshot or {}
+        namespace["_tool_policy"] = policy
     except ImportError as exc:
         raise RuntimeError("Failed to load exec tools") from exc
 
     return namespace
 
 
-def _add_plugin_tools(service_namespaces: dict[str, object], calls: list[CallRecord]) -> None:
-    """Load plugin tools into their own namespaces; failures name the plugin."""
+def _add_plugin_tools(
+    service_namespaces: dict[str, object],
+    calls: list[CallRecord],
+    enabled: list[str] | None = None,
+) -> None:
+    """Load enabled plugins' tools into their own namespaces; failures name the plugin."""
     import types as _types
 
     from archie_shared.plugins import PluginManifestError, load_manifests
@@ -117,7 +147,7 @@ def _add_plugin_tools(service_namespaces: dict[str, object], calls: list[CallRec
     from archie_agent.exec.plugin_loader import PluginLoadError, load_plugins
 
     try:
-        loaded = load_plugins(load_manifests())
+        loaded = load_plugins(load_manifests(), enabled=enabled)
     except (PluginManifestError, PluginLoadError) as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -203,15 +233,17 @@ def run(run_dir: Path) -> None:
 
     # Build namespace and compile
     calls: list[CallRecord] = []
-    policy_snapshot = None
+    context = None
     context_path = run_dir / "context.json"
     if context_path.exists():
         try:
-            policy_snapshot = json.loads(context_path.read_text(encoding="utf-8"))
+            context = json.loads(context_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError):
-            policy_snapshot = None
+            context = None
+    global _RUNNER_SETTINGS
+    _RUNNER_SETTINGS = _parse_context(context)[1]
     try:
-        namespace = _build_namespace(calls, policy_snapshot)
+        namespace = _build_namespace(calls, context)
     except Exception as e:
         Envelope.error_envelope(type(e).__name__, str(e), tb=traceback.format_exc()).write(run_dir)
         return

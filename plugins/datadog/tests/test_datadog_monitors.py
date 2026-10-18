@@ -156,7 +156,9 @@ def test_runner_exposes_datadog_namespace(tmp_path, monkeypatch):
     (tmp_path / "main.py").write_text(
         "async def main():\n    return await datadog.search_monitors('status:alert')\n"
     )
-    (tmp_path / "context.json").write_text(json.dumps({"datadog": {"read": {"enabled": True}}}))
+    (tmp_path / "context.json").write_text(
+        json.dumps({"policy": {"datadog": {"read": {"enabled": True}}}})
+    )
     # run() installs the policy snapshot without resetting it; isolate it from later tests.
     contextvars.copy_context().run(run, tmp_path)
     envelope = Envelope.read(tmp_path)
