@@ -1,12 +1,14 @@
 """incident.io client, credential, policy and error-mapping tests (no network)."""
 
 import asyncio
+from dataclasses import replace
 from unittest.mock import patch
 
 import httpx
 import pytest
-from archie_agent.exec.tools.incident_io import client as client_module
-from archie_agent.exec.tools.incident_io.client import (
+from archie_agent.exec.plugin import CredentialSource, PluginContextError, install_context
+from archie_plugins.incident_io import client as client_module
+from archie_plugins.incident_io.client import (
     IncidentIoAuthenticationError,
     IncidentIoAuthorizationError,
     IncidentIoClient,
@@ -19,10 +21,10 @@ from archie_agent.exec.tools.incident_io.client import (
     IncidentIoTransportError,
     incident_io_client,
 )
-from archie_agent.exec.tools.incident_io.incidents import list_incidents
-from archie_agent.exec.tools.incident_io.policy import require_read
+from archie_plugins.incident_io.incidents import list_incidents
+from archie_plugins.incident_io.policy import require_read
 from archie_shared.credentials.models import CREDENTIAL_TYPES
-from archie_shared.tool_policy import reset_policy_snapshot, set_policy_snapshot
+from incident_io_fakes import incident_io_context
 
 KEY = "secret-test-key-123"
 
@@ -35,16 +37,11 @@ def _client(handler) -> IncidentIoClient:
     return IncidentIoClient(KEY, transport=httpx.MockTransport(guarded))
 
 
-@pytest.fixture
-def policy():
-    tokens = []
-
-    def install(snapshot):
-        tokens.append(set_policy_snapshot(snapshot))
-
-    yield install
-    for token in reversed(tokens):
-        reset_policy_snapshot(token)
+def _with_loader(tmp_path, loader):
+    """A default incident.io context whose credential comes from ``loader``."""
+    return replace(
+        incident_io_context(tmp_path), credentials=CredentialSource("incident_io", loader=loader)
+    )
 
 
 async def test_get_sends_bearer_key_to_fixed_host():
@@ -179,32 +176,34 @@ async def test_paginate_rejects_missing_collection():
         await _client(lambda request: httpx.Response(200, json={})).paginate("/x", "things", 5)
 
 
-def test_missing_or_blank_credential_is_configuration_error():
+def test_missing_or_blank_credential_is_configuration_error(tmp_path):
     for value in (
         None,
         CREDENTIAL_TYPES["incident_io"](api_key=None),
         CREDENTIAL_TYPES["incident_io"](api_key="  "),
     ):
-        with patch.object(client_module, "get_credential", return_value=value):
-            with pytest.raises(IncidentIoConfigurationError):
-                client_module._credential()
-    with patch.object(client_module, "get_credential", side_effect=ValueError("bad yaml")):
-        with pytest.raises(IncidentIoConfigurationError):
+        install_context(_with_loader(tmp_path, lambda value=value: value))
+        with pytest.raises(IncidentIoConfigurationError, match="incomplete"):
             client_module._credential()
 
+    def broken():
+        raise ValueError("bad yaml")
 
-async def test_missing_credential_makes_no_request():
-    token = set_policy_snapshot({})
-    try:
-        with (
-            patch.object(client_module, "get_credential", return_value=None),
-            patch("httpx.AsyncClient.get") as request,
-        ):
-            with pytest.raises(IncidentIoConfigurationError):
-                await list_incidents()
-            request.assert_not_called()
-    finally:
-        reset_policy_snapshot(token)
+    install_context(_with_loader(tmp_path, broken))
+    with pytest.raises(IncidentIoConfigurationError, match="unavailable or invalid"):
+        client_module._credential()
+
+
+async def test_missing_credential_makes_no_request(tmp_path):
+    install_context(_with_loader(tmp_path, lambda: None))
+    with patch("httpx.AsyncClient.get") as request:
+        with pytest.raises(IncidentIoConfigurationError):
+            await list_incidents()
+        request.assert_not_called()
+        install_context(None)
+        with pytest.raises(PluginContextError):
+            await list_incidents()
+        request.assert_not_called()
 
 
 async def test_deadline_is_transport_error():
@@ -220,26 +219,28 @@ async def test_deadline_is_transport_error():
 def test_policy_defaults_to_read_enabled(policy):
     policy({})
     require_read()
+    for scope in (None, [], {}):
+        policy({"incident_io": {"read": {"enabled": True, "scope": scope}}})
+        require_read()
 
 
 def test_policy_disabled_read_is_rejected(policy):
     policy({"incident_io": {"read": {"enabled": False}}})
-    with pytest.raises(IncidentIoPolicyError, match="disabled"):
+    with pytest.raises(IncidentIoPolicyError, match="^incident.io reads are disabled by policy$"):
         require_read()
 
 
 def test_policy_scope_is_unsupported(policy):
     policy({"incident_io": {"read": {"enabled": True, "scope": ["team-1"]}}})
-    with pytest.raises(IncidentIoPolicyError, match="scope"):
+    with pytest.raises(
+        IncidentIoPolicyError, match="^incident.io read scope is not supported; remove it$"
+    ):
         require_read()
 
 
-async def test_disabled_policy_makes_no_request():
-    token = set_policy_snapshot({"incident_io": {"read": {"enabled": False}}})
-    try:
-        with patch.object(client_module, "_credential") as credential:
-            with pytest.raises(IncidentIoPolicyError):
-                await list_incidents()
-            credential.assert_not_called()
-    finally:
-        reset_policy_snapshot(token)
+async def test_disabled_policy_makes_no_request(policy):
+    policy({"incident_io": {"read": {"enabled": False}}})
+    with patch.object(client_module, "_credential") as credential:
+        with pytest.raises(IncidentIoPolicyError):
+            await list_incidents()
+        credential.assert_not_called()

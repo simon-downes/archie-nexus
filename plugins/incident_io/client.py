@@ -8,9 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from archie_shared.credentials.store import get_credential
-
-from archie_agent.exec.tools import ToolError
+from archie_agent.exec.plugin import ToolError, context
 
 BASE_URL = "https://api.incident.io"
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
@@ -96,8 +94,9 @@ def _error_codes(response: httpx.Response) -> str:
 
 
 def _credential() -> str:
+    source = context().credentials
     try:
-        value = get_credential("incident_io")
+        value = source.get()
     except Exception as exc:
         raise IncidentIoConfigurationError(
             "incident.io credentials are unavailable or invalid"

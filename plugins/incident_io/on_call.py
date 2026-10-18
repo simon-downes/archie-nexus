@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation as v
 from .client import (
@@ -17,7 +17,7 @@ from .policy import require_read
 _ESCALATION_PAGE = 25  # /v2/escalation_paths rejects page_size above 25
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_schedules(limit: int = 25) -> list[dict]:
     """List on-call schedules with rotations and current and next shifts."""
     count = v.limit(limit)
@@ -33,7 +33,7 @@ async def _schedule_id(client: IncidentIoClient, value: str) -> str:
     return str(v.choose(items, value, "schedule")["id"])
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def on_call(schedule: str, start: str | None = None, end: str | None = None) -> dict:
     """Show who is on call for a schedule in a window (default: now), overrides applied."""
     wanted = v.text(schedule, "schedule")
@@ -62,7 +62,7 @@ async def on_call(schedule: str, start: str | None = None, end: str | None = Non
     }
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_escalation_paths(limit: int = 25) -> list[dict]:
     """List escalation paths with their teams and current responders."""
     count = v.limit(limit)

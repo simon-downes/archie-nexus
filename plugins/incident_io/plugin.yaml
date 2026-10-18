@@ -1,5 +1,6 @@
 name: incident_io
-# Code still lives in agent/src/archie_agent/exec/tools/incident_io (moves in a later milestone).
+namespaces: [incident_io]
+entry: archie_plugins.incident_io
 credential:
   kind: static
   fields: [api_key]

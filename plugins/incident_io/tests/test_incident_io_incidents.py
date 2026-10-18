@@ -1,9 +1,9 @@
 """incident.io incident tool tests with a fake client (no network)."""
 
 import pytest
-from archie_agent.exec.tools.incident_io.client import IncidentIoInputError
-from archie_agent.exec.tools.incident_io.incidents import get_incident, list_incidents
-from archie_agent.exec.tools.incident_io.reference import reference
+from archie_plugins.incident_io.client import IncidentIoInputError
+from archie_plugins.incident_io.incidents import get_incident, list_incidents
+from archie_plugins.incident_io.reference import reference
 
 SEVERITIES = [
     {"id": "sev-1", "name": "Critical", "rank": 3},

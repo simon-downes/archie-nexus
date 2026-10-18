@@ -111,7 +111,6 @@ def get_all_tools() -> dict:
         discovery,
         drive,
         fs,
-        incident_io,
         jira,
         mail,
         meet,

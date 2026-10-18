@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation as v
 from .client import IncidentIoResponseError, incident_io_client
@@ -15,7 +15,7 @@ ALERT_STATUSES = ("firing", "resolved")
 _PAGE = 50  # /v2/alerts and /v2/incident_alerts reject page_size above 50
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_alerts(
     status: str | list[str] | None = None,
     source: str | list[str] | None = None,
@@ -39,7 +39,7 @@ async def list_alerts(
     return [alert(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def get_alert(alert_id: str) -> dict:
     """Get one alert with its description, attributes and linked incident IDs."""
     key = v.identifier(alert_id, "alert_id")

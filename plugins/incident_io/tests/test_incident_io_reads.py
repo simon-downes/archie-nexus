@@ -8,29 +8,29 @@ from datetime import UTC, datetime
 
 import pytest
 from archie_agent.exec.envelope import Envelope
+from archie_agent.exec.plugin import plugin_tools
 from archie_agent.exec.runner import run
 from archie_agent.exec.tools import get_all_tools
-from archie_agent.exec.tools.incident_io.alerts import get_alert, list_alerts
-from archie_agent.exec.tools.incident_io.client import IncidentIoInputError
-from archie_agent.exec.tools.incident_io.directory import (
+from archie_plugins.incident_io.alerts import get_alert, list_alerts
+from archie_plugins.incident_io.client import IncidentIoInputError
+from archie_plugins.incident_io.directory import (
     list_catalog_entries,
     list_catalog_types,
     list_teams,
     list_users,
 )
-from archie_agent.exec.tools.incident_io.incidents import incident_timeline, incident_updates
-from archie_agent.exec.tools.incident_io.on_call import (
+from archie_plugins.incident_io.incidents import incident_timeline, incident_updates
+from archie_plugins.incident_io.on_call import (
     list_escalation_paths,
     list_schedules,
     on_call,
 )
-from archie_agent.exec.tools.incident_io.work import (
+from archie_plugins.incident_io.work import (
     get_postmortem,
     list_actions,
     list_follow_ups,
     list_postmortems,
 )
-from archie_shared.tool_policy import reset_policy_snapshot, set_policy_snapshot
 
 PUBLIC = {
     "get_alert",
@@ -473,18 +473,18 @@ async def test_schedules_and_escalation_paths_are_normalised(fake):
 
 
 def test_registration_exposes_exactly_the_public_surface():
-    tools = get_all_tools()
+    tools = plugin_tools()
     names = {key.split(".", 1)[1] for key in tools if key.startswith("incident_io.")}
     assert names == PUBLIC
+    core = get_all_tools()
     for name in PUBLIC:
         fn = tools[f"incident_io.{name}"]
-        assert fn._native is False
-        assert fn._exec_docs is False
-        assert fn._namespace == "incident_io"
+        assert fn._plugin == "incident_io" and fn._namespace == "incident_io"
+        assert f"incident_io.{name}" not in core
 
 
 def test_runner_exposes_incident_io_namespace(tmp_path, monkeypatch):
-    from archie_agent.exec.tools.incident_io import reference as reference_module
+    from archie_plugins.incident_io import reference as reference_module
 
     class Client:
         async def items(self, path, key, params=None):
@@ -500,10 +500,15 @@ def test_runner_exposes_incident_io_namespace(tmp_path, monkeypatch):
         "async def main():\n    return await incident_io.reference('severities')\n"
     )
     (tmp_path / "context.json").write_text(
-        json.dumps({"policy": {"incident_io": {"read": {"enabled": True}}}})
+        json.dumps(
+            {
+                "policy": {"incident_io": {"read": {"enabled": True}}},
+                "settings": {},
+                "enabled": ["incident_io"],
+            }
+        )
     )
-    # run() installs the policy snapshot in a contextvar without resetting it; isolate it so the
-    # snapshot does not leak into later tests that rely on an empty one.
+    # run() installs contextvars without resetting them; isolate them from later tests.
     contextvars.copy_context().run(run, tmp_path)
     envelope = Envelope.read(tmp_path)
     assert envelope.ok is True, envelope.error
@@ -571,8 +576,8 @@ async def test_on_call_reports_truncated_entries(fake):
 async def test_tool_traffic_through_real_client_is_get_only(monkeypatch):
     """Drive a multi-request tool through the real client and a GET-only transport."""
     import httpx
-    from archie_agent.exec.tools.incident_io import client as client_module
-    from archie_agent.exec.tools.incident_io.incidents import get_incident
+    from archie_plugins.incident_io import client as client_module
+    from archie_plugins.incident_io.incidents import get_incident
 
     methods = []
 
@@ -594,10 +599,6 @@ async def test_tool_traffic_through_real_client_is_get_only(monkeypatch):
     monkeypatch.setattr(
         client_module, "IncidentIoClient", lambda key: real(key, transport=transport)
     )
-    token = set_policy_snapshot({})
-    try:
-        result = await get_incident("INC-5")
-    finally:
-        reset_policy_snapshot(token)
+    result = await get_incident("INC-5")
     assert result["reference"] == "INC-5"
     assert methods == ["GET", "GET", "GET"]

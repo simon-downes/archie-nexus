@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation as v
 from .client import IncidentIoResponseError, incident_io_client
@@ -29,7 +29,7 @@ def _status_keep(status: Any):
     return lambda item: item.get("status") in wanted
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_actions(
     incident: str | None = None,
     status: str | list[str] | None = None,
@@ -50,7 +50,7 @@ async def list_actions(
     return [action(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_follow_ups(
     incident: str | None = None,
     status: str | list[str] | None = None,
@@ -75,7 +75,7 @@ async def list_follow_ups(
     return [follow_up(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_postmortems(incident: str | None = None, limit: int = 25) -> list[dict]:
     """List post-mortem documents, newest first, optionally for one incident."""
     count = v.limit(limit)
@@ -91,7 +91,7 @@ async def list_postmortems(incident: str | None = None, limit: int = 25) -> list
     return [postmortem(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def get_postmortem(postmortem_id: str) -> dict:
     """Get one post-mortem with its markdown content (truncated at 8,000 characters)."""
     key = v.identifier(postmortem_id, "postmortem_id")

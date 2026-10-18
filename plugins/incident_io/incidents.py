@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation as v
 from .client import IncidentIoInputError, IncidentIoResponseError, incident_io_client
@@ -26,7 +26,7 @@ MODES = ("standard", "retrospective", "test", "tutorial")
 _SORT = {"newest": "created_at_newest_first", "oldest": "created_at_oldest_first"}
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_incidents(
     status_category: str | list[str] | None = None,
     severity: str | list[str] | None = None,
@@ -71,7 +71,7 @@ async def list_incidents(
     return [incident_summary(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def get_incident(incident: str) -> dict:
     """Get one incident by ID, INC-<number> or <number>, with participants and alert IDs."""
     key = v.incident_id(incident)
@@ -99,7 +99,7 @@ async def get_incident(incident: str) -> dict:
     return incident_detail(item, participants if isinstance(participants, dict) else {}, alert_ids)
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def incident_timeline(incident: str, limit: int = 25) -> list[dict]:
     """List an incident's timeline items in the API's order (oldest first)."""
     key, count = v.incident_id(incident), v.limit(limit)
@@ -115,7 +115,7 @@ async def incident_timeline(incident: str, limit: int = 25) -> list[dict]:
     return [timeline_item(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def incident_updates(incident: str, limit: int = 25) -> list[dict]:
     """List an incident's status and severity updates with their messages."""
     key, count = v.incident_id(incident), v.limit(limit)

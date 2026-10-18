@@ -2,16 +2,16 @@
 
 from pathlib import Path
 
-from archie_agent.exec.tools import get_all_tools
+from archie_agent.exec.plugin import plugin_tools
 from archie_agent.skills import _scan_directory
 
-ROOT = Path(__file__).parents[1]
-SKILL = ROOT / "plugins" / "incident_io" / "skills" / "incident-io" / "SKILL.md"
+SKILLS = Path(__file__).resolve().parents[1] / "skills"
+SKILL = SKILLS / "incident-io" / "SKILL.md"
 
 
 def test_skill_documents_every_public_function_and_error():
     text = SKILL.read_text(encoding="utf-8")
-    functions = sorted(key for key in get_all_tools() if key.startswith("incident_io."))
+    functions = sorted(key for key in plugin_tools() if key.startswith("incident_io."))
     assert len(functions) == 18
     for function in functions:
         assert f"`{function}(" in text, function
@@ -42,6 +42,6 @@ def test_skill_contains_no_credentials_or_raw_api_details():
 
 def test_skill_is_discovered():
     catalog = {}
-    _scan_directory(ROOT / "plugins" / "incident_io" / "skills", catalog)
+    _scan_directory(SKILLS, catalog)
     assert "incident-io" in catalog
     assert "read-only" in catalog["incident-io"].description

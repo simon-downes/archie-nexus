@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from .client import IncidentIoClient, IncidentIoInputError, incident_io_client
 from .formatting import reference_item
@@ -48,7 +48,7 @@ async def resolve_ids(client: IncidentIoClient, kind: str, wanted: list[str]) ->
     return result
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def reference(kind: str) -> list[dict]:
     """List incident.io reference data: severities, incident types, statuses, roles or fields."""
     path, key = _kind(kind)

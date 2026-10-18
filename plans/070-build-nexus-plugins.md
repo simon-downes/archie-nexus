@@ -308,13 +308,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q plugins/aws tests/test_plugin_loader.py tests/test_plugin_enabled.py` passes; full checks pass.
 - **Outcome:** `run_startup_hooks()` in the loader (enabled only, sync hooks inside the plugin's context, failure `plugin '<id>' startup hook failed: …`); `app.lifespan` runs hooks before building the harness and exits 1 on failure; `plugins/aws/profiles.py` `write_config()` follows every design rule; new 71-line `aws-agent-access` skill. Evidence: 21 AWS tests + 8 loader/lifespan tests pass; full suite 1877 passed; ruff clean; a smoke run with temp HOME/ARCHIE_HOME_DIR wrote the sorted config (file 600, dir 700), `aws configure list-profiles` read both profiles, and a bad profile name failed startup with the old file unchanged.
 
-### [ ] M8 — incident.io moves and uses the context
+### [x] M8 — incident.io moves and uses the context
 
 - **Approach:** Same as the Datadog move + M6 conversion; manifest gains `entry`; no write block.
 - **Test seam:** `incident_io.*` public tools under a test context.
 - **Deliverable:** `incident_io.*` served from `plugins/incident_io`.
 - **Verify:** `uv run pytest -q plugins/incident_io tests/test_plugin_layout.py`; full checks.
-- **Outcome:**
+- **Outcome:** incident.io code, fakes and tests moved to `plugins/incident_io/`; credential and read gate via the context with unchanged messages; `pytest_plugins` removed from `tests/conftest.py`. Evidence: 99 tests collected before and after the move; full suite 1880 passed; ruff clean; old-path grep empty; a real `run_exec` of `incident_io.reference('severities')` with no credential returns `IncidentIoConfigurationError: incident.io credentials are incomplete`.
 
 ### [ ] M9 — Jira moves and uses the context
 

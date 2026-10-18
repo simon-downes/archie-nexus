@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from archie_agent.exec.tools import tool
+from archie_agent.exec.plugin import tool
 
 from . import validation as v
 from .client import IncidentIoClient, IncidentIoInputError, incident_io_client
@@ -12,7 +12,7 @@ from .formatting import catalog_entry, catalog_type, directory_user, team
 from .policy import require_read
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_teams(limit: int = 25) -> list[dict]:
     """List teams with their members."""
     count = v.limit(limit)
@@ -22,7 +22,7 @@ async def list_teams(limit: int = 25) -> list[dict]:
     return [team(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_users(
     email: str | None = None,
     slack_user_id: str | None = None,
@@ -46,7 +46,7 @@ async def list_users(
     return [directory_user(item) for item in items]
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_catalog_types() -> list[dict]:
     """List catalog types (for example services, teams, features) and their attributes."""
     require_read()
@@ -61,7 +61,7 @@ async def _catalog_type(client: IncidentIoClient, value: str) -> dict:
     return v.choose(items, value, "catalog type", id_keys=("id", "type_name"))
 
 
-@tool(native=False, exec_docs=False, namespace="incident_io")
+@tool(namespace="incident_io")
 async def list_catalog_entries(
     catalog_type: str, identifier: str | None = None, limit: int = 25
 ) -> list[dict]:
