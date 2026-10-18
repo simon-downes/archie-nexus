@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlencode
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .client import JiraResponseError, JiraTransportError, jira_client
 from .formatting import adf_text, attachment, comment, gmt, issue_fields
@@ -52,12 +52,7 @@ def _detail(
     return result
 
 
-@tool(
-    guidelines=("Fetch issue details before requesting comments.",),
-    native=False,
-    exec_docs=False,
-    namespace="jira",
-)
+@tool(namespace="jira")
 async def get_issue(issue_key: str) -> dict:
     """Get bounded issue details without comments."""
     key = validate_issue_key(issue_key)
@@ -95,7 +90,7 @@ async def get_issue(issue_key: str) -> dict:
     )
 
 
-@tool(native=False, exec_docs=False, namespace="jira")
+@tool(namespace="jira")
 async def search_users(query: str, limit: int = 20) -> list[dict]:
     """Find bounded active Jira user candidates without choosing one."""
     if not isinstance(query, str) or not 1 <= len(query) <= 200:
@@ -181,7 +176,7 @@ async def _mutate_issue(issue_key: str, method: str, path: str, **kwargs: Any) -
     return _detail(data)
 
 
-@tool(native=False, exec_docs=False, namespace="jira")
+@tool(namespace="jira")
 async def create_issue(
     project: str,
     summary: str,
@@ -260,7 +255,7 @@ async def create_issue(
     return _detail(result)
 
 
-@tool(native=False, exec_docs=False, namespace="jira")
+@tool(namespace="jira")
 async def update_issue(
     issue_key: str,
     summary: str | None = None,
@@ -328,7 +323,7 @@ async def update_issue(
     return result
 
 
-@tool(native=False, exec_docs=False, namespace="jira")
+@tool(namespace="jira")
 async def transition_issue(issue_key: str, status: str) -> dict:
     """Transition an issue after exact status discovery."""
     key = validate_issue_key(issue_key)
@@ -362,7 +357,7 @@ async def transition_issue(issue_key: str, status: str) -> dict:
     return _detail(result)
 
 
-@tool(native=False, exec_docs=False, namespace="jira")
+@tool(namespace="jira")
 async def add_comment(issue_key: str, body: str) -> dict:
     """Add an explicitly requested bounded comment."""
     key = validate_issue_key(issue_key)

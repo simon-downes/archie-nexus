@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlencode
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .client import JiraResponseError, jira_client
 from .policy import project_key, require_read
@@ -34,12 +34,7 @@ def _project(item: dict) -> dict:
     return {"key": key, "name": _text(item.get("name", "")), "id": identifier}
 
 
-@tool(
-    guidelines=("Use Jira only through the `jira` namespace and never provide credentials.",),
-    native=False,
-    exec_docs=False,
-    namespace="jira",
-)
+@tool(namespace="jira")
 async def list_projects(limit: int = 50) -> list[dict]:
     """List visible Jira projects within the configured read scope."""
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX:
@@ -69,12 +64,7 @@ async def list_projects(limit: int = 50) -> list[dict]:
     return result[:limit]
 
 
-@tool(
-    guidelines=("Use Jira only through the `jira` namespace and never provide credentials.",),
-    native=False,
-    exec_docs=False,
-    namespace="jira",
-)
+@tool(namespace="jira")
 async def get_project(project: str) -> dict:
     """Get Jira project metadata, issue types, and statuses."""
     key = project_key(project)

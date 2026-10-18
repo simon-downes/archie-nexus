@@ -179,9 +179,10 @@ def test_namespace_colliding_with_runner_builtin_rejected(plugins_root):
 
 
 def test_runner_rejects_plugin_namespace_shadowing_core_namespace(plugins_root):
-    code = DEMO_CODE.replace('namespace="demo"', 'namespace="jira"')
-    _write_plugin(plugins_root, namespaces=("jira",), code=code)
-    with pytest.raises(RuntimeError, match="'jira'"):
+    # ``google`` is still a core exec namespace until M12 moves it into a plugin.
+    code = DEMO_CODE.replace('namespace="demo"', 'namespace="google"')
+    _write_plugin(plugins_root, namespaces=("google",), code=code)
+    with pytest.raises(RuntimeError, match="'google'"):
         contextvars.copy_context().run(_build_namespace, [])
 
 

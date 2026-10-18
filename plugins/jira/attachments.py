@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, context, tool
 
 from .client import JiraResponseError, JiraTransportError, jira_client
 from .issues import JiraMutationIndeterminateError
@@ -44,17 +44,15 @@ def _open_workspace_file(workspace: Path, candidate: Path) -> tuple[int, str]:
                 pass
 
 
-@tool(
-    guidelines=("Use Jira only through the `jira` namespace and never provide credentials.",),
-    native=False,
-    exec_docs=False,
-    namespace="jira",
-)
+@tool(namespace="jira")
 async def attach_file(issue_key: str, path: str) -> dict:
     """Attach one bounded, allowed file from the workspace."""
     key = validate_issue_key(issue_key)
     require_write(key.rsplit("-", 1)[0])
-    workspace = Path("/workspace").resolve()
+    root = context().workspace
+    if root is None:
+        raise JiraAttachmentError("Attachment path is not allowed")
+    workspace = Path(root).resolve()
     candidate = Path(path)
     if not candidate.is_absolute():
         candidate = workspace / candidate

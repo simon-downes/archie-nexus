@@ -316,13 +316,13 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** `uv run pytest -q plugins/incident_io tests/test_plugin_layout.py`; full checks.
 - **Outcome:** incident.io code, fakes and tests moved to `plugins/incident_io/`; credential and read gate via the context with unchanged messages; `pytest_plugins` removed from `tests/conftest.py`. Evidence: 99 tests collected before and after the move; full suite 1880 passed; ruff clean; old-path grep empty; a real `run_exec` of `incident_io.reference('severities')` with no credential returns `IncidentIoConfigurationError: incident.io credentials are incomplete`.
 
-### [ ] M9 — Jira moves and uses the context
+### [x] M9 — Jira moves and uses the context
 
 - **Approach:** As M8; `attachments.py` uses `context().workspace`; `cloud_id` regex stays in the client; the three `guidelines=` lines move into the Jira skill; scope `list[str]` in the manifest.
 - **Test seam:** `jira.*` public tools; system prompt text.
 - **Deliverable:** `jira.*` served from `plugins/jira`; no Jira lines in the system prompt.
 - **Verify:** `uv run pytest -q plugins/jira tests/test_prompt.py tests/test_plugin_layout.py`; full checks.
-- **Outcome:**
+- **Outcome:** Jira code and tests moved to `plugins/jira/`; credential, policy and attachment workspace come from the context (no workspace fails closed); the three guideline lines are now skill rules and the system prompt has none. Evidence: the 15 original tests are still collected, plus 15 new skill/policy/attachment tests; full suite 1899 passed; ruff clean; a real `run_exec` of `jira.get_issue('ABC-1')` gives `JiraConfigurationError: Jira credentials are incomplete`, and with read disabled `JiraPolicyError: Jira reads are disabled by policy`.
 
 ### [ ] M10 — Notion moves and uses the context
 

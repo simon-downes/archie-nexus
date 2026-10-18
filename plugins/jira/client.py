@@ -9,10 +9,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+from archie_agent.exec.plugin import ToolError, context
 from archie_shared.credentials.models import CREDENTIAL_TYPES
-from archie_shared.credentials.store import get_credential
-
-from archie_agent.exec.tools import ToolError
 
 
 class JiraConfigurationError(ToolError):
@@ -58,8 +56,9 @@ _TIMEOUT = httpx.Timeout(30.0, connect=10.0, write=10.0, pool=10.0)
 
 
 def _credential() -> Any:
+    credentials = context().credentials
     try:
-        value = get_credential("jira")
+        value = credentials.get()
     except Exception as exc:
         raise JiraConfigurationError("Jira credentials are unavailable or invalid") from exc
     if not value or not value.email or not value.token or not value.cloud_id:

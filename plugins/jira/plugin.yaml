@@ -1,5 +1,6 @@
 name: jira
-# Code still lives in agent/src/archie_agent/exec/tools/jira (moves in a later milestone).
+namespaces: [jira]
+entry: archie_plugins.jira
 credential:
   kind: static
   fields: [email, token, cloud_id]

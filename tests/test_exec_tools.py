@@ -495,18 +495,16 @@ def test_get_tool_guidelines_are_unique_and_meaningful():
     joined = "\n".join(guidelines)
     assert "timeout" in joined  # shell
     assert "brain_search" in joined
-    assert "jira" in joined
     # Tool-choice rules live in tools-strategy.md, not per-tool guidelines.
     assert "Use `read` to examine" not in joined
 
 
-def test_namespaced_tools_do_not_inherit_jira_guideline():
-    """Non-Jira namespaced tools carry no guideline unless they declare one."""
-    from archie_agent.exec.tools import get_all_tools
+def test_guidelines_carry_no_plugin_rules():
+    """Plugin rules live in plugin skills, never in core guidelines (070 M9: Jira)."""
+    from archie_agent.exec.tools import get_all_tools, get_tool_guidelines
 
-    for name, fn in get_all_tools().items():
-        if getattr(fn, "_namespace", None) not in (None, "jira"):
-            assert not any("Jira" in g for g in fn._guidelines), name
+    assert not any("jira" in g.lower() for g in get_tool_guidelines())
+    assert not any(name.startswith("jira.") for name in get_all_tools())
 
 
 def test_get_tool_guidelines_deterministic_order():

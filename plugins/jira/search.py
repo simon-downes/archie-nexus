@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from archie_agent.exec.tools import ToolError, tool
+from archie_agent.exec.plugin import ToolError, tool
 
 from .client import JiraResponseError, jira_client
 from .formatting import issue_fields
@@ -51,12 +51,7 @@ def _jql(
     return " AND ".join(clauses) or "ORDER BY updated DESC"
 
 
-@tool(
-    guidelines=("Use structured Jira filters; raw JQL is not available.",),
-    native=False,
-    exec_docs=False,
-    namespace="jira",
-)
+@tool(namespace="jira")
 async def list_issues(
     project: str | None = None,
     status: str | None = None,

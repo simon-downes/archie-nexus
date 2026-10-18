@@ -11,11 +11,12 @@ description: >
 
 ## Global rules
 
-- Call Jira only through `exec`, using `jira.<function>`.
-- Credentials are implicit. Never request, pass, print, or store credentials, tokens, raw Jira URLs, or provider payloads.
+- Use Jira only through the `jira` namespace, calling `jira.<function>` from `exec`.
+- Credentials are implicit, so never provide credentials. Never request, pass, print, or store credentials, tokens, raw Jira URLs, or provider payloads.
 - Reads are enabled by default; writes are disabled by default. Read and write project scopes are independent. Missing or empty scope means unrestricted.
 - Tool calls return JSON-serializable values or raise an error; they do not return error objects.
-- Raw JQL and arbitrary Jira HTTP are unavailable.
+- Use structured Jira filters (`jira.list_issues` arguments); raw JQL and arbitrary Jira HTTP are not available.
+- Fetch issue details with `jira.get_issue` before requesting comments; the detail already includes the most recent comments.
 - All collections and text are bounded. The exec result may be truncated at 16,000 characters.
 - Obtain explicit user intent before externally visible writes, especially comments, transitions, and uploads.
 
