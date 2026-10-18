@@ -1,6 +1,6 @@
 # 070 — Nexus plugins
 
-Status: planning
+Status: building
 Branch: build-it/070-nexus-plugins (base: main @ 4fa2df9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/070-nexus-plugins
 
@@ -53,8 +53,8 @@ Codebase facts found during discovery:
   session re-reads it before every exec call.
 - Slack cache sizes today: `~/.nexus/slack/users.json` 132,796 bytes (817 records),
   `conversations.json` 75,142 bytes (462 records). The shared `ToolCache` limit is 256 KB.
-- About 62 test files reference old `archie_agent.exec.tools.<integration>` paths (95 dotted
-  string monkeypatches). `tests/conftest.py` loads `tests.datadog_fakes` and
+- About 38 test files reference old integration paths (31 with dotted `archie_agent.exec.tools.<integration>`
+  paths, the rest via `from archie_agent.exec.tools import mail/calendar/...`); 95 dotted-string monkeypatches. `tests/conftest.py` loads `tests.datadog_fakes` and
   `tests.incident_io_fakes` as pytest plugins.
 
 ## Baseline
@@ -92,6 +92,11 @@ Rows below are the ones this plan adds or makes concrete.
 | D17 | Order of work | Framework + Datadog tracer, then all manifests, then the config switch, then `PluginContext`, then each remaining integration moves and converts to the context in one step | Design order (move everything, then add context) | Each integration's files change once; the config switch can go early because this build doesn't touch the live config | self |
 | D18 | `gh` wrapper delivery | Bind-mount `container/bin/gh` at `/usr/local/bin/gh:ro`; keep the Dockerfile `COPY` as a fallback | Rebuild image | Wrapper change ships without `archie build` | user Q1 (context) |
 | D19 | Migrate command YAML handling | PyYAML `safe_load`/`safe_dump(sort_keys=False)`; comments are lost, and the backup keeps the original | Add `ruamel.yaml` | No new dependency; live config has no comments | self |
+| D20 | Test isolation from the real Nexus home | Root `conftest.py` autouse fixture sets `ARCHIE_HOME_DIR` to a per-test temp dir (tests that set it themselves still override) | Edit the live config; skip affected tests | Reviewer showed 7 tests read the live `~/.nexus/config.yaml`; after M4 its `auth:`/`tools:` would fail them, and the live file must not change in this build | self |
+| D21 | AWS-chain login for core `bedrock` and plugin `aws` | `StaticProvider` gains `login: str | None`; bedrock sets `login="aws_chain"` in code, aws via manifest; CLI branches on `provider.login` | Keep `{"bedrock","aws"}` literal | Removes the last literal provider set from `cli/auth.py` without a bedrock manifest (D10) | self |
+| D22 | Which registry the harness sees | `exec.tools.get_all_tools()` stays core-only (native specs, exec docs, guidelines); the runner adds plugin tools from `plugin_loader.load_plugins()` separately | One merged registry with flags | Plugin tools can't leak into native specs or guidelines even before M12 removes the flags; the harness never imports plugin code | self |
+| D23 | Plugin Python code without tools | Any plugin with Python files has `plugins/<id>/__init__.py`; `entry` names the module imported for tools; hook paths (`module:function`) must also start with `archie_plugins.<id>` | Hooks only allowed in `entry` | AWS has a hook but no tools | self |
+| D24 | Where `CredentialSource` reads | Calls `archie_shared.credentials.store.get_credential(plugin_id, type)` on each `get()` | Snapshot at context build | Same freshness as today, so tokens the orchestrator refreshes mid-exec are seen | self |
 
 ## Requirements
 
@@ -104,7 +109,7 @@ Framework
   - AC: loader unit test with a fixture plugin raises with both names in the message.
 - MUST load skills from `plugins/<id>/skills/<name>/SKILL.md` for enabled plugins, in addition to `~/.agents/skills` and `persona/skills`.
   - AC: `discover_skills()` test finds `datadog` from `plugins/` and not from `persona/`.
-- MUST warn, not fail, when a skill's plugin declares a `context:` brain entry that does not exist.
+- MUST warn, not fail, when a skill's plugin declares a `context:` brain entry that does not exist (paths are relative to `archie_shared.brain` root; a missing brain root counts as missing).
   - AC: the `skill` tool output for such a skill starts with a warning naming the missing entry.
 - MUST mount `plugins/` read-only at `/opt/archie/plugins`, set `ARCHIE_PLUGINS_DIR`, and bind-mount `container/bin/gh` over `/usr/local/bin/gh:ro`.
   - AC: `tests/test_orchestrator_lifecycle.py` asserts the three docker args.
@@ -118,7 +123,7 @@ Credentials and config
   - AC: `tests/test_nexus_config.py` cases for each.
 - MUST fail to load a config that contains `tools:` or `auth:`, with a message naming `archie config migrate`.
   - AC: test on `load_nexus_config()`.
-- MUST provide `archie config migrate` that moves `tools.X` → `plugins.X.policy`, `auth.providers.github.work_orgs` → `plugins.github.settings.work_orgs`, `auth.providers.datadog.site` → `plugins.datadog.settings.site`, other `auth.providers.X` fields → `plugins.X.auth`, drops `linear` with a printed note, validates the result before writing, writes `config.yaml.bak-<UTC YYYYmmddTHHMMSSZ>`, and is a no-op that prints "already migrated" on a second run.
+- MUST provide `archie config migrate` that moves `tools.X` → `plugins.X.policy`, `auth.providers.github.work_orgs` → `plugins.github.settings.work_orgs`, `auth.providers.datadog.site` → `plugins.datadog.settings.site`, other `auth.providers.X` fields → `plugins.X.auth`, drops `linear` with a printed note, exits 1 naming the key for any old key it cannot map (e.g. `auth.providers.bedrock.*`, `tools.<unknown>`), validates the result before writing, writes `config.yaml.bak-<UTC YYYYmmddTHHMMSSZ>`, and is a no-op that prints "already migrated" on a second run.
   - AC: CLI tests on a copy of the live config shape: output equals the expected YAML; backup exists and equals the input; second run leaves files and backups unchanged; invalid result writes nothing and exits 1.
 - MUST keep policy live (re-read per exec call) and `enabled`/`auth`/`settings` startup-only.
   - AC: `test_tool_policy_live*.py` shows a policy edit applies to the next exec; a settings edit does not.
@@ -133,7 +138,7 @@ Runtime context
 - MUST provide one `require_read()`/`require_write()` keyed by the current context that raises the plugin's own policy error class with today's messages.
   - AC: each migrated plugin's existing disabled-policy tests pass unchanged in message.
 - MUST remove direct `get_credential`, `current_policy_snapshot`, `load_nexus_config` and `os.environ` reads from plugin code.
-  - AC: `tests/test_plugin_layout.py` greps `plugins/` for these names and finds none.
+  - AC: `tests/test_plugin_layout.py` greps `plugins/*/` excluding `plugins/*/tests/` for these names and finds none.
 - MUST run each enabled plugin's `hooks.startup` once in the agent lifespan, before requests are served; a failure stops startup with the plugin named.
   - AC: app lifespan test with a failing fixture hook exits and logs `plugin 'x' startup hook failed`.
 
@@ -172,6 +177,7 @@ New:
 - `agent/src/archie_agent/exec/plugin.py` (SDK) and `exec/plugin_loader.py` (`install_package(root)`, `load_plugins(manifests, enabled) -> dict[id, PluginRuntime]`, `run_startup_hooks(...)`). Standalone functions, no harness imports.
 - `cli/src/archie_cli/config_cmd.py`: `archie config migrate` (follow `cli/auth.py` + `main.add_command` in `cli/cli.py`).
 - `tests/test_plugin_layout.py`: dotted-path and forbidden-read guards, generic skill/namespace contract.
+- `tests/test_plugin_manifest.py`, `tests/test_plugin_loader.py`, `tests/test_plugin_sdk.py`, `tests/test_config_migrate.py`, `tests/test_plugin_enabled.py`.
 - `docs/plugins.md`.
 
 Changed: `exec/tools/__init__.py` (core registry, no integration imports), `exec/runner.py`
@@ -231,8 +237,11 @@ Runner `context.json`: `{"policy": {id: {read: {enabled, scope}, write: {enabled
 ### Config / infra
 
 Env: `ARCHIE_PLUGINS_DIR` (new). Mounts: `<repo>/plugins:/opt/archie/plugins:ro`,
-`<repo>/container/bin/gh:/usr/local/bin/gh:ro`. Deployment (for Simon, after merge): stop the
-orchestrator and sessions, run `archie config migrate`, then `archie serve`.
+`<repo>/container/bin/gh:/usr/local/bin/gh:ro`. Deployment (for Simon): containers bind-mount the
+host `agent/`, so running sessions pick up new runner code the moment the main checkout changes, and
+they lack the plugins mount. Therefore: stop all sessions and the orchestrator **before** merging or
+pulling, then run `archie config migrate`, then `archie serve`. The runner does not accept the old
+`context.json` shape; the PR body states this sequence.
 
 ## Milestones
 
@@ -240,7 +249,16 @@ Implementation is delegated to subagents in pieces of one module or one integrat
 Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff check .` and
 `uv run ruff format --check .` passing.
 
-### [ ] M1 — Trace cleanups (prefactor)
+### [ ] M1 — Datadog runs as a plugin (tracer)
+
+- **Approach:** Add `plugins_dir()`, `shared/plugins/manifest.py` and `schema.py`, the SDK `exec/plugin.py` (`tool`, `ToolError` re-export; plugin registry), `exec/plugin_loader.py` (D2/D3/D6). Per D22, `get_all_tools()` stays core-only and the runner merges `load_plugins()` tools when building namespaces (Datadog's `@tool(native=False, ...)` registrations switch to `exec.plugin.tool`). `skills.py` scans plugin skills. Move `exec/tools/datadog/*` → `plugins/datadog/` (imports become relative or `archie_agent.exec.plugin`), `persona/skills/datadog` → `plugins/datadog/skills/datadog`, Datadog tests + `datadog_fakes.py` → `plugins/datadog/tests/` with a local `conftest.py` (D16). `PROVIDERS["datadog"]`/`CREDENTIAL_TYPES["datadog"]` are generated from the manifest (static fields → `msgspec.defstruct`); other providers stay hand-written for now. Add root `conftest.py` (installs `archie_plugins`; D20 home-isolation fixture), `testpaths`, the plugins mount and `ARCHIE_PLUGINS_DIR` (the `gh` mount is M4), `docker.py` constant, `ARCHIE_SELF_PATHS`. Add `tests/test_plugin_layout.py` with the dotted-path guard for `datadog`. The `context:` warning in the skill tool lands here.
+- **Test seam:** `load_manifests()`, `load_plugins()`, runner `_build_namespace`, `discover_skills()`, `/auth/providers`, docker command.
+- **Edge cases:** manifest id ≠ dir → error; undeclared namespace → error; entry import error → `RuntimeError` naming the plugin.
+- **Deliverable:** `datadog.*` works in exec from `plugins/datadog`, with its skill.
+- **Verify:** `uv run pytest -q plugins/datadog tests/test_plugin_manifest.py tests/test_plugin_loader.py tests/test_plugin_layout.py tests/test_runner.py tests/test_skills.py tests/test_native.py` passes; full checks pass.
+- **Outcome:**
+
+### [ ] M2 — Trace cleanups (prefactor)
 
 - **Approach:** Remove the `ARCHIE_TOOL_POLICY` fallback and `set_policy_snapshot` shim from `exec/tools/jira/policy.py` and update the tests that set the env var. Remove the top-level `enabled` key from `exec/tools/slack/policy.py`. Drop the `linear` provider and `LinearCredential` (providers, models, `credentials/__init__.py`, CLI set, tests).
 - **Test seam:** `require_read/require_write` of each policy module; `/auth/providers`.
@@ -248,18 +266,9 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - **Verify:** full checks pass; `grep -rn "ARCHIE_TOOL_POLICY\|linear" agent shared cli orchestrator tests --include=*.py` finds nothing.
 - **Outcome:**
 
-### [ ] M2 — Datadog runs as a plugin (tracer)
-
-- **Approach:** Add `plugins_dir()`, `shared/plugins/manifest.py` and `schema.py`, the SDK `exec/plugin.py` (`tool`, `ToolError` re-export; plugin registry), `exec/plugin_loader.py` (D2/D3/D6). `get_all_tools()` returns core + loaded plugin tools; the runner calls the loader before building namespaces. `skills.py` scans plugin skills. Move `exec/tools/datadog/*` → `plugins/datadog/` (imports become relative or `archie_agent.exec.plugin`), `persona/skills/datadog` → `plugins/datadog/skills/datadog`, Datadog tests + `datadog_fakes.py` → `plugins/datadog/tests/` with a local `conftest.py` (D16). `PROVIDERS["datadog"]`/`CREDENTIAL_TYPES["datadog"]` are generated from the manifest (static fields → `msgspec.defstruct`); other providers stay hand-written for now. Add root `conftest.py`, `testpaths`, the lifecycle mounts/env, `docker.py` constant, `ARCHIE_SELF_PATHS`. Add `tests/test_plugin_layout.py` with the dotted-path guard for `datadog`. The `context:` warning in the skill tool lands here.
-- **Test seam:** `load_manifests()`, `load_plugins()`, runner `_build_namespace`, `discover_skills()`, `/auth/providers`, docker command.
-- **Edge cases:** manifest id ≠ dir → error; undeclared namespace → error; entry import error → `RuntimeError` naming the plugin.
-- **Deliverable:** `datadog.*` works in exec from `plugins/datadog`, with its skill.
-- **Verify:** `uv run pytest -q plugins/datadog tests/test_plugin_layout.py tests/test_runner.py tests/test_skills.py` passes; full checks pass.
-- **Outcome:**
-
 ### [ ] M3 — Every integration has a manifest and plugin skill
 
-- **Approach:** Add `plugin.yaml` for incident_io, jira, notion, slack, google (no `entry` yet; code still in `exec/tools`), aws (`login: aws_chain`, `set_env`), scalr, github. Move their skills from `persona/skills/` to `plugins/<id>/skills/`. Generate all non-bedrock `PROVIDERS`/`CREDENTIAL_TYPES` from manifests; delete the hand-written credential classes except `BedrockCredential` and `OAuthCredential`, and update imports (`jira/client.py`, `incident_io/client.py`, tests). Derive the CLI static set and AWS-chain case from manifests. Move Slack scopes and Google scopes into YAML; update skill-path constants in skill tests.
+- **Approach:** Add `plugin.yaml` for incident_io, jira, notion, slack, google (no `entry` yet; code still in `exec/tools`), aws (`login: aws_chain`, `set_env`), scalr, github. Move their skills from `persona/skills/` to `plugins/<id>/skills/`. Generate all non-bedrock `PROVIDERS`/`CREDENTIAL_TYPES` from manifests; delete the hand-written credential classes except `BedrockCredential` and `OAuthCredential`, and update imports (`jira/client.py`, `incident_io/client.py`, tests). Derive the CLI static set from provider kind and the AWS-chain case from `provider.login` (D21). Move Slack scopes and Google scopes into YAML; update skill-path constants in skill tests.
 - **Test seam:** `PROVIDERS`, `CREDENTIAL_TYPES`, `/auth/providers`, `archie auth login`, `discover_skills()`.
 - **Deliverable:** Credentials and skills come only from manifests; `persona/skills` holds procedure skills only.
 - **Verify:** `uv run pytest -q tests/test_providers.py tests/test_credentials_models.py tests/test_orchestrator_auth_discovery.py tests/test_cli_auth_login.py tests/test_skills.py` passes; full checks pass.
@@ -276,10 +285,10 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 ### [ ] M5 — `enabled: false` and settings-driven env
 
-- **Approach:** Apply `enabled` (startup) in `runtime_environment()`, `credential_refresh.py`, orchestrator `providers()`/`provider()`, CLI login, runner entry import, `discover_skills()` and hooks. `runtime_environment()` also projects settings fields that declare `env` (D9); move Scalr `hostname`/`account` to settings. Extend `LiveToolPolicy` and `run_exec` to carry `{"policy", "settings", "enabled"}` (D11) through `harness.py` and `agents.py`.
+- **Approach:** Apply `enabled` (startup) in `runtime_environment()`, `credential_refresh.py`, orchestrator `providers()`/`provider()`, CLI login, runner entry import and `discover_skills()` (hooks get the filter in M7). `runtime_environment()` also projects settings fields that declare `env` (D9); move Scalr `hostname`/`account` to settings. Extend `LiveToolPolicy` and `run_exec` to carry `{"policy", "settings", "enabled"}` (D11) through `harness.py` and `agents.py`.
 - **Test seam:** each listed surface; `context.json` content written by `run_exec`.
 - **Deliverable:** A disabled plugin disappears everywhere; Scalr hostname/account come from settings.
-- **Verify:** new tests per surface pass; full checks pass.
+- **Verify:** `uv run pytest -q tests/test_plugin_enabled.py tests/test_credentials_runtime.py tests/test_credential_refresh.py tests/test_exec_tool.py` passes; full checks pass.
 - **Outcome:**
 
 ### [ ] M6 — `PluginContext`, shared policy gates, Datadog converted
@@ -292,11 +301,11 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 ### [ ] M7 — AWS plugin with a startup hook
 
-- **Approach:** `plugins/aws/profiles.py` `write_config()` reads `context().settings` and writes `~/.aws/config` per the design rules (port from untracked `plans/060-spec-container-aws-profiles.md` rules quoted in the brain document). `run_startup_hooks()` in the loader; `app.lifespan` calls it after config load. New short skill `plugins/aws/skills/aws-agent-access/SKILL.md` per the design's "AWS plugin" item 4, written fresh.
+- **Approach:** `plugins/aws/profiles.py` `write_config()` reads `context().settings` and writes `~/.aws/config` per the design rules (port from untracked `plans/060-spec-container-aws-profiles.md` rules quoted in the brain document). `run_startup_hooks()` in the loader, skipping disabled plugins; `app.lifespan` calls it after config load. New short skill `plugins/aws/skills/aws-agent-access/SKILL.md` per the design's "AWS plugin" item 4, written fresh.
 - **Test seam:** `write_config()` with a temp home; `run_startup_hooks()`; app lifespan.
 - **Edge cases:** bad profile name / newline in ARN → hook error, old file kept; no profiles → no file; existing dir `0755` → tightened to `0700`.
 - **Deliverable:** A container with `plugins.aws.settings.profiles` gets matching AWS CLI profiles.
-- **Verify:** `uv run pytest -q plugins/aws tests/test_plugin_sdk.py` passes; full checks pass.
+- **Verify:** `uv run pytest -q plugins/aws tests/test_plugin_loader.py tests/test_plugin_enabled.py` passes; full checks pass.
 - **Outcome:**
 
 ### [ ] M8 — incident.io moves and uses the context
@@ -357,6 +366,8 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 - Deploy needs the documented sequence; a session started on new code against an unmigrated config fails at startup with the migrate instruction.
 
 ## Review
+
+- Plan review: 1 pass, 16 findings (0 ❌, 7 ⚠️, 9 ℹ️), all accepted. Fixes: tracer moved to M1 and cleanups to M2; D20 test home isolation (reviewer reproduced 7 failures against the live config); D21 `login` field for bedrock/aws; D22 core-only harness registry; D23 hook paths and package for code-without-tools; D24 credential freshness; deploy note says stop sessions before merging because `agent/` is live-mounted; hooks' `enabled` filter moved to M7; gh mount only in M4; layout guard excludes plugin tests; context path root and migrate failure cases stated; test files and M5 Verify named; test-file count corrected.
 
 ## Outcome
 
