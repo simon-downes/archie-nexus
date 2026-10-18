@@ -131,7 +131,7 @@ The exact Google redirect URI is then:
 http://127.0.0.1:7600/auth/callback/google
 ```
 
-Supported override fields are OAuth `client_id`, `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `server_url`, `scopes`, `token_path`, `refresh_token_path`, `expires_in_path` and `extra_params`, plus `env` and `set_env` for static providers. Bedrock has no config overrides. Client secrets are credential-store data, not public provider configuration.
+Supported override fields are OAuth `client_id`, `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `server_url`, `scopes`, `token_path`, `refresh_token_path`, `expires_in_path` and `extra_params`, plus `env` and `set_env` for static providers. A static provider rejects the OAuth fields and an OAuth provider rejects `env` and `set_env`. Bedrock has no config overrides. Client secrets are credential-store data, not public provider configuration.
 
 Effective OAuth values are resolved in this order:
 
@@ -317,7 +317,7 @@ Current mappings are:
 
 This preserves the distinction between Bedrock and general AWS credentials: Bedrock integrations read the typed `bedrock` entry, while the general `aws` entry supplies standard AWS environment variables for shell commands, the AWS CLI, and `exec`.
 
-Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`. Non-scalar settings cannot be projected. A plugin with `enabled: false` projects neither credentials nor settings.
+Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`. Non-scalar settings cannot be projected: a manifest that puts `env` on a non-scalar or nested field is rejected at load. A plugin with `enabled: false` projects neither credentials nor settings.
 
 Only explicitly enabled providers are projected. Missing providers are skipped, and mapping errors such as unknown credential fields, invalid environment names, or duplicate environment ownership fail container startup before Docker is invoked. Environment values are never logged.
 

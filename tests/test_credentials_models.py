@@ -9,7 +9,6 @@ from archie_shared.credentials.models import (
     CREDENTIAL_TYPES,
     BedrockCredential,
     OAuthCredential,
-    credential_type,
 )
 
 
@@ -44,12 +43,6 @@ def test_all_agent_kit_providers_have_typed_definitions():
     assert CREDENTIAL_TYPES["scalr"].__struct_fields__ == ("token",)
     assert CREDENTIAL_TYPES["aws"] is not CREDENTIAL_TYPES["bedrock"]
     assert CREDENTIAL_TYPES["incident_io"].__name__ == "IncidentIoCredential"
-
-
-def test_credential_type_helper():
-    assert credential_type("jira") is CREDENTIAL_TYPES["jira"]
-    with pytest.raises(KeyError):
-        credential_type("nope")
 
 
 def test_generated_credentials_have_static_provider_fields():

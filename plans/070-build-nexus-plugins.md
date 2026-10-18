@@ -1,6 +1,6 @@
 # 070 — Nexus plugins
 
-Status: reviewing
+Status: done
 Branch: build-it/070-nexus-plugins (base: main @ 4fa2df9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/070-nexus-plugins
 
@@ -362,6 +362,9 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 
 ## Risks
 
+- `archie config migrate` replaces a symlinked `config.yaml` with a regular file (the backup keeps the content). Simon's is a regular file today.
+- The AWS hook refuses to run (and session startup fails) if a container mounts `~/.aws`; the message names the fix.
+
 - `PROVIDERS`/`CREDENTIAL_TYPES` are built from manifests at import. A process whose `plugins_dir()` is wrong sees bedrock only. Host processes run from the repo; in the container `_REPO_ROOT` is `/opt/archie`, so the default matches the new mount.
 
 - `plugins/` is mounted read-only, so sessions can no longer edit integration skills in place as they can `persona/skills`. Accepted in design resolved decision 3.
@@ -373,8 +376,23 @@ Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff c
 ## Review
 
 - Plan review: 1 pass, 16 findings (0 ❌, 7 ⚠️, 9 ℹ️), all accepted. Fixes: tracer moved to M1 and cleanups to M2; D20 test home isolation (reviewer reproduced 7 failures against the live config); D21 `login` field for bedrock/aws; D22 core-only harness registry; D23 hook paths and package for code-without-tools; D24 credential freshness; deploy note says stop sessions before merging because `agent/` is live-mounted; hooks' `enabled` filter moved to M7; gh mount only in M4; layout guard excludes plugin tests; context path root and migrate failure cases stated; test files and M5 Verify named; test-file count corrected.
+- Code review: roles `general` and `risk` (risk ran because the diff touches credentials, policy gates, config keys, a CLI command, container mounts and a file writer). One round, 13 findings plus 2 questions. Fixed:
+  - ⚠️ AWS hook could overwrite a host-mounted `~/.aws/config`. It now refuses when `~/.aws` or the file is a mount point, or when the existing file lacks the generated header; the skill and docs say not to mount `~/.aws`.
+  - Profile regex used `match` with `$`, so a trailing newline passed. It now uses `fullmatch`.
+  - The runner loaded every plugin for a missing or old-shape `context.json` (fail open). It now loads none, and `LiveToolPolicy.runner_context()` always writes an explicit `enabled` list.
+  - Dead code: `shared/tool_policy.py` (snapshot no longer read), `LiveToolPolicy.settings`/`.snapshot`, `credential_type()`, Google `policy()`.
+  - `config migrate` validation errors named the temp file; they now name the real path.
+  - `env:` on non-scalar or nested settings is rejected at manifest load.
+  - OAuth-only `auth` fields on static-credential plugins are rejected.
+  - Import-time manifest errors: accepted as is. A broken in-repo `plugin.yaml` fails every process loudly at start, which the tests catch first.
+  - Questions: config invalid at skill discovery → all plugin skills shown, intended (tools stay policy-gated, and the agent lifespan already fails on invalid config). `config.yaml` symlink → checked: Simon's is a regular file; noted under Risks.
+  - Evidence after fixes: full suite 2022 passed; ruff check/format clean.
+- Spec check: every MUST traced to code and a passing test (manifest rejections `tests/test_plugin_manifest.py`; core-only native specs, flag-free `tool` and no plugin docs in exec `tests/test_native.py`; loader rejections `tests/test_plugin_loader.py`; plugin skills and context warning `tests/test_skills.py`; mounts `tests/test_orchestrator_lifecycle.py`; provider parity `tests/test_providers.py::test_generated_providers_match_previous_registry_exactly`; config validation and the migrate hard error `tests/test_nexus_config.py`; migrate `tests/test_config_migrate.py`; live policy vs startup settings `tests/test_tool_policy_live_exec.py`; `enabled: false` surfaces `tests/test_plugin_enabled.py`; gh `tests/test_gh_wrapper.py`; SDK fail-closed `tests/test_plugin_sdk.py`; forbidden reads and dotted-path guard `tests/test_plugin_layout.py`; hooks/lifespan `tests/test_plugin_loader.py`; AWS rules `plugins/aws/tests/test_aws_profiles.py`; Jira prompt `tests/test_prompt.py::test_system_prompt_has_no_jira_lines`; timezone and Slack cache in their plugin tests).
+- Merge risk: Medium: the worst reachable failure is a session that won't start, or an integration namespace missing after deploy (wrong order, unmigrated config, or a host-mounted `~/.aws`). Each fails loudly with a named cause, is limited to one host, and the old config is kept as a backup.
 
 ## Outcome
+
+Delivered all 13 milestones: integrations under `plugins/` (datadog, incident_io, jira, notion, slack, google with code; aws with a startup hook; github and scalr manifest-only), manifest-driven providers and credentials, a `plugins:` config with `archie config migrate`, `PluginContext` for credentials/policy/settings/cache/workspace, exec-only plugin tools, and docs (`docs/plugins.md`). Verification: 2022 tests pass (baseline 1660), ruff clean, real runner subprocess smoke tests per integration, and migrate on a temp copy of the live config. Not verified: a real container session (no docker in this sandbox) and real API calls with live credentials.
 
 PR: pending
 CI: pending

@@ -341,6 +341,16 @@ def test_removed_section_checked_before_other_errors(tmp_path):
             "plugins:\n  slack:\n    auth: {set_env: true}\n",
             r"plugins\.slack\.auth: set_env not allowed for an oauth credential",
         ),
+        (
+            "plugins:\n  datadog:\n    auth: {client_id: x}\n",
+            r"plugins\.datadog\.auth: client_id not allowed for a static credential",
+        ),
+        (
+            "plugins:\n  scalr:\n    auth:\n      token_endpoint: https://x\n"
+            "      scopes: [a]\n      extra_params: {a: b}\n      set_env: true\n",
+            r"plugins\.scalr\.auth: token_endpoint, scopes, extra_params not allowed for a "
+            r"static credential",
+        ),
     ],
 )
 def test_plugins_validation_errors(tmp_path, text, match):

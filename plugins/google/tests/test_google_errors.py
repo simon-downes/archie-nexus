@@ -61,19 +61,6 @@ async def test_no_context_fails_closed():
         common.require_read()
 
 
-@pytest.mark.parametrize(
-    ("snapshot", "expected"),
-    [
-        ({}, (True, False)),
-        ({"google": {"read": {"enabled": False}}}, (False, False)),
-        ({"google": {"write": {"enabled": True}}}, (True, True)),
-    ],
-)
-async def test_policy_reads_the_context(policy, snapshot, expected):
-    policy(snapshot)
-    assert common.policy() == expected
-
-
 async def test_write_disabled_by_default_message():
     with pytest.raises(GoogleAuthorizationError, match="^Google writes are disabled by policy$"):
         common.require_write()

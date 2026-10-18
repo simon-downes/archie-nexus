@@ -256,6 +256,8 @@ def test_cli_validation_failure_writes_nothing(tmp_path):
     result = _run(path)
     assert result.exit_code == 1
     assert "unknownplugin" in result.output
+    assert f"Migrated config for {path} is invalid, nothing written" in result.output
+    assert ".tmp" not in result.output
     assert path.read_bytes() == original
     assert list(tmp_path.iterdir()) == [path]
 

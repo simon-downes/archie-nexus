@@ -90,6 +90,9 @@ def test_load_returns_demo_ping(plugins_root):
     assert sys.modules["archie_plugins.demo"].__name__ == "archie_plugins.demo"
 
 
+DEMO_CONTEXT = {"policy": {}, "settings": {}, "enabled": ["demo"]}
+
+
 def test_enabled_filter_skips_import(plugins_root):
     _write_plugin(plugins_root)
     loaded = load_plugins(load_manifests(plugins_root), root=plugins_root, enabled=[])
@@ -110,6 +113,7 @@ def test_runner_exposes_and_audits_plugin_tool(plugins_root, tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "main.py").write_text("async def main():\n    return await demo.ping('hi')\n")
+    (run_dir / "context.json").write_text(json.dumps(DEMO_CONTEXT))
     contextvars.copy_context().run(run, run_dir)
     envelope = Envelope.read(run_dir)
     assert envelope.ok is True, envelope.error
@@ -120,7 +124,7 @@ def test_runner_exposes_and_audits_plugin_tool(plugins_root, tmp_path):
 
 def test_build_namespace_has_demo_namespace(plugins_root):
     _write_plugin(plugins_root)
-    namespace = contextvars.copy_context().run(_build_namespace, [])
+    namespace = contextvars.copy_context().run(_build_namespace, [], DEMO_CONTEXT)
     assert callable(namespace["demo"].ping)
     assert "read" in namespace
 
@@ -159,6 +163,7 @@ def test_entry_import_error_is_envelope_error(plugins_root, tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "main.py").write_text("async def main():\n    return 1\n")
+    (run_dir / "context.json").write_text(json.dumps(DEMO_CONTEXT))
     contextvars.copy_context().run(run, run_dir)
     envelope = Envelope.read(run_dir)
     assert envelope.ok is False
@@ -183,7 +188,7 @@ def test_runner_rejects_plugin_namespace_shadowing_core_tool(plugins_root):
     code = DEMO_CODE.replace('namespace="demo"', 'namespace="read"')
     _write_plugin(plugins_root, namespaces=("read",), code=code)
     with pytest.raises(RuntimeError, match="namespace 'read' collides with a core exec name"):
-        contextvars.copy_context().run(_build_namespace, [])
+        contextvars.copy_context().run(_build_namespace, [], DEMO_CONTEXT)
 
 
 def test_tool_from_unknown_plugin_rejected(plugins_root):

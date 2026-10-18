@@ -63,21 +63,25 @@ def _validate_contract(source: str) -> str | None:
     return "ContractError: source must define `async def main()`"
 
 
-def _parse_context(raw: object) -> tuple[dict, dict, list[str] | None]:
+def _parse_context(raw: object) -> tuple[dict, dict, list[str]]:
     """Split a ``context.json`` payload into ``(policy, settings, enabled)`` (D11).
 
-    Any other shape (including the pre-D11 bare policy snapshot) yields
-    ``({}, {}, None)``: empty policy, no settings, every plugin enabled.
+    Fails closed: the harness always writes ``{"policy", "settings", "enabled"}``
+    with ``enabled`` as the full list of enabled plugin ids, so that shape is
+    authoritative. A missing, unreadable or non-dict context, or the pre-D11
+    bare policy snapshot (no ``policy`` key), yields ``({}, {}, [])``; an
+    ``enabled`` that is missing or not a list yields ``[]``. Either way no
+    plugin is loaded.
     """
     if not isinstance(raw, dict) or "policy" not in raw:
-        return {}, {}, None
+        return {}, {}, []
     policy = raw.get("policy")
     settings = raw.get("settings")
     enabled = raw.get("enabled")
     return (
         policy if isinstance(policy, dict) else {},
         settings if isinstance(settings, dict) else {},
-        [str(pid) for pid in enabled] if isinstance(enabled, list) else None,
+        [str(pid) for pid in enabled] if isinstance(enabled, list) else [],
     )
 
 
@@ -86,7 +90,8 @@ def _build_namespace(calls: list[CallRecord], context: dict | None = None) -> di
 
     Imports exec tool functions and wraps each for audit logging. ``context``
     is the runner context (``{"policy", "settings", "enabled"}``); plugin
-    entries are imported only for ``enabled`` ids (None = all).
+    entries are imported only for the listed ``enabled`` ids. Without a valid
+    context no plugin is loaded (fail closed).
     """
     policy, settings, enabled = _parse_context(context)
     import json as _json
@@ -104,11 +109,8 @@ def _build_namespace(calls: list[CallRecord], context: dict | None = None) -> di
     }
 
     try:
-        from archie_shared.tool_policy import set_policy_snapshot
-
         from archie_agent.exec.tools import get_all_tools
 
-        set_policy_snapshot(policy)
         for name, func in get_all_tools().items():
             namespace[name] = _wrap_for_audit(func, name, calls)
         service_namespaces: dict[str, object] = {}

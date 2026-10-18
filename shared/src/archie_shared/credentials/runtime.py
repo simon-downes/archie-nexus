@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from archie_shared.schemas import NexusConfig
@@ -14,10 +14,8 @@ from archie_shared.credentials.providers import PROVIDERS, StaticProvider, effec
 from archie_shared.credentials.store import get_credential
 from archie_shared.plugins.config import enabled_plugins, is_enabled, resolved_settings
 from archie_shared.plugins.manifest import load_manifests
-from archie_shared.plugins.schema import FieldSpec
 
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
-_SCALARS = (str, int, float, bool)
 
 
 def _claim(owners: dict[str, str], env_name: str, owner: str) -> None:
@@ -29,28 +27,14 @@ def _claim(owners: dict[str, str], env_name: str, owner: str) -> None:
     owners[env_name] = owner
 
 
-def _settings_env(
-    path: str, fields: dict[str, FieldSpec], values: dict[str, Any]
-) -> list[tuple[str, str, Any]]:
-    """``(owner, env_name, value)`` for every settings field (nested too) that declares env."""
-    result: list[tuple[str, str, Any]] = []
-    for fname, spec in fields.items():
-        value = values.get(fname) if isinstance(values, dict) else None
-        owner = f"{path}.{fname}"
-        if spec.env is not None:
-            result.append((owner, spec.env, value))
-        if spec.fields:
-            result.extend(_settings_env(owner, spec.fields, value or {}))
-    return result
-
-
 def runtime_environment(config: NexusConfig) -> dict[str, str]:
     """Return env vars for a new agent container.
 
     Static credentials are projected for providers with ``set_env`` enabled;
     missing or partial credentials are skipped (field validation is the API's
-    job). Plugin settings fields that declare ``env`` are projected when their
-    resolved value is not None. Disabled plugins project nothing.
+    job). Plugin settings fields that declare ``env`` (top-level scalars only,
+    enforced at manifest load) are projected when their resolved value is not
+    None. Disabled plugins project nothing.
     """
     result: dict[str, str] = {}
     owners: dict[str, str] = {}
@@ -77,18 +61,17 @@ def runtime_environment(config: NexusConfig) -> dict[str, str]:
 
     manifests = load_manifests()
     for pid in sorted(enabled_plugins(config.plugins, manifests)):
-        fields = manifests[pid].manifest.settings
-        if not any(spec.env is not None or spec.fields for spec in fields.values()):
+        env_fields = {
+            fname: spec.env
+            for fname, spec in manifests[pid].manifest.settings.items()
+            if spec.env is not None
+        }
+        if not env_fields:
             continue
         settings = resolved_settings(pid, config.plugins, manifests)
-        for owner, env_name, value in _settings_env(f"{pid}.settings", fields, settings):
-            _claim(owners, env_name, owner)
-            if value is None:
-                continue
-            if not isinstance(value, _SCALARS):
-                raise ValueError(
-                    f"Setting '{owner}' maps to '{env_name}' but is not a scalar "
-                    f"({type(value).__name__})"
-                )
-            result[env_name] = str(value)
+        for fname, env_name in env_fields.items():
+            _claim(owners, env_name, f"{pid}.settings.{fname}")
+            value = settings.get(fname)
+            if value is not None:
+                result[env_name] = str(value)
     return result

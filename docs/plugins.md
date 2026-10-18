@@ -107,8 +107,10 @@ Each field is `{type, default?, fields?, env?}`:
 - `type`: `str`, `int`, `float`, `bool`, `list[str]`, `dict[str,str]` or `object`.
 - `default`: checked against `type`; absent means `None`.
 - `fields`: required for `object`, a nested field map; not allowed for other types.
-- `env` (settings only): an environment variable name. When the resolved value is set,
-  the orchestrator exports it into new containers (Scalr's `hostname` → `SCALR_HOSTNAME`).
+- `env` (settings only): an environment variable name. Allowed only on a top-level field
+  of type `str`, `int`, `float` or `bool` (not inside an `object`). When the resolved value
+  is set, the orchestrator exports it into new containers (Scalr's `hostname` →
+  `SCALR_HOSTNAME`).
 
 Field names follow `[a-z][a-z0-9_]*` and may not be Python keywords. The field map is
 compiled to a msgspec struct with unknown fields forbidden, so the host validates config
@@ -197,7 +199,10 @@ from archie_agent.exec.plugin import ToolError, context, require_read, require_w
 of enabled plugins once at startup, before the harness is built, each inside its own
 context with `workspace=None` and an empty policy. A failing hook, a missing function or
 an async function stops the agent with a message naming the plugin. AWS uses a hook to
-write `~/.aws/config` from `plugins.aws.settings.profiles`.
+write `~/.aws/config` from `plugins.aws.settings.profiles`. `~/.aws` must not be mounted
+into containers when `plugins.aws.settings.profiles` is set: the hook refuses to overwrite a
+mounted `~/.aws` or `~/.aws/config`, or any existing `~/.aws/config` that does not start
+with its generated header.
 
 ## How plugin tools are exposed
 
@@ -208,7 +213,9 @@ write `~/.aws/config` from `plugins.aws.settings.profiles`.
 - Skills are discovered from `plugins/<id>/skills/` for enabled plugins, after
   `~/.agents/skills` and `persona/skills`. When a manifest's `context` entry is missing
   from the brain, loading the skill starts with a warning naming it.
-- Disabled plugins (`enabled: false`) are not imported by the runner.
+- Disabled plugins (`enabled: false`) are not imported by the runner. The runner imports
+  only the plugins listed in `context.json`'s `enabled`; a missing, unreadable or
+  old-shape context, or one without an `enabled` list, loads no plugins.
 
 `exec.tools.get_all_tools()` is the core registry only; it feeds native specs, the exec
 description and guidelines. The runner adds plugin tools from
@@ -226,12 +233,12 @@ Build a context with `make_plugin_context` and install it with `install_context`
 import pytest
 from archie_agent.exec.plugin import install_context
 from archie_agent.exec.plugin_testing import make_plugin_context
-from archie_shared.credentials.models import credential_type
+from archie_shared.credentials.models import CREDENTIAL_TYPES
 
 
 @pytest.fixture(autouse=True)
 def datadog_context(tmp_path):
-    credential = credential_type("datadog")(api_key="k", app_key="a")
+    credential = CREDENTIAL_TYPES["datadog"](api_key="k", app_key="a")
     ctx = make_plugin_context(
         "datadog",
         tmp_path=tmp_path,

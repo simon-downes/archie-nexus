@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from archie_shared.events import ErrorNotice
 from archie_shared.plugins.config import enabled_plugins, policy_snapshot, resolved_settings
+from archie_shared.plugins.errors import PluginManifestError
 from archie_shared.plugins.manifest import LoadedPlugin, load_manifests
 from archie_shared.schemas import load_nexus_config
 from ulid import ULID
@@ -48,7 +49,8 @@ class LiveToolPolicy:
     """The last valid tool-policy snapshot plus a loader that refreshes it.
 
     ``settings`` and ``enabled`` are startup-only; ``enabled=None`` means every
-    manifest is enabled.
+    manifest is enabled, and ``runner_context()`` then writes every manifest id so
+    the runner always receives an explicit list.
     """
 
     def __init__(
@@ -71,25 +73,28 @@ class LiveToolPolicy:
         return cls(snapshot or {}, loader=None)
 
     @property
-    def settings(self) -> dict[str, dict[str, Any]]:
-        return self._settings
-
-    @property
     def enabled(self) -> list[str] | None:
         return self._enabled
 
-    @property
-    def snapshot(self) -> Snapshot:
-        """The current (last valid) policy snapshot, without reloading."""
-        return self._snapshot
-
     def runner_context(self, policy: Snapshot | None = None) -> dict[str, Any]:
-        """The ``context.json`` payload: ``policy`` (current or given), settings, enabled."""
+        """The ``context.json`` payload: ``policy`` (current or given), settings, enabled.
+
+        ``enabled`` is always a list: with ``enabled=None`` it is every manifest id
+        (empty if the manifests cannot be loaded; the runner then reports the error).
+        """
         return {
             "policy": self._snapshot if policy is None else policy,
             "settings": self._settings,
-            "enabled": self._enabled,
+            "enabled": self._runner_enabled(),
         }
+
+    def _runner_enabled(self) -> list[str]:
+        if self._enabled is not None:
+            return list(self._enabled)
+        try:
+            return sorted(load_manifests())
+        except PluginManifestError:
+            return []
 
     def refresh(self) -> tuple[Snapshot, ErrorNotice | None]:
         """Reload the policy; return the snapshot to use and any notice to show."""

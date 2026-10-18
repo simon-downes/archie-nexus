@@ -3,7 +3,7 @@
 Public API (safe for container import — no httpx dependency):
 - store: store_path, load_store, save_store, get_credential, set_credential
 - models: BedrockCredential, OAuthCredential, CREDENTIAL_TYPES (static plugin
-  credential structs are generated from manifests), credential_type
+  credential structs are generated from manifests)
 - providers: StaticProvider, OAuthProvider, PROVIDERS registry
 - refresh: is_expired, can_refresh_noninteractive, InteractiveReauthRequired
 
@@ -24,7 +24,6 @@ from archie_shared.credentials.models import (
     CREDENTIAL_TYPES,
     BedrockCredential,
     OAuthCredential,
-    credential_type,
 )
 from archie_shared.credentials.providers import (
     PROVIDERS,
@@ -64,7 +63,6 @@ __all__ = [
     "PROVIDERS",
     "StaticProvider",
     "can_refresh_noninteractive",
-    "credential_type",
     "delete_credential",
     "effective_provider",
     "extract_nested",

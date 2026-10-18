@@ -66,13 +66,6 @@ def safe_id(value: Any, name: str = "id", maximum: int = 256) -> str:
     return text(value, name, maximum=maximum)
 
 
-def policy() -> tuple[bool, bool]:
-    """Return ``(read_enabled, write_enabled)`` from the current plugin context."""
-    current = sdk.context().policy
-    write = current.write
-    return bool(current.read.enabled), bool(write is not None and write.enabled)
-
-
 def require_read() -> None:
     sdk.require_read(GoogleAuthorizationError, "Google reads are disabled by policy")
 

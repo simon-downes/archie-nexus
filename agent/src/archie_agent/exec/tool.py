@@ -45,7 +45,8 @@ async def run_exec(
         on_start: Optional callback invoked with the Process after spawn,
             used by the harness to capture the handle for cancellation.
         runner_context: Non-secret ``{"policy", "settings", "enabled"}`` written
-            to ``context.json`` for the runner (D11); None writes no file.
+            to ``context.json`` for the runner (D11); None writes no file, and
+            the runner then loads no plugins (fail closed).
 
     Returns:
         Result Envelope (structured dataclass).

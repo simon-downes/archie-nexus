@@ -50,8 +50,3 @@ CREDENTIAL_TYPES: dict[str, type] = {
     "bedrock": BedrockCredential,
     **_generated_types(),
 }
-
-
-def credential_type(name: str) -> type:
-    """Return the credential struct type for provider ``name`` (KeyError if unknown)."""
-    return CREDENTIAL_TYPES[name]

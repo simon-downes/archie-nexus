@@ -81,8 +81,9 @@ def migrate(path_opt: Path | None):
         try:
             load_nexus_config(tmp)
         except ConfigError as e:
+            detail = str(e).replace(str(tmp), str(path))
             raise click.ClickException(
-                f"Migrated config is invalid, nothing written: {e}"
+                f"Migrated config for {path} is invalid, nothing written: {detail}"
             ) from None
         os.chmod(tmp, mode)
         backup = _backup_path(path)

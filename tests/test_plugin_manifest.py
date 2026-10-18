@@ -162,10 +162,28 @@ credential:
         ("name: demo\nsettings: {x: {type: object}}\n", "requires 'fields'"),
         ("name: demo\nsettings: {x: {type: int, default: abc}}\n", "invalid default"),
         ("name: demo\npolicy: {scope: {type: str, env: X}}\n", "only allowed in settings"),
+        ("name: demo\nsettings: {x: {type: 'list[str]', env: X}}\n", "requires a scalar type"),
+        ("name: demo\nsettings: {x: {type: 'dict[str,str]', env: X}}\n", "requires a scalar type"),
+        (
+            "name: demo\nsettings: {x: {type: object, env: X, fields: {y: {type: str}}}}\n",
+            "requires a scalar type",
+        ),
+        (
+            "name: demo\nsettings: {x: {type: object, fields: {y: {type: str, env: Y}}}}\n",
+            "inside an object",
+        ),
     ],
 )
 def test_rejections(tmp_path, body, match):
     _rejects(_plugin(tmp_path, "demo", body), match)
+
+
+@pytest.mark.parametrize("typ", ["str", "int", "float", "bool"])
+def test_env_allowed_on_scalar_settings(tmp_path, typ):
+    loaded = load_manifest(
+        _plugin(tmp_path, "demo", f"name: demo\nsettings: {{x: {{type: {typ}, env: X}}}}\n")
+    )
+    assert loaded.manifest.settings["x"].env == "X"
 
 
 def test_invalid_name(tmp_path):

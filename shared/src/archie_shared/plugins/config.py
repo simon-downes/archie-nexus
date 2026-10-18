@@ -44,6 +44,20 @@ class PluginAuthConfig(msgspec.Struct, forbid_unknown_fields=True):
     set_env: bool | None = None
 
 
+_OAUTH_ONLY_AUTH_FIELDS = (
+    "client_id",
+    "authorization_endpoint",
+    "token_endpoint",
+    "registration_endpoint",
+    "server_url",
+    "scopes",
+    "token_path",
+    "refresh_token_path",
+    "expires_in_path",
+    "extra_params",
+)
+
+
 class PluginConfig(msgspec.Struct, forbid_unknown_fields=True):
     enabled: bool = True
     policy: PluginPolicyConfig = msgspec.field(default_factory=PluginPolicyConfig)
@@ -90,6 +104,12 @@ def _validate_one(pid: str, config: PluginConfig, loaded: LoadedPlugin) -> None:
             if bad:
                 raise ValueError(
                     f"{prefix}.auth: {', '.join(bad)} not allowed for an oauth credential"
+                )
+        else:
+            bad = [f for f in _OAUTH_ONLY_AUTH_FIELDS if getattr(config.auth, f) is not None]
+            if bad:
+                raise ValueError(
+                    f"{prefix}.auth: {', '.join(bad)} not allowed for a static credential"
                 )
 
 

@@ -6,7 +6,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from archie_agent.exec.runner import _build_namespace
+from archie_agent.exec.envelope import Envelope
+from archie_agent.exec.runner import _build_namespace, run
 from archie_agent.exec.tool import run_exec
 from archie_agent.skills import discover_skills
 from archie_agent.tool_policy_live import LiveToolPolicy, startup_runner_state
@@ -157,8 +158,33 @@ def test_runner_imports_only_enabled_plugins():
         _build_namespace, [], {"policy": {}, "settings": {}, "enabled": enabled}
     )
     assert "datadog" not in namespace
-    full = contextvars.copy_context().run(_build_namespace, [], {"policy": {}})
-    assert "datadog" in full  # enabled absent -> every plugin
+    full = contextvars.copy_context().run(
+        _build_namespace, [], {"policy": {}, "enabled": sorted(load_manifests())}
+    )
+    assert "datadog" in full
+
+
+def _plugin_namespaces(namespace):
+    names = {ns for loaded in load_manifests().values() for ns in loaded.manifest.namespaces}
+    return sorted(names & set(namespace))
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        None,
+        {},
+        [],
+        "policy",
+        {"policy": {}},  # enabled missing
+        {"policy": {}, "enabled": None},
+        {"policy": {}, "enabled": "datadog"},
+    ],
+)
+def test_runner_context_without_enabled_list_loads_no_plugins(context):
+    namespace = contextvars.copy_context().run(_build_namespace, [], context)
+    assert _plugin_namespaces(namespace) == []
+    assert callable(namespace["read"])
 
 
 def test_runner_old_context_shape_is_empty_policy():
@@ -166,7 +192,26 @@ def test_runner_old_context_shape_is_empty_policy():
         _build_namespace, [], {"datadog": {"read": {"enabled": True}}}
     )
     assert namespace["_tool_policy"] == {}
-    assert "datadog" in namespace
+    assert _plugin_namespaces(namespace) == []
+
+
+@pytest.mark.parametrize("content", [None, "{not json", '["policy"]'])
+def test_runner_missing_or_bad_context_file_loads_no_plugins(tmp_path, content):
+    (tmp_path / "main.py").write_text(
+        "async def main():\n    return sorted(k for k in ('datadog', 'jira') if k in globals())\n"
+    )
+    if content is not None:
+        (tmp_path / "context.json").write_text(content)
+    contextvars.copy_context().run(run, tmp_path)
+    envelope = Envelope.read(tmp_path)
+    assert envelope.ok, envelope.error
+    assert envelope.return_value == []
+
+
+def test_static_runner_context_lists_every_manifest():
+    context = LiveToolPolicy.static({}).runner_context()
+    assert context["enabled"] == sorted(load_manifests())
+    assert "datadog" in context["enabled"]
 
 
 READ_CONTEXT = (

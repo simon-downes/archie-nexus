@@ -16,6 +16,8 @@ description: >
   Each profile assumes its role with `credential_source = Environment`.
 - Never edit `~/.aws/config`; it is container-local and overwritten on every start. To change profiles, the user
   edits `plugins.aws.settings.profiles` in their Archie config and starts a new session.
+- `~/.aws` must not be mounted into the container when `plugins.aws.settings.profiles` is set; Archie refuses to
+  start rather than overwrite a host-mounted or hand-written `~/.aws/config`.
 
 # Principles
 

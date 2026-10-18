@@ -316,7 +316,8 @@ class TestMakeNativeSpecs:
         from archie_agent.exec.runner import _build_namespace
         from archie_shared.plugins import load_manifests
 
-        namespace = contextvars.copy_context().run(_build_namespace, [])
+        context = {"policy": {}, "settings": {}, "enabled": sorted(load_manifests())}
+        namespace = contextvars.copy_context().run(_build_namespace, [], context)
         namespaces = {
             ns
             for loaded in load_manifests().values()

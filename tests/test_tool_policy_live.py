@@ -148,5 +148,18 @@ def test_runner_context_settings_are_startup_only_policy_is_live(home):
 
 
 def test_static_runner_context_defaults():
+    from archie_shared.plugins import load_manifests
+
     live = LiveToolPolicy.static({"jira": {}})
-    assert live.runner_context() == {"policy": {"jira": {}}, "settings": {}, "enabled": None}
+    assert live.runner_context() == {
+        "policy": {"jira": {}},
+        "settings": {},
+        "enabled": sorted(load_manifests()),
+    }
+
+
+def test_runner_context_enabled_is_always_a_list():
+    assert LiveToolPolicy({}, loader=None, enabled=[]).runner_context()["enabled"] == []
+    assert LiveToolPolicy({}, loader=None, enabled=("jira",)).runner_context()["enabled"] == [
+        "jira"
+    ]

@@ -26,8 +26,15 @@ _SCALAR_TYPES: dict[str, Any] = {
 }
 
 
+_ENV_TYPES = frozenset({"str", "int", "float", "bool"})
+
+
 class FieldSpec(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
-    """One field: ``{type, default?, fields? (object only), env? (settings only)}``."""
+    """One field: ``{type, default?, fields? (object only), env? (settings only)}``.
+
+    ``env`` is allowed only on a top-level settings field of a scalar type
+    (``str``, ``int``, ``float``, ``bool``), so every projected value is a scalar.
+    """
 
     type: str
     default: Any = msgspec.UNSET
@@ -35,17 +42,25 @@ class FieldSpec(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
     env: str | None = None
 
 
-def compile_type(spec: FieldSpec, name: str = "Field", *, allow_env: bool = True) -> Any:
+def compile_type(
+    spec: FieldSpec, name: str = "Field", *, allow_env: bool = True, _in_object: bool = False
+) -> Any:
     """Return the Python/msgspec type for one field spec (without ``| None``)."""
     if spec.env is not None:
         if not allow_env:
             raise PluginManifestError(f"{name}: 'env' is only allowed in settings")
+        if _in_object:
+            raise PluginManifestError(f"{name}: 'env' is not allowed on a field inside an object")
+        if spec.type not in _ENV_TYPES:
+            raise PluginManifestError(
+                f"{name}: 'env' requires a scalar type (str, int, float, bool), not {spec.type!r}"
+            )
         if not ENV_NAME_RE.match(spec.env):
             raise PluginManifestError(f"{name}: invalid env var name {spec.env!r}")
     if spec.type == "object":
         if not spec.fields:
             raise PluginManifestError(f"{name}: type 'object' requires 'fields'")
-        return compile_struct(name, spec.fields, allow_env=allow_env)
+        return compile_struct(name, spec.fields, allow_env=allow_env, _in_object=True)
     if spec.fields is not None:
         raise PluginManifestError(f"{name}: 'fields' is only allowed for type 'object'")
     try:
@@ -55,7 +70,7 @@ def compile_type(spec: FieldSpec, name: str = "Field", *, allow_env: bool = True
 
 
 def compile_struct(
-    name: str, fields: dict[str, FieldSpec], *, allow_env: bool = True
+    name: str, fields: dict[str, FieldSpec], *, allow_env: bool = True, _in_object: bool = False
 ) -> type[msgspec.Struct]:
     """Compile a field map into a frozen, kw-only msgspec Struct type.
 
@@ -66,7 +81,7 @@ def compile_struct(
         if not FIELD_NAME_RE.match(fname) or keyword.iskeyword(fname):
             raise PluginManifestError(f"{name}: invalid field name {fname!r}")
         sub = f"{name}_{fname}"
-        typ = compile_type(spec, sub, allow_env=allow_env)
+        typ = compile_type(spec, sub, allow_env=allow_env, _in_object=_in_object)
         if spec.default is msgspec.UNSET or spec.default is None:
             defs.append((fname, typ | None, None))
             continue
