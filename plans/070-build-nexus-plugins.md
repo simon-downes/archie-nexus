@@ -65,3 +65,304 @@ Codebase facts found during discovery:
 - Failing before this work: none (1660 passed; ruff check and format clean)
 - Not included: `persona/skills/aws-agent-access/` and `plans/060-spec-container-aws-profiles.md`
   (untracked in the main checkout)
+
+## Decisions
+
+The brain document's decisions 1–10 and resolved decisions 1–19 apply and are not repeated.
+Rows below are the ones this plan adds or makes concrete.
+
+| #  | Decision | Chosen | Rejected | Why | Source |
+|----|----------|--------|----------|-----|--------|
+| D1 | How the old config format is replaced | `archie config migrate` rewrites `tools:`/`auth:` into `plugins:` with a timestamped backup; repeat runs are no-ops; the loader hard-errors on old sections and names the command | Loader accepts both formats; manual edit | Single host, but a running orchestrator must not silently ignore policy | user Q1 |
+| D2 | Python import name for plugin code | Each `plugins/<id>/` is the package `archie_plugins.<id>`; a loader installs `archie_plugins` as a package whose `__path__` is the plugins root | Plugin dir on `sys.path` as top-level `datadog`/`slack`/`google` | Top-level `google`/`slack` would shadow real PyPI packages; one prefix keeps dotted paths greppable | self |
+| D3 | Manifest `entry` meaning | Full dotted module, e.g. `entry: archie_plugins.datadog`; must start with `archie_plugins.<id>`; absent = no code | Relative module name; a boolean | Explicit and greppable; loader validates the prefix | self |
+| D4 | Where manifest parsing lives | `shared/src/archie_shared/plugins/` (new): manifest structs, discovery, config validation, credential/provider generation | Agent package | Orchestrator and CLI must read manifests without importing agent code | self |
+| D5 | Where the plugin SDK lives | `agent/src/archie_agent/exec/plugin.py` (new: `tool`, `ToolError`, `context()`, `PluginContext`, `require_read/require_write`) and `exec/plugin_loader.py` (new: package install, entry import, hooks) | `shared/`; a separate `archie_plugin` dist | Tool layer only (Kiro constraint 1); no new package to install in the container venv | self |
+| D6 | Plugin tool registration | Separate `exec.plugin.tool(namespace=...)` into a plugin registry; plugin id derived from the defining module's `archie_plugins.<id>` prefix; namespace must be declared in that plugin's manifest. No `guidelines` parameter | Keep one `@tool` with flags | Makes the core/plugin split structural (decision 7); guidelines banned for plugins (resolved 9) | self |
+| D7 | Settings/scope schema format | Field map in `plugin.yaml`: `{type: str|int|float|bool|list[str]|dict[str,str]|object, default?, fields? (object), env? (settings only)}`, compiled with `msgspec.defstruct(forbid_unknown_fields=True)` | JSON Schema; Python validators on host | Resolved decision 6; host validates types without agent code | self |
+| D8 | Datadog `site` | Becomes `plugins.datadog.settings.site` (default `app.datadoghq.eu`); `site` removed from `StaticProvider` and `StaticProviderResponse` | `plugins.datadog.auth.site` | Only runner code reads it (`client._site()`); "values code reads are settings" (design item 7) | self |
+| D9 | Scalr `hostname`/`account` | Settings with `env: SCALR_HOSTNAME`/`SCALR_ACCOUNT`; `runtime_environment()` projects settings with `env` as well as credential fields | Keep as credential fields | Resolved decision 18; no scalr entry exists in the live `credentials.yaml`, so no data moves | self |
+| D10 | Bedrock overrides | Bedrock stays a core provider in `providers.py` with no config overrides; `auth:` is removed entirely | Keep a top-level `auth:` for bedrock | Live config has no bedrock override; one config location per thing | self |
+| D11 | How runner code receives settings and enabled set | `context.json` becomes `{"policy": <live snapshot>, "settings": {id: {...}}, "enabled": [ids]}`; settings/enabled captured once at agent startup by `LiveToolPolicy`, policy refreshed per exec | Runner reads `config.yaml` itself | Keeps settings startup-only and policy live (design "reload timing") with one producer | self |
+| D12 | How a tool call gets its plugin's context | The runner's audit wrapper sets the contextvar to that tool's plugin context for the call | One global context per run | Calls into several plugins in one exec must each see their own policy/credentials | self |
+| D13 | Credential access scope | `context().credentials.get()` returns only the plugin's own provider credential (provider id = plugin id) | Any provider by name | A plugin cannot read another integration's secrets | self |
+| D14 | Plugin cache | `ToolCache(root=home_dir()/"cache"/<id>, max_bytes=manifest cache.max_bytes or 256 KB)`; Slack sets 1 MB and stores `{"records": [...]}` | Keep Slack `MetadataCache` | Users list is 132,796 bytes (817 records), already over half the 256 KB limit; one implementation (resolved 17) | self |
+| D15 | Scope `None` semantics | Absent/`None`/empty means unrestricted (Jira, Notion), deny nothing (Slack); a plugin whose manifest declares no `scope` rejects any non-empty scope at config load | Per-plugin defaults | Verified in each `policy.py` during planning; uniform and matches today | self |
+| D16 | Test layout | `plugins/<id>/tests/` has no `__init__.py`; fakes are top-level modules (`datadog_fakes.py`) imported by that dir's `conftest.py`; repo-root `conftest.py` (new) installs `archie_plugins`; `testpaths = ["tests", "plugins"]`; test basenames stay unique | `pytest_plugins` in nested conftest | Prototyped: two plugin conftests and cross-dir imports pass under pytest 9.1.1; nested `pytest_plugins` is unsupported | self |
+| D17 | Order of work | Framework + Datadog tracer, then all manifests, then the config switch, then `PluginContext`, then each remaining integration moves and converts to the context in one step | Design order (move everything, then add context) | Each integration's files change once; the config switch can go early because this build doesn't touch the live config | self |
+| D18 | `gh` wrapper delivery | Bind-mount `container/bin/gh` at `/usr/local/bin/gh:ro`; keep the Dockerfile `COPY` as a fallback | Rebuild image | Wrapper change ships without `archie build` | user Q1 (context) |
+| D19 | Migrate command YAML handling | PyYAML `safe_load`/`safe_dump(sort_keys=False)`; comments are lost, and the backup keeps the original | Add `ruamel.yaml` | No new dependency; live config has no comments | self |
+
+## Requirements
+
+Framework
+- MUST discover plugins from `plugins_dir()` (`ARCHIE_PLUGINS_DIR`, default `<repo>/plugins`), one `plugin.yaml` per directory, and reject a manifest with unknown keys, an id that doesn't match its directory, or an `entry` outside `archie_plugins.<id>`.
+  - AC: `shared` unit tests for each rejection, each naming the plugin directory in the error.
+- MUST expose plugin tools only inside `exec`, under their declared namespaces; plugin tools never become native tools or appear in the exec description or system-prompt guidelines.
+  - AC: test asserts `make_native_specs()` names are exactly the core set; exec description contains no `datadog.`; runner namespace has `datadog.search_logs`.
+- MUST reject a plugin tool whose namespace is not declared in its manifest, and a plugin module registering under another plugin's id.
+  - AC: loader unit test with a fixture plugin raises with both names in the message.
+- MUST load skills from `plugins/<id>/skills/<name>/SKILL.md` for enabled plugins, in addition to `~/.agents/skills` and `persona/skills`.
+  - AC: `discover_skills()` test finds `datadog` from `plugins/` and not from `persona/`.
+- MUST warn, not fail, when a skill's plugin declares a `context:` brain entry that does not exist.
+  - AC: the `skill` tool output for such a skill starts with a warning naming the missing entry.
+- MUST mount `plugins/` read-only at `/opt/archie/plugins`, set `ARCHIE_PLUGINS_DIR`, and bind-mount `container/bin/gh` over `/usr/local/bin/gh:ro`.
+  - AC: `tests/test_orchestrator_lifecycle.py` asserts the three docker args.
+
+Credentials and config
+- MUST build `PROVIDERS` and `CREDENTIAL_TYPES` from manifests plus the core `bedrock` entry, with the same provider set as today minus `linear`.
+  - AC: `/auth/providers` test lists `aws, bedrock, datadog, github, google, incident_io, jira, notion, scalr, slack`; Slack `user_scope` and Google scopes equal today's.
+- MUST derive the CLI static-login set from provider kind, not a hard-coded set.
+  - AC: `archie auth login datadog` takes the static path; `login slack` the OAuth path; no literal provider set in `cli/auth.py`.
+- MUST replace `tools:` and `auth:` with `plugins.<id>.{enabled, policy, auth, settings}`, validated against each manifest; unknown plugin ids, unknown settings, wrongly typed values, a `write` block for a plugin without writes, and a `scope` for a plugin without one are errors.
+  - AC: `tests/test_nexus_config.py` cases for each.
+- MUST fail to load a config that contains `tools:` or `auth:`, with a message naming `archie config migrate`.
+  - AC: test on `load_nexus_config()`.
+- MUST provide `archie config migrate` that moves `tools.X` → `plugins.X.policy`, `auth.providers.github.work_orgs` → `plugins.github.settings.work_orgs`, `auth.providers.datadog.site` → `plugins.datadog.settings.site`, other `auth.providers.X` fields → `plugins.X.auth`, drops `linear` with a printed note, validates the result before writing, writes `config.yaml.bak-<UTC YYYYmmddTHHMMSSZ>`, and is a no-op that prints "already migrated" on a second run.
+  - AC: CLI tests on a copy of the live config shape: output equals the expected YAML; backup exists and equals the input; second run leaves files and backups unchanged; invalid result writes nothing and exits 1.
+- MUST keep policy live (re-read per exec call) and `enabled`/`auth`/`settings` startup-only.
+  - AC: `test_tool_policy_live*.py` shows a policy edit applies to the next exec; a settings edit does not.
+- MUST, for `enabled: false`, hide the plugin's namespace, skills, `/auth/providers` entry, OAuth refresh, env projection, CLI login and hooks.
+  - AC: one test per surface with `plugins.datadog.enabled: false` (and `scalr` for env projection).
+- MUST make the `gh` wrapper read `plugins.github.settings.work_orgs`.
+  - AC: `tests/test_gh_wrapper.py` passes with the new config shape.
+
+Runtime context
+- MUST give plugin code a frozen `PluginContext` (plugin, settings, policy, credentials, cache, workspace, clock) through `context()`; calling it with no context installed raises `PluginContextError`.
+  - AC: SDK unit tests for both.
+- MUST provide one `require_read()`/`require_write()` keyed by the current context that raises the plugin's own policy error class with today's messages.
+  - AC: each migrated plugin's existing disabled-policy tests pass unchanged in message.
+- MUST remove direct `get_credential`, `current_policy_snapshot`, `load_nexus_config` and `os.environ` reads from plugin code.
+  - AC: `tests/test_plugin_layout.py` greps `plugins/` for these names and finds none.
+- MUST run each enabled plugin's `hooks.startup` once in the agent lifespan, before requests are served; a failure stops startup with the plugin named.
+  - AC: app lifespan test with a failing fixture hook exits and logs `plugin 'x' startup hook failed`.
+
+Integrations
+- MUST move Datadog, incident.io, Jira, Notion, Slack and Google code, skills and tests into `plugins/<id>/` with unchanged model-visible namespaces and function signatures.
+  - AC: each plugin's moved tests pass; generic contract test: every namespace function appears as `` `ns.fn(` `` in that plugin's skills.
+- MUST provide manifest-only plugins for `github` and `scalr` (credential, settings, optional skill) and an AWS plugin whose startup hook writes `~/.aws/config` from `plugins.aws.settings.{region, profiles}` per the design's "AWS plugin" rules (name regex, INI-injection rejection, sorted output, `0600`/`0700`, atomic replace, no file when no profiles).
+  - AC: `plugins/aws/tests/` cover each rule; the AWS skill is discovered.
+- MUST move Jira's `guidelines=` text into the Jira skill, Google's `ARCHIE_TIMEZONE` to `plugins.google.settings.timezone` (default `Europe/London`), and Slack's cache onto the plugin cache.
+  - AC: system prompt contains no Jira line; calendar test with `timezone: UTC` setting; Slack cache test writes under `cache/slack/`.
+- MUST leave no `archie_agent.exec.tools.<integration>` path in code or tests.
+  - AC: `tests/test_plugin_layout.py` greps `agent/ tests/ plugins/` for the integration module names and finds none.
+- MUST remove `native`, `exec_enabled` and `exec_docs` from core `@tool`.
+  - AC: `inspect.signature(tool)` has none of them; `make_native_specs()` reads the core registry only.
+
+Out of scope: Kiro/MCP entrypoint; external/installed plugins; per-plugin Python dependency installs;
+`credential_process` refresh for long AWS sessions; editing the live `~/.nexus/config.yaml`.
+
+## Design
+
+### Overview
+
+A `plugins/<id>/` directory holds `plugin.yaml`, optional Python package code (`archie_plugins.<id>`),
+`skills/` and `tests/`. Host code (orchestrator, CLI, shared) reads only manifests and config. The
+container runner imports enabled plugin entries, registers their exec-only tools, and runs each call
+with that plugin's `PluginContext`. Built in order: framework with Datadog as the tracer, all
+manifests, the config switch, the context, then each integration.
+
+### Code structure
+
+New:
+- `plugins/<id>/plugin.yaml`, `plugins/<id>/__init__.py` (for plugins with code), `plugins/<id>/skills/<name>/`, `plugins/<id>/tests/` (no `__init__.py`).
+- `conftest.py` (repo root): installs `archie_plugins` from `<repo>/plugins` via the loader.
+- `shared/src/archie_shared/plugins/__init__.py`, `manifest.py` (structs, `load_manifests(root)`), `schema.py` (field-map → msgspec), `config.py` (`PluginConfig`, `validate_plugins(raw, manifests)`, `resolved_settings`, `policy_defaults`), `migrate.py` (pure function `migrate_config(raw: dict) -> MigrationResult`).
+- `shared/src/archie_shared/config.py` `plugins_dir()` (follow `persona_dir()` in the same file).
+- `agent/src/archie_agent/exec/plugin.py` (SDK) and `exec/plugin_loader.py` (`install_package(root)`, `load_plugins(manifests, enabled) -> dict[id, PluginRuntime]`, `run_startup_hooks(...)`). Standalone functions, no harness imports.
+- `cli/src/archie_cli/config_cmd.py`: `archie config migrate` (follow `cli/auth.py` + `main.add_command` in `cli/cli.py`).
+- `tests/test_plugin_layout.py`: dotted-path and forbidden-read guards, generic skill/namespace contract.
+- `docs/plugins.md`.
+
+Changed: `exec/tools/__init__.py` (core registry, no integration imports), `exec/runner.py`
+(`_build_namespace` adds plugin namespaces and per-call context), `exec/native.py`, `exec/tool.py`,
+`skills.py`, `tool_policy_live.py`, `app.py`, `harness.py`/`agents.py` (pass runner context),
+`shared/schemas.py`, `shared/tool_policy.py`, `shared/credentials/{providers,models,api,runtime}.py`,
+`orchestrator/{auth,credential_refresh,lifecycle,docker}.py`, `cli/auth.py`, `container/bin/gh`,
+`agent/environment.py` (`ARCHIE_SELF_PATHS` adds `/opt/archie/plugins`), `pyproject.toml` (`testpaths`).
+
+### Data model
+
+`plugin.yaml` (all keys except `name` optional):
+
+```yaml
+name: datadog                     # == directory name, [a-z][a-z0-9_]*
+namespaces: [datadog]
+entry: archie_plugins.datadog
+hooks: {startup: "archie_plugins.aws.profiles:write_config"}
+credential:                       # provider id == name
+  kind: static                    # static | oauth
+  fields: [api_key, app_key]      # static
+  env: {api_key: DD_API_KEY}      # static, optional
+  set_env: false
+  login: aws_chain                # static, optional (aws)
+  # oauth: server_url | authorization_endpoint, token_endpoint, registration_endpoint,
+  #        scopes, token_path, refresh_token_path, expires_in_path, extra_params
+policy:
+  read: {enabled: true}
+  write: {enabled: false}         # omitted → plugin has no writes
+  scope: {type: "list[str]"}      # omitted → any non-empty scope is a config error
+settings:
+  site: {type: str, default: app.datadoghq.eu}
+cache: {max_bytes: 262144}
+context: []                       # brain entry paths the skills depend on
+```
+
+`config.yaml`: `plugins: {<id>: {enabled: bool=true, policy: {read?, write?}, auth: {<oauth/static override fields minus site/work_orgs>}, settings: {...}}}`.
+
+Runner `context.json`: `{"policy": {id: {read: {enabled, scope}, write: {enabled, scope}}}, "settings": {id: {...}}, "enabled": [id, ...]}`.
+
+`PluginContext` (frozen dataclass): `plugin: str`, `settings: Mapping[str, Any]`, `policy: PluginPolicy(read: PolicyBlock, write: PolicyBlock | None)`, `credentials: CredentialSource`, `cache: ToolCache`, `workspace: Path | None`, `clock: Callable[[], datetime]`.
+
+### Data flow
+
+- Exec call: harness → `LiveToolPolicy.refresh()` (policy re-read; settings/enabled from startup) → `run_exec(..., runner_context=...)` writes `context.json` → runner installs package, imports enabled entries, builds one context per plugin, wraps each plugin tool so the call runs inside `use_context(ctx)` → plugin code calls `context()`.
+  - Invalid config on refresh: last valid policy kept, TUI warning (unchanged).
+  - Plugin entry import fails: the runner raises `RuntimeError("Failed to load plugin '<id>'")` and the envelope reports it; other plugins are not loaded for that call.
+- Startup: `app.lifespan` loads config (hard error on old sections), runs hooks, builds `LiveToolPolicy`.
+
+### Error handling
+
+- Malformed manifest: host and container raise `PluginManifestError` naming the file; the orchestrator fails at start; the agent fails at startup.
+- `context()` without a host: `PluginContextError("no plugin context")`.
+- Missing credential: each plugin's existing configuration error class (unchanged behaviour).
+- Migrate: any failure before the final `os.replace` leaves `config.yaml` untouched.
+
+### Config / infra
+
+Env: `ARCHIE_PLUGINS_DIR` (new). Mounts: `<repo>/plugins:/opt/archie/plugins:ro`,
+`<repo>/container/bin/gh:/usr/local/bin/gh:ro`. Deployment (for Simon, after merge): stop the
+orchestrator and sessions, run `archie config migrate`, then `archie serve`.
+
+## Milestones
+
+Implementation is delegated to subagents in pieces of one module or one integration step each.
+Every milestone ends with `uv run pytest -q -p no:cacheprovider`, `uv run ruff check .` and
+`uv run ruff format --check .` passing.
+
+### [ ] M1 — Trace cleanups (prefactor)
+
+- **Approach:** Remove the `ARCHIE_TOOL_POLICY` fallback and `set_policy_snapshot` shim from `exec/tools/jira/policy.py` and update the tests that set the env var. Remove the top-level `enabled` key from `exec/tools/slack/policy.py`. Drop the `linear` provider and `LinearCredential` (providers, models, `credentials/__init__.py`, CLI set, tests).
+- **Test seam:** `require_read/require_write` of each policy module; `/auth/providers`.
+- **Deliverable:** No dead policy paths; no `linear`.
+- **Verify:** full checks pass; `grep -rn "ARCHIE_TOOL_POLICY\|linear" agent shared cli orchestrator tests --include=*.py` finds nothing.
+- **Outcome:**
+
+### [ ] M2 — Datadog runs as a plugin (tracer)
+
+- **Approach:** Add `plugins_dir()`, `shared/plugins/manifest.py` and `schema.py`, the SDK `exec/plugin.py` (`tool`, `ToolError` re-export; plugin registry), `exec/plugin_loader.py` (D2/D3/D6). `get_all_tools()` returns core + loaded plugin tools; the runner calls the loader before building namespaces. `skills.py` scans plugin skills. Move `exec/tools/datadog/*` → `plugins/datadog/` (imports become relative or `archie_agent.exec.plugin`), `persona/skills/datadog` → `plugins/datadog/skills/datadog`, Datadog tests + `datadog_fakes.py` → `plugins/datadog/tests/` with a local `conftest.py` (D16). `PROVIDERS["datadog"]`/`CREDENTIAL_TYPES["datadog"]` are generated from the manifest (static fields → `msgspec.defstruct`); other providers stay hand-written for now. Add root `conftest.py`, `testpaths`, the lifecycle mounts/env, `docker.py` constant, `ARCHIE_SELF_PATHS`. Add `tests/test_plugin_layout.py` with the dotted-path guard for `datadog`. The `context:` warning in the skill tool lands here.
+- **Test seam:** `load_manifests()`, `load_plugins()`, runner `_build_namespace`, `discover_skills()`, `/auth/providers`, docker command.
+- **Edge cases:** manifest id ≠ dir → error; undeclared namespace → error; entry import error → `RuntimeError` naming the plugin.
+- **Deliverable:** `datadog.*` works in exec from `plugins/datadog`, with its skill.
+- **Verify:** `uv run pytest -q plugins/datadog tests/test_plugin_layout.py tests/test_runner.py tests/test_skills.py` passes; full checks pass.
+- **Outcome:**
+
+### [ ] M3 — Every integration has a manifest and plugin skill
+
+- **Approach:** Add `plugin.yaml` for incident_io, jira, notion, slack, google (no `entry` yet; code still in `exec/tools`), aws (`login: aws_chain`, `set_env`), scalr, github. Move their skills from `persona/skills/` to `plugins/<id>/skills/`. Generate all non-bedrock `PROVIDERS`/`CREDENTIAL_TYPES` from manifests; delete the hand-written credential classes except `BedrockCredential` and `OAuthCredential`, and update imports (`jira/client.py`, `incident_io/client.py`, tests). Derive the CLI static set and AWS-chain case from manifests. Move Slack scopes and Google scopes into YAML; update skill-path constants in skill tests.
+- **Test seam:** `PROVIDERS`, `CREDENTIAL_TYPES`, `/auth/providers`, `archie auth login`, `discover_skills()`.
+- **Deliverable:** Credentials and skills come only from manifests; `persona/skills` holds procedure skills only.
+- **Verify:** `uv run pytest -q tests/test_providers.py tests/test_credentials_models.py tests/test_orchestrator_auth_discovery.py tests/test_cli_auth_login.py tests/test_skills.py` passes; full checks pass.
+- **Outcome:**
+
+### [ ] M4 — `plugins:` config replaces `tools:` and `auth:`
+
+- **Approach:** `shared/plugins/config.py` validates `plugins:` against manifests (D7, D15). `NexusConfig` drops `tools`/`auth`, adds `plugins`; `load_nexus_config()` checks raw YAML for `tools`/`auth` first and raises `ConfigError` naming `archie config migrate`. `tool_policy` builds snapshots from manifest defaults + `plugins.*.policy`. Orchestrator/CLI/runtime read overrides from `plugins.<id>.auth`. Datadog `site` → setting (D8), read by `client._site()` from config for now (removed in M6). Github `work_orgs` → setting; update `container/bin/gh` and its test; add the `gh` bind mount. Add `shared/plugins/migrate.py` + `cli/config_cmd.py` (D1, D19). Update `docs/config.md` and `docs/auth-credentials.md`.
+- **Test seam:** `load_nexus_config()`, `migrate_config()`, `archie config migrate` via Click `CliRunner`, `load_policy_snapshot()`, gh wrapper script.
+- **Edge cases:** old + new sections both present → migrate merges when keys don't conflict, else exits 1 naming the key; config absent → migrate prints "no config" and exits 0; validation failure → nothing written.
+- **Deliverable:** The new config shape works end to end; the live shape migrates in one command.
+- **Verify:** `uv run pytest -q tests/test_nexus_config.py tests/test_config_migrate.py tests/test_gh_wrapper.py tests/test_tool_policy_live.py tests/test_tool_policy_live_exec.py` passes; a migrate run on a temp copy of the live config shape produces the expected `plugins:` YAML; full checks pass.
+- **Outcome:**
+
+### [ ] M5 — `enabled: false` and settings-driven env
+
+- **Approach:** Apply `enabled` (startup) in `runtime_environment()`, `credential_refresh.py`, orchestrator `providers()`/`provider()`, CLI login, runner entry import, `discover_skills()` and hooks. `runtime_environment()` also projects settings fields that declare `env` (D9); move Scalr `hostname`/`account` to settings. Extend `LiveToolPolicy` and `run_exec` to carry `{"policy", "settings", "enabled"}` (D11) through `harness.py` and `agents.py`.
+- **Test seam:** each listed surface; `context.json` content written by `run_exec`.
+- **Deliverable:** A disabled plugin disappears everywhere; Scalr hostname/account come from settings.
+- **Verify:** new tests per surface pass; full checks pass.
+- **Outcome:**
+
+### [ ] M6 — `PluginContext`, shared policy gates, Datadog converted
+
+- **Approach:** Implement `PluginContext`, `CredentialSource` (D13), `context()`/`use_context()`, per-plugin `ToolCache` with `max_bytes` (D14; `exec/tools/cache.py` gains the parameter), shared `require_read/require_write(error=...)`. Runner wraps plugin tools per D12 with `workspace=_subprocess.WORKSPACE`. Convert Datadog: `client.py` credential + site via `context()`, `policy.py` uses the shared gates. Datadog tests build contexts with fake credentials (a `plugin_context` helper fixture in root `conftest.py`) instead of patching `get_credential`. Extend the layout test with the forbidden-read guard for `plugins/`.
+- **Test seam:** SDK functions; Datadog public tools under a test context.
+- **Deliverable:** Datadog takes everything from its context; calling a plugin tool outside a host fails closed.
+- **Verify:** `uv run pytest -q plugins/datadog tests/test_plugin_sdk.py tests/test_plugin_layout.py` passes; full checks pass.
+- **Outcome:**
+
+### [ ] M7 — AWS plugin with a startup hook
+
+- **Approach:** `plugins/aws/profiles.py` `write_config()` reads `context().settings` and writes `~/.aws/config` per the design rules (port from untracked `plans/060-spec-container-aws-profiles.md` rules quoted in the brain document). `run_startup_hooks()` in the loader; `app.lifespan` calls it after config load. New short skill `plugins/aws/skills/aws-agent-access/SKILL.md` per the design's "AWS plugin" item 4, written fresh.
+- **Test seam:** `write_config()` with a temp home; `run_startup_hooks()`; app lifespan.
+- **Edge cases:** bad profile name / newline in ARN → hook error, old file kept; no profiles → no file; existing dir `0755` → tightened to `0700`.
+- **Deliverable:** A container with `plugins.aws.settings.profiles` gets matching AWS CLI profiles.
+- **Verify:** `uv run pytest -q plugins/aws tests/test_plugin_sdk.py` passes; full checks pass.
+- **Outcome:**
+
+### [ ] M8 — incident.io moves and uses the context
+
+- **Approach:** Same as the Datadog move + M6 conversion; manifest gains `entry`; no write block.
+- **Test seam:** `incident_io.*` public tools under a test context.
+- **Deliverable:** `incident_io.*` served from `plugins/incident_io`.
+- **Verify:** `uv run pytest -q plugins/incident_io tests/test_plugin_layout.py`; full checks.
+- **Outcome:**
+
+### [ ] M9 — Jira moves and uses the context
+
+- **Approach:** As M8; `attachments.py` uses `context().workspace`; `cloud_id` regex stays in the client; the three `guidelines=` lines move into the Jira skill; scope `list[str]` in the manifest.
+- **Test seam:** `jira.*` public tools; system prompt text.
+- **Deliverable:** `jira.*` served from `plugins/jira`; no Jira lines in the system prompt.
+- **Verify:** `uv run pytest -q plugins/jira tests/test_prompt.py tests/test_plugin_layout.py`; full checks.
+- **Outcome:**
+
+### [ ] M10 — Notion moves and uses the context
+
+- **Approach:** As M8; scope `object{pages: list[str], databases: list[str]}`; MCP session state stays plugin-internal; OAuth credential through the context.
+- **Test seam:** `notion.*` public tools.
+- **Deliverable:** `notion.*` served from `plugins/notion`.
+- **Verify:** `uv run pytest -q plugins/notion tests/test_plugin_layout.py`; full checks.
+- **Outcome:**
+
+### [ ] M11 — Slack moves, uses the context and the plugin cache
+
+- **Approach:** As M8; scope `object{deny: list[str]}`; delete `slack/cache.py`; users/conversations use `context().cache` keys `slack.users`/`slack.conversations` storing `{"records": [...]}` only when complete; manifest `cache.max_bytes: 1048576`.
+- **Test seam:** `slack.*` public tools; cache files under a temp home.
+- **Deliverable:** `slack.*` served from `plugins/slack`; one cache implementation.
+- **Verify:** `uv run pytest -q plugins/slack tests/test_tool_cache.py tests/test_plugin_layout.py`; full checks.
+- **Outcome:**
+
+### [ ] M12 — Google moves and uses the context
+
+- **Approach:** Move `mail.py`, `calendar.py`, `drive.py`, `meet.py`, `discovery.py` and `google_common.py` (→ `common.py`) into `plugins/google/`; five namespaces in the manifest; timezone setting replaces `ARCHIE_TIMEZONE`; mail uses `context().cache`.
+- **Test seam:** `mail/calendar/drive/meet/google.*` public tools.
+- **Deliverable:** All Google namespaces served from `plugins/google`.
+- **Verify:** `uv run pytest -q plugins/google tests/test_plugin_layout.py`; full checks.
+- **Outcome:**
+
+### [ ] M13 — Core `@tool` loses plugin flags; contract tests; docs
+
+- **Approach:** Remove `native`/`exec_enabled`/`exec_docs` from `exec/tools/__init__.py` `tool`; `native.py` and `tool.py` read the core registry; generic per-plugin skill/namespace contract test replaces the hand-written ones where they only checked coverage (keep plugin-specific safety-rule assertions). Write `docs/plugins.md`; update `README.md`/`AGENTS.md` layout lines.
+- **Test seam:** `tool` signature; `make_native_specs()`; contract test.
+- **Deliverable:** The core/plugin split is structural and documented.
+- **Verify:** full checks pass; `grep -rn "native=\|exec_docs\|exec_enabled" agent plugins --include=*.py` finds nothing.
+- **Outcome:**
+
+## Deviations
+
+## Risks
+
+- `plugins/` is mounted read-only, so sessions can no longer edit integration skills in place as they can `persona/skills`. Accepted in design resolved decision 3.
+- Dropping Jira guidelines from the system prompt relies on the model loading the Jira skill.
+- Moving Google's mail cache root to `cache/google/` makes the first label lookup after deploy cold.
+- Deploy needs the documented sequence; a session started on new code against an unmigrated config fails at startup with the migrate instruction.
+
+## Review
+
+## Outcome
+
+PR: pending
+CI: pending
+
+## Follow-ups
+
+- Mark untracked `plans/060-spec-container-aws-profiles.md` dropped and remove `persona/skills/aws-agent-access/` in the main checkout (both untracked, outside this branch).
