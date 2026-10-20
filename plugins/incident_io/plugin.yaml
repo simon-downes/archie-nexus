@@ -1,0 +1,8 @@
+name: incident_io
+namespaces: [incident_io]
+entry: archie_plugins.incident_io
+credential:
+  kind: static
+  fields: [api_key]
+policy:
+  read: {enabled: true}

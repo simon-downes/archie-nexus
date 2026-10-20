@@ -1,0 +1,9 @@
+name: github
+# Fine-grained tokens: one for work organisations, one for everything else.
+# Not projected into the container environment: the container gh wrapper reads the
+# matching token from credentials.yaml on each call.
+credential:
+  kind: static
+  fields: [personal_token, work_token]
+settings:
+  work_orgs: {type: "list[str]"}  # owners whose repos use github.work_token

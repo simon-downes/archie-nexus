@@ -3,12 +3,15 @@
 Provides:
 - home_dir(): resolve ARCHIE_HOME_DIR (default ~/.nexus)
 - persona_dir(): resolve ARCHIE_PERSONA_DIR (repo-tracked skills + prompts)
+- plugins_dir(): resolve ARCHIE_PLUGINS_DIR (repo-tracked plugins)
 - load_config(): load YAML file and validate against a msgspec Struct schema
 - ConfigError: custom exception for all config-related failures
 """
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import msgspec
 import yaml
@@ -47,12 +50,29 @@ def persona_dir() -> Path:
     return _REPO_ROOT / "persona"
 
 
-def load_config[T](path: str | Path, schema: type[T]) -> T:
+def plugins_dir() -> Path:
+    """Resolve the plugins directory (repo-tracked ``plugins/<id>/`` packages).
+
+    Reads ARCHIE_PLUGINS_DIR env var. On the host this defaults to
+    ``<repo_root>/plugins``; inside the container the orchestrator sets the env
+    var to the mounted path (``/opt/archie/plugins``).
+    """
+    raw = os.environ.get("ARCHIE_PLUGINS_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    return _REPO_ROOT / "plugins"
+
+
+def load_config[T](
+    path: str | Path, schema: type[T], *, raw_check: Callable[[Any], None] | None = None
+) -> T:
     """Load a YAML file and validate against a msgspec Struct schema.
 
     Args:
         path: Path to the YAML file.
         schema: A msgspec Struct type (or dict type) to validate against.
+        raw_check: Optional callback run on the parsed YAML before conversion;
+            it may raise ConfigError to reject the file.
 
     Returns:
         A validated instance of the schema type.
@@ -77,6 +97,9 @@ def load_config[T](path: str | Path, schema: type[T]) -> T:
     # Empty file (YAML loads as None) → treat as empty mapping
     if data is None:
         data = {}
+
+    if raw_check is not None:
+        raw_check(data)
 
     try:
         return msgspec.convert(data, schema, strict=False)

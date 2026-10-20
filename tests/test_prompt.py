@@ -110,7 +110,16 @@ def test_build_tools_contains_guidelines():
     """Tools section includes de-duplicated tool guidelines."""
     tools = _build_tools()
     assert "### Guidelines" in tools
-    assert tools.count("never provide credentials") == 1
+    guidelines = tools.split("### Guidelines", 1)[1]
+    assert guidelines.count("Pass `timeout`") == 1
+
+
+def test_system_prompt_has_no_jira_lines():
+    """Jira rules moved into the Jira skill; none reach the system prompt (070 M9)."""
+    prompt = build_system_prompt("test-model")
+    jira_lines = [line for line in prompt.splitlines() if "jira" in line.lower()]
+    assert jira_lines == []
+    assert "never provide credentials" not in _build_tools()
 
 
 def test_build_system_prompt_assembles_all_sections():

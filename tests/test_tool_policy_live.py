@@ -6,13 +6,15 @@ from archie_agent.tool_policy_live import (
     RELOAD_FAILED_KIND,
     LiveToolPolicy,
     load_policy_snapshot,
+    startup_runner_state,
 )
 
 NOTION_WRITE_ON = """\
-tools:
+plugins:
   notion:
-    write:
-      enabled: true
+    policy:
+      write:
+        enabled: true
 """
 
 
@@ -28,8 +30,22 @@ def test_load_policy_snapshot_reads_config(home):
     assert snapshot["notion"]["write"]["enabled"] is True
 
 
-def test_missing_config_yields_defaults(home):
-    assert load_policy_snapshot() == {}
+def test_missing_config_yields_manifest_defaults(home):
+    snapshot = load_policy_snapshot()
+    assert set(snapshot) == {"datadog", "google", "incident_io", "jira", "notion", "slack"}
+    for entry in snapshot.values():
+        assert entry == {
+            "read": {"enabled": True, "scope": None},
+            "write": {"enabled": False, "scope": None},
+        }
+
+
+def test_old_tools_section_fails_reload_and_keeps_last_valid(home):
+    live = LiveToolPolicy({"notion": {"write": {"enabled": True}}})
+    (home / "config.yaml").write_text("tools:\n  notion:\n    write: {enabled: false}\n")
+    snapshot, notice = live.refresh()
+    assert snapshot == {"notion": {"write": {"enabled": True}}}
+    assert notice is not None and "archie config migrate" in notice.message
 
 
 def test_refresh_picks_up_file_change(home):
@@ -45,7 +61,7 @@ def test_invalid_config_keeps_last_valid_and_notifies_once(home):
     live = LiveToolPolicy({})
     good, _ = live.refresh()
 
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     results = [live.refresh() for _ in range(3)]
 
     assert all(snapshot == good for snapshot, _ in results)
@@ -57,9 +73,9 @@ def test_invalid_config_keeps_last_valid_and_notifies_once(home):
 
 def test_changed_error_notifies_again(home):
     live = LiveToolPolicy({})
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     _, first = live.refresh()
-    (home / "config.yaml").write_text("tools:\n  notion:\n    bogus: 1\n")
+    (home / "config.yaml").write_text("plugins:\n  notion:\n    bogus: 1\n")
     _, second = live.refresh()
     _, third = live.refresh()
     assert first is not None and second is not None
@@ -70,18 +86,18 @@ def test_changed_error_notifies_again(home):
 
 def test_same_error_after_recovery_notifies_again(home):
     live = LiveToolPolicy({})
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     live.refresh()
     (home / "config.yaml").write_text(NOTION_WRITE_ON)
     live.refresh()
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     _, notice = live.refresh()
     assert notice is not None and notice.kind == RELOAD_FAILED_KIND
 
 
 def test_recovery_notifies_once(home):
     live = LiveToolPolicy({})
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     live.refresh()
     (home / "config.yaml").write_text(NOTION_WRITE_ON)
     snapshot, notice = live.refresh()
@@ -107,3 +123,43 @@ def test_custom_loader_exception_falls_back():
     snapshot, notice = live.refresh()
     assert snapshot == {"slack": {}}
     assert notice is not None and "disk gone" in notice.message
+
+
+def test_runner_context_settings_are_startup_only_policy_is_live(home):
+    from archie_shared.plugins import load_manifests
+    from archie_shared.schemas import load_nexus_config
+
+    (home / "config.yaml").write_text("plugins:\n  datadog:\n    settings: {site: datadoghq.com}\n")
+    settings, enabled = startup_runner_state(load_nexus_config(), load_manifests())
+    live = LiveToolPolicy(load_policy_snapshot(), settings=settings, enabled=enabled)
+    before = live.runner_context()
+    assert before["settings"]["datadog"] == {"site": "datadoghq.com"}
+    assert before["policy"]["datadog"]["write"]["enabled"] is False
+
+    (home / "config.yaml").write_text(
+        "plugins:\n  datadog:\n    enabled: true\n    settings: {site: datadoghq.eu}\n"
+        "    policy:\n      write: {enabled: true}\n  jira: {enabled: false}\n"
+    )
+    snapshot, _ = live.refresh()
+    after = live.runner_context(snapshot)
+    assert after["policy"]["datadog"]["write"]["enabled"] is True
+    assert after["settings"] == before["settings"]
+    assert after["enabled"] == before["enabled"] and "jira" in after["enabled"]
+
+
+def test_static_runner_context_defaults():
+    from archie_shared.plugins import load_manifests
+
+    live = LiveToolPolicy.static({"jira": {}})
+    assert live.runner_context() == {
+        "policy": {"jira": {}},
+        "settings": {},
+        "enabled": sorted(load_manifests()),
+    }
+
+
+def test_runner_context_enabled_is_always_a_list():
+    assert LiveToolPolicy({}, loader=None, enabled=[]).runner_context()["enabled"] == []
+    assert LiveToolPolicy({}, loader=None, enabled=("jira",)).runner_context()["enabled"] == [
+        "jira"
+    ]

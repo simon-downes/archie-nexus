@@ -30,8 +30,10 @@ class TestRegistration:
 
     def test_web_tools_are_native(self):
         # Tool choice guidance lives in tools-strategy.md; no per-tool guideline needed.
-        tools = get_all_tools()
-        assert tools["web_fetch"]._native and tools["web_search"]._native
+        from archie_agent.exec.native import make_native_specs
+
+        names = {spec.name for spec in make_native_specs()}
+        assert {"web_fetch", "web_search"} <= names
 
 
 # ---------------------------------------------------------------------------

@@ -28,10 +28,11 @@ from archie_shared.events import (
     encode_event,
 )
 from archie_shared.models import get_model, load_models
+from archie_shared.plugins.config import policy_snapshot
+from archie_shared.plugins.manifest import load_manifests
 from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.schemas import load_nexus_config
 from archie_shared.session.log import CursorNotFound
-from archie_shared.tool_policy import ToolsConfig, policy_snapshot
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -40,10 +41,11 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
 from archie_agent.compaction import is_compact_command
+from archie_agent.exec.plugin_loader import PluginLoadError, run_startup_hooks
 from archie_agent.harness import AgentHarness
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
-from archie_agent.tool_policy_live import LiveToolPolicy
+from archie_agent.tool_policy_live import LiveToolPolicy, startup_runner_state
 
 if TYPE_CHECKING:
     from archie_shared.models import ModelEntry
@@ -117,6 +119,13 @@ async def lifespan(app):
         session_id=session_id,
     )
 
+    manifests = load_manifests()
+    settings, enabled = startup_runner_state(_config, manifests)
+    try:
+        run_startup_hooks(manifests, enabled=enabled, settings=settings)
+    except PluginLoadError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
     _agent = AgentHarness(
         session=session,
         llm_client=llm_client,
@@ -125,7 +134,9 @@ async def lifespan(app):
         model_catalog=_catalog,
         region=_config.global_.region,
         subagents=_config.agent.subagents,
-        tool_policy=LiveToolPolicy(policy_snapshot(ToolsConfig(providers=_config.tools))),
+        tool_policy=LiveToolPolicy(
+            policy_snapshot(_config.plugins, manifests), settings=settings, enabled=enabled
+        ),
         turn_cost_limit=_config.agent.turn_cost_limit,
         compaction=_config.agent.compaction,
     )

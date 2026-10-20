@@ -2,7 +2,8 @@
 
 Public API (safe for container import — no httpx dependency):
 - store: store_path, load_store, save_store, get_credential, set_credential
-- models: per-service credential structs, CREDENTIAL_TYPES
+- models: BedrockCredential, OAuthCredential, CREDENTIAL_TYPES (static plugin
+  credential structs are generated from manifests)
 - providers: StaticProvider, OAuthProvider, PROVIDERS registry
 - refresh: is_expired, can_refresh_noninteractive, InteractiveReauthRequired
 
@@ -12,25 +13,17 @@ httpx which is a CLI-only dependency. Import directly:
 """
 
 from archie_shared.credentials.api import (
-    AuthConfig,
-    AuthProviderOverride,
     CredentialStatus,
     OAuthFlowStatus,
     OAuthLoginResponse,
     OAuthProviderResponse,
     StaticProviderResponse,
+    provider_override,
 )
 from archie_shared.credentials.models import (
     CREDENTIAL_TYPES,
-    AwsCredential,
     BedrockCredential,
-    DatadogCredential,
-    GithubCredential,
-    IncidentIoCredential,
-    JiraCredential,
-    LinearCredential,
     OAuthCredential,
-    ScalrCredential,
 )
 from archie_shared.credentials.providers import (
     PROVIDERS,
@@ -57,31 +50,23 @@ from archie_shared.credentials.store import (
 )
 
 __all__ = [
-    "AuthConfig",
-    "AuthProviderOverride",
     "CredentialStatus",
     "OAuthFlowStatus",
     "OAuthLoginResponse",
     "OAuthProviderResponse",
     "StaticProviderResponse",
-    "AwsCredential",
     "BedrockCredential",
-    "DatadogCredential",
     "CREDENTIAL_TYPES",
-    "GithubCredential",
-    "IncidentIoCredential",
     "InteractiveReauthRequired",
-    "JiraCredential",
-    "LinearCredential",
     "OAuthCredential",
     "OAuthProvider",
     "PROVIDERS",
-    "ScalrCredential",
     "StaticProvider",
     "can_refresh_noninteractive",
     "delete_credential",
     "effective_provider",
     "extract_nested",
+    "provider_override",
     "get_credential",
     "is_expired",
     "load_store",

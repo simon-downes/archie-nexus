@@ -14,6 +14,7 @@ from archie_agent.tool_policy_live import (
     RELOAD_FAILED_KIND,
     LiveToolPolicy,
     load_policy_snapshot,
+    startup_runner_state,
 )
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 from archie_shared.types import ToolUseBlock
@@ -23,7 +24,7 @@ SOURCE = "async def main():\n    return _tool_policy\n"
 
 def _config(write_enabled: bool) -> str:
     flag = "true" if write_enabled else "false"
-    return f"tools:\n  notion:\n    write:\n      enabled: {flag}\n"
+    return f"plugins:\n  notion:\n    policy:\n      write:\n        enabled: {flag}\n"
 
 
 def _model() -> ModelEntry:
@@ -97,7 +98,7 @@ async def test_invalid_config_keeps_last_policy_with_one_notice(tmp_path, home):
     ws = FakeWebSocket()
     await harness.event_bus.register_client(ws, ())
 
-    (home / "config.yaml").write_text("tools: [unclosed\n")
+    (home / "config.yaml").write_text("plugins: [unclosed\n")
     for _ in range(3):
         assert _notion_write(await _exec(harness._execute_tool)) is True
     notices = ws.notices()
@@ -111,7 +112,10 @@ async def test_invalid_config_keeps_last_policy_with_one_notice(tmp_path, home):
 @pytest.mark.asyncio
 async def test_child_dispatch_awaits_live_policy_per_call(tmp_path):
     states = iter(
-        [{"notion": {"write": {"enabled": False}}}, {"notion": {"write": {"enabled": True}}}]
+        [
+            {"policy": {"notion": {"write": {"enabled": False}}}},
+            {"policy": {"notion": {"write": {"enabled": True}}}},
+        ]
     )
 
     async def source() -> dict:
@@ -121,7 +125,7 @@ async def test_child_dispatch_awaits_live_policy_per_call(tmp_path):
         create_registry(),
         exec_python=sys.executable,
         exec_run_root=tmp_path / "runs",
-        tool_policy=source,
+        runner_context=source,
     )
     assert _notion_write(await _exec(dispatch.execute)) is False
     assert _notion_write(await _exec(dispatch.execute)) is True
@@ -133,7 +137,7 @@ async def test_child_dispatch_accepts_plain_dict(tmp_path):
         create_registry(),
         exec_python=sys.executable,
         exec_run_root=tmp_path / "runs",
-        tool_policy={"notion": {"write": {"enabled": True}}},
+        runner_context={"policy": {"notion": {"write": {"enabled": True}}}},
     )
     assert _notion_write(await _exec(dispatch.execute)) is True
 
@@ -150,9 +154,47 @@ def test_harness_passes_live_source_to_task_tool(tmp_path, monkeypatch):
     real = harness_module.create_task_tool
 
     def spy(**kwargs):
-        captured["tool_policy"] = kwargs["tool_policy"]
+        captured["runner_context"] = kwargs["runner_context"]
         return real(**kwargs)
 
     monkeypatch.setattr(harness_module, "create_task_tool", spy)
     harness = _harness(tmp_path, {"notion": {}})
-    assert captured["tool_policy"] == harness._current_tool_policy
+    assert captured["runner_context"] == harness._current_runner_context
+
+
+CONTEXT_SOURCE = (
+    "import sys\n"
+    "async def main():\n"
+    "    return json.loads((Path(sys.argv[1]) / 'context.json').read_text())\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_exec_context_settings_fixed_at_startup_policy_live(tmp_path, home):
+    from archie_shared.plugins import load_manifests
+    from archie_shared.schemas import load_nexus_config
+
+    (home / "config.yaml").write_text(
+        _config(False) + "  datadog:\n    settings: {site: datadoghq.com}\n"
+    )
+    settings, enabled = startup_runner_state(load_nexus_config(), load_manifests())
+    harness = _harness(
+        tmp_path, LiveToolPolicy(load_policy_snapshot(), settings=settings, enabled=enabled)
+    )
+
+    async def context() -> dict:
+        block = ToolUseBlock(tool_use_id="tu", name="exec", input={"source": CONTEXT_SOURCE})
+        result = await harness._execute_tool(block)
+        assert not result.is_error, result.content
+        return json.loads(result.content.removeprefix("return: "))
+
+    first = await context()
+    assert first["policy"]["notion"]["write"]["enabled"] is False
+    assert first["settings"]["datadog"] == {"site": "datadoghq.com"}
+    (home / "config.yaml").write_text(
+        _config(True) + "  datadog:\n    settings: {site: datadoghq.eu}\n"
+    )
+    second = await context()
+    assert second["policy"]["notion"]["write"]["enabled"] is True
+    assert second["settings"] == first["settings"]
+    assert second["enabled"] == first["enabled"] == enabled

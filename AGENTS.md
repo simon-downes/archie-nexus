@@ -13,9 +13,10 @@ This file is the short session-start guide. Use the linked documents for detail 
 
 - `cli/` is the host-facing command and TUI client.
 - `orchestrator/` is the host-side control plane and Docker/session proxy.
-- `agent/` runs inside each session container and owns the agent loop and tools.
+- `agent/` runs inside each session container and owns the agent loop, core tools, and the plugin SDK.
 - `shared/` defines contracts used across those boundaries. Treat changes here as API/schema changes.
-- `persona/` is runtime prompt/agent/skill content, not Python package code.
+- `plugins/` holds one directory per integration (manifest, code, skills, tests); see [docs/plugins.md](docs/plugins.md).
+- `persona/` is runtime prompt/agent/procedure-skill content, not Python package code.
 
 ## Working rules
 

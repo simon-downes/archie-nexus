@@ -23,7 +23,9 @@ Nexus has four Python workspace packages:
 - **Agent (`agent/`)** — container-side Starlette application. It owns one session, the agent loop, model client, tools, skills, subagents, and session event log.
 - **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, and accounting.
 
-`persona/` is content rather than a package: prompts, agents, and skills are mounted into the container and loaded by the agent.
+`persona/` is content rather than a package: prompts, agents, and procedure skills are mounted into the container and loaded by the agent.
+
+`plugins/` holds one directory per integration (Datadog, incident.io, Jira, Notion, Slack, Google, AWS, GitHub, Scalr) with its `plugin.yaml`, code, skills, and tests. The host reads manifests through `shared/src/archie_shared/plugins/` for credentials and config validation; inside the container the exec runner imports plugin code as `archie_plugins.<id>` and exposes its tools only inside `exec`, under the plugin's namespaces. Core tools (`exec/tools/`) are flat and native. See [Plugins](plugins.md).
 
 ## Runtime topology and lifecycle
 
@@ -57,12 +59,14 @@ paths; configured mounts are appended separately.
 | --- | --- | --- |
 | `agent/` | `/opt/archie/agent` | live agent source |
 | `shared/` | `/opt/archie/shared` | shared source (read-only) |
-| `persona/` | `/opt/archie/persona` | prompts, agents, skills |
+| `persona/` | `/opt/archie/persona` | prompts, agents, procedure skills |
+| `plugins/` | `/opt/archie/plugins` | integration manifests, code, skills (read-only; `ARCHIE_PLUGINS_DIR`) |
+| `container/bin/gh` | `/usr/local/bin/gh` | `gh` wrapper (read-only) |
 | selected workspace | `/workspace` | project under development |
 | `ARCHIE_HOME_DIR` (normally `~/.nexus`) | `/home/archie/.nexus` | config, credentials, sessions, brain |
 | `~/.agents` | `/home/archie/.agents` | agent-related user content |
 
-The image contains dependencies and system tools. `gh` on `PATH` is a repository wrapper (`container/bin/gh`) around the real binary, `gh-base`; it selects a GitHub token per call from the credential store, so GitHub tokens are not part of the container environment (see [Authentication and credentials](auth-credentials.md#github-cli-token-selection)). The runtime user is `archie`, with its UID matched to the host user during `archie build`. The home and persona mounts are read-write: a session can modify shared user data and repository-tracked persona content. Treat those mounts as a deliberate trust boundary, not as isolated per-container state.
+The image contains dependencies and system tools. `gh` on `PATH` is a repository wrapper (`container/bin/gh`, bind-mounted over the copy in the image) around the real binary, `gh-base`; it selects a GitHub token per call from the credential store, so GitHub tokens are not part of the container environment (see [Authentication and credentials](auth-credentials.md#github-cli-token-selection)). The runtime user is `archie`, with its UID matched to the host user during `archie build`. The home and persona mounts are read-write: a session can modify shared user data and repository-tracked persona content. Treat those mounts as a deliberate trust boundary, not as isolated per-container state.
 
 ## Host HTTP API
 
@@ -197,7 +201,7 @@ The orchestrator writes only `llm_request` records to `<ARCHIE_HOME_DIR>/metrics
 
 ## Configuration, security, and ownership
 
-`shared/config.py` resolves `ARCHIE_HOME_DIR` (default `~/.nexus`) and `ARCHIE_PERSONA_DIR` (host repository `persona`, container `/opt/archie/persona`). `ARCHIE_BRAIN_DIR` defaults to `<ARCHIE_HOME_DIR>/brain`; a relative override is resolved beneath the home directory, while an absolute override is used as-is. An absolute brain override must also be available inside the container through the runtime environment/mount configuration. `ARCHIE_HOST` is a CLI-only `host[:port]` override for targeting an orchestrator and defaults to port 7600 when no port is supplied.
+`shared/config.py` resolves `ARCHIE_HOME_DIR` (default `~/.nexus`), `ARCHIE_PERSONA_DIR` (host repository `persona`, container `/opt/archie/persona`), and `ARCHIE_PLUGINS_DIR` (host repository `plugins`, container `/opt/archie/plugins`). `ARCHIE_BRAIN_DIR` defaults to `<ARCHIE_HOME_DIR>/brain`; a relative override is resolved beneath the home directory, while an absolute override is used as-is. An absolute brain override must also be available inside the container through the runtime environment/mount configuration. `ARCHIE_HOST` is a CLI-only `host[:port]` override for targeting an orchestrator and defaults to port 7600 when no port is supplied.
 
 `shared/schemas.py` loads `config.yaml` with defaults:
 
@@ -214,7 +218,10 @@ orchestrator:
     default:
       host: 127.0.0.1
       port: 7600
+plugins: {}
 ```
+
+`plugins.<id>` configures each plugin and is validated against its manifest; see [Configuration](config.md#plugins).
 
 Use `profile/value` CLI arguments to select a named orchestrator profile for workspace or session commands. `archie serve` binds to the configured default profile. Profiles with non-loopback hosts and these unauthenticated auth endpoints require private-network controls.
 
@@ -227,3 +234,4 @@ The agent owns the session process, provider requests, tool execution, and canon
 - **Changing mounts, ports, or lifecycle** affects `Dockerfile`, orchestrator lifecycle, readiness checks, security assumptions, and local setup instructions.
 - **Changing accounting** requires tests for model switches, interruptions/errors, duplicate ingestion, and nested scopes.
 - **Changing `persona/`** changes runtime prompts or capabilities without changing package APIs; review the resulting agent behavior and relevant skill/agent metadata.
+- **Changing `plugins/<id>/`** changes one integration; `plugin.yaml` changes also affect host-side credential providers and `config.yaml` validation. Follow [Plugins](plugins.md) and run the contract tests in `tests/test_plugin_layout.py`.

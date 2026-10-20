@@ -52,16 +52,13 @@ class FileTooLargeError(ToolError):
 _TOOLS: dict[str, object] = {}
 
 
-def tool(
-    fn=None,
-    *,
-    guidelines=(),
-    native: bool = True,
-    exec_enabled: bool = True,
-    exec_docs: bool = True,
-    namespace: str | None = None,
-):
-    """Decorator that registers an async function as an exec tool.
+def tool(fn=None, *, guidelines=()):
+    """Decorator that registers an async function as a core tool.
+
+    Every core tool is a native tool, a flat top-level name inside ``exec``,
+    and is listed in the exec description. ``guidelines`` are added to the
+    system prompt. Integrations are plugins and register with
+    ``archie_agent.exec.plugin.tool`` instead (see docs/plugins.md).
 
     Usage:
         @tool(guidelines=("Use `read` to examine files.",))
@@ -72,20 +69,11 @@ def tool(
         @tool
         async def some_tool():
             ...
-
-        # Mark a tool as code-mode-only (excluded from native registration):
-        @tool(native=False)
-        async def internal_tool():
-            ...
     """
 
     def decorator(f):
         f._guidelines = tuple(guidelines)
-        f._native = native
-        f._exec_enabled = exec_enabled
-        f._exec_docs = exec_docs
-        f._namespace = namespace
-        key = f"{namespace}.{f.__name__}" if namespace else f.__name__
+        key = f.__name__
         if key in _TOOLS:
             raise ValueError(f"Duplicate exec tool registration: {key}")
         _TOOLS[key] = f
@@ -98,31 +86,23 @@ def tool(
 
 
 def get_all_tools() -> dict:
-    """Return all registered exec tool functions.
+    """Return all registered core tool functions.
 
-    Returns a dict of name → async function. runner.py injects these
-    into the model code's namespace.
+    Returns a dict of name → async function. These become the native tool
+    specs, the exec description and the system-prompt guidelines; runner.py
+    injects them flat into the model code's namespace. Plugin tools are not
+    included (D22).
     """
     # Import submodules to trigger @tool registration
     from archie_agent.exec.tools import (  # noqa: F401
         brain,
-        calendar,
         code,
-        datadog,
-        discovery,
-        drive,
         fs,
-        incident_io,
-        jira,
-        mail,
-        meet,
-        notion,
         shell,
-        slack,
         web,
     )
 
-    return {key: value for key, value in _TOOLS.items() if getattr(value, "_exec_enabled", True)}
+    return dict(_TOOLS)
 
 
 def get_tool_guidelines() -> list[str]:

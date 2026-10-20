@@ -1,12 +1,16 @@
-"""Provider registry — code-defined service descriptors.
+"""Provider registry — service descriptors.
 
 Defines how each service authenticates (static token vs OAuth) and the
-configuration needed for OAuth flows (endpoints, scopes, etc.).
+configuration needed for OAuth flows (endpoints, scopes, etc.). ``bedrock`` is
+defined here; every other provider comes from a ``plugins/<id>/plugin.yaml``
+``credential`` block.
 """
 
 import msgspec
 
-from archie_shared.credentials.api import AuthProviderOverride
+from archie_shared.plugins.config import PluginAuthConfig
+from archie_shared.plugins.credentials import credential_plugins, provider_from_manifest
+from archie_shared.plugins.manifest import load_manifests
 
 
 class StaticProvider(msgspec.Struct, forbid_unknown_fields=True):
@@ -15,15 +19,17 @@ class StaticProvider(msgspec.Struct, forbid_unknown_fields=True):
     Attributes:
         name: Service name (matches CREDENTIAL_TYPES key).
         fields: List of credential field names the user must provide.
+        login: Login method; ``"aws_chain"`` reads fields from the standard AWS
+            credential chain (in ``fields`` order: access key, secret, session token).
         can_refresh_noninteractive: Whether credentials can be refreshed
             without user interaction. Always False for static providers.
     """
 
     name: str
     fields: list[str]
-    site: str | None = None
     env: dict[str, str] = msgspec.field(default_factory=dict)
     set_env: bool = False
+    login: str | None = None
     can_refresh_noninteractive: bool = False
 
 
@@ -61,7 +67,7 @@ class OAuthProvider(msgspec.Struct, forbid_unknown_fields=True):
 
 
 def effective_provider(
-    name: str, override: "AuthProviderOverride | None" = None
+    name: str, override: PluginAuthConfig | None = None
 ) -> StaticProvider | OAuthProvider:
     """Return a code-defined provider with optional typed OAuth overrides."""
     provider = PROVIDERS[name]
@@ -81,6 +87,13 @@ def effective_provider(
     return type(provider)(**values)
 
 
+def _generated_providers() -> dict[str, StaticProvider | OAuthProvider]:
+    plugins = load_manifests()
+    return {loaded.name: provider_from_manifest(loaded) for loaded in credential_plugins(plugins)}
+
+
+# Core provider (D10): bedrock has no plugin manifest. Every other provider is
+# generated from its plugin's ``credential`` block, ordered by plugin id.
 PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
     "bedrock": StaticProvider(
         name="bedrock",
@@ -91,109 +104,8 @@ PROVIDERS: dict[str, StaticProvider | OAuthProvider] = {
             "aws_session_token": "AWS_SESSION_TOKEN",
         },
         set_env=False,
+        login="aws_chain",
         can_refresh_noninteractive=False,
     ),
-    "linear": StaticProvider(
-        name="linear",
-        fields=["token"],
-    ),
-    # Not projected into the container environment: the container gh wrapper reads the
-    # matching token from credentials.yaml on each call.
-    "github": StaticProvider(
-        name="github",
-        fields=["personal_token", "work_token"],
-    ),
-    "aws": StaticProvider(
-        name="aws",
-        fields=["access_key_id", "secret_access_key", "session_token"],
-        env={
-            "access_key_id": "AWS_ACCESS_KEY_ID",
-            "secret_access_key": "AWS_SECRET_ACCESS_KEY",
-            "session_token": "AWS_SESSION_TOKEN",
-        },
-        set_env=True,
-    ),
-    "scalr": StaticProvider(
-        name="scalr",
-        fields=["token", "hostname", "account"],
-        env={
-            "token": "SCALR_TOKEN",
-            "hostname": "SCALR_HOSTNAME",
-            "account": "SCALR_ACCOUNT",
-        },
-        set_env=True,
-    ),
-    "jira": StaticProvider(
-        name="jira",
-        fields=["email", "token", "cloud_id"],
-    ),
-    "datadog": StaticProvider(
-        name="datadog",
-        fields=["api_key", "app_key"],
-        site="app.datadoghq.eu",
-    ),
-    "incident_io": StaticProvider(
-        name="incident_io",
-        fields=["api_key"],
-    ),
-    "notion": OAuthProvider(
-        name="notion",
-        server_url="https://mcp.notion.com",
-    ),
-    "slack": OAuthProvider(
-        name="slack",
-        authorization_endpoint="https://slack.com/oauth/v2/authorize",
-        token_endpoint="https://slack.com/api/oauth.v2.access",
-        token_path="authed_user.access_token",
-        refresh_token_path="authed_user.refresh_token",
-        expires_in_path="authed_user.expires_in",
-        extra_params={
-            # User-token scopes, one group per Slack API the slack.* tools call.
-            # Slack grants are additive: re-authorizing adds to an existing token.
-            "user_scope": " ".join(
-                (
-                    # conversations / name resolution: users.conversations (all types)
-                    "channels:read",
-                    "groups:read",
-                    "im:read",
-                    "mpim:read",
-                    # messages / thread: conversations.history, conversations.replies
-                    "channels:history",
-                    "groups:history",
-                    "im:history",
-                    "mpim:history",
-                    # users: users.list (email always requested)
-                    "users:read",
-                    "users:read.email",
-                    # search: assistant.search.context (granular search scopes)
-                    "search:read.public",
-                    "search:read.private",
-                    "search:read.im",
-                    "search:read.mpim",
-                    "search:read.files",
-                    "search:read.users",
-                    # reactions: reactions.get / react: reactions.add, reactions.remove
-                    "reactions:read",
-                    "reactions:write",
-                    # send_message: chat.postMessage
-                    "chat:write",
-                )
-            ),
-        },
-    ),
-    "google": OAuthProvider(
-        name="google",
-        authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
-        token_endpoint="https://oauth2.googleapis.com/token",
-        scopes=[
-            "https://www.googleapis.com/auth/gmail.readonly",
-            "https://www.googleapis.com/auth/calendar.readonly",
-            "https://www.googleapis.com/auth/drive.readonly",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/gmail.modify",
-            "https://www.googleapis.com/auth/meetings.space.readonly",
-            "https://www.googleapis.com/auth/drive.meet.readonly",
-        ],
-        extra_params={"access_type": "offline", "prompt": "consent"},
-    ),
+    **_generated_providers(),
 }

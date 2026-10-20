@@ -50,8 +50,9 @@ from archie_agent.tools import ToolRegistry, ToolSpec
 
 log = logging.getLogger(__name__)
 
-# A fixed snapshot, or an async callable that returns the live snapshot per exec call.
-ToolPolicySource = dict | Callable[[], Awaitable[dict]] | None
+# A fixed runner context ({"policy", "settings", "enabled"}), or an async callable that
+# returns the context (with the live policy) per exec call.
+RunnerContextSource = dict | Callable[[], Awaitable[dict]] | None
 
 
 @dataclass(frozen=True)
@@ -180,12 +181,12 @@ class ChildDispatch:
         *,
         exec_python: str | None = None,
         exec_run_root: Path | None = None,
-        tool_policy: ToolPolicySource = None,
+        runner_context: RunnerContextSource = None,
     ) -> None:
         self.registry = registry
         self.exec_python = exec_python
         self.exec_run_root = exec_run_root
-        self.tool_policy = tool_policy if tool_policy is not None else {}
+        self.runner_context = runner_context
         self.active_proc: asyncio.subprocess.Process | None = None
         self.pending_tools: dict[str, object] = {}
 
@@ -207,7 +208,7 @@ class ChildDispatch:
                     kwargs["python"] = self.exec_python
                 if self.exec_run_root is not None:
                     kwargs["run_root"] = self.exec_run_root
-                kwargs["policy_snapshot"] = await self._resolve_tool_policy()
+                kwargs["runner_context"] = await self._resolve_runner_context()
                 envelope = await run_exec(str(block.input.get("source", "")), **kwargs)
                 content = format_result(envelope)
                 is_error = not envelope.ok
@@ -239,11 +240,11 @@ class ChildDispatch:
             images=images,
         )
 
-    async def _resolve_tool_policy(self) -> dict:
-        policy = self.tool_policy
-        if callable(policy):
-            return await policy()
-        return policy
+    async def _resolve_runner_context(self) -> dict | None:
+        context = self.runner_context
+        if callable(context):
+            return await context()
+        return context
 
     def on_process_start(self, proc: asyncio.subprocess.Process) -> None:
         self.active_proc = proc
@@ -306,7 +307,7 @@ def create_task_tool(
     emit: Callable[[SessionEvent], Awaitable[None]],
     exec_python: str | None = None,
     exec_run_root: Path | None = None,
-    tool_policy: ToolPolicySource = None,
+    runner_context: RunnerContextSource = None,
     turn_cost_limit: float = 50.0,
     max_concurrent: int = 3,
     live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
@@ -425,7 +426,7 @@ def create_task_tool(
                     child_registry,
                     exec_python=exec_python,
                     exec_run_root=exec_run_root,
-                    tool_policy=tool_policy,
+                    runner_context=runner_context,
                 )
                 import threading
 

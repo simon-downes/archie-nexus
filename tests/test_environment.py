@@ -47,6 +47,16 @@ def test_render_key_facts():
     assert "don't install into it" in text
 
 
+def test_render_lists_all_self_paths():
+    paths = ("/opt/archie/agent", "/opt/archie/persona", "/opt/archie/plugins")
+    text = render(_facts(archie_self=paths), "/workspace")
+    assert (
+        "/opt/archie/agent, /opt/archie/persona and /opt/archie/plugins hold this agent's own code"
+        in text
+    )
+    assert "/opt/archie/plugins" in environment.ARCHIE_SELF_PATHS
+
+
 def test_render_omits_absent_facts():
     text = render(
         _facts(

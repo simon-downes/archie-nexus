@@ -7,11 +7,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import msgspec
 from archie_shared.credentials.api import (
-    AuthProviderOverride,
     CredentialStatus,
     OAuthFlowStatus,
     OAuthProviderResponse,
     StaticProviderResponse,
+    provider_override,
 )
 from archie_shared.credentials.models import CREDENTIAL_TYPES
 from archie_shared.credentials.oauth import build_auth_url, generate_pkce
@@ -26,6 +26,7 @@ from archie_shared.credentials.store import (
     get_credential,
     replace_credential,
 )
+from archie_shared.plugins.config import PluginAuthConfig, is_enabled
 from archie_shared.schemas import NexusConfig
 
 
@@ -222,7 +223,7 @@ class AuthService:
         refresh = getattr(credential, "refresh_token", None) if credential else None
         if not refresh:
             raise AuthError(f"Provider '{provider_name}' requires reauthentication")
-        override = self.config.auth.providers.get(provider_name, AuthProviderOverride())
+        override = provider_override(self.config, provider_name) or PluginAuthConfig()
         client_id = override.client_id or getattr(credential, "client_id", None)
         token_endpoint = (
             override.token_endpoint
@@ -303,7 +304,7 @@ class AuthService:
             )
             if credential is not None and getattr(credential, key, None) is not None
         }
-        override = self.config.auth.providers.get(provider_name, AuthProviderOverride())
+        override = provider_override(self.config, provider_name) or PluginAuthConfig()
         endpoints = {
             "authorization_endpoint": provider.authorization_endpoint,
             "token_endpoint": provider.token_endpoint,
@@ -392,31 +393,30 @@ class AuthService:
         return flow
 
     def provider(self, name: str):
-        if name not in PROVIDERS:
+        if name not in PROVIDERS or not is_enabled(name, self.config):
             raise UnknownProviderError(f"Unknown auth provider '{name}'")
-        override = self.config.auth.providers.get(name)
-        return effective_provider(name, override)
+        return effective_provider(name, provider_override(self.config, name))
 
     def provider_names(self):
-        return list(PROVIDERS)
+        """Provider ids, omitting plugins disabled in config (startup-only)."""
+        return [name for name in PROVIDERS if is_enabled(name, self.config)]
 
     def providers(self, redirect_uri: str | None = None):
         result = []
-        for name in PROVIDERS:
+        for name in self.provider_names():
             provider = self.provider(name)
             if isinstance(provider, StaticProvider):
                 result.append(
                     StaticProviderResponse(
                         name=name,
                         fields=provider.fields,
-                        site=provider.site,
                         can_refresh_noninteractive=provider.can_refresh_noninteractive,
                         env=provider.env,
                         set_env=provider.set_env,
                     )
                 )
             else:
-                override = self.config.auth.providers.get(name, AuthProviderOverride())
+                override = provider_override(self.config, name) or PluginAuthConfig()
                 credential = get_credential(name, CREDENTIAL_TYPES[name])
                 persisted = (
                     {

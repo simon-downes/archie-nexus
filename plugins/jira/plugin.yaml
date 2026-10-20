@@ -1,0 +1,10 @@
+name: jira
+namespaces: [jira]
+entry: archie_plugins.jira
+credential:
+  kind: static
+  fields: [email, token, cloud_id]
+policy:
+  read: {enabled: true}
+  write: {enabled: false}
+  scope: {type: "list[str]"}

@@ -1,0 +1,11 @@
+name: datadog
+namespaces: [datadog]
+entry: archie_plugins.datadog
+credential:
+  kind: static
+  fields: [api_key, app_key]
+policy:
+  read: {enabled: true}
+  write: {enabled: false}
+settings:
+  site: {type: str, default: app.datadoghq.eu}

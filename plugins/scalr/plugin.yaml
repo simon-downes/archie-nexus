@@ -1,0 +1,10 @@
+name: scalr
+credential:
+  kind: static
+  fields: [token]
+  env:
+    token: SCALR_TOKEN
+  set_env: true
+settings:
+  hostname: {type: str, env: SCALR_HOSTNAME}
+  account: {type: str, env: SCALR_ACCOUNT}

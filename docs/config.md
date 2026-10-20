@@ -26,21 +26,101 @@ orchestrator:
     default:
       host: 127.0.0.1
       port: 7600
-auth:
-  providers: {}
-tools: {}
+plugins: {}
 ```
 
-See [Authentication and credentials](auth-credentials.md) for `auth` provider settings and
-credential storage, including `auth.providers.github.work_orgs`, which selects the token the
-container `gh` wrapper uses. The `tools` section controls provider tool policy. The agent re-reads it
-before each exec call, so `tools` edits apply to running sessions; if the file is invalid, the
-last valid policy stays in force and the TUI shows a warning. `tools.incident_io` accepts only
-`read.enabled` (default `true`): the incident.io tools are read-only and do not support a scope.
-`tools.datadog` takes `read.enabled` (default true) and `write.enabled` (default false, needed to
-create or update monitors tagged `managedby:archie`); a `scope` is not supported.
-Other sections are read at startup.
-`cli` and `web` are currently reserved for future settings.
+Each section is read at startup, except `plugins.<id>.policy` (see below). `cli` and `web` are currently reserved for future settings.
+
+## Plugins
+
+The `plugins` section configures each plugin under `plugins/<id>/` by its id. Every key is
+optional, and an unknown plugin id or field is a load error:
+
+- `enabled` (default `true`): `false` hides the plugin everywhere: its namespaces, skills,
+  credential login and refresh, environment variables and startup hook.
+- `policy`: overrides the `read` and `write` blocks of the plugin's tool policy. Each block
+  takes `enabled` and, where the plugin supports one, a `scope`.
+- `auth`: overrides for the plugin's credential provider, such as an OAuth `client_id`. See
+  [Authentication and credentials](auth-credentials.md).
+- `settings`: values the plugin's code reads, declared in its `plugin.yaml`.
+
+The manifest keys behind each of these are described in [Plugins](plugins.md).
+
+The agent re-reads `policy` before each exec call, so policy edits apply to running
+sessions; if the file is invalid, the last valid policy stays in force and the TUI shows a
+warning. `enabled`, `auth` and `settings` are read when a session starts. Setting
+`enabled: false` in a running session also turns both policy blocks off from the next exec
+call; the rest takes effect in the next session.
+
+```yaml
+plugins:
+  datadog:
+    settings:
+      site: datadoghq.com      # default app.datadoghq.eu
+  github:
+    settings:
+      work_orgs: [tillo]       # owners whose repos use github.work_token
+  slack:
+    auth:
+      client_id: "111.222"
+    policy:
+      read: {enabled: true, scope: {deny: [C0123456789, "#hr-private"]}}
+  google:
+    auth:
+      client_id: your-client-id.apps.googleusercontent.com
+  jira:
+    policy:
+      write: {enabled: true, scope: [OPS, PLAT]}
+  notion:
+    policy:
+      write:
+        enabled: true
+        scope: {pages: [page-id], databases: [database-id]}
+```
+
+Per-plugin notes (each plugin's full settings, policy and scope rules are in its
+`plugins/<id>/README.md`; see the [index](../plugins/README.md)):
+
+- `jira` takes a list of project keys as its scope.
+- `notion` takes `pages` and `databases` lists of root IDs as its scope; a resource is in
+  scope when it is, or sits under, one of them.
+- `slack` takes a `deny` list of conversation IDs or `#channel` names as its scope.
+- `incident_io` accepts only `policy.read.enabled` (default `true`): the incident.io tools
+  are read-only and do not support a scope.
+- `datadog` takes `policy.read.enabled` (default `true`) and `policy.write.enabled`
+  (default `false`, needed to create or update monitors tagged `managedby:archie`); a
+  `scope` is not supported.
+- `google` takes `policy.read.enabled` (default `true`) and `policy.write.enabled`
+  (default `false`, needed for mail label/archive changes); a `scope` is not supported.
+  `settings.timezone` (default `Europe/London`) sets the day boundaries for
+  `calendar.today()` and `calendar.upcoming()`; an unknown zone falls back to the default.
+
+## Migrating an old config
+
+Older configs used a `tools:` section for tool policy and `auth.providers` for provider
+overrides. Nexus no longer loads a file that has either section; the error names
+`archie config migrate`, which rewrites the file in place:
+
+```bash
+archie config migrate            # <ARCHIE_HOME_DIR>/config.yaml
+archie config migrate --path ./config.yaml
+```
+
+It moves `tools.<id>` to `plugins.<id>.policy`, `auth.providers.github.work_orgs` to
+`plugins.github.settings.work_orgs`, `auth.providers.datadog.site` to
+`plugins.datadog.settings.site`, and every other `auth.providers.<id>.<field>` to
+`plugins.<id>.auth.<field>`. `linear` entries are dropped with a note. An existing
+`plugins` section is merged; the command exits 1 naming the key if a value conflicts, or if
+a key has no new location (for example `auth.providers.bedrock`).
+
+The result is validated before anything is written. The original is copied to
+`config.yaml.bak-<UTC timestamp>` and the file is replaced atomically with the same mode.
+Comments are not kept; the backup has them. Running it again prints "already migrated" and
+changes nothing.
+
+To deploy this change: running containers bind-mount the host `agent/` directory, so stop
+all sessions and the orchestrator **before** merging or pulling. Then run
+`archie config migrate`, then `archie serve`.
 
 ## Host mounts
 

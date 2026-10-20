@@ -1,10 +1,15 @@
-"""Credential model structs — one per service.
+"""Credential model structs.
 
+``BedrockCredential`` (core) and ``OAuthCredential`` (all OAuth providers) are
+hand-written; static plugin credentials are generated from their manifests.
 All fields are Optional (default None) so partially-populated entries load
 without error. forbid_unknown_fields=True catches typos/stale fields.
 """
 
 import msgspec
+
+from archie_shared.plugins.credentials import credential_plugins, credential_type_from_manifest
+from archie_shared.plugins.manifest import load_manifests
 
 
 class BedrockCredential(msgspec.Struct, forbid_unknown_fields=True):
@@ -32,70 +37,16 @@ class OAuthCredential(msgspec.Struct, forbid_unknown_fields=True):
     registration_endpoint: str | None = None
 
 
-class LinearCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Linear API token."""
-
-    token: str | None = None
-
-
-class GithubCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """GitHub fine-grained tokens: one for work organisations, one for everything else.
-
-    The container gh wrapper picks between them per call; see auth.providers.github.work_orgs.
-    """
-
-    personal_token: str | None = None
-    work_token: str | None = None
+def _generated_types() -> dict[str, type]:
+    plugins = load_manifests()
+    return {
+        loaded.name: credential_type_from_manifest(loaded) for loaded in credential_plugins(plugins)
+    }
 
 
-class ScalrCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Scalr API token, hostname, and account."""
-
-    token: str | None = None
-    hostname: str | None = None
-    account: str | None = None
-
-
-class JiraCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Jira Cloud credentials."""
-
-    email: str | None = None
-    token: str | None = None
-    cloud_id: str | None = None
-
-
-class DatadogCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Datadog API and application keys."""
-
-    api_key: str | None = None
-    app_key: str | None = None
-
-
-class IncidentIoCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """incident.io API key."""
-
-    api_key: str | None = None
-
-
-class AwsCredential(msgspec.Struct, forbid_unknown_fields=True):
-    """Generic AWS credentials (for non-Bedrock AWS services)."""
-
-    access_key_id: str | None = None
-    secret_access_key: str | None = None
-    session_token: str | None = None
-
-
-# Registry: service name → credential struct type
+# Registry: service name → credential struct type. ``bedrock`` is core; the rest are
+# generated from plugin manifests (static → ``<Camel>Credential``, oauth → OAuthCredential).
 CREDENTIAL_TYPES: dict[str, type] = {
     "bedrock": BedrockCredential,
-    "notion": OAuthCredential,
-    "slack": OAuthCredential,
-    "google": OAuthCredential,
-    "linear": LinearCredential,
-    "github": GithubCredential,
-    "scalr": ScalrCredential,
-    "jira": JiraCredential,
-    "datadog": DatadogCredential,
-    "incident_io": IncidentIoCredential,
-    "aws": AwsCredential,
+    **_generated_types(),
 }
