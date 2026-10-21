@@ -13,6 +13,7 @@ from .common import (
     bounded_limit,
     clean,
     credential,
+    drive_text_query,
     google_json,
     require_read,
     safe_id,
@@ -107,7 +108,7 @@ async def search_sources(
             "https://www.googleapis.com/drive/v3/files",
             token,
             params={
-                "q": f"fullText contains '{query}'",
+                "q": drive_text_query(query),
                 "pageSize": min(limit, 50),
                 "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
             },

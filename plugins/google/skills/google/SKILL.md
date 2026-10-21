@@ -283,9 +283,9 @@ Drive is read-only. No Drive mutations, binary downloads, arbitrary URL fetches,
 
 ### `drive.search(query, limit=20)`
 
-Searches bounded Drive metadata.
+Searches bounded Drive metadata for files whose name or content contains the text. Trashed files are excluded.
 
-- `query`: 1–500 characters.
+- `query`: 1–500 characters of plain text.
 - `limit`: integer from 1–50.
 
 ### `drive.list(limit=100)`
