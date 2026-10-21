@@ -14,6 +14,11 @@ _DATA_SOURCE_RE = re.compile(
 _VIEW_RE = re.compile(r'<view\b[^>]*?url="(?:\{\{)?(view://[^"}]+)(?:\}\})?"')
 _PROPERTIES_RE = re.compile(r"<properties>\s*(\{.*?\})\s*</properties>", re.DOTALL)
 _CONTENT_RE = re.compile(r"<content>\s*(.*?)\s*</content>", re.DOTALL)
+_STATE_RE = re.compile(r"<data-source-state>\s*(\{.*?\})\s*</data-source-state>", re.DOTALL)
+# Fetch reports status groups by key; filters take Notion's display label (case-insensitive).
+_STATUS_GROUPS = {"to_do": "To-do", "in_progress": "In progress", "complete": "Complete"}
+_MAX_PROPERTIES = 200
+_MAX_OPTIONS = 100
 _COMMENT_RE = re.compile(
     r'<comment\s+id="([^"]+)"\s+url="([^"]+)"\s+user-url="([^"]+)"\s+datetime="([^"]+)">(.*?)</comment>',
     re.DOTALL,
@@ -23,6 +28,55 @@ _COMMENT_RE = re.compile(
 def _canonical_id(value: str) -> str:
     compact = value.replace("-", "").lower()
     return f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-{compact[16:20]}-{compact[20:]}"
+
+
+def _option_names(options: Any) -> list[str]:
+    if not isinstance(options, list):
+        return []
+    names = [item.get("name") for item in options if isinstance(item, dict)]
+    return [name for name in names if isinstance(name, str)][:_MAX_OPTIONS]
+
+
+def _project_property(spec: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"type": spec["type"]}
+    if "options" in spec:
+        result["options"] = _option_names(spec["options"])
+    groups = spec.get("groups")
+    if isinstance(groups, dict):
+        result["options"] = [name for value in groups.values() for name in _option_names(value)][
+            :_MAX_OPTIONS
+        ]
+        result["groups"] = {
+            label: _option_names(groups[key])
+            for key, label in _STATUS_GROUPS.items()
+            if key in groups
+        }
+    return result
+
+
+def _parse_schemas(text: str) -> dict[str, dict[str, Any]]:
+    """Extract each data source's property names, types, and options from fetch text."""
+    schemas: dict[str, dict[str, Any]] = {}
+    for raw in _STATE_RE.findall(text):
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if (
+            not isinstance(state, dict)
+            or not isinstance(state.get("url"), str)
+            or not isinstance(state.get("schema"), dict)
+        ):
+            continue
+        properties = {
+            name: _project_property(spec)
+            for name, spec in list(state["schema"].items())[:_MAX_PROPERTIES]
+            if isinstance(name, str)
+            and isinstance(spec, dict)
+            and isinstance(spec.get("type"), str)
+        }
+        schemas[state["url"]] = {"name": state.get("name"), "properties": properties}
+    return schemas
 
 
 def normalize_fetch(value: Any, requested_id: str) -> dict[str, Any] | None:
@@ -46,6 +100,9 @@ def normalize_fetch(value: Any, requested_id: str) -> dict[str, Any] | None:
         "data_sources": _DATA_SOURCE_RE.findall(text),
         "views": [{"url": url} for url in _VIEW_RE.findall(text)],
     }
+    schemas = _parse_schemas(text)
+    if schemas:
+        result["schemas"] = schemas
     properties_match = _PROPERTIES_RE.search(text)
     if properties_match:
         try:

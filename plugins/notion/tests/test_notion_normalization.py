@@ -1,5 +1,7 @@
 """Tests for live Notion MCP envelope normalization."""
 
+import json
+
 from archie_plugins.notion.normalization import normalize_comments, normalize_fetch
 
 PAGE = "3de8a35c22c380c580def0f67737abc7"
@@ -38,6 +40,69 @@ def test_normalize_fetch_extracts_wrapped_database_urls():
     result = normalize_fetch(raw, PAGE)
     assert result["data_sources"] == ["collection://source-1"]
     assert result["views"] == [{"url": "view://view-1"}]
+
+
+STATE = {
+    "name": "Tasks Database",
+    "url": "collection://source-1",
+    "schema": {
+        " Status": {
+            "name": " Status",
+            "type": "status",
+            "groups": {
+                "complete": [{"name": "Done", "url": "collectionPropertyOption://x/1"}],
+                "current": [],
+                "in_progress": [{"name": "In progress", "url": "collectionPropertyOption://x/2"}],
+                "to_do": [{"name": "To Do", "url": "collectionPropertyOption://x/3"}],
+            },
+        },
+        "Tag": {
+            "name": "Tag",
+            "type": "select",
+            "options": [{"color": "pink", "name": "Now", "url": "collectionPropertyOption://x/4"}],
+        },
+        "Due": {"name": "Due", "type": "date", "querySqlColumns": {"columns": []}},
+        "Broken": {"name": "Broken"},
+    },
+}
+
+
+def test_normalize_fetch_extracts_data_source_schema():
+    raw = {
+        "metadata": {"type": "database"},
+        "text": (
+            '<data-sources><data-source url="{{collection://source-1}}">\n'
+            f"<data-source-state>\n{json.dumps(STATE)}\n</data-source-state>\n"
+            "<sqlite-table>...</sqlite-table></data-source></data-sources>"
+        ),
+    }
+    result = normalize_fetch(raw, PAGE)
+    assert result["schemas"] == {
+        "collection://source-1": {
+            "name": "Tasks Database",
+            "properties": {
+                " Status": {
+                    "type": "status",
+                    "options": ["Done", "In progress", "To Do"],
+                    "groups": {
+                        "To-do": ["To Do"],
+                        "In progress": ["In progress"],
+                        "Complete": ["Done"],
+                    },
+                },
+                "Tag": {"type": "select", "options": ["Now"]},
+                "Due": {"type": "date"},
+            },
+        }
+    }
+
+
+def test_normalize_fetch_skips_unparseable_schema():
+    raw = {
+        "metadata": {"type": "database"},
+        "text": "<data-source-state>\n{not json}\n</data-source-state>",
+    }
+    assert "schemas" not in normalize_fetch(raw, PAGE)
 
 
 def test_normalize_comments_empty_suggested_edits_response():

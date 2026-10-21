@@ -102,7 +102,31 @@ Search returns a list of bounded objects. Fields are included when Notion provid
 
 ### Database projection
 
-`get_database` returns the same bounded metadata fields as a page, with `type` normally `database` or `data_source`. When `include_views=True` and views are returned, it includes up to 50 view objects under `views`. This is a bounded metadata projection, not a promise that the complete Notion schema/properties are returned.
+`get_database` returns the same bounded metadata fields as a page, with `type` normally `database` or `data_source`. It also returns `data_sources`, one entry per data source, with the property names, types, and options that `query_database` filters need. When `include_views=True` and views are returned, it includes up to 50 view objects under `views`.
+
+```json
+{
+  "id": "2558a35c-...",
+  "type": "database",
+  "title": "Tasks Database",
+  "data_sources": [
+    {
+      "url": "collection://2558a35c-...",
+      "name": "Tasks Database",
+      "properties": {
+        " Status": {"type": "status", "options": ["Done", "In progress", "To Do"],
+                    "groups": {"To-do": ["To Do"], "In progress": ["In progress"], "Complete": ["Done"]}},
+        "Name": {"type": "title"},
+        "Tag": {"type": "select", "options": ["Now", "Next", "Later"]},
+        "Due": {"type": "date"}
+      }
+    }
+  ],
+  "views": [{"url": "view://2558a35c-..."}]
+}
+```
+
+Property names are exact keys and can include leading spaces. `properties` is `null` when Notion did not return a schema for that data source. Up to 200 properties and 100 options per property are included.
 
 ### Rows and comments
 
@@ -140,18 +164,58 @@ Fetches one authorized page. A page root or proven descendant is allowed. `inclu
 
 ### `notion.get_database(id_or_url, include_views=True)`
 
-Fetches one authorized database/data source. It returns bounded metadata and, when requested and available, up to 50 views. It does not guarantee a complete database schema projection.
+Fetches one authorized database/data source. It returns bounded metadata, each data source's property schema (see "Database projection"), and, when requested and available, up to 50 views. Call it before building a `query_database` filter or sort.
 
 ### `notion.query_database(id_or_url, view=None, data_source=None, filter=None, sort=None, limit=50)`
 
 Authorizes the database before issuing the row query. `limit` must be `1..100`.
 
-- `data_source`: optional `collection://...` URL returned by the database metadata. The first data source is used by default.
-- `view`: optional `view://...` URL returned by the database metadata. View queries use the provider's view mode.
-- `filter`: optional provider-shaped structured filter object. Do not pass expression strings.
+- `data_source`: optional `collection://...` URL from `get_database` `data_sources[].url`. The first data source is used by default.
+- `view`: optional `view://...` URL returned by the database metadata. View queries use the provider's view mode, which applies the saved view's own filters and sorts. `filter` and `sort` cannot be combined with `view`.
+- `filter`: optional structured filter. The outer object must be a group: `{"type": "group", "operator": "and" | "or", "filters": [...]}` with 1–100 entries. Each entry is a property filter or a group; groups nest one level deep.
 - `sort`: optional list of objects with `property` and `direction`, where direction is `ascending` or `descending`.
 
-Rows are capped locally at `limit`. Use the database ID rather than a connected-source search result ID.
+To filter:
+
+1. Call `get_database` and read the chosen data source's `properties`.
+2. Build each property filter as `{"type": "property", "property": <exact key>, "propertyType": <its type>, "operator": <op>, "value": {...}}`, using the table below.
+3. For select, multi-select, and status values, use a name from `options`. For a status group, use a key from `groups`.
+
+| `propertyType` | Operators | `value` |
+|---|---|---|
+| `title`, `text`, `url`, `email`, `phone_number` | `string_is`, `string_is_not`, `string_contains`, `string_does_not_contain`, `string_starts_with`, `string_ends_with` | `{"type": "exact", "value": "<string>"}` |
+| `number` | `number_equals`, `number_does_not_equal`, `number_greater_than`, `number_less_than`, `number_greater_than_or_equal_to`, `number_less_than_or_equal_to` | `{"type": "exact", "value": <number>}` |
+| `select` | `enum_is`, `enum_is_not` | `{"type": "exact", "value": "<option>"}` (case-sensitive) |
+| `multi_select` | `enum_contains`, `enum_does_not_contain` | `{"type": "exact", "value": "<option>"}` (case-sensitive) |
+| `status` | `status_is`, `status_is_not` | `{"type": "is_option", "value": "<option>"}` or `{"type": "is_group", "value": "<group key>"}` |
+| `checkbox` | `checkbox_is`, `checkbox_is_not` | `{"type": "exact", "value": true}` |
+| `date`, `created_time`, `last_edited_time` | `date_is`, `date_is_before`, `date_is_after`, `date_is_on_or_before`, `date_is_on_or_after` | `{"type": "exact", "value": "<ISO date>"}` or `{"type": "relative", "value": "today"}` |
+| any | `is_empty`, `is_not_empty` | omit `value` |
+
+Select, multi-select, and status `value` may also be a list of value objects to match any of them.
+
+Before querying, `query_database` checks the filter and sort against the fetched schema. It raises `NotionValidationError` that lists the valid choices when a property name doesn't exist, `propertyType` doesn't match, or a select/status option or status group is unknown. These checks exist because the provider doesn't report such mistakes: it ignores an unknown property and returns unfiltered rows, and it returns no rows for an unknown option. Operators and value shapes are validated by the provider, which raises `NotionToolError`. If Notion returns no schema for the data source, a filtered or sorted query raises `NotionQueryError`; query without them or use a saved view.
+
+Example:
+
+```python
+async def main():
+    db = await notion.get_database("<database-id>")
+    props = db["data_sources"][0]["properties"]  # inspect names, types, options
+    return await notion.query_database(
+        "<database-id>",
+        filter={"type": "group", "operator": "and", "filters": [
+            {"type": "property", "property": " Status", "propertyType": "status",
+             "operator": "status_is", "value": {"type": "is_group", "value": "To-do"}},
+            {"type": "property", "property": "Due", "propertyType": "date",
+             "operator": "is_not_empty"},
+        ]},
+        sort=[{"property": "Due", "direction": "ascending"}],
+        limit=20,
+    )
+```
+
+Rows are capped locally at `limit`; there is no paging. Use the database ID rather than a connected-source search result ID.
 
 ### `notion.get_comments(id_or_url, limit=50)`
 
@@ -194,6 +258,7 @@ Errors are sanitized in the exec result. They do not contain credentials or raw 
 - `NotionWriteError`: the write target/parent is outside write scope. Do not mutate another resource unless the user confirms it.
 - `NotionConfigurationError`: credentials are missing, incomplete, or unreadable. Do not retry unchanged; configure authentication through Nexus.
 - `NotionAuthenticationError`: provider authentication failed. Reauthenticate; do not retry unchanged.
+- `NotionToolError`: the Notion MCP server rejected the request, for example an invalid filter shape or unknown property. The message carries the provider's reason. Correct the input; do not retry unchanged.
 - `NotionTransportError`: MCP connection or request failed. Reads may be retried after checking connectivity; a mutation may have been transmitted, so treat its outcome as unknown.
 - `NotionResponseError` / `NotionQueryError`: the provider returned an unsupported or malformed response. Do not automatically repeat a mutation.
 - `NotionMutationIndeterminateError`: a mutation may have succeeded or its result could not be confirmed. Fetch the target or list comments to verify before repeating. Never automatically retry.
@@ -215,14 +280,26 @@ async def main():
 async def main():
     rows = await notion.query_database(
         "<database-id>",
-        filter={"property": "Status", "select": {"equals": "Done"}},
+        filter={
+            "type": "group",
+            "operator": "and",
+            "filters": [
+                {
+                    "type": "property",
+                    "property": "Status",
+                    "propertyType": "status",
+                    "operator": "status_is",
+                    "value": {"type": "is_option", "value": "Done"},
+                }
+            ],
+        },
         sort=[{"property": "Delivery", "direction": "descending"}],
         limit=10,
     )
     return rows
 ```
 
-Filters and sorts use the provider's structured schema; inspect returned rows rather than assuming every property type is supported.
+Filters and sorts use the provider's structured schema. If a filter is rejected, read the `NotionToolError` message and check the property name and type with `get_database`.
 
 ### Confirm before writing
 

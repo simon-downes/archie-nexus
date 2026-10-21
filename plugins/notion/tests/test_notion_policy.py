@@ -7,6 +7,8 @@ import pytest
 from archie_agent.exec.plugin import PluginContextError, install_context
 from archie_plugins.notion.client import (
     NotionConfigurationError,
+    NotionResponseError,
+    NotionToolError,
     NotionTransportError,
     _session,
 )
@@ -113,3 +115,54 @@ def test_session_sends_the_context_access_token(policy):
         with pytest.raises(NotionTransportError, match="could not be completed"):
             asyncio.run(_session().__aenter__())
     assert seen == {"url": "https://mcp.notion.com/mcp", "headers": {"Authorization": "Bearer tok"}}
+
+
+def _wrapping_modules():
+    """Fake MCP modules whose transport and session each wrap body errors in a group,
+    as the real anyio TaskGroups do."""
+
+    class Wrapping:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, tb):
+            if exc is not None:
+                raise ExceptionGroup("unhandled errors in a TaskGroup", [exc])
+
+    class Client:
+        async def initialize(self):
+            pass
+
+    module = type(
+        "M", (), {"streamablehttp_client": staticmethod(lambda *a, **k: Wrapping((1, 2, 3)))}
+    )
+    session_module = type("S", (), {"ClientSession": staticmethod(lambda r, w: Wrapping(Client()))})
+    return {"mcp.client.streamable_http": module, "mcp.client.session": session_module}
+
+
+@pytest.mark.parametrize("error_type", [NotionToolError, NotionResponseError])
+def test_session_surfaces_doubly_nested_provider_errors(policy, error_type):
+    policy({}, credential=OAuthCredential(access_token="tok"))
+
+    async def run():
+        async with _session():
+            raise error_type("data: Invalid input")
+
+    with patch("importlib.import_module", side_effect=_wrapping_modules().__getitem__):
+        with pytest.raises(error_type, match="^data: Invalid input$"):
+            asyncio.run(run())
+
+
+def test_session_reports_nested_network_failure_as_transport(policy):
+    policy({}, credential=OAuthCredential(access_token="tok"))
+
+    async def run():
+        async with _session():
+            raise ConnectionError("reset")
+
+    with patch("importlib.import_module", side_effect=_wrapping_modules().__getitem__):
+        with pytest.raises(NotionTransportError, match="could not be completed"):
+            asyncio.run(run())

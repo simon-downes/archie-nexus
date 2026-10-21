@@ -70,3 +70,19 @@ async def test_get_database_returns_views():
     with patch("archie_plugins.notion.reads.notion_call", new=AsyncMock(return_value=raw)):
         result = await get_database(ROOT)
     assert result["views"] == [{"name": "All"}]
+
+
+async def test_get_database_returns_data_source_properties():
+    properties = {"Tag": {"type": "select", "options": ["Now"]}}
+    raw = {
+        "id": ROOT,
+        "type": "database",
+        "data_sources": ["collection://source-1", "collection://source-2"],
+        "schemas": {"collection://source-1": {"name": "Tasks", "properties": properties}},
+    }
+    with patch("archie_plugins.notion.reads.notion_call", new=AsyncMock(return_value=raw)):
+        result = await get_database(ROOT)
+    assert result["data_sources"] == [
+        {"url": "collection://source-1", "name": "Tasks", "properties": properties},
+        {"url": "collection://source-2", "properties": None},
+    ]
