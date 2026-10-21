@@ -212,7 +212,7 @@ async def query_database(
 
 @tool(namespace="notion")
 async def get_comments(id_or_url: str, *, limit: int = 50) -> list[dict[str, Any]]:
-    """Fetch bounded comments for a policy-authorized page."""
+    """Fetch up to 50 comments (page and block discussions, with replies) for an authorized page."""
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
         raise NotionValidationError("limit must be 1-50")
     page_id = resource_id(id_or_url)
@@ -223,6 +223,8 @@ async def get_comments(id_or_url: str, *, limit: int = 50) -> list[dict[str, Any
     from .reads import _authorize
 
     _authorize(page, page_id, policy, "page")
-    raw = await notion_call("notion-get-comments", {"page_id": page_id})
+    # Page-level and block-anchored discussions, each with all its replies; resolved
+    # discussions stay excluded (provider default).
+    raw = await notion_call("notion-get-comments", {"page_id": page_id, "include_all_blocks": True})
     comments = normalize_comments(raw)
     return comments[:limit]

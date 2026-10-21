@@ -133,7 +133,7 @@ Property names are exact keys and can include leading spaces. `properties` is `n
 
 `query_database` returns a list of provider-shaped row dictionaries, capped by `limit` (maximum 100). Rows are not converted into a universal property schema; inspect the returned keys.
 
-`get_comments` returns up to 50 dictionaries. XML discussion responses are normalized to:
+`get_comments` returns up to 50 dictionaries, one per comment, in thread order. XML discussion responses are normalized to:
 
 ```json
 {
@@ -222,17 +222,20 @@ Rows are capped locally at `limit`; there is no paging. Use the database ID rath
 
 Fetches up to 50 comments after authorizing the page. A page fetch is performed first to establish scope. No comments are returned for a blocked or metadata-unverifiable page.
 
+Covers page-level discussions and discussions anchored on blocks in the page, each with all its replies (flattened; a reply has its own `id`). Resolved discussions are not included.
+
 ## Write functions
 
 All writes require enabled write policy and a permitted target/parent in the write scope. Internal scope preflight fetches are also part of the write authorization sequence.
 
 ### `notion.create_page(parent_id_or_url, title=None, properties=None, content=None)`
 
-Creates one child page under a write-authorized parent.
+Creates one child page under a write-authorized page, or one row in a database.
 
-- `title`: optional non-empty string, maximum 500 characters.
-- `properties`: optional string mapping, maximum 50 fields and 2,000 characters per value.
-- `content`: optional string, maximum 8,000 characters; empty content is accepted.
+- `parent_id_or_url`: a page ID/URL, a database ID/URL, or a `collection://` data-source URL from `get_database`. A database with more than one data source needs the `collection://` URL.
+- `title`: optional non-empty string, maximum 500 characters. For a database row it sets the database's title property (for example `Name`); don't also set that property in `properties`.
+- `properties`: optional string mapping, maximum 50 fields and 2,000 characters per value. Under a page parent, leave it empty (only the title is allowed). For a database row, use the exact property names from `get_database`: select/status take the option name, checkboxes `"__YES__"`/`"__NO__"`, and dates are split into `"date:<Name>:start"` (ISO date or datetime), optional `"date:<Name>:end"`, and `"date:<Name>:is_datetime"` (`"0"` or `"1"`).
+- `content`: optional string (Notion Markdown), maximum 8,000 characters; empty content is accepted.
 
 Obtain explicit confirmation of the parent, title, properties, and content before calling. The returned object is provider-shaped; fetch the created page using its returned ID when available.
 
@@ -241,8 +244,8 @@ Obtain explicit confirmation of the parent, title, properties, and content befor
 Updates page properties or applies content replacement operations. At least one non-empty update is required.
 
 - `properties`: optional bounded string mapping.
-- `replacements`: optional list of at most 20 dictionaries. Each item must have a non-empty string `old`; provider-specific fields such as `new` and `replace_all` may be passed but are not fully locally validated.
-- Do not provide `properties` and `replacements` together. The current implementation sends one MCP command field, so combined updates are not a supported atomic operation.
+- `replacements`: optional list of 1–20 dictionaries `{"old": str, "new": str, "replace_all": bool}`. `old` must be non-empty and match the page content exactly; `replace_all` is optional (default: fail on multiple matches).
+- Do not provide `properties` and `replacements` together; that raises `NotionValidationError`. Make two calls.
 
 Review the target and exact intended replacement with the user first. Fetch the page afterward to verify the resulting state.
 
@@ -259,7 +262,7 @@ Errors are sanitized in the exec result. They do not contain credentials or raw 
 - `NotionWriteError`: the write target/parent is outside write scope. Do not mutate another resource unless the user confirms it.
 - `NotionConfigurationError`: credentials are missing, incomplete, or unreadable. Do not retry unchanged; configure authentication through Nexus.
 - `NotionAuthenticationError`: provider authentication failed. Reauthenticate; do not retry unchanged.
-- `NotionToolError`: the Notion MCP server rejected the request, for example an invalid filter shape or unknown property. The message carries the provider's reason. Correct the input; do not retry unchanged.
+- `NotionToolError`: the Notion MCP server rejected the request, for example an invalid filter shape or unknown property. The message carries the provider's reason. For a write, nothing was written. Correct the input; do not retry unchanged.
 - `NotionTransportError`: MCP connection or request failed. Reads may be retried after checking connectivity; a mutation may have been transmitted, so treat its outcome as unknown.
 - `NotionResponseError` / `NotionQueryError`: the provider returned an unsupported or malformed response. Do not automatically repeat a mutation.
 - `NotionMutationIndeterminateError`: a mutation may have succeeded or its result could not be confirmed. Fetch the target or list comments to verify before repeating. Never automatically retry.

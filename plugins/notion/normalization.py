@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from typing import Any
@@ -19,10 +20,11 @@ _STATE_RE = re.compile(r"<data-source-state>\s*(\{.*?\})\s*</data-source-state>"
 _STATUS_GROUPS = {"to_do": "To-do", "in_progress": "In progress", "complete": "Complete"}
 _MAX_PROPERTIES = 200
 _MAX_OPTIONS = 100
-_COMMENT_RE = re.compile(
-    r'<comment\s+id="([^"]+)"\s+url="([^"]+)"\s+user-url="([^"]+)"\s+datetime="([^"]+)">(.*?)</comment>',
-    re.DOTALL,
-)
+# Attributes are matched by name, not position: the provider adds attributes such as
+# by-you="true" (tests/fixtures/get_comments_response.json).
+_COMMENT_RE = re.compile(r"<comment\b([^>]*)>(.*?)</comment>", re.DOTALL)
+_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+_MAX_COMMENTS = 50
 
 
 def _canonical_id(value: str) -> str:
@@ -117,23 +119,33 @@ def normalize_fetch(value: Any, requested_id: str) -> dict[str, Any] | None:
     return result
 
 
+def _parse_comments(text: str) -> list[dict[str, Any]]:
+    """Project every <comment> in a <discussions> document, across all discussion threads."""
+    comments = []
+    for raw_attrs, body in _COMMENT_RE.findall(text):
+        attrs = {name: html.unescape(value) for name, value in _ATTR_RE.findall(raw_attrs)}
+        if not attrs.get("id"):
+            continue
+        comments.append(
+            {
+                "id": attrs["id"],
+                "url": attrs.get("url"),
+                "user_url": attrs.get("user-url"),
+                "created": attrs.get("datetime"),
+                "body": html.unescape(body.strip())[:8000],
+            }
+        )
+    return comments[:_MAX_COMMENTS]
+
+
 def normalize_comments(value: Any) -> list[dict[str, Any]]:
     """Normalize comment responses, including XML discussion envelopes."""
     if isinstance(value, dict) and "results" in value:
         value = value["results"]
     if isinstance(value, dict) and isinstance(value.get("text"), str):
-        return [
-            {
-                "id": comment_id,
-                "url": url,
-                "user_url": user_url,
-                "created": created,
-                "body": body.strip()[:8000],
-            }
-            for comment_id, url, user_url, created, body in _COMMENT_RE.findall(value["text"])
-        ][:50]
+        return _parse_comments(value["text"])
     if isinstance(value, dict) and set(value) <= {"suggested_edits_status"}:
         return []
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, dict)][:50]
+    return [item for item in value if isinstance(item, dict)][:_MAX_COMMENTS]

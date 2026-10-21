@@ -1,7 +1,10 @@
 """Tests for Notion database queries and comments."""
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import jsonschema
 import pytest
 from archie_plugins.notion.policy import NotionPolicyError, NotionValidationError
 from archie_plugins.notion.query import NotionQueryError, get_comments, query_database
@@ -248,3 +251,20 @@ async def test_get_comments_authorizes_page_before_comments():
         result = await get_comments(ROOT, limit=1)
     assert result == comments["results"]
     assert call.await_args_list[1].args[0] == "notion-get-comments"
+
+
+async def test_get_comments_sends_schema_valid_args_and_returns_live_shape():
+    fixtures = Path(__file__).parent / "fixtures"
+    schema = json.loads((fixtures / "read_tool_schemas.json").read_text())["notion-get-comments"]
+    raw = json.loads((fixtures / "get_comments_response.json").read_text())
+    page_id = "4008a35c22c381f1a3faf4a6e81d1f25"
+    page = {"id": page_id, "type": "database_item", "ancestors": []}
+    call = AsyncMock(side_effect=[page, raw])
+    with patch("archie_plugins.notion.query.notion_call", call):
+        result = await get_comments(page_id)
+    name, arguments = call.await_args_list[1].args
+    assert name == "notion-get-comments"
+    jsonschema.validate(arguments, schema)
+    assert arguments == {"page_id": page_id, "include_all_blocks": True}
+    assert [item["id"] for item in result] == ["4008a35c-22c3-8104-84d0-001d2d98910e"]
+    assert result[0]["body"].startswith("Email from Test, 21 Oct: test comment.")

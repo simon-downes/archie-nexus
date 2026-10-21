@@ -1,8 +1,11 @@
 """Tests for live Notion MCP envelope normalization."""
 
 import json
+from pathlib import Path
 
 from archie_plugins.notion.normalization import normalize_comments, normalize_fetch
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 PAGE = "3de8a35c22c380c580def0f67737abc7"
 PARENT = "2798a35c22c380fab63bcfb22110c4d5"
@@ -128,3 +131,52 @@ def test_normalize_comments_xml_discussion():
             "body": "Commenting on a test",
         }
     ]
+
+
+def test_normalize_comments_live_response_with_extra_attributes():
+    # Sanitised capture of notion-get-comments; the by-you attribute broke the old parser.
+    raw = json.loads((FIXTURES / "get_comments_response.json").read_text())
+    assert normalize_comments(raw) == [
+        {
+            "id": "4008a35c-22c3-8104-84d0-001d2d98910e",
+            "url": "https://app.notion.com/p/4008a35c22c381f1a3faf4a6e81d1f25"
+            "?d=4008a35c22c381059721001c3202f66a&pvs=42",
+            "user_url": "user://00000000-0000-0000-0000-000000000000/user@example.com",
+            "created": "2026-10-21T20:22:58.752Z",
+            "body": "Email from Test, 21 Oct: test comment. https://mail.google.com/mail/u/0/#all/test",
+        }
+    ]
+
+
+def test_normalize_comments_threads_with_replies_in_order():
+    def comment(n, body, extra=""):
+        return (
+            f'<comment id="c{n}" url="https://app.notion.com/p/x?d=d{n}&amp;pvs=42" '
+            f'user-url="user://u{n}" datetime="2026-10-21T20:2{n}:00.000Z"{extra}>{body}</comment>'
+        )
+
+    raw = {
+        "suggested_edits_status": "not_enabled",
+        "text": (
+            '<discussions total-count="2" shown-count="2">\n'
+            '<discussion id="discussion://p/p/d1" comment-count="2" resolved="false" '
+            'type="comment" context="page">\n'
+            + comment(1, "First")
+            + "\n"
+            + comment(2, "Reply &amp; more\nsecond line", ' by-you="true"')
+            + '\n</discussion>\n<discussion id="discussion://p/b/d2" comment-count="1" '
+            'resolved="false" type="comment" context="block">\n'
+            + comment(3, "On a block")
+            + "\n</discussion>\n</discussions>"
+        ),
+    }
+    result = normalize_comments(raw)
+    assert [item["id"] for item in result] == ["c1", "c2", "c3"]
+    assert result[1]["body"] == "Reply & more\nsecond line"
+    assert result[0]["url"] == "https://app.notion.com/p/x?d=d1&pvs=42"
+    assert set(result[0]) == {"id", "url", "user_url", "created", "body"}
+
+
+def test_normalize_comments_empty_discussions():
+    raw = {"suggested_edits_status": "not_enabled", "text": '<discussions total-count="0"/>'}
+    assert normalize_comments(raw) == []
