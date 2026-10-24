@@ -39,7 +39,7 @@ root, so `plugins/` itself is never on `sys.path`. `plugins_dir()` resolves the 
 `ARCHIE_PLUGINS_DIR`, defaulting to `<repo>/plugins`. In a container the directory is
 mounted read-only at `/opt/archie/plugins`.
 
-Plugins without code (`github`, `scalr`) have only `plugin.yaml` and `README.md`.
+Plugins without code (`github`, `openai`, `scalr`) have only `plugin.yaml` and `README.md`.
 
 Each plugin's `README.md` covers what is specific to it: what it does and how it talks to the
 service, its namespaces and functions grouped read vs write, its credential and

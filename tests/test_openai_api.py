@@ -8,12 +8,15 @@ from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart,
 from archie_agent.llm.openai_api import OPENAI_BASE_URL
 from archie_agent.prompt import PromptSection, SystemPrompt
 from archie_agent.session import Turn
-from archie_shared.credentials import replace_credential
+from archie_shared.credentials import replace_credential, save_store
 from archie_shared.models import DEFAULT_MODELS
 from archie_shared.types import ImageBlock, TextBlock, ToolResultBlock
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseError,
+    ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
@@ -96,29 +99,59 @@ def test_factory_routes_openai_provider_to_openai_client():
     assert client.can_cache and client.can_see
 
 
-def test_sdk_client_uses_stored_key_and_public_endpoint(monkeypatch):
+@pytest.fixture
+def sdk(monkeypatch):
+    """Patch the SDK constructor (the network boundary) and record its kwargs."""
+    built = []
+
+    def factory(**kwargs):
+        fake = MagicMock()
+        fake.responses.create.return_value = _stream([_completed()])
+        built.append((kwargs, fake))
+        return fake
+
+    monkeypatch.setattr("archie_agent.llm.openai_api.OpenAI", factory)
+    return built
+
+
+def test_sdk_client_uses_stored_key_and_public_endpoint(monkeypatch, sdk):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
     replace_credential("openai", {"api_key": "sk-stored"})
     client = OpenAIClient("gpt-6-luna")
-    sdk = client._sdk()
-    assert sdk.api_key == "sk-stored"
-    assert str(sdk.base_url).rstrip("/") == OPENAI_BASE_URL
-    assert client._sdk() is sdk
+    list(client.stream(_user(), "system"))
+    list(client.stream(_user(), "system"))
+    assert len(sdk) == 1
+    kwargs, fake = sdk[0]
+    assert kwargs["api_key"] == "sk-stored"
+    assert kwargs["base_url"] == OPENAI_BASE_URL
+    assert fake.responses.create.call_count == 2
 
 
-def test_env_key_is_used_when_nothing_is_stored(monkeypatch):
+def test_env_key_is_used_when_nothing_is_stored(monkeypatch, sdk):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-    assert OpenAIClient("gpt-6-luna")._sdk().api_key == "sk-env"
+    list(OpenAIClient("gpt-6-luna").stream(_user(), "system"))
+    assert sdk[0][0]["api_key"] == "sk-env"
 
 
-def test_missing_key_fails_the_request_not_construction():
+def test_missing_key_fails_the_request_not_construction(sdk):
     client = OpenAIClient("gpt-6-luna")
     with pytest.raises(RuntimeError, match="archie auth login openai"):
         list(client.stream(_user(), "system"))
     with pytest.raises(RuntimeError, match="archie auth login openai"):
         client.invoke(_user(), "system")
+    assert sdk == []
     replace_credential("openai", {"api_key": "sk-later"})
-    assert client._sdk().api_key == "sk-later"
+    events = list(client.stream(_user(), "system"))
+    assert events[-1] == Done("end_turn")
+    assert sdk[0][0]["api_key"] == "sk-later"
+
+
+def test_malformed_stored_entry_raises_instead_of_using_env(monkeypatch, sdk):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    save_store({"openai": {"token": "wrong-field"}})
+    with pytest.raises(ValueError):
+        list(OpenAIClient("gpt-6-luna").stream(_user(), "system"))
+    assert sdk == []
 
 
 def test_request_shape_with_cache_tools_and_images():
@@ -224,7 +257,65 @@ def test_cache_validation_error_retries_once_without_cache_metadata():
     assert "prompt_cache_key" in first.kwargs
     assert "prompt_cache_key" not in second.kwargs
     assert "extra_body" not in second.kwargs
-    assert client._cache_enabled is False
+    fake.responses.create.side_effect = None
+    fake.responses.create.return_value = _stream([_completed()])
+    list(client.stream(_user("again"), "system"))
+    third = fake.responses.create.call_args.kwargs
+    assert "prompt_cache_key" not in third
+    assert "extra_body" not in third
+
+
+def _call_added(call_id="call_1", item_id="fc_1"):
+    return ResponseOutputItemAddedEvent(
+        item=ResponseFunctionToolCall(
+            arguments="", call_id=call_id, name="exec", type="function_call", id=item_id
+        ),
+        output_index=0,
+        sequence_number=0,
+        type="response.output_item.added",
+    )
+
+
+def _args_done(arguments, item_id="fc_1"):
+    return ResponseFunctionCallArgumentsDoneEvent(
+        arguments=arguments,
+        item_id=item_id,
+        name="exec",
+        output_index=0,
+        sequence_number=0,
+        type="response.function_call_arguments.done",
+    )
+
+
+def test_argument_deltas_accumulate_and_malformed_json_is_truncated():
+    delta = ResponseFunctionCallArgumentsDeltaEvent(
+        delta='{"command":',
+        item_id="fc_1",
+        output_index=0,
+        sequence_number=0,
+        type="response.function_call_arguments.delta",
+    )
+    client, fake = _client()
+    fake.responses.create.return_value = _stream(
+        [_call_added(), delta, _args_done('{"command":'), _completed()]
+    )
+    out = [e for e in client.stream(_user(), "system") if isinstance(e, ToolUseEvent)]
+    assert out[0].input == {}
+    assert out[0].input_truncated is True
+
+
+def test_failed_event_raises_and_closes_stream():
+    failed = ResponseFailedEvent(
+        response=_response(error=ResponseError(code="server_error", message="boom")),
+        sequence_number=0,
+        type="response.failed",
+    )
+    client, fake = _client()
+    stream = _stream([failed])
+    fake.responses.create.return_value = stream
+    with pytest.raises(RuntimeError, match="boom"):
+        list(client.stream(_user(), "system"))
+    stream.close.assert_called_once()
 
 
 def test_invoke_returns_output_text_without_stream_flag():

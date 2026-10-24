@@ -34,7 +34,8 @@ plugins:
 ```
 
 No settings and no tool policy (no tools). `enabled: false` hides login and status for the
-provider.
+provider; it does not stop the agent using a key that is already stored (or `OPENAI_API_KEY`)
+for `openai-*` models. Delete the credential to stop that.
 
 ## How it works
 

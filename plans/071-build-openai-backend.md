@@ -1,6 +1,6 @@
 # 071 — Direct OpenAI API backend
 
-Status: reviewing
+Status: done
 Branch: build-it/071-openai-backend (base: main @ e885114)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/071-openai-backend
 
@@ -225,7 +225,38 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 
 - Plan review: 1 pass. Fixed both ❌ (missing plugin README/`plugins/README.md` row; catalog test updates moved into M1) and every ⚠️/ℹ️: generator-raise AC, key-precedence AC, `test_plugin_layout.py` in Verify, `can_cache`/`can_see`/128_000 stated, display names (D9), client caching rule (D8), docs locations named, explicit `set_env`, metrics assertion flip, `docs/config.md` skip reason, malformed-credential handling, tiered-rate pattern named. No rejections.
 
+- Code review: 1 round, roles `general` and `risk` (risk run: new credential, secret
+  handling, `ProviderConfig` union is a cross-package contract). `risk`: no findings.
+  `general`: 4 ℹ️ + 1 ❓, all agreed and fixed — key-precedence and recovery tests now go
+  through `stream`/`invoke` with the `OpenAI` constructor patched (no `_sdk()` calls); cache
+  fallback test asserts a later request also has no cache metadata instead of reading
+  `_cache_enabled`; added tests for `ResponseFailedEvent` (raises, stream closed), argument
+  deltas with malformed JSON (`input_truncated`), and malformed stored entry → `ValueError`
+  with no env fallback; `docs/plugins.md` code-free plugin list gains `openai`. ❓ (disabled
+  plugin still authenticates): intended — the agent's Bedrock path doesn't check `enabled`
+  either; documented in `plugins/openai/README.md`. No rejections.
+- Spec check: each MUST traced — provider (`test_openai_reads_api_key_from_env_and_is_not_exported`),
+  routing and endpoint (`test_factory_routes_openai_provider_to_openai_client`,
+  `test_sdk_client_uses_stored_key_and_public_endpoint`), request shape
+  (`test_request_shape_with_cache_tools_and_images`, `test_request_without_cache_has_no_cache_metadata`),
+  stream/fallback (`test_stream_maps_*`, `test_incomplete_*`, `test_cache_validation_*`,
+  `test_failed_event_*`), missing key (`test_missing_key_fails_the_request_not_construction`),
+  precedence (`test_sdk_client_uses_stored_key_*`), README (`tests/test_plugin_layout.py`),
+  catalog (`test_openai_api_catalog_entries`), metrics (`test_infer_backend`), docs (diff).
+- Merge risk: Low: the change adds new opt-in models and a provider; existing models,
+  default model and Bedrock clients are untouched, and a missing or wrong key fails only
+  requests to `openai-*` models.
+
 ## Outcome
+
+Delivered a direct OpenAI Responses backend: `plugins/openai` credential (API key from
+`OPENAI_API_KEY`), `OpenAIClient` in `agent/src/archie_agent/llm/openai_api.py`, and four
+catalog models (`openai-gpt-6-astra`, `openai-gpt-6-1-sol`, `openai-gpt-6-luna`,
+`openai-gpt-5-6-cyber`), with metrics backend `openai` and docs. Evidence:
+`env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR uv run pytest -q` → 1 failed (baseline
+`inbox-triage` layout test), 2103 passed; ruff check/format clean on touched files.
+Not verified: a live request to api.openai.com (no key in this environment), and that the
+Daybreak org accepts explicit cache breakpoints for `gpt-5.6-cyber`.
 
 PR: pending
 CI: pending
