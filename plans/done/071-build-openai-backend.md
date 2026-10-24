@@ -220,6 +220,9 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 - `gpt-5.6-cyber` explicit-cache support is inferred from "GPT-5.6 and later"; the cache
   fallback covers a rejection.
 - Using the OpenAI API sends prompts outside AWS; data-handling approval may apply.
+- pr.py mismatch: local `main` (base e885114) is 7 commits ahead of `origin/main`, so the PR
+  diff also contains those unpushed, unreviewed-by-this-build commits (4eb4f86..e885114).
+  Noted in the PR body.
 
 ## Review
 
@@ -258,7 +261,7 @@ catalog models (`openai-gpt-6-astra`, `openai-gpt-6-1-sol`, `openai-gpt-6-luna`,
 Not verified: a live request to api.openai.com (no key in this environment), and that the
 Daybreak org accepts explicit cache breakpoints for `gpt-5.6-cyber`.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/9
 CI: pending
 
 ## Follow-ups
