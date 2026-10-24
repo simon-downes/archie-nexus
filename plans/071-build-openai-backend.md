@@ -1,6 +1,6 @@
 # 071 — Direct OpenAI API backend
 
-Status: building
+Status: reviewing
 Branch: build-it/071-openai-backend (base: main @ e885114)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/071-openai-backend
 
@@ -194,7 +194,7 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
   1 failed (the baseline `inbox-triage` failure). Full suite: 1 failed (baseline), 2100 passed.
   Ruff check/format clean on touched files.
 
-### [ ] M2 — Full model set, metrics and docs
+### [x] M2 — Full model set, metrics and docs
 
 - **Approach:** Add the Astra and 6.1 Sol entries with tiered rates (same pattern as M1;
   over-272K rates 2x input/cache, 1.5x output) and Cyber with a single rate (D7); update
@@ -204,7 +204,12 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 - **Deliverable:** four OpenAI models are selectable and priced; metrics tag them `openai`.
 - **Verify:** `uv run pytest -q tests/test_models_catalog.py tests/test_orchestrator_metrics.py`
   passes; full suite shows no new failures.
-- **Outcome:**
+- **Outcome:** Added `openai-gpt-6-astra`, `openai-gpt-6-1-sol` (tiered) and
+  `openai-gpt-5-6-cyber` (single rate, cache write $15.625). `test_openai_api_catalog_entries`
+  asserts all four and that no other `openai-` keys exist. `_infer_backend` maps `openai-` →
+  `openai`. Docs: `docs/auth-credentials.md` (provider table, env-projection table, OpenAI
+  paragraph incl. data leaving AWS and Daybreak approval), `docs/architecture.md` (topology
+  and provider list). Verify: 48 passed. Full suite: 1 failed (baseline), 2100 passed.
 
 ## Deviations
 

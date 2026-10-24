@@ -395,7 +395,8 @@ def test_infer_backend():
     w = MetricsWriter(Path("/tmp/unused.db"))
     assert w._infer_backend("bedrock-anthropic.claude-sonnet-4-6") == "bedrock"
     assert w._infer_backend("ollama-qwen3:30b-a3b") == "ollama"
-    assert w._infer_backend("openai-gpt-4o") is None
+    assert w._infer_backend("openai-gpt-6-luna") == "openai"
+    assert w._infer_backend("anthropic-claude") is None
     assert w._infer_backend("") is None
 
 

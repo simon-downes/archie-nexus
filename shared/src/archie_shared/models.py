@@ -350,6 +350,63 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         max_output_tokens=16_000,
         cost=CostConfig(rates=[Rate(input=3.0, output=15.0, cache_read=0.30, cache_write=3.75)]),
     ),
+    # Model card: https://developers.openai.com/api/docs/models/gpt-6-astra
+    # ``context`` is the maximum input (922K of the 1.05M window).
+    "openai-gpt-6-astra": ModelEntry(
+        name="GPT-6 Astra (OpenAI)",
+        context=922_000,
+        provider=OpenAIProvider(model_id="gpt-6-astra"),
+        can_cache=True,
+        cache_ttl_seconds=1800,
+        can_see=True,
+        max_output_tokens=128_000,
+        cost=CostConfig(
+            rates=[
+                Rate(
+                    input=10.00,
+                    output=50.00,
+                    cache_read=1.00,
+                    cache_write=12.50,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=20.00,
+                    output=75.00,
+                    cache_read=2.00,
+                    cache_write=25.00,
+                    criteria=("total_input", "min", 272_001),
+                ),
+            ]
+        ),
+    ),
+    # Model card: https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    "openai-gpt-6-1-sol": ModelEntry(
+        name="GPT-6.1 Sol (OpenAI)",
+        context=922_000,
+        provider=OpenAIProvider(model_id="gpt-6.1-sol"),
+        can_cache=True,
+        cache_ttl_seconds=1800,
+        can_see=True,
+        max_output_tokens=128_000,
+        cost=CostConfig(
+            rates=[
+                Rate(
+                    input=2.00,
+                    output=10.00,
+                    cache_read=0.10,
+                    cache_write=2.50,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=4.00,
+                    output=15.00,
+                    cache_read=0.20,
+                    cache_write=5.00,
+                    criteria=("total_input", "min", 272_001),
+                ),
+            ]
+        ),
+    ),
     # Model card: https://developers.openai.com/api/docs/models/gpt-6-luna
     # ``context`` is the maximum input (922K of the 1.05M window).
     "openai-gpt-6-luna": ModelEntry(
@@ -377,6 +434,21 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
                     criteria=("total_input", "min", 272_001),
                 ),
             ]
+        ),
+    ),
+    # Model card: https://developers.openai.com/api/docs/models/gpt-5.6-cyber
+    # Daybreak Red only: the key's OpenAI org needs Daybreak approval. Max input is 272K
+    # (400K window), so the >272K long-context tier never applies. Cache writes are 1.25x input.
+    "openai-gpt-5-6-cyber": ModelEntry(
+        name="GPT-5.6 Cyber (OpenAI)",
+        context=272_000,
+        provider=OpenAIProvider(model_id="gpt-5.6-cyber"),
+        can_cache=True,
+        cache_ttl_seconds=1800,
+        can_see=True,
+        max_output_tokens=128_000,
+        cost=CostConfig(
+            rates=[Rate(input=12.50, output=75.00, cache_read=1.25, cache_write=15.625)]
         ),
     ),
     "ollama-qwen3-6-35b": ModelEntry(

@@ -167,6 +167,24 @@ def test_openai_tiered_global_rates():
 def test_openai_api_catalog_entries():
     # (model_id, name, context, rates) — from developers.openai.com/api/docs/models/<id>.
     expected = {
+        "openai-gpt-6-astra": (
+            "gpt-6-astra",
+            "GPT-6 Astra (OpenAI)",
+            922_000,
+            _tiered((10.00, 50.00, 1.00, 12.50), (20.00, 75.00, 2.00, 25.00)),
+        ),
+        "openai-gpt-6-1-sol": (
+            "gpt-6.1-sol",
+            "GPT-6.1 Sol (OpenAI)",
+            922_000,
+            _tiered((2.00, 10.00, 0.10, 2.50), (4.00, 15.00, 0.20, 5.00)),
+        ),
+        "openai-gpt-5-6-cyber": (
+            "gpt-5.6-cyber",
+            "GPT-5.6 Cyber (OpenAI)",
+            272_000,
+            [Rate(input=12.50, output=75.00, cache_read=1.25, cache_write=15.625)],
+        ),
         "openai-gpt-6-luna": (
             "gpt-6-luna",
             "GPT-6 Luna (OpenAI)",
