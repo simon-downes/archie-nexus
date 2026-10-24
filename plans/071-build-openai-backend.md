@@ -44,12 +44,15 @@ Discovery:
 
 ## Baseline
 
-- Check commands: `uv run pytest -q`, `uv run ruff check .`, `uv run ruff format --check <files>`
+- Check commands: `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR uv run pytest -q`,
+  `uv run ruff check <files>`, `uv run ruff format <files>`. The build container sets
+  `ARCHIE_PLUGINS_DIR`/`ARCHIE_PERSONA_DIR` to the running agent's own install, so tests must
+  run with them unset to see the repo's `plugins/`.
 - Setup: `uv sync` in the worktree
 - Setup leftovers: none
-- Failing before this work: `uv run pytest -q` → 31 failed, 9 errors, 2048 passed
-  (mainly `tests/test_ws_integration.py`, `tests/test_native.py::...every_plugin_namespace`,
-  plugin `test_runner_exposes_*_namespace`)
+- Failing before this work (base e885114, env unset): 1 failed, 2087 passed —
+  `tests/test_plugin_layout.py::test_persona_skills_holds_only_procedure_skills` (the committed
+  `persona/skills/inbox-triage`). With the env vars set, 31 failed / 9 errors, all env-caused.
 - Not included: `persona/skills/aws-agent-access/`, `plans/060-spec-container-aws-profiles.md`,
   `plans/070-build-nexus-plugins.md` (untracked in the user's checkout)
 
@@ -162,7 +165,7 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 
 ## Milestones
 
-### [ ] M1 — Requests to one OpenAI model work end to end
+### [x] M1 — Requests to one OpenAI model work end to end
 
 - **Approach:** Add the plugin manifest and README (+ `plugins/README.md` row),
   `OpenAIProvider`, `OpenAIClient`, factory case, and the `openai-gpt-6-luna` catalog entry
@@ -182,7 +185,14 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 - **Verify:** `uv run pytest -q tests/test_openai_api.py tests/test_providers.py
   tests/test_credentials_models.py tests/test_orchestrator_credentials.py
   tests/test_models_catalog.py tests/test_plugin_layout.py` passes.
-- **Outcome:**
+- **Outcome:** Added `plugins/openai/` (manifest, README, `plugins/README.md` row),
+  `OpenAIProvider`, `agent/src/archie_agent/llm/openai_api.py` (`OpenAIClient`), factory case,
+  and `openai-gpt-6-luna`. New `tests/test_openai_api.py` (11 tests: factory, stored-over-env
+  key, env fallback, missing key on `stream`/`invoke` then recovery, request shape with cache,
+  tools and images, no-cache shape, stream mapping, max_tokens, cache fallback, invoke).
+  `test_providers.py::EXPECTED_PROVIDERS` snapshot gained `openai`. Verify command: 117 passed,
+  1 failed (the baseline `inbox-triage` failure). Full suite: 1 failed (baseline), 2100 passed.
+  Ruff check/format clean on touched files.
 
 ### [ ] M2 — Full model set, metrics and docs
 

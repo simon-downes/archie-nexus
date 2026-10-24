@@ -113,12 +113,18 @@ class BedrockOpenAIProvider(msgspec.Struct, tag="bedrock-openai"):
     region: str | None = None
 
 
+class OpenAIProvider(msgspec.Struct, tag="openai"):
+    """A model served directly by the OpenAI Responses API (``api.openai.com``)."""
+
+    model_id: str
+
+
 class OllamaProvider(msgspec.Struct, tag="ollama"):
     model_id: str
     endpoint: str = "host.docker.internal:11434"
 
 
-ProviderConfig = BedrockProvider | BedrockOpenAIProvider | OllamaProvider
+ProviderConfig = BedrockProvider | BedrockOpenAIProvider | OpenAIProvider | OllamaProvider
 
 
 def provider_name(provider: ProviderConfig) -> str:
@@ -343,6 +349,35 @@ DEFAULT_MODELS: dict[str, ModelEntry] = {
         can_see=True,
         max_output_tokens=16_000,
         cost=CostConfig(rates=[Rate(input=3.0, output=15.0, cache_read=0.30, cache_write=3.75)]),
+    ),
+    # Model card: https://developers.openai.com/api/docs/models/gpt-6-luna
+    # ``context`` is the maximum input (922K of the 1.05M window).
+    "openai-gpt-6-luna": ModelEntry(
+        name="GPT-6 Luna (OpenAI)",
+        context=922_000,
+        provider=OpenAIProvider(model_id="gpt-6-luna"),
+        can_cache=True,
+        cache_ttl_seconds=1800,
+        can_see=True,
+        max_output_tokens=128_000,
+        cost=CostConfig(
+            rates=[
+                Rate(
+                    input=0.10,
+                    output=0.50,
+                    cache_read=0.01,
+                    cache_write=0.125,
+                    criteria=("total_input", "min", 0),
+                ),
+                Rate(
+                    input=0.20,
+                    output=0.75,
+                    cache_read=0.02,
+                    cache_write=0.25,
+                    criteria=("total_input", "min", 272_001),
+                ),
+            ]
+        ),
     ),
     "ollama-qwen3-6-35b": ModelEntry(
         name="Qwen 3.6 35B",
