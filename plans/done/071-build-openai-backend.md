@@ -262,7 +262,7 @@ Not verified: a live request to api.openai.com (no key in this environment), and
 Daybreak org accepts explicit cache breakpoints for `gpt-5.6-cyber`.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/9
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
