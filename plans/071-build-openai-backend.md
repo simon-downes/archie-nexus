@@ -1,6 +1,6 @@
 # 071 — Direct OpenAI API backend
 
-Status: planning
+Status: building
 Branch: build-it/071-openai-backend (base: main @ e885114)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/071-openai-backend
 
@@ -64,6 +64,8 @@ Discovery:
 | D5 | Model keys and provider tag | Keys `openai-gpt-6-astra`, `openai-gpt-6-1-sol`, `openai-gpt-6-luna`, `openai-gpt-5-6-cyber`; provider struct `OpenAIProvider(tag="openai", model_id)` | Reuse `bedrock-openai` tag with a base URL | Key prefix drives `_infer_backend` in metrics; a separate tag keeps the dispatch explicit | self |
 | D6 | `context` value | Max input tokens (922_000; 272_000 for cyber) | Full context window (1.05M / 400K) | `context` is used as the input limit for compaction and context-percent; output is reserved separately | self |
 | D7 | Cyber long-context tier | Single rate, no >272K tier | Add the tier | Max input is 272K, so the tier can never apply | self |
+| D8 | Client construction | Build the SDK client on the first request that finds a key and keep it; a request with no key builds nothing, so the next request re-reads the store | Re-read the store on every request; build once at init | `archie auth login openai` then takes effect without restarting after a no-key failure, without per-request store reads after that | self |
+| D9 | Display names | Suffix ` (OpenAI)`: "GPT-6 Astra (OpenAI)", "GPT-6.1 Sol (OpenAI)", "GPT-6 Luna (OpenAI)", "GPT-5.6 Cyber (OpenAI)" | Same names as Bedrock entries | `DEFAULT_MODELS` already has "GPT-6 Luna" and "GPT-6.1 Sol"; pickers would show duplicates | self |
 
 ## Requirements
 
@@ -85,15 +87,22 @@ Discovery:
     `Usage`, `Done` as expected; the cache-fallback test retries without cache fields.
 - MUST fail a request, not agent startup or model switch, when no API key is available, with
   a message naming `archie auth login openai`.
-  - AC: constructing `OpenAIClient` with no credential and no env var succeeds; calling
-    `stream` raises `RuntimeError` whose message contains `archie auth login openai`.
-- MUST catalog the four models with the limits and prices in Context.
-  - AC: catalog tests assert model ID, context, max output, `can_cache`, `can_see`,
-    `cache_ttl_seconds == 1800` and rates for each key.
+  - AC: constructing `OpenAIClient` with no credential and no env var succeeds; iterating
+    `stream(...)` and calling `invoke(...)` each raise `RuntimeError` whose message contains
+    `archie auth login openai`; after a key is stored, the next request succeeds.
+- MUST prefer the stored `openai.api_key` over `OPENAI_API_KEY`.
+  - AC: with both set, the SDK client is built with the stored key.
+- MUST ship `plugins/openai/README.md` and a `plugins/README.md` row, as every plugin does.
+  - AC: `uv run pytest -q tests/test_plugin_layout.py` passes.
+- MUST catalog the four models with the limits and prices in Context: `max_output_tokens =
+  128_000`, `can_cache = True`, `can_see = True`, `cache_ttl_seconds = 1800`, names per D9.
+  - AC: catalog tests assert model ID, name, context, max output, `can_cache`, `can_see`,
+    `cache_ttl_seconds` and rates for each key.
 - MUST record `backend = "openai"` in metrics for `openai-` model keys.
   - AC: `_infer_backend("openai-gpt-6-luna") == "openai"`.
-- MUST document the provider and models in `docs/auth-credentials.md` and
-  `docs/architecture.md`.
+- MUST document the provider and models in `docs/auth-credentials.md` (Supported providers
+  table, Startup environment projection table, and a note that requests go to OpenAI rather
+  than staying in AWS) and `docs/architecture.md` (the backend list).
   - AC: both files mention the `openai` provider / OpenAI API backend.
 
 Out of scope: Sign in with ChatGPT OAuth; configurable base URL, organisation or project
@@ -116,7 +125,11 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 ### Code structure
 
 - `plugins/openai/plugin.yaml` (new): `name: openai`, `credential: {kind: static, fields:
-  [api_key], env: {api_key: OPENAI_API_KEY}}`. Follow `plugins/aws/plugin.yaml`.
+  [api_key], env: {api_key: OPENAI_API_KEY}, set_env: false}` (explicit, as in
+  `plugins/aws/plugin.yaml`).
+- `plugins/openai/README.md` (new): follow `plugins/scalr/README.md` (credential-only plugin;
+  names `api_key`, links `../../docs/plugins.md`). Add a row to `plugins/README.md`.
+  `docs/config.md` is not changed: the plugin has no settings or policy.
 - `agent/src/archie_agent/llm/openai_api.py` (new): `OpenAIClient` with `__init__(model_id,
   max_output_tokens, can_cache, can_see)`, lazy `_client()`, `_request_kwargs`,
   `_create_with_cache_fallback`, `stream`, `invoke`. Imports `_turns_to_responses_input`,
@@ -134,6 +147,8 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 
 ### Error handling
 
+- Malformed stored `openai` entry → the store's `ValueError` propagates at request time
+  (no env fallback), so a broken credential is visible rather than silently replaced.
 - No API key → `RuntimeError("No OpenAI API key: run `archie auth login openai` or set
   OPENAI_API_KEY")` at request time; the agent loop already reports request exceptions.
 - 4xx cache validation error → one retry without cache metadata, caching disabled for the
@@ -149,10 +164,15 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 
 ### [ ] M1 — Requests to one OpenAI model work end to end
 
-- **Approach:** Add the plugin manifest, `OpenAIProvider`, `OpenAIClient`, factory case, and
-  the `openai-gpt-6-luna` catalog entry. Update the provider-set tests. Follow
+- **Approach:** Add the plugin manifest and README (+ `plugins/README.md` row),
+  `OpenAIProvider`, `OpenAIClient`, factory case, and the `openai-gpt-6-luna` catalog entry
+  with tiered rates following `bedrock-openai-gpt-6-luna` in `shared/src/archie_shared/models.py`
+  (`criteria=("total_input", "min", 0)` and `("total_input", "min", 272_001)`). Update the
+  provider-set tests and, in `tests/test_models_catalog.py`, `test_default_models_all_have_required_fields`
+  (provider isinstance), `test_default_model_key_format` (allow `openai-`) and
+  `test_cache_ttl_matches_cache_capability` (OpenAIProvider → 1800). Follow
   `bedrock_openai.py` for the client methods; read the key with
-  `archie_shared.credentials.get_credential("openai")` then `os.environ`.
+  `archie_shared.credentials.get_credential("openai")` then `os.environ` (D4, D8).
 - **Test seam:** `create_llm_client`, `OpenAIClient.stream`/`invoke`/`_request_kwargs` with
   a fake SDK client; `PROVIDERS`/`CREDENTIAL_TYPES`.
 - **Edge cases:** no key → request-time error; stored key wins over env; cache validation
@@ -161,15 +181,15 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
   expected Responses request and parses the stream.
 - **Verify:** `uv run pytest -q tests/test_openai_api.py tests/test_providers.py
   tests/test_credentials_models.py tests/test_orchestrator_credentials.py
-  tests/test_models_catalog.py` passes.
+  tests/test_models_catalog.py tests/test_plugin_layout.py` passes.
 - **Outcome:**
 
 ### [ ] M2 — Full model set, metrics and docs
 
-- **Approach:** Add the Astra, 6.1 Sol and Cyber entries with tiered rates (Cyber single
-  rate, D7); update `_infer_backend`; update `test_default_model_key_format` and the
-  cache-TTL test; document the provider in `docs/auth-credentials.md` (provider table,
-  data leaves AWS) and the backend in `docs/architecture.md`.
+- **Approach:** Add the Astra and 6.1 Sol entries with tiered rates (same pattern as M1;
+  over-272K rates 2x input/cache, 1.5x output) and Cyber with a single rate (D7); update
+  `_infer_backend` and change the existing `_infer_backend("openai-gpt-4o") is None`
+  assertion in `tests/test_orchestrator_metrics.py`; document per the docs requirement.
 - **Test seam:** `DEFAULT_MODELS`, `MetricsWriter._infer_backend`.
 - **Deliverable:** four OpenAI models are selectable and priced; metrics tag them `openai`.
 - **Verify:** `uv run pytest -q tests/test_models_catalog.py tests/test_orchestrator_metrics.py`
@@ -187,6 +207,8 @@ catalog gains four `OpenAIProvider` entries that `create_llm_client` routes to i
 - Using the OpenAI API sends prompts outside AWS; data-handling approval may apply.
 
 ## Review
+
+- Plan review: 1 pass. Fixed both ❌ (missing plugin README/`plugins/README.md` row; catalog test updates moved into M1) and every ⚠️/ℹ️: generator-raise AC, key-precedence AC, `test_plugin_layout.py` in Verify, `can_cache`/`can_see`/128_000 stated, display names (D9), client caching rule (D8), docs locations named, explicit `set_env`, metrics assertion flip, `docs/config.md` skip reason, malformed-credential handling, tiered-rate pattern named. No rejections.
 
 ## Outcome
 
