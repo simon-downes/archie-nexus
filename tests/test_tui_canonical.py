@@ -534,6 +534,49 @@ def test_turn_error_notice_ends_pending_turn():
     conv.add_client_error.assert_called_once_with("provider failed")
 
 
+def _root_turn_complete(stop_reason):
+    from archie_shared.events import TurnComplete
+
+    return TurnComplete(id=f"tc-{stop_reason}", turn=1, scope=None, stop_reason=stop_reason)
+
+
+def test_content_filtered_turn_shows_compact_and_rephrase_guidance():
+    """A content-filtered root turn renders an error telling the user to /compact and rephrase."""
+    from archie_cli.tui.app import CONTENT_FILTERED_MESSAGE
+
+    app = _make_app()
+    app._turn_active = True
+    conv = MagicMock()
+    input_widget = MagicMock()
+
+    def query_one(selector, _type=None):
+        return {"#conversation": conv, "#input": input_widget}[selector]
+
+    with (
+        patch.object(app, "query_one", side_effect=query_one),
+        patch.object(app, "_remove_throbber"),
+    ):
+        app._apply_event(_root_turn_complete("content_filtered"))
+
+    conv.add_error.assert_called_once_with(CONTENT_FILTERED_MESSAGE)
+    assert "/compact" in CONTENT_FILTERED_MESSAGE
+    assert "Rephrase" in CONTENT_FILTERED_MESSAGE
+    assert app._turn_active is False
+    assert input_widget.disabled is False
+
+
+def test_end_turn_does_not_show_error():
+    app = _make_app()
+    conv = MagicMock()
+    with (
+        patch.object(app, "query_one", return_value=conv),
+        patch.object(app, "_remove_throbber"),
+    ):
+        app._apply_event(_root_turn_complete("end_turn"))
+
+    conv.add_error.assert_not_called()
+
+
 def test_render_canonical_does_not_create_empty_iteration_block():
     """Text-only replay iterations do not leave an empty visual block."""
     app = _make_app()
