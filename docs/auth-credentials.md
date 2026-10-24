@@ -38,6 +38,7 @@ By default:
 | `bedrock` | Static | `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token` | AWS credential chain plus STS validation |
 | `datadog` | Static | `api_key`, `app_key` | Prompt or JSON stdin; site defaults to `app.datadoghq.eu` |
 | `incident_io` | Static | `api_key` | Prompt or JSON stdin; API host is `https://api.incident.io/` |
+| `openai` | Static | `api_key` | `OPENAI_API_KEY`; used by the `openai-*` models |
 
 `bedrock` and `aws` are separate provider identities and separate store entries. Their fields are intentionally distinct even though both represent AWS access keys.
 
@@ -198,6 +199,12 @@ plugins:
       site: datadoghq.com
 ```
 
+OpenAI uses one `api_key` secret, read from `OPENAI_API_KEY` on the host. It authenticates the direct OpenAI Responses backend for the `openai-*` catalog models; the agent reads the stored key and falls back to an `OPENAI_API_KEY` already in its environment. Unlike the `bedrock-*` models, these requests go to `https://api.openai.com/v1` and leave AWS, so prompts, tool results and images are subject to OpenAI's data handling rather than Bedrock's. `gpt-5.6-cyber` also needs Daybreak approval on the key's OpenAI organisation:
+
+```bash
+OPENAI_API_KEY=sk-... archie auth login openai
+```
+
 incident.io uses one `api_key` secret. The API uses the fixed host `https://api.incident.io/` and sends the key as a Bearer token. API keys can have account-level and team-scoped permissions; no additional authentication secret or account identifier is required.
 
 Example using JSON stdin:
@@ -314,6 +321,7 @@ Current mappings are:
 | `bedrock` | `aws_access_key_id` → `AWS_ACCESS_KEY_ID`, `aws_secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `aws_session_token` → `AWS_SESSION_TOKEN` | `false` |
 | `aws` | `access_key_id` → `AWS_ACCESS_KEY_ID`, `secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `session_token` → `AWS_SESSION_TOKEN` | `true` |
 | `scalr` | `token` → `SCALR_TOKEN` | `true` |
+| `openai` | `api_key` → `OPENAI_API_KEY` | `false` |
 
 This preserves the distinction between Bedrock and general AWS credentials: Bedrock integrations read the typed `bedrock` entry, while the general `aws` entry supplies standard AWS environment variables for shell commands, the AWS CLI, and `exec`.
 

@@ -45,6 +45,7 @@ async def test_provider_discovery_is_complete_and_secret_free():
         "bedrock",
         "datadog",
         "incident_io",
+        "openai",
     }
     assert providers["datadog"]["fields"] == ["api_key", "app_key"]
     assert "site" not in providers["datadog"]  # D8: site is plugins.datadog.settings.site

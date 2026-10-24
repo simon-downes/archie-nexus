@@ -39,7 +39,7 @@ host orchestrator :7600
 agent container :8080
        │ model provider, tools, workspace
        ▼
-AWS Bedrock / Ollama / local workspace
+AWS Bedrock / OpenAI API / Ollama / local workspace
 ```
 
 1. `archie build` builds `archie:latest` from `Dockerfile`.
@@ -113,7 +113,10 @@ A user message follows this path:
 2. The orchestrator relays it to the agent without interpreting the command.
 3. The agent publishes canonical events through the session coordinator. The coordinator orders
    them, persists persisted events before delivery, and broadcasts them to connected clients.
-4. LLM provider streams become canonical text, request, tool, and terminal events. Tool calls may
+4. LLM provider streams become canonical text, request, tool, and terminal events. The catalog
+   provider picks the client: `bedrock` (Converse), `bedrock-openai` (Responses on
+   bedrock-runtime), `openai` (Responses on `https://api.openai.com/v1`, `openai-*` keys,
+   authenticated with the `openai` API key credential; these requests leave AWS), or `ollama`. Tool calls may
    invoke native tools, the exec runner, or child agents through the `task` tool.
    Native `read` returns image files (PNG/JPEG/GIF/WebP) as image content, downscaled with
    Pillow to at most 1568px on the long edge and ~1.2MP. Images ride on `ToolResultBlock.images`

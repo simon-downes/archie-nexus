@@ -3,12 +3,19 @@
 from collections.abc import Generator
 from typing import Protocol
 
-from archie_shared.models import BedrockOpenAIProvider, BedrockProvider, ModelEntry, OllamaProvider
+from archie_shared.models import (
+    BedrockOpenAIProvider,
+    BedrockProvider,
+    ModelEntry,
+    OllamaProvider,
+    OpenAIProvider,
+)
 
 from archie_agent.llm._types import Done, StreamEvent, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.bedrock import BedrockClient
 from archie_agent.llm.bedrock_openai import BedrockOpenAIClient
 from archie_agent.llm.fake import FakeLLMClient
+from archie_agent.llm.openai_api import OpenAIClient
 from archie_agent.prompt import SystemPrompt
 from archie_agent.session import Turn
 
@@ -58,6 +65,13 @@ def create_llm_client(model: ModelEntry, default_region: str) -> LLMClient:
                 can_cache=model.can_cache,
                 can_see=model.can_see,
             )
+        case OpenAIProvider(model_id=model_id):
+            return OpenAIClient(
+                model_id=model_id,
+                max_output_tokens=model.max_output_tokens,
+                can_cache=model.can_cache,
+                can_see=model.can_see,
+            )
         case OllamaProvider(model_id=model_id, endpoint=endpoint):
             from archie_agent.llm.ollama import OllamaClient
 
@@ -76,6 +90,7 @@ __all__ = [
     "Done",
     "FakeLLMClient",
     "LLMClient",
+    "OpenAIClient",
     "StreamEvent",
     "TextDelta",
     "ToolUseEvent",

@@ -96,7 +96,7 @@ async def get_page(id_or_url: str, *, include_properties: bool = False) -> dict[
 
 @tool(namespace="notion")
 async def get_database(id_or_url: str, *, include_views: bool = True) -> dict[str, Any]:
-    """Fetch one policy-authorized Notion database or data source."""
+    """Fetch a Notion database's metadata, views, and per-data-source property names, types, and options (for query_database filters)."""
     identifier = resource_id(id_or_url)
     policy = require_read()
     raw = normalize_fetch(await notion_call("notion-fetch", {"id": identifier}), identifier)
@@ -106,6 +106,12 @@ async def get_database(id_or_url: str, *, include_views: bool = True) -> dict[st
         raise NotionResponseError("Notion resource is not a database")
     _authorize(raw, identifier, policy, "database")
     result = _project(raw)
+    schemas = raw.get("schemas") if isinstance(raw.get("schemas"), dict) else {}
+    sources = raw.get("data_sources") if isinstance(raw.get("data_sources"), list) else []
+    if sources:
+        result["data_sources"] = [
+            {"url": url, **schemas.get(url, {"properties": None})} for url in sources[:20]
+        ]
     if include_views and isinstance(raw.get("views"), list):
         result["views"] = raw["views"][:50]
     return result

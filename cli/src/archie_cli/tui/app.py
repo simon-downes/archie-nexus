@@ -62,6 +62,20 @@ from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
 
+# Provider stop reason when a safety filter blocks the response (Bedrock Converse).
+CONTENT_FILTERED = "content_filtered"
+
+CONTENT_FILTERED_MESSAGE = (
+    "The model provider's content filter blocked this response. Something in the "
+    "conversation, such as your message, a tool result or a file, triggered it.\n"
+    "That content is still in the session, so later requests will be blocked too.\n"
+    "To continue:\n"
+    "1. Run /compact to replace the conversation history with a summary.\n"
+    "2. Rephrase your request to avoid the content that triggered the filter."
+)
+
+CHILD_CONTENT_FILTERED_MESSAGE = "Blocked by the model provider's content filter"
+
 
 @dataclass(frozen=True, slots=True)
 class RequestKey:
@@ -511,6 +525,8 @@ class ArchieApp(App):
             self._end_turn()
         elif isinstance(event, ce.TurnComplete):
             self._show_turn_status()
+            if event.stop_reason == CONTENT_FILTERED:
+                conv.add_error(CONTENT_FILTERED_MESSAGE)
             self._iteration_block = None
             self._end_turn()
 
@@ -743,6 +759,12 @@ class ArchieApp(App):
                 child.activity = result_summary
             else:
                 child.activity = "Thinking..."
+        elif isinstance(event, (TurnComplete, ce.TurnComplete)) and (
+            event.stop_reason == CONTENT_FILTERED
+        ):
+            child.status = "error"
+            child.error = CHILD_CONTENT_FILTERED_MESSAGE
+            child.activity = child.error
         elif isinstance(event, (TurnComplete, ce.TurnComplete)):
             child.status = "complete"
             child.activity = "Completed"

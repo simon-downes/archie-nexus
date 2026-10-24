@@ -15,6 +15,7 @@ def test_all_services_present():
         "jira",
         "datadog",
         "incident_io",
+        "openai",
         "google",
     }
     assert set(PROVIDERS.keys()) == expected
@@ -30,6 +31,7 @@ def test_static_providers():
         "jira",
         "datadog",
         "incident_io",
+        "openai",
     }
     for name in static_services:
         provider = PROVIDERS[name]
@@ -52,6 +54,14 @@ def test_incident_io_uses_api_key_only():
     incident_io = PROVIDERS["incident_io"]
     assert isinstance(incident_io, StaticProvider)
     assert incident_io.fields == ["api_key"]
+
+
+def test_openai_reads_api_key_from_env_and_is_not_exported():
+    openai = PROVIDERS["openai"]
+    assert isinstance(openai, StaticProvider)
+    assert openai.fields == ["api_key"]
+    assert openai.env == {"api_key": "OPENAI_API_KEY"}
+    assert openai.set_env is False
 
 
 def test_datadog_uses_key_fields_and_site_is_not_a_provider_field():
@@ -196,6 +206,8 @@ EXPECTED_PROVIDERS = {
     "incident_io": StaticProvider(name="incident_io", fields=["api_key"]),
     "jira": StaticProvider(name="jira", fields=["email", "token", "cloud_id"]),
     "notion": OAuthProvider(name="notion", server_url="https://mcp.notion.com"),
+    # Plan 071: API key for the direct OpenAI backend; not exported into containers.
+    "openai": StaticProvider(name="openai", fields=["api_key"], env={"api_key": "OPENAI_API_KEY"}),
     # D9: hostname/account moved to plugins.scalr.settings (env-projected).
     "scalr": StaticProvider(
         name="scalr", fields=["token"], env={"token": "SCALR_TOKEN"}, set_env=True
