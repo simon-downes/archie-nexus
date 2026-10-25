@@ -63,7 +63,7 @@ RUN uv python install "$(cat /opt/archie/.python-version)" && \
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     npm install --global agent-browser cf@1.0.0-beta.21 && \
-    node --version && npx --version && agent-browser --version && cf --version && \
+    node --version && npx --version && agent-browser --version && CF_SEND_TELEMETRY=false cf --version && \
     rm -rf /var/lib/apt/lists/*
 
 # Install jq

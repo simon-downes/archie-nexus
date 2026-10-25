@@ -42,10 +42,11 @@ description: >
    cf auth whoami
    echo "${CLOUDFLARE_ACCOUNT_ID:-unset}"
    ```
-2. If the account id is unset, find it and export it for this shell:
+2. If the account id is unset, find it, then set it on every account-scoped command. Each
+   shell call is a new process, so an `export` on its own is lost before the next call:
    ```bash
    cf accounts list | jq -r '.[] | "\(.id)  \(.name)"'
-   export CLOUDFLARE_ACCOUNT_ID=<account-id>
+   CLOUDFLARE_ACCOUNT_ID=<account-id> cf workers list
    ```
    If `cf accounts list` is denied, ask the user to set `plugins.cloudflare.settings.account_id`
    in their Archie config and start a new session.

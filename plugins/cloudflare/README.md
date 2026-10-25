@@ -62,6 +62,10 @@ prompt or JSON stdin; it fails naming the variable when it is unset):
 CLOUDFLARE_API_TOKEN=... archie auth login cloudflare
 ```
 
+Login stores whatever is in `CLOUDFLARE_API_TOKEN`, without checking its permissions. Shells
+used for Terraform or wrangler often hold an Edit token in that variable, so set the variable
+to the dedicated read-only token on the command line, as above.
+
 `set_env: true`: new containers get `CLOUDFLARE_API_TOKEN`.
 
 ## Configuration

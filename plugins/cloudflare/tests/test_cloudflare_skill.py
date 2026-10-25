@@ -28,7 +28,8 @@ AREAS = (
 # A command path is the leading lowercase words after `cf`, stopping at the first flag,
 # placeholder, or anything else (`-z`, `<worker-id>`, `"query"`, `|`).
 _COMMAND = re.compile(r"(?:`|^\s*)cf((?: [a-z0-9][a-z0-9-]*)+)", re.MULTILINE)
-# Commands whose following words are arguments, not subcommands (`cf schema workers list`).
+# Commands whose following words name another command (`cf schema workers list`): both the
+# command and the named command are checked.
 _TAKES_WORDS = {"schema"}
 
 
@@ -48,8 +49,10 @@ def command_paths(text: str) -> list[str]:
     for match in _COMMAND.finditer(text):
         words = match.group(1).split()
         if words[0] in _TAKES_WORDS:
-            words = words[:1]
-        paths.add(" ".join(words))
+            paths.add(words[0])
+            words = words[1:]
+        if words:
+            paths.add(" ".join(words))
     return sorted(paths)
 
 
@@ -91,9 +94,15 @@ def test_command_extraction_stops_at_arguments():
     sample = (
         "`cf zones settings get <setting-id> -z <zone>` and\n"
         "   cf workers list | jq\n"
-        '`cf schema workers list` `cf cli search "x"`'
+        '`cf schema dns records list` `cf cli search "x"`'
     )
-    assert command_paths(sample) == ["cli search", "schema", "workers list", "zones settings get"]
+    assert command_paths(sample) == [
+        "cli search",
+        "dns records list",
+        "schema",
+        "workers list",
+        "zones settings get",
+    ]
 
 
 def _cf() -> str | None:

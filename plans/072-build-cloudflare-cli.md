@@ -1,6 +1,6 @@
 # 072 — Cloudflare plugin using the cf CLI
 
-Status: reviewing
+Status: done
 Branch: build-it/072-cloudflare-cli (base: main @ fa87bf0)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/072-cloudflare-cli
 
@@ -222,6 +222,17 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   suite gave 2192 passed, 1 failed (baseline). Ruff check and format pass. `rg -ci
   cloudflare` hits each doc, `docs/auth-credentials.md` 5 times.
 
+## Deviations
+
+- M3: the skill does not say "write commands exit 0 without doing anything". Under
+  1.0.0-beta.21, probes showed that destructive commands (`delete`) print "Aborted." and exit 1
+  without `--force`, and create/update commands don't prompt at all. That contradicts the
+  discovery note made before the plan review. The rule phrase became "Create and update
+  commands don't ask: only the token stops them", Errors handles "Aborted.", and the
+  Requirements phrase list and Error handling were updated. Scope is unchanged.
+- M3: the D9 command check also asserts that the help header names the full command path,
+  because `cf <group> <unknown> --help` prints the group's help and exits 0.
+
 ## Risks
 
 - The image build is not run here (no Docker in this container); the `Dockerfile` change is
@@ -233,6 +244,9 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   name a `Connectivity Directory Read` role; the README marks the VPC and Registrar groups
   as unconfirmed.
 - `cf` is beta: a version bump may rename commands; D9's check must be re-run then.
+- `cf@1.0.0-beta.21` adds about 210 MB to the image (138 MB is `workerd`, pulled in through
+  `miniflare` for `--local` simulation, which the read-only skill never uses). Every new
+  container host pulls it once.
 
 ## Review
 
@@ -242,12 +256,38 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   split into M2 (image and environment) and M3 (skill and docs); the doc edits are listed
   per file, including the `docs/plugins.md` no-code line; the ordered
   `EXPECTED_PROVIDERS` dict is named; the tests dir without fakes is stated; a no-`--force`
-  exit-0 error case was added; token permissions were added as D10 and tied to the
+  error case was added (exit code corrected in Deviations); token permissions were added as D10 and tied to the
   account-id fallback.
-- Code review:
-- Merge risk:
+- Code review: one round, roles `general` and `risk` (risk ran because the change touches
+  secrets, the container environment and a CLI-facing skill). No ❌. Fixed: ⚠️ account-id
+  `export` lost between shell calls (Workflow step 2 now prefixes
+  `CLOUDFLARE_ACCOUNT_ID=<id>` per command); ℹ️ missing Deviations section and stale exit-0
+  wording in the plan; ℹ️ `cf schema <cmd>` examples now also check the named command;
+  ℹ️ build-time `cf --version` now runs with `CF_SEND_TELEMETRY=false`; ℹ️ image size added
+  to Risks. ❓ `cf accounts list` output shape: answered by running `cf` against a local
+  fake API, which printed the unwrapped `result` array, so `jq '.[]'` is right. ❓ login
+  storing an Edit token from the host shell: accepted per D1/requirement 2, with a warning
+  added to the README and `docs/auth-credentials.md`. Rejected: none.
+- Merge risk: Medium: the plugin hands the agent's shell a Cloudflare token, and the only
+  limit on `cf` is that token's permissions, so a token stored with Edit scope would let a
+  mistaken command change production; this is limited by the documented read-only scopes,
+  the skill's no-change rules, and destructive commands needing `--force`.
 
 ## Outcome
+
+Delivered a no-code `cloudflare` plugin. It stores a static `api_token` credential projected as
+`CLOUDFLARE_API_TOKEN` and an `account_id` setting projected as `CLOUDFLARE_ACCOUNT_ID`. It
+ships a `cloudflare` skill with read commands for the 12 requested areas and read-only rules.
+`cf@1.0.0-beta.21` is pinned in the image with telemetry off, `cf` is listed in the agent's
+environment, and the docs are updated.
+
+Evidence: the full pytest run with `cf` on PATH gave 2192 passed, 1 failed (the baseline
+`test_persona_skills_holds_only_procedure_skills`). Ruff check and format pass. All 56 skill
+commands resolve under the pinned CLI. `cf accounts list` against a local fake API printed
+the unwrapped array.
+
+Not verified: the Docker image build (no Docker here), and any command against the live
+Cloudflare API (no token).
 
 PR: pending
 CI: pending

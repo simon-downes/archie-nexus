@@ -189,7 +189,7 @@ plugins:
 
 A stored `scalr` entry that still has `hostname`/`account` fields (pre-settings shape) fails validation as unknown fields; move the values to `plugins.scalr.settings` and re-run `archie auth login scalr`.
 
-For Cloudflare, the CLI reads `CLOUDFLARE_API_TOKEN` into `api_token`. Use a read-only API token; its permissions are the only limit on what the agent's `cf` CLI can do (see `plugins/cloudflare/README.md`). The non-secret account id is a plugin setting, projected into new agent containers as `CLOUDFLARE_ACCOUNT_ID`:
+For Cloudflare, the CLI reads `CLOUDFLARE_API_TOKEN` into `api_token`. Login stores whatever token is in the variable without checking its permissions, so set it to a dedicated read-only token on the command line (`CLOUDFLARE_API_TOKEN=... archie auth login cloudflare`); its permissions are the only limit on what the agent's `cf` CLI can do (see `plugins/cloudflare/README.md`). The non-secret account id is a plugin setting, projected into new agent containers as `CLOUDFLARE_ACCOUNT_ID`:
 
 ```yaml
 plugins:
