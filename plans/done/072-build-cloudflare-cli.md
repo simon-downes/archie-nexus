@@ -290,7 +290,7 @@ Not verified: the Docker image build (no Docker here), and any command against t
 Cloudflare API (no token).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/10
-CI: pending
+CI: none (the repository has no CI checks on the PR)
 
 ## Follow-ups
 
