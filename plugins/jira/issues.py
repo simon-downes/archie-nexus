@@ -7,12 +7,15 @@ from urllib.parse import urlencode
 
 from archie_agent.exec.plugin import ToolError, tool
 
+from .adf import markdown_to_adf
 from .client import JiraResponseError, JiraTransportError, jira_client
 from .formatting import adf_text, attachment, comment, gmt, issue_fields
 from .policy import issue_key as validate_issue_key
 from .policy import project_key, require_read, require_write
 
 _MAX_TEXT = 8000
+# Jira Cloud rejects descriptions and comments over 32,767 characters.
+_MAX_BODY = 32767
 
 
 class JiraMutationIndeterminateError(ToolError):
@@ -27,12 +30,11 @@ def _issue_project(key: str) -> str:
     return validate_issue_key(key).rsplit("-", 1)[0]
 
 
-def _adf(value: str) -> dict:
-    return {
-        "type": "doc",
-        "version": 1,
-        "content": [{"type": "paragraph", "content": [{"type": "text", "text": value}]}],
-    }
+def _check_description(description: str | None) -> None:
+    if description is not None and (
+        not isinstance(description, str) or len(description) > _MAX_BODY
+    ):
+        raise JiraInputError(f"description must be at most {_MAX_BODY} characters")
 
 
 def _ensure_limit(limit: int, maximum: int = 100) -> None:
@@ -194,10 +196,7 @@ async def create_issue(
         raise JiraInputError("summary must be 1-8000 characters")
     if not isinstance(type, str) or not type.strip():
         raise JiraInputError("type must not be empty")
-    if description is not None and (
-        not isinstance(description, str) or len(description) > _MAX_TEXT
-    ):
-        raise JiraInputError("description must be at most 8000 characters")
+    _check_description(description)
     if status is not None and (not isinstance(status, str) or not status.strip()):
         raise JiraInputError("status must not be empty")
     require_write(key)
@@ -206,7 +205,11 @@ async def create_issue(
             "project": {"key": key},
             "summary": summary,
             "issuetype": {"name": type},
-            **({"description": _adf(description)} if description else {}),
+            **(
+                {"description": markdown_to_adf(description)}
+                if description and description.strip()
+                else {}
+            ),
             **({"labels": labels} if labels is not None else {}),
             **({"parent": {"key": validate_issue_key(parent)}} if parent else {}),
             **({"priority": {"name": priority}} if priority else {}),
@@ -283,10 +286,7 @@ async def update_issue(
         raise JiraInputError("summary must be 1-8000 characters")
     if status is not None and (not isinstance(status, str) or not status.strip()):
         raise JiraInputError("status must not be empty")
-    if description is not None and (
-        not isinstance(description, str) or len(description) > _MAX_TEXT
-    ):
-        raise JiraInputError("description must be at most 8000 characters")
+    _check_description(description)
     if assignee is not None and not isinstance(assignee, str):
         raise JiraInputError("assignee must be a string")
     if labels is not None and (
@@ -298,7 +298,7 @@ async def update_issue(
     if summary is not None:
         fields["summary"] = summary[:_MAX_TEXT]
     if description is not None:
-        fields["description"] = _adf(description) if description else None
+        fields["description"] = markdown_to_adf(description) if description.strip() else None
     if labels is not None:
         fields["labels"] = labels
     if assignee is not None:
@@ -361,12 +361,14 @@ async def transition_issue(issue_key: str, status: str) -> dict:
 async def add_comment(issue_key: str, body: str) -> dict:
     """Add an explicitly requested bounded comment."""
     key = validate_issue_key(issue_key)
-    if not isinstance(body, str) or not 1 <= len(body) <= _MAX_TEXT:
-        raise JiraInputError("comment body must be 1-8000 characters")
+    if not isinstance(body, str) or not body.strip() or len(body) > _MAX_BODY:
+        raise JiraInputError(f"comment body must be 1-{_MAX_BODY} characters and not blank")
     require_write(_issue_project(key))
     async with jira_client() as client:
         try:
-            data = await client.request("POST", f"/issue/{key}/comment", json={"body": _adf(body)})
+            data = await client.request(
+                "POST", f"/issue/{key}/comment", json={"body": markdown_to_adf(body)}
+            )
         except JiraTransportError as exc:
             if exc.transmitted:
                 raise JiraMutationIndeterminateError(

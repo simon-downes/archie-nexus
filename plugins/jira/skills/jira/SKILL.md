@@ -128,7 +128,7 @@ All writes require enabled write policy and an in-scope project. Internal assign
 
 - `summary`: required, non-empty, at most 8,000 characters.
 - `type`: required, non-empty issue-type name.
-- `description`: optional plain text, at most 8,000 characters; converted to ADF.
+- `description`: optional Markdown, at most 32,767 characters (Jira's limit); converted to ADF. Blank or whitespace-only text is omitted.
 - `labels`: optional list of replacement labels.
 - `assignee`: optional value that must resolve uniquely.
 - `parent`: optional issue key.
@@ -146,7 +146,7 @@ At least one argument must be supplied. `None` leaves a field unchanged:
 | Field | Empty value | Non-empty value |
 |---|---|---|
 | `summary` | invalid | replaces summary; 1–8,000 characters |
-| `description` | clears description | replaces description; at most 8,000 characters |
+| `description` | clears description (also whitespace-only) | replaces description; Markdown, at most 32,767 characters |
 | `labels` | `[]` clears all labels | replaces all labels |
 | `status` | invalid | exact, case-insensitive target status |
 | `assignee` | `""` clears assignee | resolves uniquely and replaces assignee |
@@ -161,7 +161,7 @@ Returns the resulting issue detail. All local validation, including status valid
 
 ### `jira.add_comment(issue_key, body)`
 
-`body` must be plain text of 1–8,000 characters. Returns:
+`body` must be Markdown of 1–32,767 characters and not blank. Returns:
 
 ```json
 {

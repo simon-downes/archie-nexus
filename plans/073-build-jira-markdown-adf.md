@@ -158,7 +158,7 @@ non-empty; `code` combines only with `link`.
 
 ## Milestones
 
-### [ ] M1 — Multiline text reaches Jira as separate lines (tracer)
+### [x] M1 — Multiline text reaches Jira as separate lines (tracer)
 
 - **Approach:** declare `markdown-it-py>=3` in `agent/pyproject.toml` and run `uv lock`. Create
   `adf.py` with `markdown_to_adf` handling paragraphs, `hardBreak` (D6), plain text, raw HTML
@@ -170,7 +170,11 @@ non-empty; `code` combines only with `link`.
   ignored; Unicode preserved; 32,768 characters → `JiraInputError` with no client call.
 - **Deliverable:** the JS-988 shape (multiline text) is sent as separate paragraphs and breaks.
 - **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR UV_PROJECT_ENVIRONMENT=/tmp/nexus-073-venv uv run pytest -q -p no:cacheprovider plugins/jira` passes; full checks pass; `uv.lock` committed.
-- **Outcome:**
+- **Outcome:** `adf.py` with the tracer converter; `_adf` removed; the three write paths use
+  `markdown_to_adf`; description/comment limit 32,767 (`_MAX_BODY`); D16 applied;
+  `markdown-it-py>=3` declared and `uv.lock` updated (+2 lines). The skill's write limits were
+  updated here, because the limits changed in this milestone. `plugins/jira`: 48 passed; full
+  suite 2,141 passed; ruff check and format clean.
 
 ### [ ] M2 — Rich Markdown is written as valid ADF
 
