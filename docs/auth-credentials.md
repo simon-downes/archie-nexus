@@ -34,6 +34,7 @@ By default:
 | `github` | Static | `personal_token`, `work_token` | Prompt or JSON stdin |
 | `aws` | Static | `access_key_id`, `secret_access_key`, `session_token` | AWS credential chain plus STS validation |
 | `scalr` | Static | `token` | `SCALR_TOKEN`; hostname/account are settings (`plugins.scalr.settings`) |
+| `cloudflare` | Static | `api_token` | `CLOUDFLARE_API_TOKEN`; account id is a setting (`plugins.cloudflare.settings.account_id`) |
 | `jira` | Static | `email`, `token`, `cloud_id` | Prompt or JSON stdin |
 | `bedrock` | Static | `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token` | AWS credential chain plus STS validation |
 | `datadog` | Static | `api_key`, `app_key` | Prompt or JSON stdin; site defaults to `app.datadoghq.eu` |
@@ -188,6 +189,15 @@ plugins:
 
 A stored `scalr` entry that still has `hostname`/`account` fields (pre-settings shape) fails validation as unknown fields; move the values to `plugins.scalr.settings` and re-run `archie auth login scalr`.
 
+For Cloudflare, the CLI reads `CLOUDFLARE_API_TOKEN` into `api_token`. Use a read-only API token; its permissions are the only limit on what the agent's `cf` CLI can do (see `plugins/cloudflare/README.md`). The non-secret account id is a plugin setting, projected into new agent containers as `CLOUDFLARE_ACCOUNT_ID`:
+
+```yaml
+plugins:
+  cloudflare:
+    settings:
+      account_id: 0123456789abcdef0123456789abcdef
+```
+
 For other static providers, the CLI accepts a JSON object on stdin. If stdin is not a non-empty pipe, it prompts interactively for the provider’s declared fields. Secret-like fields such as tokens, keys, and passwords are hidden while prompting.
 
 Datadog uses `api_key` and `app_key` as secrets. Its non-secret site is the plugin setting `plugins.datadog.settings.site`, default `app.datadoghq.eu`; Datadog API clients derive the API host (`https://api.datadoghq.eu` by default) from that site:
@@ -321,11 +331,12 @@ Current mappings are:
 | `bedrock` | `aws_access_key_id` → `AWS_ACCESS_KEY_ID`, `aws_secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `aws_session_token` → `AWS_SESSION_TOKEN` | `false` |
 | `aws` | `access_key_id` → `AWS_ACCESS_KEY_ID`, `secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `session_token` → `AWS_SESSION_TOKEN` | `true` |
 | `scalr` | `token` → `SCALR_TOKEN` | `true` |
+| `cloudflare` | `api_token` → `CLOUDFLARE_API_TOKEN` | `true` |
 | `openai` | `api_key` → `OPENAI_API_KEY` | `false` |
 
 This preserves the distinction between Bedrock and general AWS credentials: Bedrock integrations read the typed `bedrock` entry, while the general `aws` entry supplies standard AWS environment variables for shell commands, the AWS CLI, and `exec`.
 
-Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`. Non-scalar settings cannot be projected: a manifest that puts `env` on a non-scalar or nested field is rejected at load. A plugin with `enabled: false` projects neither credentials nor settings.
+Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`, `plugins.cloudflare.settings.account_id` → `CLOUDFLARE_ACCOUNT_ID`. Non-scalar settings cannot be projected: a manifest that puts `env` on a non-scalar or nested field is rejected at load. A plugin with `enabled: false` projects neither credentials nor settings.
 
 Only explicitly enabled providers are projected. Missing providers are skipped, and mapping errors such as unknown credential fields, invalid environment names, or duplicate environment ownership fail container startup before Docker is invoked. Environment values are never logged.
 

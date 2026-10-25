@@ -1,11 +1,56 @@
 # Cloudflare plugin
 
 Gives agent containers a read-only Cloudflare API token and account id as environment
-variables, for Cloudflare's `cf` CLI. The plugin has no Python code and no tools.
+variables for Cloudflare's `cf` CLI (open beta, https://developers.cloudflare.com/cf/). The
+`cloudflare` skill teaches the agent to inspect Workers, Queues, Workflows, Workers VPC, R2,
+Workers KV, zones and domains, DNS, SSL and certificates, WAF, Turnstile and Tunnels. The
+plugin has no Python code and no tools.
+
+The token's permissions are the only permission layer. There is no wrapper or command
+allowlist in front of `cf`: if the token grants a permission, the agent can use it. Keep the
+token read-only. Resources are managed by Terraform, and the skill tells the agent not to
+change anything.
 
 ## Namespaces and functions
 
-No namespaces and no tools.
+No namespaces and no tools. The agent runs `cf` in the shell. The image installs
+`cf@1.0.0-beta.21` (pinned in `Dockerfile`) and sets `CF_SEND_TELEMETRY=false`.
+
+## Skill
+
+`skills/cloudflare/SKILL.md` covers access (env vars, account id), the read-only rules (no
+changes, never `--force`, denials are not worked around, no secret-value reads such as
+`cf tunnels token get`, `cf kv keys get` or `cf r2 objects get`), a workflow (`cf auth whoami`,
+`cf cli search`, `--help`, `cf schema`, `--dry-run`), read commands per area, and errors.
+
+## Token permissions
+
+Create a custom API token in the Cloudflare dashboard (My Profile → API Tokens) with only
+*Read* permissions, scoped to the one account and the zones the agent should see. Names are
+from Cloudflare's [API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
+reference.
+
+| Area | Scope | Permission |
+| --- | --- | --- |
+| Account lookup (`cf accounts list`) | Account | Account Settings Read |
+| Workers, Workflows | Account | Workers Scripts Read (the Workflows API accepts it) |
+| Queues | Account | Queues Read |
+| R2 | Account | Workers R2 Storage Read |
+| Workers KV | Account | Workers KV Storage Read |
+| Turnstile | Account | Turnstile Read |
+| Tunnels | Account | Cloudflare Tunnel Read |
+| Account rulesets and WAF | Account | Account Rulesets Read, Account WAF Read |
+| Account certificates | Account | Account: SSL and Certificates Read |
+| Workers VPC | Account | Unconfirmed: the docs name a `Connectivity Directory Read` role; no token group is listed |
+| Registrar | Account | Unconfirmed: no token group is listed |
+| Zones and domains | Zone | Zone Read, Zone Settings Read |
+| DNS | Zone | DNS Read |
+| SSL and certificates | Zone | SSL and Certificates Read |
+| WAF and firewall rules | Zone | Zone WAF Read, Firewall Services Read |
+
+Don't grant *Edit* permissions. Anything the token allows is available to the agent. With
+Workers KV Storage Read and Workers R2 Storage Read the token can read values and object
+bodies too; the skill tells the agent not to read them, but only the token enforces it.
 
 ## Credential
 
@@ -45,7 +90,18 @@ a snapshot at container start; restart the session after logging in again or cha
 
 ## Tests
 
+`plugins/cloudflare/tests/test_cloudflare_skill.py` checks the skill's area headings and
+rules. It also runs each `cf …` command the skill names with `--help`, checking that the
+command exists in the installed CLI. Those cases skip when `cf` is not on PATH. Re-run them
+after changing the pinned version:
+
+```bash
+npm install --prefix /tmp/cfcli cf@<version>
+PATH=/tmp/cfcli/node_modules/.bin:$PATH uv run pytest -q plugins/cloudflare
+```
+
 Projection and login are covered by `tests/test_credentials_runtime.py`,
-`tests/test_plugin_enabled.py` and `tests/test_cli_auth_login.py`.
+`tests/test_plugin_enabled.py` and `tests/test_cli_auth_login.py`. No `conftest.py` or fakes:
+there is no plugin code to fake.
 
 See [docs/plugins.md](../../docs/plugins.md) for the manifest format, the plugin SDK and testing conventions.

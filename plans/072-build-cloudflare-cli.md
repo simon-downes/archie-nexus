@@ -199,7 +199,7 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   note. `tests/test_environment.py` gave 9 passed. The npm install of the pin printed
   `1.0.0-beta.21`. The image build was not run (no Docker here).
 
-### [ ] M3 — A `cloudflare` skill for read-only use, and the docs
+### [x] M3 — A `cloudflare` skill for read-only use, and the docs
 
 - **Approach:** Write `plugins/cloudflare/skills/cloudflare/SKILL.md` following the
   structure of `plugins/aws/skills/aws-agent-access/SKILL.md`: How access works,
@@ -214,7 +214,13 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
 - **Verify:** `PATH=/tmp/cfcli/node_modules/.bin:$PATH env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider plugins/cloudflare tests/test_plugin_layout.py`
   passes (layout test: baseline failure only) with the D9 test run, not skipped; then the
   full suite, `uv run ruff check .` and `uv run ruff format --check .` show no new failures.
-- **Outcome:**
+- **Outcome:** Added the skill, `test_cloudflare_skill.py` (headings, rule phrases, no
+  `--force` examples, secret reads only in Principles, an extraction test, and a `--help`
+  check per command), the README's Skill, Token permissions and Tests sections, and the
+  docs entries. With `cf` 1.0.0-beta.21 on PATH, `plugins/cloudflare` gave 81 passed, and
+  all 56 command checks ran. Without `cf` on PATH it gave 25 passed, 56 skipped. The full
+  suite gave 2192 passed, 1 failed (baseline). Ruff check and format pass. `rg -ci
+  cloudflare` hits each doc, `docs/auth-credentials.md` 5 times.
 
 ## Risks
 
