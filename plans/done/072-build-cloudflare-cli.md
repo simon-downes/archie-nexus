@@ -289,7 +289,7 @@ the unwrapped array.
 Not verified: the Docker image build (no Docker here), and any command against the live
 Cloudflare API (no token).
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/10
 CI: pending
 
 ## Follow-ups
