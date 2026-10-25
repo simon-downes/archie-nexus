@@ -1,6 +1,6 @@
 # 073 — Jira Markdown descriptions and comments
 
-Status: planning
+Status: building
 Branch: build-it/073-jira-markdown-adf (base: main @ b051ac1)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/073-jira-markdown-adf
 
@@ -10,7 +10,9 @@ The Jira plugin sends a description or comment as one ADF paragraph with one tex
 Jira editor therefore shows multiline text as one line, and nothing can be formatted. Reads
 flatten ADF by joining text with spaces, so the agent sees every issue as a wall of text, and
 a read-edit-save destroys existing formatting. When done, writes accept Markdown and send
-structured ADF, and reads return Markdown, so formatting survives a round trip.
+structured ADF, and reads return Markdown. Formatting the plugin wrote survives a round trip.
+Jira-only content (expands, media, mentions, statuses, task lists, colours) reads as readable
+text and becomes plain text if re-saved; the skill tells the agent so.
 
 ## Context
 
@@ -59,10 +61,14 @@ structured ADF, and reads return Markdown, so formatting survives a round trip.
 | D9 | Images `![alt](url)` | Link mark with the alt text (or the URL) | `media` nodes | Media nodes need Jira media IDs, not URLs | self |
 | D10 | Code where JIRA forbids combined marks | `code` keeps only a `link` mark | Keep all marks | ADF allows `code` only with `link`; other combos are rejected | self |
 | D11 | Read rendering of nodes without Markdown form | status → `[text]`; date → `YYYY-MM-DD`; emoji → its text or `:short:`; inline/block/embed card → `<url>`; media → `[attachment: name]`; task item → `- [ ]`/`- [x]`; decision item → `- `; unknown → its text content | Drop them | Content is never silently lost on read | self |
-| D12 | Read escaping | Escape only characters that would change the parse: `\`, `*`, `` ` ``, `[`, `\|`, `~` next to `~`, `_` unless between two alphanumerics, `<` that starts an autolink, `&` that starts an entity, and block markers at line start (`#`, `-`/`+` list, `1.`/`1)`, `>`, `=`/`-` underline lines); line-leading whitespace is stripped; emphasis uses `*` | Escape all punctuation; no escaping | Keeps snake_case and prose readable while Markdown → ADF → Markdown → ADF is stable | self |
-| D15 | Raw newlines inside stored text nodes (what the old plugin wrote to JS-988–990) | Read as line breaks | Read as spaces | Lets the existing issues be read back with their lines, then re-saved as structured ADF | self |
+| D12 | Read escaping | In inline text only, escape characters that would change the parse: `\`, `*`, `` ` ``, `[`, `\|`, `~` next to `~`, `_` unless between two alphanumerics, `<` that starts an autolink, `&` that starts an entity, and block markers at line start (`#`, `-`/`+` list, `1.`/`1)`, `>`, `=`/`-` underline lines); line-leading whitespace of inline text is stripped. Code spans and code blocks are emitted verbatim. Emphasis uses `*` | Escape all punctuation; no escaping | Keeps snake_case and prose readable while Markdown → ADF → Markdown → ADF is stable | self |
 | D13 | Code location | New `plugins/jira/adf.py` with `markdown_to_adf()` and `adf_to_markdown()`; `formatting.adf_text` replaced by `adf_to_markdown` | Grow `formatting.py` | Converter is ~400 lines and self-contained; testable without the client | self |
 | D14 | Missing description on read | `null` | `""` | The skill's documented schema already says "or null" | self |
+| D15 | Raw newlines inside stored text nodes (what the old plugin wrote to JS-988–990) | Read as line breaks | Read as spaces | Lets the existing issues be read back with their lines, then re-saved as structured ADF | self |
+| D16 | Whitespace-only input | Description: treated as empty (create omits it, update clears it). Comment: rejected with `JiraInputError` before any request | Send an empty doc | An empty ADF doc may be rejected by Jira; a blank comment has no meaning | self |
+| D17 | Reading tables Jira's editor wrote (multi-block cells, no header row) | Cells: blocks joined with `<br>`, lists flattened to `- item` lines joined with `<br>`, `\|` escaped; no header row: an empty header row is emitted; a row of `tableHeader` cells anywhere is treated as data | Flatten cells to spaces; drop the table | GFM tables can't hold blocks; `<br>` keeps the lines visible, and the writer reads `<br>` literally, so a re-save keeps the text | self |
+| D18 | Read marks without Markdown form (`underline`, `textColor`, `backgroundColor`, `subsup`) | Dropped; text kept | HTML tags | Raw HTML stays literal on write (D5), so tags would come back as visible text | self |
+| D19 | Converter failure | `markdown_to_adf` never raises on any `str`; the normaliser always places or degrades a node | A new error type | D8's degradations cover every disallowed nesting, so there is nothing left to reject | self |
 
 ## Requirements
 
@@ -92,9 +98,17 @@ structured ADF, and reads return Markdown, so formatting survives a round trip.
   `markdown_to_adf(adf_to_markdown(markdown_to_adf(m))) == markdown_to_adf(m)`.
   - AC: parametrised round-trip test over the corpus, including text with `*`, `_`, `#`,
     `` ` ``, `[x]`, `1.` and `|`.
-- MUST document the Markdown contract, panel syntax, limits and read format in the Jira skill
-  and README.
-  - AC: `test_jira_skill.py` asserts the skill mentions Markdown and 32,767.
+- MUST treat whitespace-only descriptions as empty and reject whitespace-only comments (D16).
+  - AC: `create_issue(description="  \n")` sends no description; `update_issue(description=" ")`
+    sends `null`; `add_comment(body=" ")` raises `JiraInputError` with no client call.
+- MUST NOT raise from `markdown_to_adf` for any string input (D19).
+  - AC: a test feeds deeply nested and mixed constructs (quote in list in quote, table in list,
+    heading in panel, code in panel, 50-level nesting) and validates the output.
+- MUST document the Markdown contract, panel syntax, limits, Markdown read format and the
+  Jira-only-content warning in the Jira skill and README.
+  - AC: `test_jira_skill.py` asserts the skill mentions Markdown, 32,767 and the warning, and no
+    longer says "plain text, not ADF".
+  - AC: the README's "How it works" lists `adf.py`.
 
 Out of scope: @mention resolution on write; expand, status, date and colour on write; task
 lists on write; media upload; summary limit (stays 8,000); repairing JS-988–990 (needs
@@ -144,30 +158,45 @@ non-empty; `code` combines only with `link`.
 
 ## Milestones
 
-### [ ] M1 — Markdown descriptions and comments are written as structured ADF
+### [ ] M1 — Multiline text reaches Jira as separate lines (tracer)
 
-- **Approach:** add the dependency and `markdown_to_adf` per D1, D5–D10. Wire it into the
-  three write paths and raise their limit to 32,767 (D4). Update the skill's write sections
-  and the README.
-- **Test seam:** `markdown_to_adf()`; `create_issue` / `update_issue` / `add_comment` with a
-  patched `jira_client` (pattern: `tests/test_jira_review_fixes.py`).
-- **Edge cases:** empty string → update clears (unchanged); CRLF → same as LF; trailing
-  newlines ignored; empty list item → empty paragraph; empty table cell → empty paragraph;
-  Unicode preserved.
-- **Deliverable:** a multiline Markdown description reaches Jira as headings, lists and
-  separate paragraphs.
-- **Verify:** `uv run pytest -q plugins/jira` passes; full checks pass.
+- **Approach:** declare `markdown-it-py>=3` in `agent/pyproject.toml` and run `uv lock`. Create
+  `adf.py` with `markdown_to_adf` handling paragraphs, `hardBreak` (D6), plain text, raw HTML
+  as text (D5) and CRLF. Wire it into `create_issue`, `update_issue` and `add_comment`
+  (removing `_adf`), raise their description/comment limit to 32,767 (D4), and apply D16.
+- **Test seam:** `markdown_to_adf()`; the three write functions with a patched `jira_client`
+  (pattern: `plugins/jira/tests/test_jira_review_fixes.py`).
+- **Edge cases:** `""` on update → clears (unchanged); CRLF → same as LF; trailing newlines
+  ignored; Unicode preserved; 32,768 characters → `JiraInputError` with no client call.
+- **Deliverable:** the JS-988 shape (multiline text) is sent as separate paragraphs and breaks.
+- **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR UV_PROJECT_ENVIRONMENT=/tmp/nexus-073-venv uv run pytest -q -p no:cacheprovider plugins/jira` passes; full checks pass; `uv.lock` committed.
 - **Outcome:**
 
-### [ ] M2 — Reads return Markdown and round trips are stable
+### [ ] M2 — Rich Markdown is written as valid ADF
 
-- **Approach:** `adf_to_markdown` per D2, D3, D11, D12, D14; replace `adf_text` in
-  `_detail`, `formatting.comment` and `add_comment`. Update the skill's output schema.
-- **Test seam:** `adf_to_markdown()`; `get_issue` via `_detail`; round-trip property over the
-  corpus.
-- **Deliverable:** `get_issue` returns a formatted Markdown description that saves back
-  unchanged.
-- **Verify:** `uv run pytest -q plugins/jira` passes; full checks pass.
+- **Approach:** extend `markdown_to_adf` with headings, marks (D10), links and images (D9),
+  lists, code blocks, quotes, rules, tables and panels (D7), then the D8 normaliser driven by
+  the allowed-children table. Add the test validator. Update the skill's write sections and
+  the README's "How it works".
+- **Test seam:** `markdown_to_adf()` with exact-ADF assertions; the validator over the corpus.
+- **Edge cases:** empty list item → empty paragraph; empty table cell → empty paragraph;
+  ragged table rows → padded; ordered list start 0 and 7; alert with no body → empty panel
+  paragraph; D19 nesting stress.
+- **Deliverable:** a Markdown plan with headings, lists, a table and a panel is sent as the
+  matching ADF.
+- **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR UV_PROJECT_ENVIRONMENT=/tmp/nexus-073-venv uv run pytest -q -p no:cacheprovider plugins/jira` passes; full checks pass.
+- **Outcome:**
+
+### [ ] M3 — Reads return Markdown and round trips are stable
+
+- **Approach:** `adf_to_markdown` per D2, D3, D11, D12, D14, D15, D17, D18; replace `adf_text`
+  in `_detail`, `formatting.comment` and `add_comment`. Update the skill's output schema and
+  add the Jira-only-content warning.
+- **Test seam:** `adf_to_markdown()`; `get_issue` with a patched `jira_client`; the round-trip
+  property over the corpus.
+- **Deliverable:** `get_issue` returns a formatted Markdown description that saves back to the
+  same ADF.
+- **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR UV_PROJECT_ENVIRONMENT=/tmp/nexus-073-venv uv run pytest -q -p no:cacheprovider plugins/jira` passes; full checks pass.
 - **Outcome:**
 
 ## Deviations
@@ -180,6 +209,13 @@ non-empty; `code` combines only with `link`.
   table is built from Atlassian's node docs, not from live calls.
 
 ## Review
+
+- Plan review: 1 pass. Fixed: Objective claim narrowed to plugin-written formatting plus a
+  skill warning; M1 split into a thin tracer (M1) and rich constructs (M2); Verify uses the
+  baseline env prefix; doc ACs cover the schema text and README; added D16 (whitespace),
+  D17 (Jira-authored tables), D18 (unsupported marks), D19 (never raises); D12 limited to
+  inline text; Decisions reordered; `uv lock` added to M1. No rejections. No ❌, so no second
+  pass.
 
 ## Outcome
 
