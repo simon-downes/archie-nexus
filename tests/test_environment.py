@@ -91,8 +91,12 @@ def test_shipped_tool_notes_parse():
     everything = frozenset(
         line.split("`")[1] for line in notes.splitlines() if line.startswith("- `")
     )
-    assert {"agent-browser", "tofu", "pandoc", "pdftotext"} <= everything
+    assert {"agent-browser", "tofu", "pandoc", "pdftotext", "cf"} <= everything
     assert len(_tool_notes(notes, everything)) == len(everything)
+
+
+def test_cf_is_a_probed_cloud_cli():
+    assert "cf" in environment.TOOL_CATEGORIES["Cloud/IaC"]
 
 
 def test_build_environment_uses_cached_probe(monkeypatch):

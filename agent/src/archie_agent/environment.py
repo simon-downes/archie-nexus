@@ -33,7 +33,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "pdftotext",
     ),
     "Data": ("sqlite3", "psql", "mysql", "redis-cli"),
-    "Cloud/IaC": ("aws", "gh", "tofu", "terraform-docs"),
+    "Cloud/IaC": ("aws", "gh", "tofu", "terraform-docs", "cf"),
     "Browser": ("agent-browser",),
 }
 

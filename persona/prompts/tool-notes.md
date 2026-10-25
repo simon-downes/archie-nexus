@@ -7,5 +7,7 @@ Keep entries to one or two lines — anything longer belongs in a skill.
 - `agent-browser` — drives headless Chromium to load and interact with web pages
   (JS-rendered content, forms, logins, screenshots). Use `web_fetch` for static pages.
 - `tofu` — OpenTofu is installed in place of Terraform; use `tofu` wherever docs say `terraform`.
+- `cf` — Cloudflare's CLI (beta), authenticated with a read-only API token; load the
+  `cloudflare` skill before using it.
 - `pandoc` — converts between document formats (Markdown, HTML, DOCX, PDF output, etc.).
 - `pdftotext` — poppler PDF tools: `pdftotext`, `pdfinfo`, `pdftoppm` for reading and rasterising PDFs.

@@ -180,7 +180,7 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   baseline failure). The full suite gave 2108 passed, 1 failed (baseline); ruff check and
   format pass.
 
-### [ ] M2 — The agent image has `cf` and the agent knows it is there
+### [x] M2 — The agent image has `cf` and the agent knows it is there
 
 - **Approach:** Pin `cf@1.0.0-beta.21` in the existing `npm install --global` line in
   `Dockerfile`, add `cf --version` to that layer's checks, and set `ENV CF_SEND_TELEMETRY=false`
@@ -194,7 +194,10 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
 - **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider tests/test_environment.py`
   passes; `npm install --prefix /tmp/cfcli cf@1.0.0-beta.21 && /tmp/cfcli/node_modules/.bin/cf --version`
   prints `1.0.0-beta.21`.
-- **Outcome:**
+- **Outcome:** `Dockerfile` pins `cf@1.0.0-beta.21` in the Node layer, adds `cf --version`
+  to that layer and sets `CF_SEND_TELEMETRY=false`. `cf` is now in `Cloud/IaC`, with a tool
+  note. `tests/test_environment.py` gave 9 passed. The npm install of the pin printed
+  `1.0.0-beta.21`. The image build was not run (no Docker here).
 
 ### [ ] M3 — A `cloudflare` skill for read-only use, and the docs
 
