@@ -196,7 +196,7 @@ non-empty; `code` combines only with `link`.
   "Formatting descriptions and comments" section and README `adf.py` entry added. See the
   M2 deviation.
 
-### [ ] M3 — Reads return Markdown and round trips are stable
+### [x] M3 — Reads return Markdown and round trips are stable
 
 - **Approach:** `adf_to_markdown` per D2, D3, D11, D12, D14, D15, D17, D18; replace `adf_text`
   in `_detail`, `formatting.comment` and `add_comment`. Update the skill's output schema and
@@ -206,7 +206,14 @@ non-empty; `code` combines only with `link`.
 - **Deliverable:** `get_issue` returns a formatted Markdown description that saves back to the
   same ADF.
 - **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR UV_PROJECT_ENVIRONMENT=/tmp/nexus-073-venv uv run pytest -q -p no:cacheprovider plugins/jira` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** `adf_to_markdown` renders every written node plus expands, mentions,
+  statuses, dates, emoji, cards, media, task lists, Jira-editor tables (`<br>` cells, empty
+  header) and unknown nodes; raw newlines in old text nodes read as line breaks; it never
+  raises (malformed input, 5,000-level nesting). `_detail`, `formatting.comment` and
+  `add_comment` use it; `adf_text` removed. A fuzzer (100,000+ random inputs during the build)
+  drove fixes in both directions until the round trip was stable; a seeded 3,000-input fuzz
+  test is kept. Skill schema, read-format section and re-save warning added; README updated.
+  `plugins/jira`: 121 passed; full suite 2,216 passed; ruff clean. See the M3 deviation.
 
 ## Deviations
 
@@ -214,6 +221,12 @@ non-empty; `code` combines only with `link`.
   recursive parser overflows the stack on ~16,000 levels. `maxNesting` is raised to 100;
   input that reaches the limit, or raises `RecursionError`, is converted as plain paragraphs
   with line breaks. This keeps D19 (never raises) and no content loss. Scope unchanged.
+- M3: round-trip stability needed the writer to produce one canonical form, so `markdown_to_adf`
+  now also drops whitespace at line edges and line breaks at paragraph edges (Jira does not
+  show them), keeps emphasis off edge whitespace, de-duplicates repeated marks, turns line
+  breaks inside setext headings into spaces, drops empty paragraphs left by degradation, keeps
+  only plain code-fence language names (`[A-Za-z0-9_+#.-]`), and gives an empty link `href`
+  of `#`. Behaviour visible in Jira is unchanged except that invisible whitespace is trimmed.
 
 ## Risks
 

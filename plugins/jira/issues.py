@@ -7,9 +7,9 @@ from urllib.parse import urlencode
 
 from archie_agent.exec.plugin import ToolError, tool
 
-from .adf import markdown_to_adf
+from .adf import adf_to_markdown, markdown_to_adf
 from .client import JiraResponseError, JiraTransportError, jira_client
-from .formatting import adf_text, attachment, comment, gmt, issue_fields
+from .formatting import attachment, comment, gmt, issue_fields
 from .policy import issue_key as validate_issue_key
 from .policy import project_key, require_read, require_write
 
@@ -48,7 +48,8 @@ def _detail(
     result = issue_fields(data)
     reporter = (data.get("fields") or {}).get("reporter") or {}
     result["reported_by"] = reporter.get("displayName")
-    result["description"] = adf_text((data.get("fields") or {}).get("description"))
+    description = (data.get("fields") or {}).get("description")
+    result["description"] = adf_to_markdown(description) if description else None
     result["comments"] = comments or []
     result["attachments"] = attachments or []
     return result
@@ -382,6 +383,6 @@ async def add_comment(issue_key: str, body: str) -> dict:
     return {
         "id": str(data["id"]),
         "author": (data.get("author") or {}).get("displayName"),
-        "body": adf_text(data.get("body")),
+        "body": adf_to_markdown(data.get("body")),
         "created": gmt(data.get("created")),
     }

@@ -1,10 +1,17 @@
-"""Markdown → ADF conversion and its use by the Jira write functions; no live Jira access."""
+"""Markdown <-> ADF conversion and its use by the Jira tools; no live Jira access."""
 
+import random
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from archie_plugins.jira.adf import ALLOWED, markdown_to_adf
-from archie_plugins.jira.issues import JiraInputError, add_comment, create_issue, update_issue
+from archie_plugins.jira.adf import ALLOWED, adf_to_markdown, markdown_to_adf
+from archie_plugins.jira.issues import (
+    JiraInputError,
+    add_comment,
+    create_issue,
+    get_issue,
+    update_issue,
+)
 
 WRITE = {"jira": {"write": {"enabled": True, "scope": ["PLAT"]}}}
 
@@ -417,3 +424,254 @@ async def test_over_limit_is_rejected_before_any_request(call, policy):
         with pytest.raises(JiraInputError, match="32767"):
             await call()
     factory.assert_not_called()
+
+
+# --- ADF -> Markdown ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("node", "expected"),
+    [
+        (doc(para(text("a"), BR, text("b")), para(text("c"))), "a\nb\n\nc"),
+        (doc({"type": "heading", "attrs": {"level": 3}, "content": [text("T")]}), "### T"),
+        (
+            doc(para(text("b", {"type": "strong"}), text(" "), text("i", {"type": "em"}))),
+            "**b** *i*",
+        ),
+        (
+            doc(para(text("s", {"type": "strike"}), text(" "), text("c", {"type": "code"}))),
+            "~~s~~ `c`",
+        ),
+        (
+            doc(para(text("l", {"type": "link", "attrs": {"href": "https://x.test"}}))),
+            "[l](https://x.test)",
+        ),
+        (
+            doc({"type": "orderedList", "attrs": {"order": 3}, "content": [item(para(text("x")))]}),
+            "3. x",
+        ),
+        (
+            doc({"type": "codeBlock", "attrs": {"language": "py"}, "content": [text("a\n```")]}),
+            "````py\na\n```\n````",
+        ),
+        (doc({"type": "rule"}), "---"),
+        (doc({"type": "blockquote", "content": [para(text("q"))]}), "> q"),
+        (
+            doc({"type": "panel", "attrs": {"panelType": "warning"}, "content": [para(text("w"))]}),
+            "> [!WARNING]\n>\n> w",
+        ),
+    ],
+)
+def test_reader_renders_written_nodes(node, expected):
+    assert adf_to_markdown(node) == expected
+
+
+def test_reader_renders_jira_only_nodes():
+    node = doc(
+        {"type": "expand", "attrs": {"title": "More"}, "content": [para(text("hidden"))]},
+        para(
+            {"type": "mention", "attrs": {"id": "acct", "text": "@Alex Smith"}},
+            text(" "),
+            {"type": "mention", "attrs": {"id": "acct"}},
+            text(" "),
+            {"type": "status", "attrs": {"text": "IN PROGRESS", "color": "blue"}},
+            text(" "),
+            {"type": "date", "attrs": {"timestamp": "1735732800000"}},
+            text(" "),
+            {"type": "emoji", "attrs": {"shortName": ":smile:", "text": "😄"}},
+            text(" "),
+            {"type": "inlineCard", "attrs": {"url": "https://jira.test/browse/PLAT-1"}},
+            text(" "),
+            text("u", {"type": "underline"}, {"type": "textColor", "attrs": {"color": "#f00"}}),
+        ),
+        {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"alt": "shot.png"}}]},
+        {
+            "type": "taskList",
+            "content": [
+                {"type": "taskItem", "attrs": {"state": "DONE"}, "content": [text("done")]},
+                {"type": "taskItem", "attrs": {"state": "TODO"}, "content": [text("todo")]},
+            ],
+        },
+        {"type": "blockCard", "attrs": {"url": "https://x.test/page"}},
+        {"type": "someFutureNode", "content": [para(text("kept"))]},
+    )
+    assert adf_to_markdown(node) == (
+        "**More**\n\nhidden\n\n"
+        "@Alex Smith @user [IN PROGRESS] 2025-01-01 😄 <https://jira.test/browse/PLAT-1> u\n\n"
+        "[attachment: shot.png]\n\n"
+        "- [x] done\n- [ ] todo\n\n"
+        "<https://x.test/page>\n\n"
+        "kept"
+    )
+
+
+def test_reader_splits_raw_newlines_from_old_plugin_writes():
+    stored = doc(para(text("## Plan\n- one\n- two")))
+    assert adf_to_markdown(stored) == "\\## Plan\n\\- one\n\\- two"
+    assert markdown_to_adf(adf_to_markdown(stored)) == doc(
+        para(text("## Plan"), BR, text("- one"), BR, text("- two"))
+    )
+
+
+def test_reader_renders_jira_editor_tables():
+    cell_blocks = [
+        para(text("a")),
+        {"type": "bulletList", "content": [item(para(text("x"))), item(para(text("y")))]},
+        {"type": "codeBlock", "content": [text("c|d")]},
+    ]
+    table = doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        cell("tableCell", *cell_blocks),
+                        cell("tableCell", para(text("p|q"))),
+                    ],
+                },
+            ],
+        }
+    )
+    assert adf_to_markdown(table) == (
+        "|  |  |\n| --- | --- |\n| a<br>- x<br>- y<br>`c\\|d` | p\\|q |"
+    )
+
+
+def test_reader_never_raises_on_malformed_adf():
+    for value in [
+        None,
+        5,
+        [],
+        {},
+        {"type": "doc", "content": "x"},
+        {"content": [None, 3, {"text": 7}]},
+        {"type": "heading", "attrs": {"level": 99}, "content": [text("h")]},
+    ]:
+        assert isinstance(adf_to_markdown(value), str)
+    deep: dict = {"type": "blockquote", "content": [para(text("bottom"))]}
+    for _ in range(5000):
+        deep = {"type": "blockquote", "content": [deep]}
+    assert "bottom" in adf_to_markdown(doc(deep))
+
+
+ROUND_TRIP = CORPUS + [
+    "> [!NOTE]\n> x\n\n> [!TIP]",
+    "*a* **b** ***c*** ~~**d**~~ **a***b*",
+    '[a *b* `c`](https://x.test "t\\"q") [](https://u.test)',
+    "1986\\. A great year",
+    "- a\n- b\n\n- c\n\n1. a\n\n2) b",
+    "\\#5 issue\n\\+ x\n\\> y",
+    "&copy; &#169; a < b <c> x_y _z_",
+    "| a \\| b | `x\\|y` |\n|---|---|\n| 1 | 2 |",
+    "x\\\ny\\\n\\\nz",
+    "# Title #\n\nSetext\n===",
+    "- \n-\n  - x\n- 2) y",
+]
+
+
+@pytest.mark.parametrize("source", ROUND_TRIP)
+def test_round_trip_is_stable(source):
+    written = markdown_to_adf(source)
+    assert markdown_to_adf(adf_to_markdown(written)) == written
+
+
+async def test_get_issue_returns_markdown_description_and_comments(policy):
+    description = markdown_to_adf("# Plan\n\n- one\n- two")
+    issue = {
+        "id": "1",
+        "key": "PLAT-1",
+        "fields": {
+            "description": description,
+            "comment": {"comments": [{"id": "5", "body": markdown_to_adf("**done**")}]},
+            "attachment": [],
+        },
+    }
+    client = _client(issue)
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        result = await get_issue("PLAT-1")
+    assert result["description"] == "# Plan\n\n- one\n- two"
+    assert result["comments"][0]["body"] == "**done**"
+
+
+async def test_get_issue_missing_description_is_null(policy):
+    client = _client(
+        {"id": "1", "key": "PLAT-1", "fields": {"comment": {"comments": []}, "attachment": []}}
+    )
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        assert (await get_issue("PLAT-1"))["description"] is None
+
+
+async def test_add_comment_returns_markdown(policy):
+    policy(WRITE)
+    client = _client({"id": "9", "body": markdown_to_adf("a\n\n- b")})
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        assert (await add_comment("PLAT-1", "a\n\n- b"))["body"] == "a\n\n- b"
+
+
+_FUZZ_ATOMS = [
+    "a",
+    "b c",
+    "*",
+    "**",
+    "_",
+    "__",
+    "~",
+    "~~",
+    "`",
+    "``",
+    "[",
+    "]",
+    "(",
+    ")",
+    "<",
+    ">",
+    "&amp;",
+    "&",
+    "#",
+    "# ",
+    "- ",
+    "+ ",
+    "1. ",
+    "2) ",
+    "> ",
+    "|",
+    "\\",
+    "\n",
+    "\n\n",
+    "  ",
+    " ",
+    "\t",
+    "x_y",
+    "https://e.test",
+    "[l](https://u.test)",
+    "![i](https://i.test)",
+    "<https://a.test>",
+    "```",
+    "---",
+    "===",
+    "> [!NOTE]\n",
+    "| a | b |\n|---|---|\n",
+    "    ",
+    "!",
+    '"',
+    "'",
+    "é",
+    "😀",
+    "1986.",
+    "[x]",
+    "[ ] ",
+]
+
+
+def test_random_markdown_round_trips_and_validates():
+    """Seeded fuzz: any input yields valid ADF, and reading it back writes the same ADF."""
+    rng = random.Random(73)
+    for _ in range(3000):
+        source = "".join(rng.choice(_FUZZ_ATOMS) for _ in range(rng.randint(1, 25)))
+        written = markdown_to_adf(source)
+        validate(written)
+        assert markdown_to_adf(adf_to_markdown(written)) == written, source

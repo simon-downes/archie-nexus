@@ -63,7 +63,9 @@ block fails every call closed. `enabled: false` removes the namespace and skill.
   normaliser keeps every node where ADF allows it, using the `ALLOWED` table, and degrades
   disallowed nesting rather than failing; `> [!NOTE]`-style alerts become panels. Input nested
   deeper than the parser's limit falls back to plain paragraphs and line breaks. Descriptions
-  and comments are limited to 32,767 characters, Jira Cloud's own cap.
+  and comments are limited to 32,767 characters, Jira Cloud's own cap. `adf_to_markdown()`
+  renders descriptions and comment bodies on read as Markdown the writer reads back to the same
+  ADF; Jira-only nodes (expands, mentions, media, statuses, task lists) become readable text.
 
 Safety rules enforced in code:
 

@@ -56,13 +56,13 @@ An issue summary plus:
 
 ```json
 {
-  "description": "Plain text or null",
+  "description": "Markdown or null",
   "reported_by": "Name or null",
   "comments": [
     {
       "id": "10001",
       "author": "Name or null",
-      "body": "Plain text",
+      "body": "Markdown",
       "created": "2025-01-01T12:00:00Z"
     }
   ],
@@ -72,7 +72,9 @@ An issue summary plus:
 }
 ```
 
-At most 50 comments are returned. Description and comment bodies are plain text, not ADF.
+At most 50 comments are returned. Description and comment bodies are Markdown in the same dialect writes accept (see "Formatting descriptions and comments"), so text you read can be edited and saved back with its formatting intact.
+
+Jira content with no Markdown form is shown as readable text: an expand section as its bold title followed by its contents, a mention as `@Name`, a status as `[STATUS]`, a date as `YYYY-MM-DD`, an attachment as `[attachment: name]`, a smart link as `<url>`, and task items as `- [ ]` / `- [x]`. Underline and colour are dropped. **Re-saving such a description turns these into plain text**: mentions stop notifying, expands open, task boxes stop being checkable, and embedded attachments become text. Before re-saving a description that contains any of them, tell the user what will change, or edit with a comment instead.
 
 ## Read functions
 
@@ -176,7 +178,7 @@ Returns the resulting issue detail. All local validation, including status valid
 {
   "id": "10001",
   "author": "Alex Smith",
-  "body": "Plain text",
+  "body": "Markdown",
   "created": "2025-01-01T12:00:00Z"
 }
 ```
