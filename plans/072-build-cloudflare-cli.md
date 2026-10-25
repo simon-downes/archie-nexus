@@ -1,6 +1,6 @@
 # 072 — Cloudflare plugin using the cf CLI
 
-Status: planning
+Status: building
 Branch: build-it/072-cloudflare-cli (base: main @ fa87bf0)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/072-cloudflare-cli
 
@@ -62,7 +62,8 @@ Discovery:
 | D6 | Telemetry | `ENV CF_SEND_TELEMETRY=false` in `Dockerfile` | Leave the default (on); a plugin setting | Containers are ephemeral, so each session would look like a new install; an image-level env var is the mechanism `cf` documents and needs no config | self |
 | D7 | Write and secret-bearing commands | The skill tells the agent to run only read commands, never pass `--force`, and not to read secret values (`cf tunnels token get`, KV values, R2 object bodies) unless the user asks for that specific value | Rely on the token alone with no guidance | D1 rules out a second enforcement layer, but guidance is not enforcement: it stops the agent trying writes that the token will deny anyway, and keeps secrets out of model context when the token's read scope does allow them | self |
 | D8 | Agent discovery of `cf` | Add `cf` to `Cloud/IaC` in `agent/src/archie_agent/environment.py` and a one-line entry in `persona/prompts/tool-notes.md` pointing at the `cloudflare` skill | Skill only | The environment section is how the agent learns which CLIs exist; `cf` is an unusual name and could be mistaken for something else without the note | self |
-| D9 | Checking the skill's commands | A manual Verify step that runs `cf <command> --help` for each command the skill names, against the pinned CLI | A pytest that shells out to `cf` | `cf` is not installed in the dev or CI environment, so a pytest would need to skip or install npm packages; the pin (D5) means the check only needs repeating on a version bump | self |
+| D9 | Checking the skill's commands | A pytest in `plugins/cloudflare/tests/test_cloudflare_skill.py` that extracts each `cf …` command from the skill and runs it with `--help`, skipped when `cf` is not on PATH; run here with the pinned CLI from `/tmp/cfcli` on PATH | A manual, uncommitted check; installing npm packages from pytest | `cf` is not installed in the dev or CI environment, but it is in the agent image, so the test runs wherever `cf` exists and the check is repeatable on a version bump (D5) | self |
+| D10 | Token permissions documented | README lists the read permission groups per area, split account vs zone, including `Account Settings Read` (needed for `cf accounts list`); groups not in Cloudflare's permissions reference (Workers VPC, Registrar) are marked unconfirmed | No list; only "a read-only token" | The user scopes the token by hand in the dashboard, and the skill's missing-account-id path depends on `Account Settings Read` | self |
 
 ## Requirements
 
@@ -79,23 +80,34 @@ Discovery:
 - MUST install `cf` 1.0.0-beta.21 in the agent image with telemetry off.
   - AC: `Dockerfile` installs `cf@1.0.0-beta.21` and runs `cf --version` in the same
     layer; `ENV CF_SEND_TELEMETRY=false` is set.
-- MUST ship a `cloudflare` skill that covers the requested areas (Workers, Queues,
-  Workflows, Workers VPC, R2, Workers KV, zones/domains, DNS, SSL/certificates, WAF,
-  Turnstile, Tunnels) with read commands that exist in the pinned CLI.
-  - AC: each area appears in the skill; every `cf …` command it names prints help
-    with exit 0 under `cf@1.0.0-beta.21`.
-- MUST state in the skill that resources are Terraform-managed and the agent does not
-  change them, that a 403 or authentication error is the token's scope working and is not
-  to be worked around, that `--force` is never passed, and which commands return secret values.
-  - AC: `plugins/cloudflare/tests/test_cloudflare_skill.py` asserts each rule's phrase.
+- MUST ship a `cloudflare` skill that covers the requested areas with read commands
+  that exist in the pinned CLI.
+  - AC: `test_cloudflare_skill.py` asserts a `### <area>` heading for each of: `Workers`,
+    `Queues`, `Workflows`, `Workers VPC`, `R2`, `Workers KV`, `Zones and domains`, `DNS`,
+    `SSL and certificates`, `WAF`, `Turnstile`, `Tunnels`.
+  - AC: the D9 test runs every `cf …` command in the skill with `--help` and each exits 0
+    under `cf@1.0.0-beta.21`. A command is extracted from inline code or a fenced line
+    starting `cf `, as the leading tokens matching `[a-z0-9-]+`, stopping at the first
+    token that starts with `-` or `<` or contains other characters.
+- MUST state these rules in the skill's `## Principles` section, each asserted as an exact
+  phrase by `test_cloudflare_skill.py`:
+  - "managed by Terraform" and "Never create, change or delete Cloudflare resources";
+  - "A 403 or authentication error means the token's scope is working" and "don't work around it";
+  - "Never pass `--force`";
+  - "write commands exit 0 without doing anything", with "treat it as not done";
+  - "Don't read secret values" naming `cf tunnels token get`, `cf kv keys get` and `cf r2 objects get`.
 - MUST list `cf` among the agent's probed CLIs with a tool note.
-  - AC: `"cf"` is in `TOOL_CATEGORIES["Cloud/IaC"]`; `tool-notes.md` has a `` `cf` `` bullet;
-    `tests/test_environment.py` passes.
+  - AC: a new assertion in `tests/test_environment.py` checks `"cf"` is in
+    `TOOL_CATEGORIES["Cloud/IaC"]` and that the shipped tool notes include a `` `cf` `` entry.
 - MUST document the plugin: `plugins/cloudflare/README.md` (passing
-  `test_plugin_has_readme_covering_its_manifest`) including the token permissions to grant,
-  and the provider in `plugins/README.md`, `docs/auth-credentials.md`, `docs/config.md`,
-  `docs/plugins.md` and `docs/architecture.md`.
-  - AC: the layout test passes; `rg -n cloudflare docs plugins/README.md` hits each file.
+  `test_plugin_has_readme_covering_its_manifest`) with the token permissions (D10); a row
+  in `plugins/README.md`; in `docs/auth-credentials.md` the provider table row, a login
+  paragraph next to Scalr's, the `set_env` table row and the settings projection note; a
+  per-plugin note in `docs/config.md`; the plugin list in `docs/architecture.md`; and in
+  `docs/plugins.md` the "Plugins without code" line, which must stop implying no-code
+  plugins have no skills.
+  - AC: the layout test passes; `rg -n -i cloudflare` hits each named file, and
+    `docs/auth-credentials.md` at least four times.
 
 Out of scope: write access or write scopes; exec tools; a command wrapper or allowlist;
 `cf auth login` OAuth; multiple accounts or profiles; Terraform integration.
@@ -124,8 +136,12 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   `plugins/aws/skills/aws-agent-access/SKILL.md` (How access works, Principles, Workflow,
   per-area commands, Errors).
 - `plugins/cloudflare/tests/test_cloudflare_skill.py` (new): follows `plugins/jira/tests/test_jira_skill.py`.
-- Provider-set tests updated: `tests/test_providers.py`, `tests/test_credentials_models.py`,
-  `tests/test_orchestrator_credentials.py`, plus new cases in
+- `plugins/cloudflare/tests/` holds only the skill test, with no `conftest.py` or fakes:
+  there is no code to fake, as in `plugins/aws/tests/`.
+- Provider-set tests updated: in `tests/test_providers.py` both hand-written sets and the
+  ordered `EXPECTED_PROVIDERS` dict (`cloudflare` goes between `bedrock` and `datadog`,
+  matching manifest sort order); `tests/test_credentials_models.py`;
+  `tests/test_orchestrator_credentials.py`; plus new cases in
   `tests/test_credentials_runtime.py`, `tests/test_plugin_enabled.py`, `tests/test_cli_auth_login.py`.
 
 ### Config / infra
@@ -143,8 +159,10 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
 - Bad or expired token → `[9106]`/`[10000]` authentication errors: report, stop.
 - 403 / missing permission → report which command and area was denied; don't try another
   command to reach the same data.
-- Missing account id → pass `--account-id` from `cf accounts list`, or ask the user to
-  set `plugins.cloudflare.settings.account_id`.
+- Missing account id → run `cf accounts list` (needs `Account Settings Read`, D10) and
+  pass the id; if that is denied, ask the user to set `plugins.cloudflare.settings.account_id`.
+- A write or destructive command run without `--force` aborts and exits 0 → treat it as
+  not done, tell the user, and don't retry with `--force`.
 
 ## Milestones
 
@@ -159,17 +177,37 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
 - **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider tests/test_providers.py tests/test_credentials_models.py tests/test_orchestrator_credentials.py tests/test_credentials_runtime.py tests/test_plugin_enabled.py tests/test_cli_auth_login.py tests/test_plugin_layout.py` passes except the baseline failure.
 - **Outcome:**
 
-### [ ] M2 — The agent has `cf` and a skill for using it read-only
+### [ ] M2 — The agent image has `cf` and the agent knows it is there
 
-- **Approach:** Pin `cf` in `Dockerfile`'s Node layer and set `CF_SEND_TELEMETRY=false`.
-  Add `cf` to `TOOL_CATEGORIES` and a tool-notes bullet. Write the skill (D7, Error
-  handling above), its test, the README's Skill and token permissions sections, and the
-  docs entries. Commands in the skill come from `cf <area> --help` under the pinned version.
-- **Test seam:** the skill file text; `environment.TOOL_CATEGORIES`; `cf --help` output.
-- **Deliverable:** a session with the plugin can load the `cloudflare` skill and run `cf`.
-- **Verify:** full pytest (baseline failure only), `uv run ruff check .`,
-  `uv run ruff format --check .`; a script that extracts every `cf …` command from the skill and
-  runs it with `--help` against `cf@1.0.0-beta.21` installed in `/tmp` reports all exit 0.
+- **Approach:** Pin `cf@1.0.0-beta.21` in the existing `npm install --global` line in
+  `Dockerfile`, add `cf --version` to that layer's checks, and set `ENV CF_SEND_TELEMETRY=false`
+  next to `AGENT_BROWSER_EXECUTABLE_PATH`. Add `cf` to `TOOL_CATEGORIES["Cloud/IaC"]` in
+  `agent/src/archie_agent/environment.py` and a `` `cf` `` bullet to
+  `persona/prompts/tool-notes.md` that names the `cloudflare` skill. Add the assertion to
+  `tests/test_environment.py`.
+- **Test seam:** `environment.TOOL_CATEGORIES`, the shipped tool notes; `Dockerfile` by inspection.
+- **Deliverable:** the image definition installs `cf`, and the agent's environment section
+  lists it when present.
+- **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider tests/test_environment.py`
+  passes; `npm install --prefix /tmp/cfcli cf@1.0.0-beta.21 && /tmp/cfcli/node_modules/.bin/cf --version`
+  prints `1.0.0-beta.21`.
+- **Outcome:**
+
+### [ ] M3 — A `cloudflare` skill for read-only use, and the docs
+
+- **Approach:** Write `plugins/cloudflare/skills/cloudflare/SKILL.md` following the
+  structure of `plugins/aws/skills/aws-agent-access/SKILL.md`: How access works,
+  Principles (the exact phrases in Requirements), Workflow (whoami, account, `-z <domain>`,
+  `cf cli search`, `cf schema`), one `###` section per area with list/get commands taken
+  from `cf <area> --help` under the pinned version, and Errors (Design: Error handling).
+  Write `test_cloudflare_skill.py` with the phrase, heading and D9 command tests. Finish
+  the README (Skill and Token permissions sections, D10) and the docs entries.
+- **Test seam:** the skill file text; `cf <command> --help` exit codes.
+- **Deliverable:** a session with the plugin enabled lists and can load the `cloudflare`
+  skill, and every command it names exists.
+- **Verify:** `PATH=/tmp/cfcli/node_modules/.bin:$PATH env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider plugins/cloudflare tests/test_plugin_layout.py`
+  passes (layout test: baseline failure only) with the D9 test run, not skipped; then the
+  full suite, `uv run ruff check .` and `uv run ruff format --check .` show no new failures.
 - **Outcome:**
 
 ## Risks
@@ -178,13 +216,22 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   checked by installing the same pinned package with npm and running `cf --version`.
 - No real Cloudflare token is available, so no command is run against the live API; the
   skill's commands are checked only for existence and help output.
-- The token permission group names in the README come from Cloudflare's docs and may not
-  match the dashboard wording exactly.
+- Cloudflare's permissions reference lists no token group for Workflows, Workers VPC or
+  Registrar. The Workflows API docs accept `Workers Scripts Read`, and the Workers VPC docs
+  name a `Connectivity Directory Read` role; the README marks the VPC and Registrar groups
+  as unconfirmed.
 - `cf` is beta: a version bump may rename commands; D9's check must be re-run then.
 
 ## Review
 
-- Plan review:
+- Plan review: 1 pass, 0 ❌, 4 ⚠️, 9 ℹ️, all accepted. The skill phrases and area
+  headings are now named exactly; the command check is a committed pytest (D9 revised), with
+  the extraction rule stated; the `cf` tool-category AC has a new assertion; the old M2
+  split into M2 (image and environment) and M3 (skill and docs); the doc edits are listed
+  per file, including the `docs/plugins.md` no-code line; the ordered
+  `EXPECTED_PROVIDERS` dict is named; the tests dir without fakes is stated; a no-`--force`
+  exit-0 error case was added; token permissions were added as D10 and tied to the
+  account-id fallback.
 - Code review:
 - Merge risk:
 
