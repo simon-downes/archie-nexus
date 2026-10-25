@@ -282,7 +282,7 @@ Not verified: Jira's acceptance and rendering of the generated ADF (no authorise
 issue); whether Jira counts ADF JSON or text against 32,767.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/12
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
