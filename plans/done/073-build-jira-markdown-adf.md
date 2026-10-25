@@ -281,7 +281,7 @@ ad-hoc fuzz inputs round-trip and validate; worst-case inputs at the cap convert
 Not verified: Jira's acceptance and rendering of the generated ADF (no authorised test
 issue); whether Jira counts ADF JSON or text against 32,767.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/12
 CI: pending
 
 ## Follow-ups
