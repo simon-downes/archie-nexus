@@ -1,6 +1,6 @@
 # 072 — Cloudflare plugin using the cf CLI
 
-Status: building
+Status: reviewing
 Branch: build-it/072-cloudflare-cli (base: main @ fa87bf0)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/072-cloudflare-cli
 
@@ -29,7 +29,7 @@ Discovery:
   non-interactively from `CLOUDFLARE_API_TOKEN` (which beats any stored login) and reads
   `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ZONE_ID` for targeting. `CF_SEND_TELEMETRY=false`
   or `DO_NOT_TRACK=1` turns telemetry off. Non-interactive destructive commands abort
-  without `--force` and exit 0. Docs: https://developers.cloudflare.com/cf/.
+  without `--force` (exit 1 under beta.21, see Deviations). Docs: https://developers.cloudflare.com/cf/.
 - Plugins live in `plugins/<id>/` (`docs/plugins.md`). Credential-only plugins with env
   projection follow `plugins/scalr/` (`credential.env` + `set_env: true`; settings with
   `env`). CLI-driven skills without exec tools follow `plugins/aws/skills/aws-agent-access`.
@@ -94,7 +94,7 @@ Discovery:
   - "managed by Terraform" and "Never create, change or delete Cloudflare resources";
   - "A 403 or authentication error means the token's scope is working" and "don't work around it";
   - "Never pass `--force`";
-  - "write commands exit 0 without doing anything", with "treat it as not done";
+  - "Create and update commands don't ask: only the token stops them" (see Deviations);
   - "Don't read secret values" naming `cf tunnels token get`, `cf kv keys get` and `cf r2 objects get`.
 - MUST list `cf` among the agent's probed CLIs with a tool note.
   - AC: a new assertion in `tests/test_environment.py` checks `"cf"` is in
@@ -161,8 +161,8 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
   command to reach the same data.
 - Missing account id → run `cf accounts list` (needs `Account Settings Read`, D10) and
   pass the id; if that is denied, ask the user to set `plugins.cloudflare.settings.account_id`.
-- A write or destructive command run without `--force` aborts and exits 0 → treat it as
-  not done, tell the user, and don't retry with `--force`.
+- A destructive command run without `--force` prints "Aborted." and exits 1 → nothing
+  changed; tell the user and don't retry with `--force`.
 
 ## Milestones
 
