@@ -115,7 +115,7 @@ def normalize_fetch(value: Any, requested_id: str) -> dict[str, Any] | None:
             result["properties"] = properties
     content_match = _CONTENT_RE.search(text)
     if content_match:
-        result["content"] = content_match.group(1).strip()[:8000]
+        result["content"] = content_match.group(1).strip()
     return result
 
 
@@ -132,7 +132,7 @@ def _parse_comments(text: str) -> list[dict[str, Any]]:
                 "url": attrs.get("url"),
                 "user_url": attrs.get("user-url"),
                 "created": attrs.get("datetime"),
-                "body": html.unescape(body.strip())[:8000],
+                "body": html.unescape(body.strip()),
             }
         )
     return comments[:_MAX_COMMENTS]

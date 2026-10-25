@@ -42,18 +42,6 @@ def resource_id(value: str) -> str:
     return normalize_id(value)
 
 
-def _text(value: Any, limit: int = 8000) -> str:
-    if isinstance(value, str):
-        return value[:limit]
-    if isinstance(value, (int, float, bool)):
-        return str(value)
-    if isinstance(value, list):
-        return " ".join(_text(item, limit) for item in value)[:limit]
-    if isinstance(value, dict):
-        return " ".join(_text(item, limit) for item in value.values())[:limit]
-    return ""
-
-
 def _ancestors(value: dict[str, Any]) -> list[str]:
     raw = value.get("ancestors", value.get("path", []))
     if isinstance(raw, str):
@@ -72,11 +60,14 @@ def _authorize(
 def _project(value: dict[str, Any], *, include_properties: bool = False) -> dict[str, Any]:
     result = {
         key: value[key]
-        for key in ("id", "type", "title", "url", "path", "last_edited_time", "content")
+        for key in ("id", "type", "title", "url", "path", "last_edited_time")
         if key in value
     }
     if include_properties and isinstance(value.get("properties"), dict):
         result["properties"] = dict(list(value["properties"].items())[:50])
+    # Content last: if the exec result cap cuts a long page, the metadata survives.
+    if "content" in value:
+        result["content"] = value["content"]
     return result
 
 

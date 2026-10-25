@@ -90,7 +90,7 @@ def _body(payload: Any) -> str | None:
         try:
             return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode(
                 "utf-8", "replace"
-            )[:30000]
+            )
         except (ValueError, UnicodeError):
             pass
     parts = payload.get("parts", [])
@@ -118,8 +118,8 @@ def _message(raw: Any) -> dict[str, Any] | None:
         "to": clean(raw.get("to"), 500) or _header(payload, "To"),
         "date": clean(raw.get("date"), 64) or _header(payload, "Date"),
         "snippet": clean(raw.get("snippet"), 1000),
-        "body": clean(raw.get("body"), 30000) or _body(payload),
         "label_ids": [x for x in raw.get("labelIds", []) if isinstance(x, str)][:100],
+        "body": clean(raw.get("body"), None) or _body(payload),
     }
 
 

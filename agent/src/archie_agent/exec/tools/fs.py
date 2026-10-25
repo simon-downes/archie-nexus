@@ -76,6 +76,7 @@ async def read(
     path: str, offset: int | None = None, limit: int | None = None, raw: bool = False
 ) -> str | ToolImage:
     """Read a file from the workspace. Image files (PNG, JPEG, GIF, WebP) are returned as images.
+    Results over 32,000 characters are truncated; read large files in chunks with offset/limit.
 
     Args:
         path: File path (relative to /workspace/ or any visible absolute path).

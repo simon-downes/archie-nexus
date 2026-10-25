@@ -8,7 +8,7 @@ from archie_agent.exec.plugin import tool
 
 from . import validation as v
 from .client import IncidentIoResponseError, incident_io_client
-from .formatting import MAX_TEXT, action, follow_up, postmortem, text
+from .formatting import action, follow_up, postmortem
 from .incidents import resolve_incident_ulid
 from .policy import require_read
 
@@ -93,7 +93,7 @@ async def list_postmortems(incident: str | None = None, limit: int = 25) -> list
 
 @tool(namespace="incident_io")
 async def get_postmortem(postmortem_id: str) -> dict:
-    """Get one post-mortem with its markdown content (truncated at 8,000 characters)."""
+    """Get one post-mortem with its full markdown content."""
     key = v.identifier(postmortem_id, "postmortem_id")
     require_read()
     async with incident_io_client() as client:
@@ -103,9 +103,7 @@ async def get_postmortem(postmortem_id: str) -> dict:
             raise IncidentIoResponseError("incident.io returned a malformed post-mortem")
         content = await client.get(f"/v1/postmortem_documents/{key}/content")
     markdown = content.get("markdown")
-    full = markdown if isinstance(markdown, str) else ""
     return {
         **postmortem(item),
-        "content": text(full) if full else None,
-        "content_truncated": len(full) > MAX_TEXT,
+        "content": markdown if isinstance(markdown, str) and markdown else None,
     }

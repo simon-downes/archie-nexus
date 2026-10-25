@@ -25,7 +25,17 @@ log = logging.getLogger(__name__)
 
 _RUNS_ROOT = Path("/tmp/archie-runs")
 PYTHON = "/opt/archie/venv/bin/python"
-_MAX_RESULT_CHARS = 16_000
+_MAX_RESULT_CHARS = 32_000
+
+
+def truncate_result(text: str) -> str:
+    """Cap a model-facing result at _MAX_RESULT_CHARS with a marker that says how to get the rest."""
+    if len(text) <= _MAX_RESULT_CHARS:
+        return text
+    return text[:_MAX_RESULT_CHARS] + (
+        f"\n[…truncated: showed {_MAX_RESULT_CHARS:,} of {len(text):,} characters. "
+        "See the exec guidance on large results.]"
+    )
 
 
 async def run_exec(
@@ -116,7 +126,7 @@ async def run_exec(
 def format_result(envelope: Envelope) -> str:
     """Format a result envelope into the model-facing string.
 
-    Truncates at _MAX_RESULT_CHARS with an elision marker.
+    Truncates at _MAX_RESULT_CHARS with a marker (see truncate_result).
     """
     parts: list[str] = []
 
@@ -143,12 +153,7 @@ def format_result(envelope: Envelope) -> str:
     if envelope.stderr:
         parts.append(f"stderr:\n{envelope.stderr}")
 
-    result = "\n\n".join(parts)
-
-    if len(result) > _MAX_RESULT_CHARS:
-        result = result[:_MAX_RESULT_CHARS] + "\n[…truncated]"
-
-    return result
+    return truncate_result("\n\n".join(parts))
 
 
 def _generate_tool_docs() -> str:
@@ -186,6 +191,10 @@ def _build_exec_description() -> str:
         "files — call the native tools directly (in parallel when independent).\n\n"
         "The working directory is the workspace root; helpers and plain `open()` "
         "resolve relative paths the same way.\n\n"
+        "The result shown to the model is capped at 32,000 characters; data inside the "
+        "script is not. Plugin reads return whole documents. When data may exceed the "
+        "cap, process it in the script and return only what you need, or write it to a "
+        "file under /tmp and read it in chunks with `read(path, offset, limit)`.\n\n"
         "Available functions in the exec namespace:\n"
     )
 

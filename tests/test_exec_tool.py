@@ -134,11 +134,16 @@ def test_format_result_error():
 def test_format_result_truncation():
     env = Envelope(
         ok=True,
-        return_value="x" * 20000,
+        return_value="x" * 40000,
     )
     result = format_result(env)
-    assert len(result) <= 16_000 + 50  # some margin for the truncation marker
-    assert "[…truncated]" in result
+    assert result.startswith("x" * 32_000 + "\n[…truncated: showed 32,000 of 40,000 characters.")
+    assert "x" * 32_001 not in result
+
+
+def test_format_result_under_cap_is_untouched():
+    env = Envelope(ok=True, return_value="x" * 32_000)
+    assert format_result(env) == "x" * 32_000
 
 
 def test_format_result_string_is_plain_text():

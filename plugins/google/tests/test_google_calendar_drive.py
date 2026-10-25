@@ -154,14 +154,15 @@ async def test_drive_read_exports_google_doc_content(monkeypatch):
                 "mimeType": "application/vnd.google-apps.document",
             }
         if operation == "export":
-            return "Meeting notes\nNext steps"
+            return "Meeting notes\nNext steps\n" + "x" * 200_000
         raise AssertionError(operation)
 
     monkeypatch.setattr(drive, "drive_request", fake_request)
     result = await drive.read("doc-1", format="text")
-    assert result["content"] == "Meeting notes\nNext steps"
+    assert result["content"] == "Meeting notes\nNext steps\n" + "x" * 200_000
     assert result["format"] == "text"
-    assert result["truncated"] is False
+    assert "truncated" not in result
+    assert list(result)[-1] == "content"
     assert calls == [
         ("metadata", {"id": "doc-1", "purpose": "read"}),
         ("export", {"id": "doc-1", "mime_type": "application/vnd.google-apps.document"}),

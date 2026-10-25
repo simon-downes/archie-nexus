@@ -70,7 +70,7 @@ Load the google, notion and slack skills before Run or Review mode.
 # Run mode
 
 Exec state doesn't persist between calls, so keep working data in `/tmp/inbox-triage/`. Keep every exec
-result under 16,000 characters.
+result under 32,000 characters.
 
 ## 1. Preflight
 

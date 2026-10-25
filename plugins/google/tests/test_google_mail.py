@@ -17,6 +17,17 @@ def _warm_labels(labels):
     context().cache.set("google.labels", {"labels": labels}, 60)
 
 
+def test_message_body_is_returned_whole_after_metadata():
+    import base64
+
+    body = "b" * 100_000
+    data = base64.urlsafe_b64encode(body.encode()).decode()
+    raw = {"id": "m1", "payload": {"mimeType": "text/plain", "body": {"data": data}}}
+    result = mail._message(raw)
+    assert result["body"] == body
+    assert list(result)[-1] == "body"
+
+
 async def test_mail_surface_uses_bulk_mutation_names():
     tools = plugin_tools()
     expected = {

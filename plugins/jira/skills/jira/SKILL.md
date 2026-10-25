@@ -17,7 +17,7 @@ description: >
 - Tool calls return JSON-serializable values or raise an error; they do not return error objects.
 - Use structured Jira filters (`jira.list_issues` arguments); raw JQL and arbitrary Jira HTTP are not available.
 - Fetch issue details with `jira.get_issue` before requesting comments; the detail already includes the most recent comments.
-- All collections and text are bounded. The exec result may be truncated at 16,000 characters.
+- Collections are bounded; issue descriptions and comment bodies are returned whole. The exec result shown to you is capped at 32,000 characters, but data inside the script is not. If a result may exceed the cap, process it in the script and return only the part you need, or write it to a file under `/tmp` and read it in chunks with `read(path, offset, limit)`.
 - Obtain explicit user intent before externally visible writes, especially comments, transitions, and uploads.
 
 ## Shared input rules

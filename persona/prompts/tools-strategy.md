@@ -98,6 +98,11 @@ commit.
 - Return only what you need. A returned `str` is shown as plain text; other
   values are shown as JSON. Prefer returning a joined string over a dict of
   large text values. Use `print()` for debug output only.
+- Every tool result shown to you, native or exec, is capped at 32,000
+  characters. Data inside an exec script is not capped: plugin reads (Notion
+  pages, Drive files, emails) return whole documents. If data may exceed the
+  cap, process it in the script and return only the part you need, or write it
+  to a file under `/tmp` and read it in chunks with `read(path, offset, limit)`.
 - Results come back as plain text or `return: <json>`, `return (repr): ...`,
   `stdout:`, `stderr:`, or `error: <Type>: <message>`.
 

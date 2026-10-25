@@ -178,9 +178,7 @@ def _artifact(raw: Any) -> dict[str, Any]:
     content = raw.get("content")
     if isinstance(content, bytes):
         content = None
-    if isinstance(content, str):
-        content = content[:30000]
-    else:
+    if not isinstance(content, str):
         content = None
     destination = raw.get("docsDestination")
     if not isinstance(destination, dict):
@@ -188,7 +186,6 @@ def _artifact(raw: Any) -> dict[str, Any]:
     state = _state(raw.get("state"))
     result = {
         "state": state,
-        "content": content,
         "url": safe_url(raw.get("url") or destination.get("exportUri")),
         "provenance": "google.meet",
     }
@@ -198,6 +195,7 @@ def _artifact(raw: Any) -> dict[str, Any]:
         result["message"] = "Google Meet did not return this meeting artifact."
     elif state == "unavailable":
         result["message"] = "This Google Meet artifact is currently unavailable."
+    result["content"] = content
     return result
 
 
@@ -213,7 +211,7 @@ async def _notes_from_drive(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(content, str):
         return None
     artifact = _artifact(raw)
-    artifact["content"] = content[:30000]
+    artifact["content"] = content
     return artifact
 
 
@@ -231,9 +229,9 @@ async def _read(kind: str, meeting_id: str) -> dict[str, Any]:
         if isinstance(content, str):
             return {
                 "state": "available",
-                "content": content[:30000],
                 "url": result["file"].get("web_url"),
                 "provenance": "google.meet",
+                "content": content,
             }
         return {
             "state": "missing",

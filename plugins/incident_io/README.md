@@ -50,7 +50,7 @@ non-empty `policy.read.scope` is a config load error; the gate also fails every 
   a non-GET request.
 - `policy.py`: `require_read()` around the SDK gate; no write gate.
 - `validation.py`: local input checks, raising `IncidentIoInputError` before any request.
-- `formatting.py`: normalisers; text is capped at 8,000 characters and nested lists at 50.
+- `formatting.py`: normalisers; long text is returned whole, short metadata fields are bounded, and nested lists are capped at 50.
 - `reference.py`: reference data and name-to-ID resolution used by the list filters.
 - `incidents.py`, `alerts.py`, `work.py` (actions, follow-ups, post-mortems), `on_call.py`,
   `directory.py` (teams, users, catalog): the tools.
