@@ -1,6 +1,6 @@
 # 073 — Jira Markdown descriptions and comments
 
-Status: reviewing
+Status: done
 Branch: build-it/073-jira-markdown-adf (base: main @ b051ac1)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/073-jira-markdown-adf
 
@@ -269,6 +269,17 @@ non-empty; `code` combines only with `link`.
   write with a `JiraValidationError` (no partial write), and the change is one revertable PR.
 
 ## Outcome
+
+Delivered: `plugins/jira/adf.py` converts Markdown to ADF on write (descriptions and
+comments, up to 32,767 characters) and ADF to Markdown on read, with formatting the plugin
+writes surviving a round trip. The skill and README document the contract.
+
+Evidence: full suite 2,222 passed, 1 warning (baseline 2,126); `plugins/jira` 129 passed;
+`ruff check` and `ruff format --check` clean; seeded fuzz test (3,000 inputs) plus 100,000+
+ad-hoc fuzz inputs round-trip and validate; worst-case inputs at the cap convert in < 1 s.
+
+Not verified: Jira's acceptance and rendering of the generated ADF (no authorised test
+issue); whether Jira counts ADF JSON or text against 32,767.
 
 PR: pending
 CI: pending
