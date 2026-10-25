@@ -208,7 +208,9 @@ from archie_agent.exec.plugin import ToolError, context, require_read, require_w
 of enabled plugins once at startup, before the harness is built, each inside its own
 context with `workspace=None` and an empty policy. A failing hook, a missing function or
 an async function stops the agent with a message naming the plugin. AWS uses a hook to
-write `~/.aws/config` from `plugins.aws.settings.profiles`. `~/.aws` must not be mounted
+write `~/.aws/config` from `plugins.aws.settings.profiles`; its profiles get base credentials
+from `plugins/aws/bin/credential-process`, which reads the credential store on every call.
+`~/.aws` must not be mounted
 into containers when `plugins.aws.settings.profiles` is set: the hook refuses to overwrite a
 mounted `~/.aws` or `~/.aws/config`, or any existing `~/.aws/config` that does not start
 with its generated header.

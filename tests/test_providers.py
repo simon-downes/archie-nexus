@@ -162,7 +162,8 @@ _SLACK_USER_SCOPE = (
 )
 
 # Hard-coded snapshot of the hand-written registry before plan 070 M3; the
-# manifest-generated registry must reproduce it exactly.
+# manifest-generated registry must reproduce it exactly. Deliberate change since:
+# aws set_env is False (its credential_process reads the store per call).
 EXPECTED_PROVIDERS = {
     "bedrock": StaticProvider(
         name="bedrock",
@@ -183,7 +184,7 @@ EXPECTED_PROVIDERS = {
             "secret_access_key": "AWS_SECRET_ACCESS_KEY",
             "session_token": "AWS_SESSION_TOKEN",
         },
-        set_env=True,
+        set_env=False,
         login="aws_chain",
     ),
     "datadog": StaticProvider(name="datadog", fields=["api_key", "app_key"]),
