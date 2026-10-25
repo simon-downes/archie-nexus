@@ -103,6 +103,18 @@ def test_scalr_login_uses_environment(monkeypatch):
     assert put.call_args.kwargs["json"] == {"token": "scalr-secret"}
 
 
+def test_cloudflare_login_uses_environment(monkeypatch):
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-secret")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct")  # a setting; not read by login
+    response = _response()
+    with (
+        patch("archie_cli.auth._orchestrator_url", return_value="http://test"),
+        patch("archie_cli.auth.httpx.put", return_value=response) as put,
+    ):
+        _set_static_from_login("cloudflare")
+    assert put.call_args.kwargs["json"] == {"api_token": "cf-secret"}
+
+
 def test_static_login_passes_json_stdin(monkeypatch):
     monkeypatch.setattr(
         "sys.stdin",

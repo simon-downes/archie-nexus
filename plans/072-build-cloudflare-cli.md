@@ -166,7 +166,7 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
 
 ## Milestones
 
-### [ ] M1 — Cloudflare token and account id reach new containers
+### [x] M1 — Cloudflare token and account id reach new containers
 
 - **Approach:** Add `plugins/cloudflare/plugin.yaml` and a minimal `README.md` (credential,
   configuration, link to `docs/plugins.md`). Add `cloudflare` to the provider sets in the
@@ -175,7 +175,10 @@ skill tells the agent how to use `cf` read-only across the requested resource ar
 - **Test seam:** `PROVIDERS`, `CREDENTIAL_TYPES`, `runtime_environment()`, `_set_static_from_login`.
 - **Deliverable:** a stored Cloudflare token and account id are exported into new containers.
 - **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider tests/test_providers.py tests/test_credentials_models.py tests/test_orchestrator_credentials.py tests/test_credentials_runtime.py tests/test_plugin_enabled.py tests/test_cli_auth_login.py tests/test_plugin_layout.py` passes except the baseline failure.
-- **Outcome:**
+- **Outcome:** Added `plugins/cloudflare/plugin.yaml` and a README, plus provider-set,
+  projection, disabled and login tests. The M1 Verify set gave 141 passed, 1 failed (the
+  baseline failure). The full suite gave 2108 passed, 1 failed (baseline); ruff check and
+  format pass.
 
 ### [ ] M2 — The agent image has `cf` and the agent knows it is there
 

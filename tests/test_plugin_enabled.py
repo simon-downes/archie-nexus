@@ -116,6 +116,13 @@ def test_runtime_environment_projects_scalr_settings_when_enabled():
     assert env["SCALR_ACCOUNT"] == "acct"
 
 
+def test_runtime_environment_skips_disabled_cloudflare():
+    replace_credential("cloudflare", {"api_token": "tok"})
+    config = _config("plugins:\n  cloudflare:\n    enabled: false\n    settings: {account_id: a}\n")
+    env = runtime_environment(config)
+    assert not {"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"} & set(env)
+
+
 def test_cli_login_refuses_disabled_plugin():
     _config(DATADOG_OFF)
     result = CliRunner().invoke(login, ["datadog"])

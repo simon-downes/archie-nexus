@@ -7,6 +7,7 @@ def test_all_services_present():
     """Registry covers all configured services."""
     expected = {
         "bedrock",
+        "cloudflare",
         "notion",
         "slack",
         "github",
@@ -25,6 +26,7 @@ def test_static_providers():
     """Static providers have correct type and fields."""
     static_services = {
         "bedrock",
+        "cloudflare",
         "github",
         "aws",
         "scalr",
@@ -185,6 +187,12 @@ EXPECTED_PROVIDERS = {
         },
         set_env=True,
         login="aws_chain",
+    ),
+    "cloudflare": StaticProvider(
+        name="cloudflare",
+        fields=["api_token"],
+        env={"api_token": "CLOUDFLARE_API_TOKEN"},
+        set_env=True,
     ),
     "datadog": StaticProvider(name="datadog", fields=["api_key", "app_key"]),
     "github": StaticProvider(name="github", fields=["personal_token", "work_token"]),
