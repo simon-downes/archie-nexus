@@ -20,3 +20,6 @@ core
 
 # Session logs
 archie-*.jsonl
+
+# Secrets
+*.key

@@ -224,29 +224,22 @@ class TestDiscoverSkills:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-INTEGRATION_SKILLS = {
-    "google",
-    "incident-io",
-    "jira",
-    "notion",
-    "slack",
-    "datadog",
-    "aws-agent-access",
-}
 
 
-def test_repo_plugins_provide_integration_skills(tmp_path, monkeypatch):
-    """Integration skills come from the repo's plugins dir, not persona/skills (070 M3)."""
+def test_repo_plugin_skills_are_discovered(tmp_path, monkeypatch):
+    """Every skill under the repo's plugins/<id>/skills is discovered from that path."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(REPO_ROOT / "persona"))
     monkeypatch.setenv("ARCHIE_PLUGINS_DIR", str(REPO_ROOT / "plugins"))
-    catalog = discover_skills()
-    assert INTEGRATION_SKILLS <= set(catalog)
     plugins_root = REPO_ROOT / "plugins"
-    for name in INTEGRATION_SKILLS:
-        assert catalog[name].path.is_relative_to(plugins_root), name
-    persona_skills = {p.name for p in (REPO_ROOT / "persona" / "skills").iterdir()}
-    assert not persona_skills & INTEGRATION_SKILLS
+    plugin_ids = [p.name for p in plugins_root.iterdir() if (p / "plugin.yaml").is_file()]
+    catalog = discover_skills(enabled=plugin_ids)
+    skill_files = sorted(plugins_root.glob("*/skills/*/SKILL.md"))
+    assert skill_files
+    for path in skill_files:
+        entry = _parse_skill_file(path)
+        assert entry is not None, path
+        assert catalog[entry.name].path == path, entry.name
 
 
 def _write_plugin(root: Path, name: str, *, context: tuple[str, ...] = ()) -> Path:
