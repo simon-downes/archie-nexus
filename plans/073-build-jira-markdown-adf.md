@@ -1,6 +1,6 @@
 # 073 — Jira Markdown descriptions and comments
 
-Status: building
+Status: reviewing
 Branch: build-it/073-jira-markdown-adf (base: main @ b051ac1)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/073-jira-markdown-adf
 
@@ -213,7 +213,7 @@ non-empty; `code` combines only with `link`.
   `add_comment` use it; `adf_text` removed. A fuzzer (100,000+ random inputs during the build)
   drove fixes in both directions until the round trip was stable; a seeded 3,000-input fuzz
   test is kept. Skill schema, read-format section and re-save warning added; README updated.
-  `plugins/jira`: 121 passed; full suite 2,216 passed; ruff clean. See the M3 deviation.
+  `plugins/jira`: 121 passed; full suite 2,214 passed; ruff clean. See the M3 deviation.
 
 ## Deviations
 
