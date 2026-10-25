@@ -58,6 +58,12 @@ block fails every call closed. `enabled: false` removes the namespace and skill.
   `project in (...)` from the read scope, so the scope cannot be bypassed.
 - `tools.py` (projects), `issues.py` (issue reads, users, mutations), `attachments.py`,
   `formatting.py`.
+- `adf.py`: `markdown_to_adf()` converts description and comment Markdown (CommonMark plus GFM
+  tables and strikethrough, parsed with `markdown-it-py`) to Atlassian Document Format. A
+  normaliser keeps every node where ADF allows it, using the `ALLOWED` table, and degrades
+  disallowed nesting rather than failing; `> [!NOTE]`-style alerts become panels. Input nested
+  deeper than the parser's limit falls back to plain paragraphs and line breaks. Descriptions
+  and comments are limited to 32,767 characters, Jira Cloud's own cap.
 
 Safety rules enforced in code:
 

@@ -124,6 +124,15 @@ Returns up to `limit` candidate objects without selecting one:
 
 All writes require enabled write policy and an in-scope project. Internal assignee lookup, transition discovery, and verification reads are also write-scoped.
 
+### Formatting descriptions and comments
+
+Descriptions and comment bodies are Markdown (CommonMark with GFM tables and strikethrough), converted to Jira's rich text. Write readable structure: short sections with headings, lists, and tables rather than long paragraphs.
+
+- Supported: headings `#`–`######`, paragraphs, line breaks (a single newline is kept as a line break), `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, `[links](https://…)`, bullet and numbered lists (nested; a numbered list may start at any number), fenced code blocks with a language, `>` quotes, `---` rules, and tables with a header row.
+- Panels: a quote whose first line is exactly `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, or `> [!CAUTION]` becomes an info, success, note, warning, or error panel.
+- Not supported: raw HTML (sent as literal text), @mentions (sent as plain text; no one is notified), images (sent as a link), task checkboxes, expand sections, status lozenges, colours.
+- Jira cannot nest some blocks. A heading inside a list or panel becomes bold text, a table inside a list becomes one line per row, a quote inside a quote is flattened, and a code block inside a panel becomes code-formatted lines. Content is kept.
+
 ### `jira.create_issue(project, summary, type="Task", description=None, labels=None, status=None, assignee=None, parent=None, priority=None)`
 
 - `summary`: required, non-empty, at most 8,000 characters.

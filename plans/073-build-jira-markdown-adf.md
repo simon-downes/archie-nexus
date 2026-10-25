@@ -176,7 +176,7 @@ non-empty; `code` combines only with `link`.
   updated here, because the limits changed in this milestone. `plugins/jira`: 48 passed; full
   suite 2,141 passed; ruff check and format clean.
 
-### [ ] M2 — Rich Markdown is written as valid ADF
+### [x] M2 — Rich Markdown is written as valid ADF
 
 - **Approach:** extend `markdown_to_adf` with headings, marks (D10), links and images (D9),
   lists, code blocks, quotes, rules, tables and panels (D7), then the D8 normaliser driven by
@@ -189,7 +189,12 @@ non-empty; `code` combines only with `link`.
 - **Deliverable:** a Markdown plan with headings, lists, a table and a panel is sent as the
   matching ADF.
 - **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR UV_PROJECT_ENVIRONMENT=/tmp/nexus-073-venv uv run pytest -q -p no:cacheprovider plugins/jira` passes; full checks pass.
-- **Outcome:**
+- **Outcome:** `markdown_to_adf` covers headings, marks, links, images, lists, code blocks,
+  quotes, rules, tables and panels, with the `ALLOWED`-driven D8 normaliser. Tests assert
+  exact ADF per construct, run the structural validator over a 12-item corpus and the
+  nesting stress cases, and confirm text survives fallback. `plugins/jira`: 78 passed; full suite 2,171 passed. Skill
+  "Formatting descriptions and comments" section and README `adf.py` entry added. See the
+  M2 deviation.
 
 ### [ ] M3 — Reads return Markdown and round trips are stable
 
@@ -204,6 +209,11 @@ non-empty; `code` combines only with `link`.
 - **Outcome:**
 
 ## Deviations
+
+- M2: `markdown-it-py` silently drops content nested past `maxNesting` (default 20), and its
+  recursive parser overflows the stack on ~16,000 levels. `maxNesting` is raised to 100;
+  input that reaches the limit, or raises `RecursionError`, is converted as plain paragraphs
+  with line breaks. This keeps D19 (never raises) and no content loss. Scope unchanged.
 
 ## Risks
 
