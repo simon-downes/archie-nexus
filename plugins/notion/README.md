@@ -64,8 +64,14 @@ root, or a root appears among its ancestors as Notion reports them. Database res
 their ancestors; pages match only `pages` roots. When a scope is set, reads and writes fetch
 the target (or the parent, for `create_page`) first and refuse if its ancestry does not
 prove the relationship. Search does one provider-wide search and drops results that are out
-of scope or lack ancestry, so it may return fewer than `limit`. Any failure of the mutation
-call itself raises `NotionMutationIndeterminateError`, since the write may have happened.
+of scope or lack ancestry, so it may return fewer than `limit`. `create_page` accepts a page,
+a database (sent as its single data source) or a `collection://` data-source URL as parent;
+a data source is scoped through its owning database. When the provider rejects a mutation's
+input (`NotionToolError`, with its message) nothing was written; any other failure of the
+mutation call raises `NotionMutationIndeterminateError`, since the write may have happened.
+`tests/fixtures/write_tool_schemas.json` holds the provider's write-tool input schemas, which
+the write tests validate against; `read_tool_schemas.json` and `get_comments_response.json`
+hold the `notion-get-comments` input schema and a sanitised live response.
 
 No cache and no startup hook.
 

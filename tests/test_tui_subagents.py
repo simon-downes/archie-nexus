@@ -195,6 +195,26 @@ def test_child_reducer_uses_shared_summaries_and_status():
     assert child.status == "complete"
 
 
+def test_content_filtered_child_is_shown_as_error():
+    from archie_cli.tui.app import CHILD_CONTENT_FILTERED_MESSAGE
+
+    app = _app()
+    with patch.object(app, "_render_child"):
+        app._handle_scoped_event(
+            TurnComplete(
+                id="done",
+                turn=1,
+                scope="task-1",
+                subagent_index=0,
+                stop_reason="content_filtered",
+            )
+        )
+
+    child = app._child_activity[("task-1", 0)]
+    assert child.status == "error"
+    assert child.error == CHILD_CONTENT_FILTERED_MESSAGE
+
+
 def test_modal_uses_mutable_state():
     state = ChildActivityState(scope="task-1", index=0, agent="researcher")
     modal = SubagentScreen(state)

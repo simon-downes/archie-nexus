@@ -1,0 +1,24 @@
+{
+ "notion-get-comments": {
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+   "page_id": {
+    "type": "string"
+   },
+   "include_resolved": {
+    "type": "boolean"
+   },
+   "include_all_blocks": {
+    "type": "boolean"
+   },
+   "discussion_id": {
+    "type": "string"
+   }
+  },
+  "required": [
+   "page_id"
+  ],
+  "additionalProperties": {}
+ }
+}

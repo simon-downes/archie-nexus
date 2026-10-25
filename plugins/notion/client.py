@@ -34,6 +34,16 @@ class NotionResponseError(ToolError):
     pass
 
 
+_PASSTHROUGH = (NotionConfigurationError, NotionToolError, NotionResponseError)
+
+
+def _unwrap_single(exc: BaseException) -> BaseException:
+    """Strip nested single-exception groups to reach the underlying error."""
+    while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        exc = exc.exceptions[0]
+    return exc
+
+
 @asynccontextmanager
 async def _session():
     credentials = context().credentials  # no context fails closed with PluginContextError
@@ -60,13 +70,14 @@ async def _session():
             async with session_type(read_stream, write_stream) as client:
                 await client.initialize()
                 yield client
-    except (NotionConfigurationError, NotionToolError, NotionResponseError):
+    except _PASSTHROUGH:
         raise
     except Exception as exc:
-        if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
-            exc = exc.exceptions[0]
-        if isinstance(exc, (NotionConfigurationError, NotionToolError, NotionResponseError)):
-            raise exc
+        # The MCP session and the HTTP transport each wrap errors in an anyio
+        # TaskGroup, so a tool error raised in the body arrives nested two deep.
+        inner = _unwrap_single(exc)
+        if isinstance(inner, _PASSTHROUGH):
+            raise inner from None
         raise NotionTransportError("Notion MCP request could not be completed") from exc
 
 

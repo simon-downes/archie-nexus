@@ -168,6 +168,45 @@ async def test_drive_read_exports_google_doc_content(monkeypatch):
     ]
 
 
+async def test_drive_search_wraps_plain_text_in_drive_query(monkeypatch):
+    calls = []
+
+    async def fake_request(operation, payload, token):
+        calls.append((operation, payload))
+        return [{"id": "f1", "name": "JARVIS notes"}]
+
+    monkeypatch.setattr(drive, "drive_request", fake_request)
+    result = await drive.search("Bob's JARVIS", limit=5)
+    assert [item["id"] for item in result] == ["f1"]
+    assert calls == [
+        (
+            "search",
+            {
+                "q": "(name contains 'Bob\\'s JARVIS' or fullText contains 'Bob\\'s JARVIS')"
+                " and trashed = false",
+                "pageSize": 5,
+            },
+        )
+    ]
+
+
+async def test_drive_list_requests_normalized_fields(monkeypatch):
+    calls = []
+
+    async def fake_google_json(url, token, *, params=None):
+        calls.append(params)
+        return {"files": []}
+
+    monkeypatch.setattr(drive, "google_json", fake_google_json)
+    await drive.drive_request("list", {"pageSize": 3}, "token")
+    assert calls == [
+        {
+            "pageSize": 3,
+            "fields": "files(id,name,mimeType,modifiedTime,webViewLink,trashed,parents)",
+        }
+    ]
+
+
 async def test_drive_format_validation_before_provider(monkeypatch):
     calls = []
     monkeypatch.setattr(drive, "drive_request", lambda *args: calls.append(args))

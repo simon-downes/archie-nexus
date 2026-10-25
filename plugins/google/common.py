@@ -66,6 +66,12 @@ def safe_id(value: Any, name: str = "id", maximum: int = 256) -> str:
     return text(value, name, maximum=maximum)
 
 
+def drive_text_query(value: str) -> str:
+    """Build a Drive ``q`` expression that matches plain text in names or content."""
+    literal = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"(name contains '{literal}' or fullText contains '{literal}') and trashed = false"
+
+
 def require_read() -> None:
     sdk.require_read(GoogleAuthorizationError, "Google reads are disabled by policy")
 

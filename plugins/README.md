@@ -17,6 +17,7 @@ and how to run its tests.
 | [incident_io](incident_io/README.md) | Read-only REST tools, `incident_io` |
 | [jira](jira/README.md) | REST tools, `jira` |
 | [notion](notion/README.md) | MCP tools, `notion` |
+| [openai](openai/README.md) | API key for the OpenAI model backend; no code |
 | [scalr](scalr/README.md) | Credential and settings exported as env vars; no code |
 | [slack](slack/README.md) | REST tools, `slack` |
 

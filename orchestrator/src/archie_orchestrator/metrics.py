@@ -94,6 +94,8 @@ class MetricsWriter:
     def _infer_backend(model_key: str) -> str | None:
         if model_key.startswith("bedrock-"):
             return "bedrock"
+        if model_key.startswith("openai-"):
+            return "openai"
         if model_key.startswith("ollama-"):
             return "ollama"
         return None

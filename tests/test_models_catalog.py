@@ -7,6 +7,7 @@ from archie_shared.models import (
     BedrockProvider,
     CostConfig,
     OllamaProvider,
+    OpenAIProvider,
     Rate,
     calculate_cost,
     get_model,
@@ -24,7 +25,9 @@ def test_default_models_all_have_required_fields():
     for key, model in DEFAULT_MODELS.items():
         assert model.name, f"{key} missing name"
         assert model.context > 0, f"{key} has invalid context"
-        assert isinstance(model.provider, (BedrockProvider, BedrockOpenAIProvider, OllamaProvider))
+        assert isinstance(
+            model.provider, (BedrockProvider, BedrockOpenAIProvider, OpenAIProvider, OllamaProvider)
+        )
         assert model.provider.model_id
 
 
@@ -33,13 +36,17 @@ def test_cache_ttl_matches_cache_capability():
         assert (model.cache_ttl_seconds is not None) == model.can_cache
         if isinstance(model.provider, BedrockProvider) and model.can_cache:
             assert model.cache_ttl_seconds == 300
-        elif isinstance(model.provider, BedrockOpenAIProvider) and model.can_cache:
+        elif (
+            isinstance(model.provider, (BedrockOpenAIProvider, OpenAIProvider)) and model.can_cache
+        ):
             assert model.cache_ttl_seconds == 1800
 
 
 def test_default_model_key_format():
     for key in DEFAULT_MODELS:
-        assert key.startswith("bedrock-") or key.startswith("ollama-")
+        assert key.startswith(("bedrock-", "openai-", "ollama-"))
+        if key.startswith("openai-"):
+            assert isinstance(DEFAULT_MODELS[key].provider, OpenAIProvider)
 
 
 def test_gpt_56_luna_catalog_entry():
@@ -157,6 +164,47 @@ def test_openai_tiered_global_rates():
         assert DEFAULT_MODELS[key].cost.rates == rates, key
 
 
+def test_openai_api_catalog_entries():
+    # (model_id, name, context, rates) — from developers.openai.com/api/docs/models/<id>.
+    expected = {
+        "openai-gpt-6-astra": (
+            "gpt-6-astra",
+            "GPT-6 Astra (OpenAI)",
+            922_000,
+            _tiered((10.00, 50.00, 1.00, 12.50), (20.00, 75.00, 2.00, 25.00)),
+        ),
+        "openai-gpt-6-1-sol": (
+            "gpt-6.1-sol",
+            "GPT-6.1 Sol (OpenAI)",
+            922_000,
+            _tiered((2.00, 10.00, 0.10, 2.50), (4.00, 15.00, 0.20, 5.00)),
+        ),
+        "openai-gpt-5-6-cyber": (
+            "gpt-5.6-cyber",
+            "GPT-5.6 Cyber (OpenAI)",
+            272_000,
+            [Rate(input=12.50, output=75.00, cache_read=1.25, cache_write=15.625)],
+        ),
+        "openai-gpt-6-luna": (
+            "gpt-6-luna",
+            "GPT-6 Luna (OpenAI)",
+            922_000,
+            _tiered((0.10, 0.50, 0.01, 0.125), (0.20, 0.75, 0.02, 0.25)),
+        ),
+    }
+    for key, (model_id, name, context, rates) in expected.items():
+        model = DEFAULT_MODELS[key]
+        assert isinstance(model.provider, OpenAIProvider), key
+        assert model.provider.model_id == model_id, key
+        assert model.name == name, key
+        assert model.context == context, key
+        assert model.max_output_tokens == 128_000, key
+        assert model.can_cache and model.can_see, key
+        assert model.cache_ttl_seconds == 1800, key
+        assert model.cost.rates == rates, key
+    assert {k for k in DEFAULT_MODELS if k.startswith("openai-")} == set(expected)
+
+
 def test_gpt_6_1_sol_tier_boundary_applies_to_all_categories():
     cost = DEFAULT_MODELS["bedrock-openai-gpt-6-1-sol"].cost
     assert cost.get_rate(272_000, 0).input == 2.00
@@ -204,7 +252,7 @@ def test_in_region_eu_west_2_prices():
 
 def test_every_bedrock_model_is_priced():
     for key, model in DEFAULT_MODELS.items():
-        if isinstance(model.provider, (BedrockProvider, BedrockOpenAIProvider)):
+        if isinstance(model.provider, (BedrockProvider, BedrockOpenAIProvider, OpenAIProvider)):
             assert all(rate.input > 0 and rate.output > 0 for rate in model.cost.rates), key
 
 

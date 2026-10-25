@@ -13,6 +13,7 @@ from .common import (
     bounded_limit,
     clean,
     credential,
+    drive_text_query,
     google_json,
     google_text,
     require_read,
@@ -20,6 +21,8 @@ from .common import (
     safe_url,
     text,
 )
+
+_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,parents"
 
 
 async def drive_request(operation: str, payload: dict[str, Any], token: str) -> Any:
@@ -40,12 +43,13 @@ async def drive_request(operation: str, payload: dict[str, Any], token: str) -> 
             params={"alt": "media"},
         )
     if operation in {"search", "list"}:
-        data = await google_json("https://www.googleapis.com/drive/v3/files", token, params=payload)
+        params = {**payload, "fields": f"files({_FIELDS})"}
+        data = await google_json("https://www.googleapis.com/drive/v3/files", token, params=params)
         return data.get("files", [])
     return await google_json(
         f"https://www.googleapis.com/drive/v3/files/{payload['id']}",
         token,
-        params={"fields": "id,name,mimeType,modifiedTime,webViewLink,trashed,parents"},
+        params={"fields": _FIELDS},
     )
 
 
@@ -83,7 +87,9 @@ async def search_references(query: str, limit: int) -> list[dict[str, Any]]:
     limit = bounded_limit(limit, maximum=50)
     require_read()
     raw = await drive_request(
-        "search", {"q": query, "pageSize": limit}, credential().access_token or ""
+        "search",
+        {"q": drive_text_query(query), "pageSize": limit},
+        credential().access_token or "",
     )
     return _normalize(raw, limit)
 
