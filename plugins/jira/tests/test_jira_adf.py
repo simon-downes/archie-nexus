@@ -1,10 +1,11 @@
 """Markdown <-> ADF conversion and its use by the Jira tools; no live Jira access."""
 
 import random
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from archie_plugins.jira.adf import ALLOWED, adf_to_markdown, markdown_to_adf
+from archie_plugins.jira.adf import adf_to_markdown, markdown_to_adf
 from archie_plugins.jira.issues import (
     JiraInputError,
     add_comment,
@@ -68,6 +69,17 @@ def test_empty_input_is_an_empty_document():
 
 # --- Rich Markdown --------------------------------------------------------------------------
 
+# Allowed block children, copied from the plan's table (Atlassian ADF node reference). Kept
+# separate from adf.ALLOWED so a wrong production entry fails here.
+_CELL = {"paragraph", "heading", "bulletList", "orderedList", "codeBlock", "blockquote"}
+ALLOWED = {
+    "doc": _CELL | {"panel", "rule", "table"},
+    "listItem": {"paragraph", "bulletList", "orderedList", "codeBlock"},
+    "blockquote": {"paragraph", "bulletList", "orderedList", "codeBlock"},
+    "panel": {"paragraph", "heading", "bulletList", "orderedList"},
+    "tableCell": _CELL | {"panel", "rule"},
+    "tableHeader": _CELL | {"panel", "rule"},
+}
 INLINE = {"text", "hardBreak"}
 MARKS = {"strong", "em", "strike", "code", "link"}
 
@@ -80,9 +92,7 @@ def validate(node, parent="doc"):
         assert node["version"] == 1
     if kind in ALLOWED:
         for child in content:
-            assert child["type"] in ALLOWED[kind] or (kind == "doc" and child["type"] == "table"), (
-                f"{child['type']} inside {kind}"
-            )
+            assert child["type"] in ALLOWED[kind], f"{child['type']} inside {kind}"
         if kind != "doc":
             assert content, f"empty {kind}"
     if kind == "listItem":
@@ -402,12 +412,21 @@ async def test_add_comment_rejects_blank_body_before_any_request(policy):
 
 async def test_body_limit_is_jira_cap(policy):
     policy(WRITE)
-    client = _client({"key": "PLAT-1", "id": "1"}, {"id": "9", "body": doc()})
+    client = _client(
+        {"key": "PLAT-1", "id": "1"},
+        None,
+        {"id": "1", "key": "PLAT-1", "fields": {}},
+        {"id": "9", "body": doc()},
+    )
     with patch("archie_plugins.jira.issues.jira_client") as factory:
         factory.return_value.__aenter__.return_value = client
         await create_issue("PLAT", "s", description="d" * 32767)
+        await update_issue("PLAT-1", description="e" * 32767)
         await add_comment("PLAT-1", "c" * 32767)
-    assert client.request.call_count == 2
+    calls = client.request.call_args_list
+    assert calls[0].kwargs["json"]["fields"]["description"] == doc(para(text("d" * 32767)))
+    assert calls[1].kwargs["json"]["fields"]["description"] == doc(para(text("e" * 32767)))
+    assert calls[3].kwargs["json"]["body"] == doc(para(text("c" * 32767)))
 
 
 @pytest.mark.parametrize(
@@ -675,3 +694,52 @@ def test_random_markdown_round_trips_and_validates():
         written = markdown_to_adf(source)
         validate(written)
         assert markdown_to_adf(adf_to_markdown(written)) == written, source
+
+
+def test_links_without_a_usable_target_stay_text():
+    # Empty or non-web targets lose the link; "![d](data:x)" isn't an image to markdown-it.
+    assert markdown_to_adf("[x]() ![alt]() ![](data:image/png;base64,AAA) ![d](data:x)") == doc(
+        para(text("x alt  ![d](data:x)"))
+    )
+    assert markdown_to_adf("[j](javascript:alert(1))") == doc(
+        para(text("[j](javascript:alert(1))"))
+    )
+
+
+def test_reader_keeps_jira_only_blocks_inside_table_cells():
+    media = {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"alt": "shot.png"}}]}
+    expand = {"type": "nestedExpand", "attrs": {"title": "More"}, "content": [para(text("hidden"))]}
+    task = {"type": "taskItem", "attrs": {"state": "DONE"}, "content": [text("done")]}
+    cells = [
+        cell("tableCell", para(text("img:")), media),
+        cell("tableCell", {"type": "blockCard", "attrs": {"url": "https://x.test/a"}}),
+        cell("tableCell", expand),
+        cell("tableCell", {"type": "taskList", "content": [task]}),
+    ]
+    table = {"type": "table", "content": [{"type": "tableRow", "content": cells}]}
+    assert adf_to_markdown(doc(table)).split("\n")[2] == (
+        "| img:<br>[attachment: shot.png] | <https://x.test/a> | **More**<br>hidden | - [x] done |"
+    )
+
+
+def test_reader_never_raises_on_non_string_code_text():
+    for bad in (5, None, ["x"]):
+        code = {"type": "codeBlock", "content": [{"type": "text", "text": bad}]}
+        row = {"type": "tableRow", "content": [cell("tableCell", code)]}
+        assert isinstance(adf_to_markdown(doc(code, {"type": "table", "content": [row]})), str)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        ("*a* " * 8192)[:32767],
+        ("**a** " * 5461)[:32767],
+        ("~~a~~ " * 5461)[:32767],
+        ("a[](https://b.test)" * 1800)[:32767],
+        ("[a](https://b.test) " * 1600)[:32767],
+    ],
+)
+def test_worst_case_size_converts_quickly(source):
+    started = time.perf_counter()
+    adf_to_markdown(markdown_to_adf(source))
+    assert time.perf_counter() - started < 1.0

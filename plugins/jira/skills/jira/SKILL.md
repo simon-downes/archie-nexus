@@ -76,6 +76,8 @@ At most 50 comments are returned. Description and comment bodies are Markdown in
 
 Jira content with no Markdown form is shown as readable text: an expand section as its bold title followed by its contents, a mention as `@Name`, a status as `[STATUS]`, a date as `YYYY-MM-DD`, an attachment as `[attachment: name]`, a smart link as `<url>`, and task items as `- [ ]` / `- [x]`. Underline and colour are dropped. **Re-saving such a description turns these into plain text**: mentions stop notifying, expands open, task boxes stop being checkable, and embedded attachments become text. Before re-saving a description that contains any of them, tell the user what will change, or edit with a comment instead.
 
+Read-back Markdown escapes literal Markdown characters (`\*`, `\[`, `\_`), so it can be longer than the visible text. A description close to Jira's 32,767-character limit may exceed it when read and saved back; shorten it or attach the full text with `attach_file`.
+
 ## Read functions
 
 ### `jira.list_projects(limit=50)`

@@ -167,6 +167,7 @@ def _inline(tokens: list[Token]) -> list[dict]:
     result: list[dict] = []
     marks: list[dict] = []
     link_starts: list[int] = []
+    length = 0  # characters emitted so far, to spot links with no text
     for token in tokens:
         kind = token.type
         if kind in {"softbreak", "hardbreak"}:
@@ -174,12 +175,13 @@ def _inline(tokens: list[Token]) -> list[dict]:
         elif kind in {"strong_open", "em_open", "s_open"}:
             marks.append({"type": {"strong_open": "strong", "em_open": "em"}.get(kind, "strike")})
         elif kind == "link_open":
-            href = str(token.attrs.get("href", ""))
-            attrs = {"href": href or "#"}
+            # An empty href ("[x]()") gives a mark _append drops, so the text stays plain.
+            # markdown-it already leaves unsafe schemes (javascript:, file:) unlinked.
+            attrs = {"href": str(token.attrs.get("href", ""))}
             if token.attrs.get("title"):
                 attrs["title"] = str(token.attrs["title"])
             marks.append({"type": "link", "attrs": attrs})
-            link_starts.append(_text_length(result))
+            link_starts.append(length)
         elif kind in {"strong_close", "em_close", "s_close", "link_close"}:
             wanted = {"strong_close": "strong", "em_close": "em", "s_close": "strike"}.get(
                 kind, "link"
@@ -188,21 +190,27 @@ def _inline(tokens: list[Token]) -> list[dict]:
                 if marks[index]["type"] == wanted:
                     mark = marks.pop(index)
                     start = link_starts.pop() if wanted == "link" and link_starts else None
-                    if start is not None and start == _text_length(result):
+                    if start is not None and start == length:
                         # "[](url)" has no text; keep the URL visible instead of losing it.
-                        _append(result, mark["attrs"]["href"], [*marks, mark])
+                        length += _append(result, mark["attrs"]["href"], [*marks, mark])
                     break
         elif kind == "code_inline":
             # ADF allows code only alongside link.
-            _append(result, token.content, [m for m in marks if m["type"] == "link"] + [_CODE])
-        elif kind == "image":
-            alt = "".join(child.content for child in token.children or []) or str(
-                token.attrs.get("src", "")
+            length += _append(
+                result, token.content, [m for m in marks if m["type"] == "link"] + [_CODE]
             )
-            link = {"type": "link", "attrs": {"href": str(token.attrs.get("src", ""))}}
-            _append(result, alt, [m for m in marks if m["type"] != "link"] + [link])
+        elif kind == "image":
+            # Jira images need uploaded media, so an image becomes a link to its URL. Only
+            # web URLs are linked; other sources (data: URIs) keep just the alt text.
+            src = str(token.attrs.get("src", ""))
+            web = re.match(r"https?://", src, re.IGNORECASE) is not None
+            alt = "".join(child.content for child in token.children or []) or (src if web else "")
+            image_marks = [m for m in marks if m["type"] != "link"]
+            if web:
+                image_marks.append({"type": "link", "attrs": {"href": src}})
+            length += _append(result, alt, image_marks)
         elif token.content:
-            _append(result, token.content, marks)
+            length += _append(result, token.content, marks)
     return result
 
 
@@ -238,8 +246,13 @@ def _canonical(nodes: list[dict]) -> list[dict]:
         split.append({**node, "text": core})
         if tail:
             split.append(_text_node(tail, _keep(marks, after)))
+    return _merge(split)
+
+
+def _merge(nodes: list[dict]) -> list[dict]:
+    """Merge adjacent text nodes that carry equal marks."""
     merged: list[dict] = []
-    for node in split:
+    for node in nodes:
         last = merged[-1] if merged else None
         if (
             last
@@ -297,25 +310,22 @@ def _tidy(nodes: list[dict]) -> list[dict]:
 _CODE = {"type": "code"}
 
 
-def _text_length(result: list[dict]) -> int:
-    return sum(len(node.get("text", "")) for node in result)
-
-
-def _append(result: list[dict], value: str, marks: list[dict]) -> None:
+def _append(result: list[dict], value: str, marks: list[dict]) -> int:
+    """Append text with marks, merging into the previous node; returns characters added."""
     if not value:
-        return
+        return 0
     unique: dict[str, dict] = {}
     for mark in marks:
+        if mark["type"] == "link" and not mark["attrs"]["href"]:
+            continue  # a link with no target is plain text
         unique[mark["type"]] = dict(mark)  # nested "*a *b* c*" repeats a mark; ADF forbids it
     ordered = sorted(unique.values(), key=lambda m: _MARK_ORDER[m["type"]])
     last = result[-1] if result else None
     if last and last["type"] == "text" and last.get("marks", []) == ordered:
         last["text"] += value
-        return
-    node: dict[str, Any] = {"type": "text", "text": value}
-    if ordered:
-        node["marks"] = ordered
-    result.append(node)
+    else:
+        result.append(_text_node(value, ordered))
+    return len(value)
 
 
 # --- Normalisation --------------------------------------------------------------------------
@@ -390,18 +400,7 @@ def _alert(quote: dict, raw: dict[int, str]) -> dict:
 
 
 def _paragraph(content: list[dict]) -> dict:
-    merged: list[dict] = []
-    for node in content:
-        last = merged[-1] if merged else None
-        if (
-            last
-            and node["type"] == last["type"] == "text"
-            and node.get("marks", []) == last.get("marks", [])
-        ):
-            merged[-1] = {**last, "text": last["text"] + node["text"]}
-        else:
-            merged.append(node)
-    return {"type": "paragraph", "content": merged}
+    return {"type": "paragraph", "content": _merge(content)}
 
 
 def _with_strong(content: list[dict]) -> list[dict]:
@@ -426,8 +425,8 @@ def _code_lines(node: dict) -> list[dict]:
     return result
 
 
-def _flat_inline(node: dict) -> list[dict]:
-    """Inline content of any block, with hardBreaks between its blocks."""
+def _degraded_inline(node: dict) -> list[dict]:
+    """Writer: inline content of a block ADF can't nest here, with breaks between blocks."""
     kind = node["type"]
     if kind in {"paragraph", "heading"}:
         return list(node.get("content", []))
@@ -435,7 +434,7 @@ def _flat_inline(node: dict) -> list[dict]:
         return _code_lines(node)
     result: list[dict] = []
     for child in node.get("content", []):
-        part = _flat_inline(child)
+        part = _degraded_inline(child)
         if kind in {"bulletList", "orderedList"}:
             part = [{"type": "text", "text": "- "}, *part]
         if part:
@@ -450,7 +449,7 @@ def _row_inline(row: dict) -> list[dict]:
     for index, cell in enumerate(row["content"]):
         if index:
             result.append({"type": "text", "text": " | "})
-        result.extend(_flat_inline(cell))
+        result.extend(_degraded_inline(cell))
     return result
 
 
@@ -458,7 +457,9 @@ def _row_inline(row: dict) -> list[dict]:
 
 _PANEL_KEYWORDS = {value: key for key, value in PANELS.items()}
 _DELIMITERS = {"strong": "**", "em": "*", "strike": "~~"}
+_RAW = "_raw"  # internal inline node rendered verbatim (task boxes in table cells)
 _INLINE_TYPES = {
+    _RAW,
     "text",
     "hardBreak",
     "mention",
@@ -478,7 +479,7 @@ def adf_to_markdown(value: Any) -> str:
     try:
         nodes = value if isinstance(value, list) else [value]
         return _blocks(_dicts(nodes)).strip("\n")
-    except RecursionError:
+    except Exception:  # noqa: BLE001 - malformed or pathological provider ADF: keep the text
         return " ".join(_all_text(value))
 
 
@@ -651,8 +652,16 @@ def _task_list(node: dict) -> str:
     return "\n".join(lines)
 
 
+def _code_text(node: dict) -> str:
+    return "".join(
+        child["text"]
+        for child in _content(node)
+        if child.get("type") == "text" and isinstance(child.get("text"), str)
+    )
+
+
 def _fence(node: dict) -> str:
-    body = "".join(child.get("text", "") for child in _content(node) if child.get("type") == "text")
+    body = _code_text(node)
     longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
     fence = "`" * max(3, longest + 1)
     language = _attrs(node).get("language")
@@ -687,26 +696,43 @@ def _cell(cell: dict) -> str:
         if kind in {"bulletList", "orderedList", "taskList", "decisionList"}:
             parts.extend("- " + _inline_run(_flat(item), table=True) for item in _content(block))
         elif kind == "codeBlock":
-            code = "".join(child.get("text", "") for child in _content(block))
+            code = _code_text(block)
             parts.extend(_code_span(line, table=True) for line in code.split("\n") if line)
         else:
             text = _inline_run(_flat(block), table=True)
             if text:
                 parts.append(text)
-    return "<br>".join(parts)
+    # A raw newline would end the table row; Jira line breaks inside a cell become <br>.
+    return "<br>".join(parts).replace("\n", "<br>")
 
 
 def _flat(node: dict) -> list[dict]:
-    """Inline content of a block and its descendants, with breaks between blocks."""
-    if node.get("type") in _INLINE_TYPES:
+    """Reader: inline content of a block and its descendants, with breaks between blocks.
+
+    Used for table cells, which hold one line of Markdown. Blocks with no inline form are
+    swapped for an inline equivalent so a cell keeps the same content as the page would.
+    """
+    kind = node.get("type")
+    if kind in _INLINE_TYPES:
         return [node]
+    if kind == "media":
+        return [{"type": "mediaInline", "attrs": _attrs(node)}]
+    if kind in {"blockCard", "embedCard"}:
+        return [{"type": "inlineCard", "attrs": _attrs(node)}]
+    prefix: list[dict] = []
+    title = _attrs(node).get("title")
+    if kind in {"expand", "nestedExpand"} and isinstance(title, str) and title.strip():
+        prefix = [{"type": "text", "text": title.strip(), "marks": [{"type": "strong"}]}]
+    if kind in {"taskItem", "blockTaskItem"}:
+        prefix = [{"type": _RAW, "text": "[x] " if _attrs(node).get("state") == "DONE" else "[ ] "}]
     result: list[dict] = []
     for child in _content(node):
         part = _flat(child)
-        if part and result and child.get("type") not in _INLINE_TYPES:
-            result.append({"type": "hardBreak"})
+        if part and (result or (prefix and kind not in {"taskItem", "blockTaskItem"})):
+            if child.get("type") not in _INLINE_TYPES:
+                result.append({"type": "hardBreak"})
         result.extend(part)
-    return result
+    return prefix + result
 
 
 def _media(node: dict) -> str:
@@ -882,13 +908,16 @@ def _apply_emphasis(segments: list[tuple[list[str], str]]) -> str:
             return "__" if name == "strong" else "_"
         return _DELIMITERS[name]
 
-    def run_length(name: str, start: int) -> int:
-        length = 0
-        for marks, text in segments[start:]:
-            if text == "\n" or (name not in marks and text.strip()):
-                break
-            length += 1
-        return length
+    # runs[name][i]: how many segments from i keep mark `name` open (whitespace-only
+    # segments do not close it; a line break does). One backward pass keeps this linear.
+    runs: dict[str, list[int]] = {}
+    for name in _DELIMITERS:
+        counts = [0] * (len(segments) + 1)
+        for index in range(len(segments) - 1, -1, -1):
+            marks, text = segments[index]
+            if text != "\n" and (name in marks or not text.strip()):
+                counts[index] = counts[index + 1] + 1
+        runs[name] = counts
 
     for position, (wanted, rendered) in enumerate(segments):
         if rendered == "\n":
@@ -905,7 +934,7 @@ def _apply_emphasis(segments: list[tuple[list[str], str]]) -> str:
         # Open the mark that lasts longest outermost, so it need not close and reopen.
         opening = sorted(
             (name for name in wanted if name not in stack),
-            key=lambda name: (-run_length(name, position), _MARK_ORDER[name]),
+            key=lambda name: (-runs[name][position], _MARK_ORDER[name]),
         )
         if opening:
             stripped = rendered.lstrip(" \t")
@@ -951,6 +980,8 @@ def _inline_node(node: dict, table: bool, line_start: bool, is_code: bool) -> st
         return f"<{url}>" if url and not re.search(r"[\s<>]", url) else _escape(url, line_start)
     if kind == "mediaInline":
         return _media(node)
+    if kind == _RAW:
+        return str(node.get("text", ""))
     return _inline_run(_content(node), table) if _content(node) else ""
 
 

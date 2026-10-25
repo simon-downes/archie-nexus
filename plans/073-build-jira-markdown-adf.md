@@ -234,6 +234,8 @@ non-empty; `code` combines only with `link`.
   Needs a live test on an authorised issue.
 - Jira's ADF validator may reject a shape the test validator allows; the allowed-children
   table is built from Atlassian's node docs, not from live calls.
+- Relative link targets (`[x](docs/a.md)`) are sent as-is; Jira may reject or mis-render them.
+- Lists nested past ~50 levels make the whole document plain lines (text kept).
 
 ## Review
 
@@ -243,6 +245,28 @@ non-empty; `code` combines only with `link`.
   D17 (Jira-authored tables), D18 (unsupported marks), D19 (never raises); D12 limited to
   inline text; Decisions reordered; `uv lock` added to M1. No rejections. No ❌, so no second
   pass.
+- Code review: 1 round, `general` and `risk` (risk ran: model-supplied input, provider
+  payloads and a changed tool output contract). Fixed: empty-`src` images and empty links
+  produced `href: ""` (now plain text; images link only `http(s)` sources, so `data:` URIs
+  no longer become links); table cells dropped media, smart links, expand titles and task
+  state on read (cells now keep them, and cell line breaks become `<br>` instead of ending the
+  row); reader was quadratic on long runs of short emphasis spans (2.2 s at the cap; now
+  linear via precomputed run lengths) and writer quadratic in links per paragraph (now a
+  running length); `adf_to_markdown` raised on non-string code text (now never raises);
+  validator imported production `ALLOWED` (now a literal copy of the plan table) and had a
+  dead clause; three copies of the text-merge loop (now `_merge`); `_flat_inline` renamed
+  `_degraded_inline` to separate it from the reader's `_flat`; limit test now covers
+  `update_issue` and asserts full-length payloads; skill warns that escaped read-back can
+  exceed 32,767 near the cap. Added regression tests for each, plus a size test at the cap
+  (< 1 s per conversion). Answered: a list nested past the parser limit (~50 levels) turns the
+  whole document into plain lines — accepted, because no text is lost and real descriptions
+  never nest that deep. Not changed: commit subjects lack a breaking-change marker for the
+  read format change; the PR body states it instead of rewriting history. Href schemes: markdown-it
+  already blocks `javascript:`, `vbscript:`, `file:` and non-image `data:`; whether Jira accepts
+  relative hrefs is unverified (Risks). No ❌, so no second round.
+- Merge risk: Medium: the tool's description and comment format changes in both directions,
+  and Jira's acceptance of the generated ADF is untested live; a rejected shape fails one
+  write with a `JiraValidationError` (no partial write), and the change is one revertable PR.
 
 ## Outcome
 
