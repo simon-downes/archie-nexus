@@ -50,3 +50,150 @@ Discovery:
   (`persona/skills/inbox-triage` is not a procedure skill). Ruff check and format pass.
 - Not included: the user's untracked `openai.key`, `persona/skills/aws-agent-access/`,
   `plans/060-spec-container-aws-profiles.md`, `plans/070-build-nexus-plugins.md`.
+## Decisions
+
+| #  | Decision | Chosen | Rejected | Why | Source |
+|----|----------|--------|----------|-----|--------|
+| D1 | How the agent reaches Cloudflare | `cf` run directly in the shell, authenticated by `CLOUDFLARE_API_TOKEN`; the token's permissions are the only permission layer | A wrapper enforcing a command allowlist; Python exec tools under a `cloudflare` namespace | Two layers that disagree (wrapper allows, token denies, or the reverse) are confusing; `cf` has ~2,900 generated commands, so an allowlist or exec tools would be large and track a moving beta | user Q1 |
+| D2 | Plugin shape | Credential-and-settings plugin with one skill and no Python code (`plugins/cloudflare/`), like `plugins/scalr/` plus a skill like `plugins/aws/skills/aws-agent-access` | A plugin with an `entry` and tool policy | No exec tools (D1), so `policy` and `namespaces` have nothing to gate | self |
+| D3 | Credential field name | `api_token` → `CLOUDFLARE_API_TOKEN`, `set_env: true` | `token` (Scalr's name) | Cloudflare also has a global API key (`CLOUDFLARE_API_KEY`) that `cf` reads; naming the field `api_token` makes it clear which one to store | self |
+| D4 | Account targeting | Optional setting `account_id` → `CLOUDFLARE_ACCOUNT_ID` | Also a `zone_id` setting; no settings | Workers, Queues, R2, KV, Workflows, VPC, Turnstile and Tunnels are account-scoped and need an account id; zones are many per account and `cf` takes `-z <domain>` per call, so a fixed default zone would mislead | self |
+| D5 | How `cf` is installed | Pinned `npm install --global cf@1.0.0-beta.21` in the existing Node layer of `Dockerfile` | `cf@latest`; `npx cf` on demand | The skill names exact commands, and a beta can rename them between releases; pinning keeps the skill and CLI in step, and `npx` would download on every cold session | self |
+| D6 | Telemetry | `ENV CF_SEND_TELEMETRY=false` in `Dockerfile` | Leave the default (on); a plugin setting | Containers are ephemeral, so each session would look like a new install; an image-level env var is the mechanism `cf` documents and needs no config | self |
+| D7 | Write and secret-bearing commands | The skill tells the agent to run only read commands, never pass `--force`, and not to read secret values (`cf tunnels token get`, KV values, R2 object bodies) unless the user asks for that specific value | Rely on the token alone with no guidance | D1 rules out a second enforcement layer, but guidance is not enforcement: it stops the agent trying writes that the token will deny anyway, and keeps secrets out of model context when the token's read scope does allow them | self |
+| D8 | Agent discovery of `cf` | Add `cf` to `Cloud/IaC` in `agent/src/archie_agent/environment.py` and a one-line entry in `persona/prompts/tool-notes.md` pointing at the `cloudflare` skill | Skill only | The environment section is how the agent learns which CLIs exist; `cf` is an unusual name and could be mistaken for something else without the note | self |
+| D9 | Checking the skill's commands | A manual Verify step that runs `cf <command> --help` for each command the skill names, against the pinned CLI | A pytest that shells out to `cf` | `cf` is not installed in the dev or CI environment, so a pytest would need to skip or install npm packages; the pin (D5) means the check only needs repeating on a version bump | self |
+
+## Requirements
+
+- MUST register a static `cloudflare` provider with one field `api_token`.
+  - AC: `PROVIDERS["cloudflare"]` is a `StaticProvider` with `fields == ["api_token"]`,
+    `env == {"api_token": "CLOUDFLARE_API_TOKEN"}`, `set_env is True`;
+    `CREDENTIAL_TYPES["cloudflare"].__struct_fields__ == ("api_token",)`.
+- MUST let `archie auth login cloudflare` read the token from `CLOUDFLARE_API_TOKEN`.
+  - AC: a test like `test_scalr_login_uses_environment` stores `{"api_token": <value>}`.
+- MUST export the stored token as `CLOUDFLARE_API_TOKEN` and `plugins.cloudflare.settings.account_id`
+  as `CLOUDFLARE_ACCOUNT_ID` into new containers, and neither when the plugin is disabled.
+  - AC: `runtime_environment()` returns both variables when enabled; neither when
+    `enabled: false`; only the token when `account_id` is unset.
+- MUST install `cf` 1.0.0-beta.21 in the agent image with telemetry off.
+  - AC: `Dockerfile` installs `cf@1.0.0-beta.21` and runs `cf --version` in the same
+    layer; `ENV CF_SEND_TELEMETRY=false` is set.
+- MUST ship a `cloudflare` skill that covers the requested areas (Workers, Queues,
+  Workflows, Workers VPC, R2, Workers KV, zones/domains, DNS, SSL/certificates, WAF,
+  Turnstile, Tunnels) with read commands that exist in the pinned CLI.
+  - AC: each area appears in the skill; every `cf …` command it names prints help
+    with exit 0 under `cf@1.0.0-beta.21`.
+- MUST state in the skill that resources are Terraform-managed and the agent does not
+  change them, that a 403 or authentication error is the token's scope working and is not
+  to be worked around, that `--force` is never passed, and which commands return secret values.
+  - AC: `plugins/cloudflare/tests/test_cloudflare_skill.py` asserts each rule's phrase.
+- MUST list `cf` among the agent's probed CLIs with a tool note.
+  - AC: `"cf"` is in `TOOL_CATEGORIES["Cloud/IaC"]`; `tool-notes.md` has a `` `cf` `` bullet;
+    `tests/test_environment.py` passes.
+- MUST document the plugin: `plugins/cloudflare/README.md` (passing
+  `test_plugin_has_readme_covering_its_manifest`) including the token permissions to grant,
+  and the provider in `plugins/README.md`, `docs/auth-credentials.md`, `docs/config.md`,
+  `docs/plugins.md` and `docs/architecture.md`.
+  - AC: the layout test passes; `rg -n cloudflare docs plugins/README.md` hits each file.
+
+Out of scope: write access or write scopes; exec tools; a command wrapper or allowlist;
+`cf auth login` OAuth; multiple accounts or profiles; Terraform integration.
+
+## Design
+
+### Overview
+
+A no-code plugin: `plugin.yaml` declares the API-token credential and an `account_id`
+setting, both projected as environment variables. The image ships the pinned `cf` CLI. A
+skill tells the agent how to use `cf` read-only across the requested resource areas.
+
+### Stack
+
+- `cf` (npm, new to the image), pinned at `1.0.0-beta.21` (D5). Installed with the existing
+  global npm install of `agent-browser`.
+
+### Code structure
+
+- `plugins/cloudflare/plugin.yaml` (new): `name`, static `credential`
+  (`fields: [api_token]`, `env: {api_token: CLOUDFLARE_API_TOKEN}`, `set_env: true`),
+  `settings.account_id: {type: str, env: CLOUDFLARE_ACCOUNT_ID}`. Follows `plugins/scalr/plugin.yaml`.
+- `plugins/cloudflare/README.md` (new): follows `plugins/scalr/README.md`, plus a Skill
+  section and a token permissions list (read-only permission groups per area).
+- `plugins/cloudflare/skills/cloudflare/SKILL.md` (new): follows the structure of
+  `plugins/aws/skills/aws-agent-access/SKILL.md` (How access works, Principles, Workflow,
+  per-area commands, Errors).
+- `plugins/cloudflare/tests/test_cloudflare_skill.py` (new): follows `plugins/jira/tests/test_jira_skill.py`.
+- Provider-set tests updated: `tests/test_providers.py`, `tests/test_credentials_models.py`,
+  `tests/test_orchestrator_credentials.py`, plus new cases in
+  `tests/test_credentials_runtime.py`, `tests/test_plugin_enabled.py`, `tests/test_cli_auth_login.py`.
+
+### Config / infra
+
+- Env vars into containers: `CLOUDFLARE_API_TOKEN` (credential), `CLOUDFLARE_ACCOUNT_ID`
+  (setting, when set).
+- Image: `CF_SEND_TELEMETRY=false`; `cf` on PATH from the global npm install.
+
+### Error handling
+
+`cf` exits 1 and prints a boxed error on stderr. The skill maps the cases the agent will meet:
+
+- No token → "No authentication token found": the user needs `archie auth login cloudflare`
+  and a new session; stop.
+- Bad or expired token → `[9106]`/`[10000]` authentication errors: report, stop.
+- 403 / missing permission → report which command and area was denied; don't try another
+  command to reach the same data.
+- Missing account id → pass `--account-id` from `cf accounts list`, or ask the user to
+  set `plugins.cloudflare.settings.account_id`.
+
+## Milestones
+
+### [ ] M1 — Cloudflare token and account id reach new containers
+
+- **Approach:** Add `plugins/cloudflare/plugin.yaml` and a minimal `README.md` (credential,
+  configuration, link to `docs/plugins.md`). Add `cloudflare` to the provider sets in the
+  three enumerating tests, and add projection, disabled and login tests next to the Scalr
+  ones. ⚠️ Run pytest with `ARCHIE_PLUGINS_DIR`, `ARCHIE_PERSONA_DIR`, `ARCHIE_HOME_DIR` unset.
+- **Test seam:** `PROVIDERS`, `CREDENTIAL_TYPES`, `runtime_environment()`, `_set_static_from_login`.
+- **Deliverable:** a stored Cloudflare token and account id are exported into new containers.
+- **Verify:** `env -u ARCHIE_PLUGINS_DIR -u ARCHIE_PERSONA_DIR -u ARCHIE_HOME_DIR uv run pytest -q -p no:cacheprovider tests/test_providers.py tests/test_credentials_models.py tests/test_orchestrator_credentials.py tests/test_credentials_runtime.py tests/test_plugin_enabled.py tests/test_cli_auth_login.py tests/test_plugin_layout.py` passes except the baseline failure.
+- **Outcome:**
+
+### [ ] M2 — The agent has `cf` and a skill for using it read-only
+
+- **Approach:** Pin `cf` in `Dockerfile`'s Node layer and set `CF_SEND_TELEMETRY=false`.
+  Add `cf` to `TOOL_CATEGORIES` and a tool-notes bullet. Write the skill (D7, Error
+  handling above), its test, the README's Skill and token permissions sections, and the
+  docs entries. Commands in the skill come from `cf <area> --help` under the pinned version.
+- **Test seam:** the skill file text; `environment.TOOL_CATEGORIES`; `cf --help` output.
+- **Deliverable:** a session with the plugin can load the `cloudflare` skill and run `cf`.
+- **Verify:** full pytest (baseline failure only), `uv run ruff check .`,
+  `uv run ruff format --check .`; a script that extracts every `cf …` command from the skill and
+  runs it with `--help` against `cf@1.0.0-beta.21` installed in `/tmp` reports all exit 0.
+- **Outcome:**
+
+## Risks
+
+- The image build is not run here (no Docker in this container); the `Dockerfile` change is
+  checked by installing the same pinned package with npm and running `cf --version`.
+- No real Cloudflare token is available, so no command is run against the live API; the
+  skill's commands are checked only for existence and help output.
+- The token permission group names in the README come from Cloudflare's docs and may not
+  match the dashboard wording exactly.
+- `cf` is beta: a version bump may rename commands; D9's check must be re-run then.
+
+## Review
+
+- Plan review:
+- Code review:
+- Merge risk:
+
+## Outcome
+
+PR: pending
+CI: pending
+
+## Follow-ups
+
+- Narrow write scopes (for example queue purge or cache purge) once wanted; they would come
+  from a second token or extra permission groups, per D1.
