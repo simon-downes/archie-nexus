@@ -106,6 +106,20 @@ RUN TFDOCS_VERSION=$(curl -fsSL https://api.github.com/repos/terraform-docs/terr
     curl -fsSL "https://github.com/terraform-docs/terraform-docs/releases/download/${TFDOCS_VERSION}/terraform-docs-${TFDOCS_VERSION}-linux-${TARGETARCH}.tar.gz" \
     | tar -xz -C /usr/local/bin terraform-docs && chmod +x /usr/local/bin/terraform-docs
 
+# --- Scalr CLI ---
+# Credentials come from SCALR_TOKEN / SCALR_HOSTNAME / SCALR_ACCOUNT (plugins/scalr).
+RUN SCALR_VERSION=$(curl -fsSL https://api.github.com/repos/Scalr/scalr-cli/releases/latest | jq -r .tag_name | sed 's/^v//') && \
+    SCALR_BASE="https://github.com/Scalr/scalr-cli/releases/download/v${SCALR_VERSION}" && \
+    SCALR_ZIP="scalr-cli_${SCALR_VERSION}_linux_${TARGETARCH}.zip" && \
+    cd /tmp && \
+    curl -fsSLO "${SCALR_BASE}/${SCALR_ZIP}" && \
+    curl -fsSLO "${SCALR_BASE}/scalr-cli_${SCALR_VERSION}_SHA256SUMS" && \
+    grep " ${SCALR_ZIP}\$" "scalr-cli_${SCALR_VERSION}_SHA256SUMS" | sha256sum -c - && \
+    unzip -q "${SCALR_ZIP}" scalr -d /usr/local/bin && \
+    chmod +x /usr/local/bin/scalr && \
+    rm -f /tmp/scalr-cli_* && \
+    scalr -version
+
 # --- GitHub CLI ---
 # The real binary is diverted to /usr/bin/gh-base so package upgrades keep it there.
 # /usr/local/bin/gh (copied below) is a wrapper that picks the GitHub token per call.
