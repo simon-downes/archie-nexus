@@ -243,8 +243,8 @@ Dockerfile change plus one frontmatter entry. Evidence: full suite 2,160 passed;
 clean; the shipped template rendered in this container with the expected tool list and
 paths. Not verified: a real session started through the orchestrator with the new prompt.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/13
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
