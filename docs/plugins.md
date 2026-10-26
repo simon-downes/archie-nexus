@@ -152,10 +152,11 @@ Each plugin is configured under `plugins.<id>` in `~/.nexus/config.yaml`:
 - `auth`: overrides for the credential provider, such as an OAuth `client_id`.
 - `settings`: values validated against the manifest's `settings`.
 
-`policy` is re-read before every exec call. `enabled` is read at startup for which plugins
+`policy` is re-read before every exec call. `enabled` is read at session start for which plugins
 are imported and which skills are listed; a plugin disabled while a session runs has both
 policy blocks turned off from the next exec call. `auth` and `settings` are read at
-startup. Unknown plugin ids, unknown fields, wrong types, a `write` block for a plugin
+session start; the orchestrator re-reads `config.yaml` on use, so no orchestrator restart
+is needed (see [Configuration](config.md)). Unknown plugin ids, unknown fields, wrong types, a `write` block for a plugin
 without writes and a `scope` for a plugin without one are load errors. See
 [Configuration](config.md#plugins) for examples.
 

@@ -166,7 +166,7 @@ async def test_startup_logs_discovered_sessions(caplog):
 
     with (
         patch("archie_orchestrator.app.list_sessions", return_value=sessions),
-        patch("archie_orchestrator.app.load_nexus_config", return_value=NexusConfig()),
+        patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
         caplog.at_level(logging.INFO, logger="archie_orchestrator.app"),
     ):
         # Drive the lifespan directly — enter startup, do nothing, then exit

@@ -46,7 +46,7 @@ async def test_shutdown_does_not_call_docker_stop(caplog):
 
     with (
         patch("archie_orchestrator.app.list_sessions", return_value=sessions),
-        patch("archie_orchestrator.app.load_nexus_config", return_value=NexusConfig()),
+        patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
         patch("archie_orchestrator.docker.subprocess.run") as mock_run,
     ):
         async with lifespan(app):
@@ -81,7 +81,7 @@ async def test_shutdown_logs_active_connections(caplog):
     """Shutdown log shows the count of active WS connections."""
     with (
         patch("archie_orchestrator.app.list_sessions", return_value=[]),
-        patch("archie_orchestrator.app.load_nexus_config", return_value=NexusConfig()),
+        patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
         caplog.at_level(logging.INFO, logger="archie_orchestrator.app"),
     ):
         async with lifespan(app):

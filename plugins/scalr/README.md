@@ -48,8 +48,9 @@ and hides login and status for the provider.
 `shared/src/archie_shared/credentials/runtime.py` (`runtime_environment()`) builds the
 environment for each new container: the stored `token` as `SCALR_TOKEN` (skipped when no
 credential is stored), and each setting that declares `env` in the manifest, when its value
-is set. Values are a snapshot at container start; restart the session after logging in again
-or changing settings. Two plugins claiming the same variable fail container startup.
+is set. Values are a snapshot at container start; start a new session after logging in again
+or changing settings (the orchestrator re-reads `config.yaml` on use, so it does not need a
+restart). Two plugins claiming the same variable fail container startup.
 
 ## Tests
 

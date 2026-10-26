@@ -100,7 +100,7 @@ For example:
   `archie auth login slack` adds newly requested scopes to the existing token.
 - Google requests offline access with consent.
 
-Overrides are configured for the running orchestrator under `plugins.<id>.auth` in `config.yaml` and read at startup (see [Configuration](config.md)). Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `plugins.google.auth.client_id` is required before `archie auth login google` can start. Slack takes its `client_id` the same way:
+Overrides are configured under `plugins.<id>.auth` in `config.yaml`; the orchestrator re-reads them on each auth request, so edits apply without a restart (see [Configuration](config.md)). Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `plugins.google.auth.client_id` is required before `archie auth login google` can start. Slack takes its `client_id` the same way:
 
 ```yaml
 plugins:
