@@ -1,6 +1,6 @@
 # 074 — Environment section from one markdown template
 
-Status: building
+Status: reviewing
 Branch: build-it/074-environment-template (base: main @ 75710b2)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/074-environment-template
 
