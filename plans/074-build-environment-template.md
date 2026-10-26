@@ -73,7 +73,7 @@ Discovery:
 | D9 | Runtime companions (`uv`, `npm`) | Ordinary tools in the `Runtimes` category | `RUNTIME_COMPANIONS` table | One mechanism for every binary | self |
 | D10 | Rendered tool list | Per category: `*Category*:` then `- \`tool\` (version) — note` per installed tool, categories in first-appearance order | today's comma lists plus a separate Tool notes block | User's sketch; one place per tool | user |
 | D11 | Which paths show | An entry shows when it is a mount point, or it exists and an earlier `PATHS` entry that is its ancestor is shown | any mounted ancestor; exact mount only | Lets `~/.nexus/sessions` appear under the `~/.nexus` mount without treating a dev host's `/home` filesystem as host-mounted | self |
-| D16 | Self paths presentation | `/opt/archie/*` become `PATHS` entries in the one paths list under the heading "Host-mounted (persistent; everything else is lost when the session ends):", described "this agent's own code — don't edit unless asked", "this agent's own prompts and skills — don't edit unless asked", "this agent's plugins — don't edit unless asked" | separate prose line | The user's combined list. They are host-mounted, so the heading stays true | user |
+| D16 | Self paths presentation | `/opt/archie/*` become `PATHS` entries in the one paths list under the heading "Host-mounted (persistent; everything else is lost when the session ends):", described "this agent's own code (don't edit unless asked)", "this agent's own prompts and skills (don't edit unless asked)", "this agent's plugins (don't edit unless asked)" | separate prose line | The user's combined list. They are host-mounted, so the heading stays true | user |
 | D12 | Session logs location | `~/.nexus/sessions` entry in `PATHS` ("session logs (JSONL)") | `{ARCHIE_HOME}/logs` line | Logs are in `sessions/`; `logs/` holds orchestrator access/error logs. Fits the paths list | self |
 | D13 | Template errors (missing file, bad frontmatter, bad tool entry) | Raise at prompt build; messages prefixed `environment.md:` and naming the key, e.g. `environment.md: tools.scalr: unknown key 'notes'`, `environment.md: unknown placeholder {nope}` | fall back to an empty section | Matches `_load_prompt` for other core fragments; a broken template fails the first session visibly instead of silently dropping the section | self |
 | D14 | Dockerfile/template drift test | No test; document the two-step procedure | string-match test | Package names differ from binaries (`mariadb-client`→`mysql`, `poppler-utils`→`pdftotext`, `redis-tools`→`redis-cli`), so a test needs a mapping field: the duplication this build removes | self |
@@ -166,7 +166,7 @@ probe failure or timeout (5 s) → no version shown, as today.
 
 ## Milestones
 
-### [ ] M1 — Environment section rendered from environment.md
+### [x] M1 — Environment section rendered from environment.md
 
 - **Approach:** Write `environment.md` reproducing today's output text with the D10 tool
   layout; rewrite `environment.py` per Code structure; switch `prompt._build_environment`;
@@ -185,7 +185,16 @@ probe failure or timeout (5 s) → no version shown, as today.
   _build_environment; print(_build_environment('m', '/workspace'))"` prints a `- \`scalr\` —`
   line, `- \`python\` (3.13)`, and `- \`~/.nexus/sessions\` — session logs (JSONL)`; full
   suite and ruff pass.
-- **Outcome:**
+- **Outcome:** `persona/prompts/environment.md` (frontmatter: 26 tools; body: layout with
+  `{name}` placeholders and `{?container}`, `{?sudo}`, `{?tools}`, `{?paths}` guards) replaces
+  `tool-notes.md` and the Python tables; `environment.py` is now parse + probe + fill;
+  `prompt._build_environment` loads the template with `_load_prompt`. Evidence:
+  `uv run pytest -q tests/test_environment.py tests/test_prompt.py` → 57 passed; full suite
+  → 2,157 passed; `ruff check .` clean; `ruff format --check` clean on touched files; the
+  removal grep over `agent persona tests` → no matches. The Verify render in this container
+  printed `- \`python\` (3.13)`, `- \`node\` (24.22)`, the `scalr` note and
+  `- \`~/.nexus/sessions\` — session logs (JSONL)`. Self-path descriptions use parentheses
+  for "don't edit unless asked" to avoid a double em dash.
 
 ## Deviations
 
