@@ -1,5 +1,7 @@
 """Tests for the environment section rendered from persona/prompts/environment.md."""
 
+import sys
+
 import pytest
 from archie_agent import environment
 from archie_agent.environment import EnvironmentFacts, ToolSpec, parse_template, render
@@ -89,9 +91,10 @@ def test_render_inserts_values_verbatim():
     assert "- `jq` — literal {user} and {?sudo}" in text
 
 
-def test_render_is_deterministic():
-    env = _facts()
-    assert render(TEMPLATE, "/workspace", env=env) == render(TEMPLATE, "/workspace", env=env)
+def test_render_omits_empty_category():
+    text = render(TEMPLATE, "/workspace", env=_facts(tools=((PY, "3.13"), (TOFU, None))))
+    assert "*CLI*" not in text
+    assert "*Runtimes*:\n- `python` (3.13)\n*Cloud/IaC*:\n- `tofu`" in text
 
 
 def test_render_unknown_placeholder_raises():
@@ -129,11 +132,22 @@ def test_parse_template_reads_specs_in_order():
         (_template("  jq: {category: CLI, notes: x}\n"), "tools.jq: unknown key 'notes'"),
         (_template("  jq: {category: 3}\n"), "tools.jq: category must be a non-empty string"),
         (_template("  jq: CLI\n"), "tools.jq: entry must be a mapping"),
+        (
+            _template('  jq: {category: CLI, version_args: "--version \'"}\n'),
+            "tools.jq: version_args: No closing quotation",
+        ),
+        ("---\ntools:\n", "unterminated YAML frontmatter"),
     ],
 )
 def test_parse_template_rejects_bad_input(text, message):
     with pytest.raises(ValueError, match=message):
         parse_template(text)
+
+
+def test_parse_template_allows_dashes_inside_frontmatter():
+    specs, body = parse_template(_template('  jq: {category: CLI, note: "a --- b"}\n', "B\n"))
+    assert specs[0].note == "a --- b"
+    assert body == "B\n"
 
 
 def test_parse_template_empty_tools():
@@ -160,7 +174,9 @@ def test_probe_runs_version_only_when_declared(monkeypatch):
 
 
 def test_version_parses_major_minor():
-    assert environment._version("python3", "--version") is not None
+    script = "import sys; sys.stdout.write('v24.22.1 (build 7)')"
+    assert environment._version(sys.executable, f'-c "{script}"') == "24.22"
+    assert environment._version(sys.executable, "-c pass") is None
     assert environment._version("definitely-not-a-binary", "--version") is None
 
 
@@ -208,12 +224,20 @@ def test_shipped_template_renders_every_tool():
 
     assert by_name["go"].version_args == "version"
     assert "- `pandoc`\n" in text
-    assert "- `scalr` — global options go before the command" in text
-    assert "`-include=environment` expands related records" in text
-    assert "- `tofu` — OpenTofu is installed in place of Terraform" in text
-    assert "- `agent-browser` — drives headless Chromium" in text
-    assert "- `pdftotext` — poppler PDF tools: `pdftotext`, `pdfinfo`, `pdftoppm`" in text
-    assert "{" not in text.replace("`{", "")
+    expected = [
+        "- `scalr` — global options go before the command (`scalr -format=table "
+        "get-workspaces`); table shows a few columns, default JSON has every field. "
+        "`-include=environment` expands related records, which are otherwise IDs only.",
+        "- `tofu` — OpenTofu is installed in place of Terraform; use `tofu` wherever docs "
+        "say `terraform`.",
+        "- `agent-browser` — drives headless Chromium to load and interact with web pages "
+        "(JS-rendered content, forms, logins, screenshots). Use `web_fetch` for static pages.",
+        "- `pdftotext` — poppler PDF tools: `pdftotext`, `pdfinfo`, `pdftoppm` for reading "
+        "and rasterising PDFs.",
+    ]
+    lines = text.splitlines()
+    for line in expected:
+        assert line in lines
 
 
 def test_shipped_template_renders_with_nothing_found():

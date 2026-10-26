@@ -82,13 +82,14 @@ class EnvironmentFacts:
 
 def parse_template(text: str) -> tuple[tuple[ToolSpec, ...], str]:
     """Split the template into tool specs and body. Raises ValueError."""
-    if not text.startswith("---"):
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
         raise ValueError(f"{_SOURCE}: missing YAML frontmatter")
-    parts = text.split("---", 2)
-    if len(parts) < 3:
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
+    if end is None:
         raise ValueError(f"{_SOURCE}: unterminated YAML frontmatter")
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.safe_load("".join(lines[1:end]))
     except yaml.YAMLError as error:
         raise ValueError(f"{_SOURCE}: invalid YAML frontmatter: {error}") from error
     if not isinstance(data, dict):
@@ -99,7 +100,8 @@ def parse_template(text: str) -> tuple[tuple[ToolSpec, ...], str]:
     tools = data.get("tools") or {}
     if not isinstance(tools, dict):
         raise ValueError(f"{_SOURCE}: tools must be a mapping")
-    return tuple(_tool_spec(name, entry) for name, entry in tools.items()), parts[2]
+    specs = tuple(_tool_spec(name, entry) for name, entry in tools.items())
+    return specs, "".join(lines[end + 1 :])
 
 
 def _tool_spec(name: object, entry: object) -> ToolSpec:
@@ -117,10 +119,16 @@ def _tool_spec(name: object, entry: object) -> ToolSpec:
             raise ValueError(f"{where}: {key} must be a non-empty string")
     if entry.get("category") is None:
         raise ValueError(f"{where}: category is required")
+    version_args = entry.get("version_args")
+    if version_args is not None:
+        try:
+            version_args = shlex.join(shlex.split(version_args))
+        except ValueError as error:
+            raise ValueError(f"{where}: version_args: {error}") from error
     return ToolSpec(
         name=name,
         category=entry["category"].strip(),
-        version_args=entry.get("version_args"),
+        version_args=version_args,
         note=entry["note"].strip() if entry.get("note") else None,
     )
 

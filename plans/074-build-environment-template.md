@@ -1,6 +1,6 @@
 # 074 — Environment section from one markdown template
 
-Status: reviewing
+Status: done
 Branch: build-it/074-environment-template (base: main @ 75710b2)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/074-environment-template
 
@@ -221,8 +221,27 @@ probe failure or timeout (5 s) → no version shown, as today.
   persona/agent mismatch recorded in Risks; D16 descriptions fixed; D5 guard order, unknown
   guard and overlap specified. ℹ️ shipped-notes AC and `/home` mount AC added. Rejected:
   none.
+- Code review: `general` and `risk`, one round. Fixed: ⚠️ version test only asserted
+  non-None (now a fixed-output `sys.executable` check for `24.22`); ⚠️ shipped notes checked
+  by prefix (now full lines); ℹ️ empty category omission now rendered and asserted; ℹ️
+  tautological determinism test replaced by the empty-category test (caching test covers
+  stability); ℹ️ (both) malformed `version_args` raised an unprefixed error at probe time
+  (now validated in `_tool_spec` with the D13 prefix); ℹ️ (risk) `split("---", 2)` cut the
+  frontmatter at a `---` inside a note (now ends only at a `---` line). ❓ the `"{" not in`
+  assertion: removed with the full-line note checks. ❓ (risk) persona/agent version skew:
+  persona and agent ship from one repository and the orchestrator mounts both from the same
+  checkout (`docs/architecture.md` mount table), so skew needs a hand-mixed mount; covered
+  by Risks. Rejected: none.
+- Merge risk: Low: a template or parse bug fails prompt build at the first session start
+  (D13), which is immediately visible and reverts with the commit; the shipped template is
+  rendered by tests and in this container.
 
 ## Outcome
+
+The Environment section now renders from `persona/prompts/environment.md`; adding a tool is a
+Dockerfile change plus one frontmatter entry. Evidence: full suite 2,160 passed; `ruff check .`
+clean; the shipped template rendered in this container with the expected tool list and
+paths. Not verified: a real session started through the orchestrator with the new prompt.
 
 PR: pending
 CI: pending
