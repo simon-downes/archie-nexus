@@ -8,6 +8,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 - [Configuration](docs/config.md) — application settings and host bind mounts, including wildcard Git and SSH mounts.
 - [Authentication and credentials](docs/auth-credentials.md) — provider configuration, credential storage, CLI workflows, OAuth, and agent access.
 - [Plugins](docs/plugins.md) — integration layout, `plugin.yaml` reference, plugin SDK, and testing.
+- [System prompt](docs/system-prompt.md) — prompt sections and order, how the prompt is built, what varies for subagents, and how to add a tool.
 - [Contributing](CONTRIBUTING.md) — development workflow, checks, and invariants for changing the system.
 - [Agent-session guidance](AGENTS.md) — short context and reading order for coding agents.
 

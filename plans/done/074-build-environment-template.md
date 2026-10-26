@@ -212,6 +212,13 @@ probe failure or timeout (5 s) → no version shown, as today.
   `version_args` gone, a per-tool `category` field was only repetition. The renderer groups
   with `itertools.groupby` because probed tools keep template order. A tool listed twice is
   an error. User request.
+- After PR: frontmatter and `PATHS` removed (supersedes D3, D6, D10, D15). `environment.md` is
+  plain markdown with the tool and path lists written out; `environment.py` only probes and
+  fills host-specific values. The brain has its own paths line from `{brain_dir}` (resolved
+  `brain_root()`), wherever it is nested. Reason: after versions went, the frontmatter only
+  filtered by `PATH` and sorted, and the image is fixed; the paths duplicated the orchestrator's
+  fixed mounts. Cost: the lists are no longer checked against the image. Authoring guidance moved
+  to the new `docs/system-prompt.md`. User request.
 
 ## Risks
 
