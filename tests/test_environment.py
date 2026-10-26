@@ -66,8 +66,8 @@ def test_render_fills_values_and_lists():
         "CWD: /workspace\n"
         "Passwordless sudo.\n\n"
         "Preinstalled:\n"
-        "*Runtimes*:\n- `python` (3.13)\n"
-        "*CLI*:\n- `jq`\n"
+        "*Runtimes*: `python` (3.13)\n"
+        "*CLI*: `jq`\n"
         "*Cloud/IaC*:\n- `tofu` — use tofu not terraform.\n\n"
         "Host-mounted:\n"
         "- `/workspace` — project files\n- `~/.nexus` — agent data\n\n"
@@ -94,7 +94,19 @@ def test_render_inserts_values_verbatim():
 def test_render_omits_empty_category():
     text = render(TEMPLATE, "/workspace", env=_facts(tools=((PY, "3.13"), (TOFU, None))))
     assert "*CLI*" not in text
-    assert "*Runtimes*:\n- `python` (3.13)\n*Cloud/IaC*:\n- `tofu`" in text
+    assert "*Runtimes*: `python` (3.13)\n*Cloud/IaC*:\n- `tofu`" in text
+
+
+def test_render_sorts_tools_and_puts_folded_line_first():
+    tools = (
+        (ToolSpec("zz", "CLI", note="last note."), None),
+        (ToolSpec("rg", "CLI"), None),
+        (ToolSpec("Fd", "CLI"), None),
+        (ToolSpec("aa", "CLI", note="first note."), None),
+        (ToolSpec("jq", "CLI"), "1.7"),
+    )
+    text = render(TEMPLATE, "/w", env=_facts(tools=tools))
+    assert "*CLI*: `Fd`, `jq` (1.7), `rg`\n- `aa` — first note.\n- `zz` — last note." in text
 
 
 def test_render_unknown_placeholder_raises():
@@ -223,7 +235,7 @@ def test_shipped_template_renders_every_tool():
     text = render(_load_prompt("environment.md"), "/workspace", env=env)
 
     assert by_name["go"].version_args == "version"
-    assert "- `pandoc`\n" in text
+    assert "`pandoc`" in next(line for line in text.splitlines() if line.startswith("*CLI*:"))
     expected = [
         "- `scalr` — global options go before the command (`scalr -format=table "
         "get-workspaces`); table shows a few columns, default JSON has every field. "

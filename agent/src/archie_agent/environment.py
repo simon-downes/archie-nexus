@@ -225,15 +225,29 @@ def facts(specs: tuple[ToolSpec, ...]) -> EnvironmentFacts:
 
 
 def _render_tools(tools: tuple[tuple[ToolSpec, str | None], ...]) -> str:
-    by_category: dict[str, list[str]] = {}
+    """One block per category, in template order; tools sorted by name.
+
+    Tools without a note fold onto the category line; each tool with a note
+    follows as its own bullet.
+    """
+    by_category: dict[str, list[tuple[ToolSpec, str | None]]] = {}
     for spec, version in tools:
-        line = f"- `{spec.name}`"
-        if version:
-            line += f" ({version})"
-        if spec.note:
-            line += f" — {spec.note}"
-        by_category.setdefault(spec.category, []).append(line)
-    blocks = [f"*{category}*:\n" + "\n".join(lines) for category, lines in by_category.items()]
+        by_category.setdefault(spec.category, []).append((spec, version))
+    blocks = []
+    for category, entries in by_category.items():
+        entries.sort(key=lambda entry: entry[0].name.lower())
+        names = [
+            f"`{spec.name}`" + (f" ({version})" if version else "")
+            for spec, version in entries
+            if not spec.note
+        ]
+        head = f"*{category}*:" + (f" {', '.join(names)}" if names else "")
+        notes = [
+            f"- `{spec.name}`" + (f" ({version})" if version else "") + f" — {spec.note}"
+            for spec, version in entries
+            if spec.note
+        ]
+        blocks.append("\n".join([head, *notes]))
     return "\n".join(blocks)
 
 

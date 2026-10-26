@@ -3,6 +3,7 @@
 #
 # Each key is a binary name; it is listed only when found on PATH. Fields:
 #   category      (required) heading the tool is grouped under, in first-appearance order
+#                 (tools are sorted by name; tools without a note share one line)
 #   version_args  (optional) arguments that print a version, e.g. "--version"; shown as major.minor
 #   note          (optional) only what an agent would otherwise get wrong or miss
 #

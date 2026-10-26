@@ -71,7 +71,7 @@ Discovery:
 | D7 | Version field | Optional `version_args` (string, split with `shlex`), run as `<key> <args>`; shown as major.minor | `version_cmd` full command; versions for every tool | Arguments only avoid repeating the binary. Only `python`, `node` (`--version`) and `go` (`version`) set it, so startup cost stays at today's three calls | self |
 | D8 | Node major-only special case | Drop it; all versions major.minor | keep per-binary rule | Removes a hidden rule; versions only change when the image is rebuilt | self |
 | D9 | Runtime companions (`uv`, `npm`) | Ordinary tools in the `Runtimes` category | `RUNTIME_COMPANIONS` table | One mechanism for every binary | self |
-| D10 | Rendered tool list | Per category: `*Category*:` then `- \`tool\` (version) — note` per installed tool, categories in first-appearance order | today's comma lists plus a separate Tool notes block | User's sketch; one place per tool | user |
+| D10 | Rendered tool list | Per category, in first-appearance order: `*Category*:` followed by the tools without a note, comma-separated and sorted by name, then one `- \`tool\` (version) — note` bullet per noted tool, sorted by name | one bullet per tool; today's separate Tool notes block | User review of the rendered output: one bullet per tool made the list ~30 lines and hid the notes | user |
 | D11 | Which paths show | An entry shows when it is a mount point, or it exists and an earlier `PATHS` entry that is its ancestor is shown | any mounted ancestor; exact mount only | Lets `~/.nexus/sessions` appear under the `~/.nexus` mount without treating a dev host's `/home` filesystem as host-mounted | self |
 | D16 | Self paths presentation | `/opt/archie/*` become `PATHS` entries in the one paths list under the heading "Host-mounted (persistent; everything else is lost when the session ends):", described "this agent's own code (don't edit unless asked)", "this agent's own prompts and skills (don't edit unless asked)", "this agent's plugins (don't edit unless asked)" | separate prose line | The user's combined list. They are host-mounted, so the heading stays true | user |
 | D12 | Session logs location | `~/.nexus/sessions` entry in `PATHS` ("session logs (JSONL)") | `{ARCHIE_HOME}/logs` line | Logs are in `sessions/`; `logs/` holds orchestrator access/error logs. Fits the paths list | self |
@@ -198,6 +198,9 @@ probe failure or timeout (5 s) → no version shown, as today.
 
 ## Deviations
 
+- After PR: tools without a note fold onto the category line and all tools sort by name
+  (D10 updated), at the user's request after reading the rendered section.
+
 ## Risks
 
 - Until this merges, the main checkout's `persona/` has `tool-notes.md` and no
@@ -206,8 +209,6 @@ probe failure or timeout (5 s) → no version shown, as today.
   merge, code and persona update together; a container whose persona mount lags its agent
   source would fail prompt build (D13), which is the intended visible failure.
 
-- The rendered tool list is longer (one line per tool, about 30 lines instead of 5). It is
-  static, so it costs cached prompt tokens only.
 
 ## Review
 
