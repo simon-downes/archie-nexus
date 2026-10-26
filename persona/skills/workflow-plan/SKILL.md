@@ -183,7 +183,7 @@ The full four-phase process below. This is where implementable plans are produce
    of work, and any referenced files — aimed at answering discoverable questions, not
    exhaustively mapping the repo. When a question can't be answered from code, add it to the
    decision tree rather than digging further. For unfamiliar repos, explore by progressive
-   disclosure (see `# Available Tools` → "Exploring a codebase") and delegate wide surveys to a research subagent.
+   disclosure (see `# Available Tools` → "Exploring a codebase") and delegate wide surveys to a `default` subagent.
    Also check project documentation (README, CONTRIBUTING, AGENTS.md) and determine
    the project configuration (refer to `# Available Tools`). If an issue tracker is
    configured (`issues.provider`), note it for use after plan approval. If no

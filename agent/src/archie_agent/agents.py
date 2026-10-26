@@ -294,6 +294,26 @@ def _resolve_model(
     return entry.model, model
 
 
+def _agent_names(agent_catalog: dict[str, AgentEntry]) -> list[str]:
+    """Names accepted by the task tool: the built-in default plus discovered agents."""
+    return [DEFAULT_AGENT.name, *sorted(n for n in agent_catalog if n != DEFAULT_AGENT.name)]
+
+
+def _task_description(agent_catalog: dict[str, AgentEntry], max_concurrent: int) -> str:
+    """Build the task tool description from the discovered agent catalog."""
+    agents = "; ".join(
+        f"{name} — {(agent_catalog.get(name) or DEFAULT_AGENT).description}"
+        for name in _agent_names(agent_catalog)
+    )
+    return (
+        "Delegate one or more tasks to child agents. Tasks in one call run in parallel, "
+        f"{max_concurrent} at a time; put independent tasks in one call. Each child starts "
+        "with no conversation history, so the prompt must state the goal, the relevant "
+        "paths and what is already known, and the shape and length of the report. "
+        f"Agents: {agents}."
+    )
+
+
 def create_task_tool(
     *,
     agent_catalog: dict[str, AgentEntry],
@@ -394,8 +414,10 @@ def create_task_tool(
                 ):
                     raise ValueError("task requires non-empty string agent and prompt")
                 entry = agent_catalog.get(agent_name)
+                if entry is None and agent_name == DEFAULT_AGENT.name:
+                    entry = DEFAULT_AGENT
                 if entry is None:
-                    available = ", ".join(sorted(agent_catalog)) or "(none)"
+                    available = ", ".join(_agent_names(agent_catalog))
                     warning = (
                         f"Warning: unknown agent '{agent_name}' (available: {available}); "
                         "using default agent. "
@@ -620,7 +642,7 @@ def create_task_tool(
 
     return ToolSpec(
         name="task",
-        description="Delegate one or more tasks to specialised child agents.",
+        description=_task_description(agent_catalog, max_concurrent),
         schema={
             "type": "object",
             "properties": {

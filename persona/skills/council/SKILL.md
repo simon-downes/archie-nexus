@@ -196,11 +196,11 @@ name what would break the tie.
 
 # Subagent Configuration
 
-- **Type:** `general` subagent for each perspective (see `# Available Tools`).
+- **Type:** `default` agent for each perspective, with the perspective stated in the prompt.
 - **Model:** same model for all (default to the current session's model).
 - **Parallelism:** all perspectives within a round run in parallel — spawn them in a
-  single batch. Keep a round to **at most 4 perspectives** so they run concurrently
-  rather than queueing.
+  single `task` call. The `task` description states how many run at a time; extra
+  perspectives queue behind the first batch.
 - **Between rounds:** sequential (Round 2 needs Round 1 output, Round 3 needs both).
 
 ---

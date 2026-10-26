@@ -66,7 +66,7 @@ In-context research for a focused question.
 Parallel research for a broad or high-stakes question.
 
 - 8-12 primary sources
-- Split the topic into subtopics; spawn parallel `research` subagents (one per cluster
+- Split the topic into subtopics; spawn parallel `default` subagents in one `task` call (one per cluster
   of sources), each returning extracted findings **with verified citations**
 - Main agent synthesises the returned findings and writes the artifact by default
 
@@ -105,8 +105,7 @@ and note the gap.
 **Quick mode:** the main agent fetches each source, extracts the relevant substance,
 and confirms each citation resolves and supports the claim.
 
-**Deep mode:** delegate reading to parallel `research` subagents (read-only; see
-`# Available Tools`). Each receives its source cluster and the questions, and returns
+**Deep mode:** delegate reading to parallel `default` subagents in one `task` call. Each receives its source cluster and the questions, and returns
 extracted findings with verified citations — not raw page dumps.
 
 ### Subagent prompt template (deep mode)

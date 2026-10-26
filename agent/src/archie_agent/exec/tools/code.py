@@ -21,7 +21,7 @@ from archie_agent.exec.tools import (
     tool,
 )
 from archie_agent.exec.tools._subprocess import run_exec
-from archie_agent.exec.tools.fs import WORKSPACE
+from archie_agent.exec.tools.fs import _NOISE_EXCLUDES, WORKSPACE
 
 # Maximum file size to parse (skip generated/minified files)
 _MAX_FILE_SIZE = 500_000  # 500KB
@@ -328,13 +328,22 @@ def _parse_file_with_lines(
 # ---------------------------------------------------------------------------
 
 
-@tool(guidelines=("Use `code` to explore symbol structure before reading full files.",))
+@tool(
+    guidelines=(
+        "Use `code` on a directory for a project overview, and on a file for its "
+        "symbol outline before reading it.",
+    )
+)
 async def code(
     path: str | None = None,
     name: str | None = None,
     language: str | None = None,
 ) -> str:
-    """Structural code intelligence — extract symbol definitions from source files.
+    """Structural code intelligence — project structure and symbol definitions.
+
+    A directory without `name` returns a compact tree with file counts and
+    the main extensions per directory (gitignore-aware). A file returns its
+    symbol outline. A directory with `name` searches symbol definitions.
 
     Args:
         path: File or directory (relative to /workspace/, default: /workspace/).
@@ -342,7 +351,7 @@ async def code(
         language: Filter by language (python, typescript, javascript, tsx, php, go, rust, css, hcl).
 
     Returns:
-        Formatted symbol outline showing names, kinds, line ranges, and signatures.
+        A directory tree, a symbol outline with line ranges, or matching definitions.
     """
     resolved = _resolve_path(path or "")
 
@@ -362,8 +371,8 @@ async def code(
         return header + "\n" + _format_symbols(symbols, indent=0)
     else:
         # Directory mode
-        files = await _discover_files(resolved, language)
         if name:
+            files = await _discover_files(resolved, language)
             results = _search_symbols_raw(files, name)
             if not results:
                 return "No symbols found."
@@ -375,29 +384,99 @@ async def code(
             if len(results) > _MAX_RESULTS:
                 output += f"\n\nShowing {_MAX_RESULTS} of {len(results)} — narrow your query."
             return output
-        # Overview mode: outline per file
-        output_lines: list[str] = []
-        total_symbols = 0
-        for f in files:
-            try:
-                syms, lines_count = _parse_file_with_lines(f, language)
-                if syms:
-                    rel = str(f.relative_to(WORKSPACE))
-                    lang_name = _EXTENSION_MAP.get(f.suffix, "unknown")
-                    output_lines.append(f"{rel} ({lang_name}, {lines_count} lines)")
-                    output_lines.append(_format_symbols(syms, indent=0))
-                    output_lines.append("")
-                    total_symbols += _count_symbols(syms)
-                    if total_symbols >= _MAX_RESULTS * 4:  # ~200 symbols cap
-                        output_lines.append(
-                            f"… truncated at {total_symbols} symbols — narrow path or use name filter."
-                        )
-                        break
-            except Exception:
-                continue
-        if not output_lines:
-            return "No symbols found."
-        return "\n".join(output_lines).rstrip()
+        # Structure mode: directory tree with file counts
+        return await _structure(resolved, language)
+
+
+# ---------------------------------------------------------------------------
+# Structure mode (directory without name filter)
+# ---------------------------------------------------------------------------
+
+# Output budget for the tree; depth shrinks until the tree fits.
+_TREE_MAX_LINES = 150
+_TREE_MAX_DEPTH = 3
+# Per directory: files listed by name, and subdirectories shown.
+_TREE_MAX_FILES = 12
+_TREE_MAX_DIRS = 25
+
+
+@dataclass
+class _Dir:
+    files: list[str] = field(default_factory=list)
+    dirs: dict[str, _Dir] = field(default_factory=dict)
+    total: int = 0
+    exts: dict[str, int] = field(default_factory=dict)
+
+
+async def _structure(dir_path: Path, language: str | None) -> str:
+    """Render a gitignore-aware directory tree with file counts per directory."""
+    excludes = [arg for ex in _NOISE_EXCLUDES for arg in ("-g", ex)]
+    result = await run_exec("rg", "--files", *excludes, cwd=dir_path)
+    if result.returncode not in (0, 1) and result.returncode is not None:
+        raise RuntimeError(f"ripgrep error (exit {result.returncode}): {result.stderr.strip()}")
+
+    root = _Dir()
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        parts = line.split("/")
+        suffix = Path(parts[-1]).suffix
+        if language and _EXTENSION_MAP.get(suffix) != language:
+            continue
+        ext = suffix or parts[-1]
+        node = root
+        for part in parts[:-1]:
+            node.total += 1
+            node.exts[ext] = node.exts.get(ext, 0) + 1
+            node = node.dirs.setdefault(part, _Dir())
+        node.total += 1
+        node.exts[ext] = node.exts.get(ext, 0) + 1
+        node.files.append(parts[-1])
+
+    if root.total == 0:
+        return "No files found."
+
+    rel = str(dir_path.relative_to(WORKSPACE)) if dir_path != WORKSPACE else "."
+    header = f"{rel}/ ({_files(root.total)}{_ext_summary(root)})"
+    for depth in range(_TREE_MAX_DEPTH, 0, -1):
+        body = _render_dir(root, depth, indent=1)
+        if len(body) <= _TREE_MAX_LINES:
+            break
+    else:
+        body = body[:_TREE_MAX_LINES] + ["  … truncated — pass a subdirectory as path."]
+    footer = (
+        "\nGitignored and hidden files are excluded. For symbols: code(path=<file>), "
+        "or code(path=<dir>, name=<substring>) to find a definition."
+    )
+    return "\n".join([header, *body]) + footer
+
+
+def _files(n: int) -> str:
+    return f"{n} file" if n == 1 else f"{n} files"
+
+
+def _ext_summary(node: _Dir, top: int = 3) -> str:
+    ranked = sorted(node.exts.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+    return ": " + ", ".join(f"{ext} {n}" for ext, n in ranked)
+
+
+def _render_dir(node: _Dir, depth: int, indent: int) -> list[str]:
+    prefix = "  " * indent
+    lines: list[str] = []
+    files = sorted(node.files)
+    if files:
+        shown = ", ".join(files[:_TREE_MAX_FILES])
+        more = f" … +{len(files) - _TREE_MAX_FILES} more" if len(files) > _TREE_MAX_FILES else ""
+        lines.append(f"{prefix}{shown}{more}")
+    names = sorted(node.dirs)
+    for name in names[:_TREE_MAX_DIRS]:
+        child = node.dirs[name]
+        lines.append(f"{prefix}{name}/ ({_files(child.total)}{_ext_summary(child)})")
+        if depth > 1:
+            lines.extend(_render_dir(child, depth - 1, indent + 1))
+    if len(names) > _TREE_MAX_DIRS:
+        lines.append(f"{prefix}… +{len(names) - _TREE_MAX_DIRS} more directories")
+    return lines
 
 
 def _format_symbols(symbols: list[Symbol], indent: int) -> str:
@@ -409,14 +488,6 @@ def _format_symbols(symbols: list[Symbol], indent: int) -> str:
         if sym.children:
             lines.append(_format_symbols(sym.children, indent + 1))
     return "\n".join(lines)
-
-
-def _count_symbols(symbols: list[Symbol]) -> int:
-    """Count total symbols including children."""
-    count = len(symbols)
-    for sym in symbols:
-        count += _count_symbols(sym.children)
-    return count
 
 
 def _search_symbols_raw(files: list[Path], name: str) -> list[tuple[Symbol, str]]:
