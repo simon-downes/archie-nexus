@@ -35,7 +35,7 @@ called, native tools would have been cheaper and clearer.
 - `glob` returns a file list sorted by modification time (most recent first).
 - `edit` returns a unified diff showing the change.
 - `write` returns a confirmation with path and line count.
-- `shell` returns `$ command\n[exit: N]\noutput` — always check the exit code.
+- `shell` returns `[exit: N]\noutput` — always check the exit code.
 - `code` returns a structural outline of symbols with line ranges.
 - All tools raise exceptions on errors (path validation, file not found, etc.).
 - A successful write or edit means the change is applied. Do not re-read to verify.
@@ -112,7 +112,10 @@ commit.
 ```python
 async def main():
     raw = await shell("aws ec2 describe-instances --output json")
-    data = json.loads(raw.split("\n", 2)[2])  # skip "$ cmd" and "[exit: N]" lines
+    header, _, body = raw.partition("\n")  # header is "[exit: N]"
+    if header != "[exit: 0]":
+        return raw[:2000]
+    data = json.loads(body)
     rows = [
         f"{i['InstanceId']}  {i['State']['Name']}  {i.get('PrivateIpAddress', '-')}"
         for r in data["Reservations"] for i in r["Instances"]
