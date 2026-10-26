@@ -8,6 +8,7 @@ Imports are deferred (tree-sitter loaded on first use per language).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -398,6 +399,12 @@ _TREE_MAX_DEPTH = 3
 # Per directory: files listed by name, and subdirectories shown.
 _TREE_MAX_FILES = 12
 _TREE_MAX_DIRS = 25
+# Listed before other files so the per-directory cap never hides them.
+_TREE_KEY_FILES = re.compile(
+    r"^(readme|agents|contributing|claude)(\..*)?$|^(pyproject\.toml|package\.json|go\.mod|"
+    r"cargo\.toml|composer\.json|justfile|makefile|dockerfile)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -463,7 +470,7 @@ def _ext_summary(node: _Dir, top: int = 3) -> str:
 def _render_dir(node: _Dir, depth: int, indent: int) -> list[str]:
     prefix = "  " * indent
     lines: list[str] = []
-    files = sorted(node.files)
+    files = sorted(node.files, key=lambda f: (not _TREE_KEY_FILES.match(f), f))
     if files:
         shown = ", ".join(files[:_TREE_MAX_FILES])
         more = f" … +{len(files) - _TREE_MAX_FILES} more" if len(files) > _TREE_MAX_FILES else ""

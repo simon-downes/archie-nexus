@@ -182,7 +182,7 @@ If the verdict is APPROVE or APPROVE WITH SUGGESTIONS and the work is on a featu
   change needed. PR merge handles the final transition.
 
 **Post-PR actions:** After creating the PR, send a Slack notification with the PR title
-and link to the project's configured channel (refer to `# Available Tools`). Message
+and link to the channel named in the project documentation, using the `slack` skill. Message
 format: `<PR title> <<url>|#<number>>`. If Slack is not configured for the project or
 the notification fails, skip silently — notifications are informational, not blocking.
 

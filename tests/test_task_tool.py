@@ -100,7 +100,8 @@ async def test_default_agent_is_accepted_without_warning(tmp_path, monkeypatch):
 async def test_description_lists_agents_and_concurrency(tmp_path, monkeypatch):
     spec, _ = await _make_tool(tmp_path, monkeypatch, [], max_concurrent=4)
 
-    assert "4 at a time" in spec.description
+    assert "up to 4 at a time" in spec.description
+    assert "cannot delegate further" in spec.description
     assert "no conversation history" in spec.description
     assert "default — General-purpose child agent" in spec.description
     assert "researcher — Researcher" in spec.description

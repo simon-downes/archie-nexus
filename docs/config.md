@@ -15,7 +15,7 @@ cli: {}
 web: {}
 agent:
   subagents:
-    max_concurrent: 3
+    max_concurrent: 5
   turn_cost_limit: 50.0
   compaction:
     model: bedrock-openai-gpt-6-luna
