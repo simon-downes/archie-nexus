@@ -2,10 +2,9 @@
 # Preinstalled tools shown in the Environment section.
 #
 # Each key is a binary name; it is listed only when found on PATH. Fields:
-#   category      (required) heading the tool is grouped under, in first-appearance order
-#                 (tools are sorted by name; tools without a note share one line)
-#   version_args  (optional) arguments that print a version, e.g. "--version"; shown as major.minor
-#   note          (optional) only what an agent would otherwise get wrong or miss
+#   category  (required) heading the tool is grouped under, in first-appearance order
+#             (tools are sorted by name; tools without a note share one line)
+#   note      (optional) only what an agent would otherwise get wrong or miss
 #
 # To add a tool: install it in the Dockerfile, then add an entry here.
 #
@@ -14,11 +13,11 @@
 # Values: os_name, arch, user, uid, home, workspace_dir, exec_python, tools, paths,
 # container, sudo.
 tools:
-  python: {category: Runtimes, version_args: --version}
+  python: {category: Runtimes}
   uv: {category: Runtimes}
-  node: {category: Runtimes, version_args: --version}
+  node: {category: Runtimes}
   npm: {category: Runtimes}
-  go: {category: Runtimes, version_args: version}
+  go: {category: Runtimes}
   rg: {category: CLI}
   fd: {category: CLI}
   jq: {category: CLI}
@@ -62,10 +61,11 @@ System: {os_name} ({arch}) · User: {user} (uid {uid}) · Home: {home} · CWD: {
 {?sudo}Passwordless sudo — install missing packages as needed.
 Relative paths resolve from {workspace_dir}; `~` is {home}, not /root.
 
-{?tools}Preinstalled:
-{tools}
-
 {?paths}Host-mounted (persistent; everything else is lost when the session ends):
 {paths}
 
 Exec interpreter: {exec_python}. /opt/archie/venv runs this agent — don't install into it; use uv or a project venv.
+
+{?tools}### Installed tools
+{?tools}
+{tools}

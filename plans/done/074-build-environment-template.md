@@ -200,6 +200,13 @@ probe failure or timeout (5 s) → no version shown, as today.
 
 - After PR: tools without a note fold onto the category line and all tools sort by name
   (D10 updated), at the user's request after reading the rendered section.
+- After PR: versions dropped (supersedes D7, D8). `version_args`, the version probe and its
+  tests are gone; `version_args` in the frontmatter is now an unknown-key error. Reason: versions
+  rarely change what the agent does, major.minor is too coarse when they do, and the probe cost
+  three subprocesses per session. A runtime constraint that matters goes in a `note` instead.
+- After PR: the tool list moved under an `### Installed tools` heading after the exec line.
+  Categories are separated by blank lines, and tools without a note share one bullet on the line
+  under the category heading (supersedes the D10 layout). User request.
 
 ## Risks
 

@@ -21,7 +21,6 @@ import os
 import platform
 import pwd
 import re
-import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -42,8 +41,7 @@ PATHS: tuple[tuple[str, str], ...] = (
 )
 
 _SOURCE = "environment.md"
-_TOOL_KEYS = frozenset({"category", "version_args", "note"})
-_VERSION = re.compile(r"(\d+)\.(\d+)")
+_TOOL_KEYS = frozenset({"category", "note"})
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _GUARD = re.compile(r"\{\?(\w+)\}")
 
@@ -54,7 +52,6 @@ class ToolSpec:
 
     name: str
     category: str
-    version_args: str | None = None
     note: str | None = None
 
 
@@ -69,8 +66,8 @@ class EnvironmentFacts:
     uid: int
     home: str
     sudo: bool
-    # (spec, version) for each declared tool found on PATH, in template order.
-    tools: tuple[tuple[ToolSpec, str | None], ...] = ()
+    # Each declared tool found on PATH, in template order.
+    tools: tuple[ToolSpec, ...] = ()
     # (display path, description) for each PATHS entry that is shown.
     paths: tuple[tuple[str, str], ...] = ()
 
@@ -119,16 +116,9 @@ def _tool_spec(name: object, entry: object) -> ToolSpec:
             raise ValueError(f"{where}: {key} must be a non-empty string")
     if entry.get("category") is None:
         raise ValueError(f"{where}: category is required")
-    version_args = entry.get("version_args")
-    if version_args is not None:
-        try:
-            version_args = shlex.join(shlex.split(version_args))
-        except ValueError as error:
-            raise ValueError(f"{where}: version_args: {error}") from error
     return ToolSpec(
         name=name,
         category=entry["category"].strip(),
-        version_args=version_args,
         note=entry["note"].strip() if entry.get("note") else None,
     )
 
@@ -158,17 +148,6 @@ def _has_sudo() -> bool:
     return result.returncode == 0
 
 
-def _version(binary: str, args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            [binary, *shlex.split(args)], capture_output=True, text=True, timeout=5, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    match = _VERSION.search(result.stdout + result.stderr)
-    return f"{match.group(1)}.{match.group(2)}" if match else None
-
-
 def _mount_points() -> frozenset[str]:
     try:
         text = Path("/proc/self/mounts").read_text(encoding="utf-8")
@@ -195,11 +174,7 @@ def _paths(home: str, mounts: frozenset[str]) -> tuple[tuple[str, str], ...]:
 def probe(specs: tuple[ToolSpec, ...]) -> EnvironmentFacts:
     """Probe the current environment for the declared tools (uncached)."""
     entry = pwd.getpwuid(os.getuid())
-    tools = tuple(
-        (spec, _version(spec.name, spec.version_args) if spec.version_args else None)
-        for spec in specs
-        if shutil.which(spec.name)
-    )
+    tools = tuple(spec for spec in specs if shutil.which(spec.name))
     return EnvironmentFacts(
         in_container=Path("/.dockerenv").exists(),
         os_name=_os_name(),
@@ -224,31 +199,25 @@ def facts(specs: tuple[ToolSpec, ...]) -> EnvironmentFacts:
 # ---------------------------------------------------------------------------
 
 
-def _render_tools(tools: tuple[tuple[ToolSpec, str | None], ...]) -> str:
-    """One block per category, in template order; tools sorted by name.
+def _render_tools(tools: tuple[ToolSpec, ...]) -> str:
+    """One block per category, in template order, separated by blank lines.
 
-    Tools without a note fold onto the category line; each tool with a note
-    follows as its own bullet.
+    Tools are sorted by name. Tools without a note share one bullet, first;
+    each tool with a note follows as its own bullet.
     """
-    by_category: dict[str, list[tuple[ToolSpec, str | None]]] = {}
-    for spec, version in tools:
-        by_category.setdefault(spec.category, []).append((spec, version))
+    by_category: dict[str, list[ToolSpec]] = {}
+    for spec in tools:
+        by_category.setdefault(spec.category, []).append(spec)
     blocks = []
-    for category, entries in by_category.items():
-        entries.sort(key=lambda entry: entry[0].name.lower())
-        names = [
-            f"`{spec.name}`" + (f" ({version})" if version else "")
-            for spec, version in entries
-            if not spec.note
-        ]
-        head = f"*{category}*:" + (f" {', '.join(names)}" if names else "")
-        notes = [
-            f"- `{spec.name}`" + (f" ({version})" if version else "") + f" — {spec.note}"
-            for spec, version in entries
-            if spec.note
-        ]
-        blocks.append("\n".join([head, *notes]))
-    return "\n".join(blocks)
+    for category, specs in by_category.items():
+        specs.sort(key=lambda spec: spec.name.lower())
+        lines = [f"*{category}*:"]
+        plain = [f"`{spec.name}`" for spec in specs if not spec.note]
+        if plain:
+            lines.append(f"- {', '.join(plain)}")
+        lines.extend(f"- `{spec.name}` — {spec.note}" for spec in specs if spec.note)
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def _render_paths(paths: tuple[tuple[str, str], ...]) -> str:

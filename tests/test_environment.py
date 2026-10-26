@@ -1,19 +1,17 @@
 """Tests for the environment section rendered from persona/prompts/environment.md."""
 
-import sys
-
 import pytest
 from archie_agent import environment
 from archie_agent.environment import EnvironmentFacts, ToolSpec, parse_template, render
 from archie_agent.prompt import _build_environment, _load_prompt
 
-PY = ToolSpec("python", "Runtimes", "--version")
+PY = ToolSpec("python", "Runtimes")
 TOFU = ToolSpec("tofu", "Cloud/IaC", note="use tofu not terraform.")
 JQ = ToolSpec("jq", "CLI")
 
 TEMPLATE = """---
 tools:
-  python: {category: Runtimes, version_args: --version}
+  python: {category: Runtimes}
   jq: {category: CLI}
   tofu: {category: Cloud/IaC, note: use tofu not terraform.}
 ---
@@ -24,13 +22,14 @@ tools:
 System: {os_name} ({arch}) · User: {user} (uid {uid}) · Home: {home} · CWD: {workspace_dir}
 {?sudo}Passwordless sudo.
 
-{?tools}Preinstalled:
-{tools}
-
 {?paths}Host-mounted:
 {paths}
 
 Exec interpreter: {exec_python}.
+
+{?tools}### Installed tools
+{?tools}
+{tools}
 """
 
 
@@ -43,7 +42,7 @@ def _facts(**overrides) -> EnvironmentFacts:
         "uid": 502,
         "home": "/home/archie",
         "sudo": True,
-        "tools": ((PY, "3.13"), (JQ, None), (TOFU, None)),
+        "tools": (PY, JQ, TOFU),
         "paths": (("/workspace", "project files"), ("~/.nexus", "agent data")),
     }
     base.update(overrides)
@@ -65,20 +64,20 @@ def test_render_fills_values_and_lists():
         "System: Debian 13 (aarch64) · User: archie (uid 502) · Home: /home/archie · "
         "CWD: /workspace\n"
         "Passwordless sudo.\n\n"
-        "Preinstalled:\n"
-        "*Runtimes*: `python` (3.13)\n"
-        "*CLI*: `jq`\n"
-        "*Cloud/IaC*:\n- `tofu` — use tofu not terraform.\n\n"
         "Host-mounted:\n"
         "- `/workspace` — project files\n- `~/.nexus` — agent data\n\n"
-        "Exec interpreter: /venv/bin/python."
+        "Exec interpreter: /venv/bin/python.\n\n"
+        "### Installed tools\n\n"
+        "*Runtimes*:\n- `python`\n\n"
+        "*CLI*:\n- `jq`\n\n"
+        "*Cloud/IaC*:\n- `tofu` — use tofu not terraform."
     )
 
 
 def test_render_drops_guarded_lines_and_blank_runs():
     env = _facts(in_container=False, sudo=False, tools=(), paths=())
     text = render(TEMPLATE, "/workspace", env=env)
-    for absent in ("container", "sudo", "Preinstalled", "Host-mounted"):
+    for absent in ("container", "sudo", "Installed tools", "Host-mounted"):
         assert absent not in text
     assert "\n\n\n" not in text
     assert text.startswith("## Environment\n\nSystem:")
@@ -87,26 +86,26 @@ def test_render_drops_guarded_lines_and_blank_runs():
 
 def test_render_inserts_values_verbatim():
     spec = ToolSpec("jq", "CLI", note="literal {user} and {?sudo}")
-    text = render(_template("  jq: {category: CLI}\n"), "/w", env=_facts(tools=((spec, None),)))
+    text = render(_template("  jq: {category: CLI}\n"), "/w", env=_facts(tools=(spec,)))
     assert "- `jq` — literal {user} and {?sudo}" in text
 
 
 def test_render_omits_empty_category():
-    text = render(TEMPLATE, "/workspace", env=_facts(tools=((PY, "3.13"), (TOFU, None))))
+    text = render(TEMPLATE, "/workspace", env=_facts(tools=(PY, TOFU)))
     assert "*CLI*" not in text
-    assert "*Runtimes*: `python` (3.13)\n*Cloud/IaC*:\n- `tofu`" in text
+    assert "*Runtimes*:\n- `python`\n\n*Cloud/IaC*:\n- `tofu`" in text
 
 
 def test_render_sorts_tools_and_puts_folded_line_first():
     tools = (
-        (ToolSpec("zz", "CLI", note="last note."), None),
-        (ToolSpec("rg", "CLI"), None),
-        (ToolSpec("Fd", "CLI"), None),
-        (ToolSpec("aa", "CLI", note="first note."), None),
-        (ToolSpec("jq", "CLI"), "1.7"),
+        ToolSpec("zz", "CLI", note="last note."),
+        ToolSpec("rg", "CLI"),
+        ToolSpec("Fd", "CLI"),
+        ToolSpec("aa", "CLI", note="first note."),
+        ToolSpec("jq", "CLI"),
     )
     text = render(TEMPLATE, "/w", env=_facts(tools=tools))
-    assert "*CLI*: `Fd`, `jq` (1.7), `rg`\n- `aa` — first note.\n- `zz` — last note." in text
+    assert "*CLI*:\n- `Fd`, `jq`, `rg`\n- `aa` — first note.\n- `zz` — last note." in text
 
 
 def test_render_unknown_placeholder_raises():
@@ -145,8 +144,8 @@ def test_parse_template_reads_specs_in_order():
         (_template("  jq: {category: 3}\n"), "tools.jq: category must be a non-empty string"),
         (_template("  jq: CLI\n"), "tools.jq: entry must be a mapping"),
         (
-            _template('  jq: {category: CLI, version_args: "--version \'"}\n'),
-            "tools.jq: version_args: No closing quotation",
+            _template("  jq: {category: CLI, version_args: --version}\n"),
+            "tools.jq: unknown key 'version_args'",
         ),
         ("---\ntools:\n", "unterminated YAML frontmatter"),
     ],
@@ -172,24 +171,8 @@ def test_parse_template_empty_tools():
 
 def test_probe_lists_only_tools_on_path(monkeypatch):
     monkeypatch.setattr(environment.shutil, "which", lambda name: name in {"python", "tofu"})
-    monkeypatch.setattr(environment, "_version", lambda binary, args: "3.13")
     facts = environment.probe((PY, JQ, TOFU))
-    assert facts.tools == ((PY, "3.13"), (TOFU, None))
-
-
-def test_probe_runs_version_only_when_declared(monkeypatch):
-    calls = []
-    monkeypatch.setattr(environment.shutil, "which", lambda name: True)
-    monkeypatch.setattr(environment, "_version", lambda b, a: calls.append((b, a)) or "1.2")
-    environment.probe((PY, JQ, ToolSpec("go", "Runtimes", "version")))
-    assert calls == [("python", "--version"), ("go", "version")]
-
-
-def test_version_parses_major_minor():
-    script = "import sys; sys.stdout.write('v24.22.1 (build 7)')"
-    assert environment._version(sys.executable, f'-c "{script}"') == "24.22"
-    assert environment._version(sys.executable, "-c pass") is None
-    assert environment._version("definitely-not-a-binary", "--version") is None
+    assert facts.tools == (PY, TOFU)
 
 
 def test_paths_shows_mounts_and_children_of_shown_entries(tmp_path, monkeypatch):
@@ -230,12 +213,13 @@ def test_probe_runs_on_this_host():
 
 def test_shipped_template_renders_every_tool():
     specs, _ = parse_template(_load_prompt("environment.md"))
-    by_name = {spec.name: spec for spec in specs}
-    env = _facts(tools=tuple((spec, None) for spec in specs))
+    env = _facts(tools=specs)
     text = render(_load_prompt("environment.md"), "/workspace", env=env)
+    lines = text.splitlines()
 
-    assert by_name["go"].version_args == "version"
-    assert "`pandoc`" in next(line for line in text.splitlines() if line.startswith("*CLI*:"))
+    assert "### Installed tools" in lines
+    assert lines[lines.index("*Runtimes*:") + 1] == "- `go`, `node`, `npm`, `python`, `uv`"
+    assert "`pandoc`" in lines[lines.index("*CLI*:") + 1]
     expected = [
         "- `scalr` — global options go before the command (`scalr -format=table "
         "get-workspaces`); table shows a few columns, default JSON has every field. "
@@ -247,7 +231,6 @@ def test_shipped_template_renders_every_tool():
         "- `pdftotext` — poppler PDF tools: `pdftotext`, `pdfinfo`, `pdftoppm` for reading "
         "and rasterising PDFs.",
     ]
-    lines = text.splitlines()
     for line in expected:
         assert line in lines
 
@@ -255,7 +238,7 @@ def test_shipped_template_renders_every_tool():
 def test_shipped_template_renders_with_nothing_found():
     env = _facts(in_container=False, sudo=False, tools=(), paths=())
     text = render(_load_prompt("environment.md"), "/workspace", env=env)
-    assert "Preinstalled" not in text
+    assert "Installed tools" not in text
     assert "Host-mounted" not in text
     assert "\n\n\n" not in text
 
@@ -265,7 +248,7 @@ def test_build_environment_uses_cached_probe(monkeypatch):
 
     def fake_probe(specs):
         calls.append(specs)
-        return _facts(tools=tuple((s, None) for s in specs if s.name == "tofu"))
+        return _facts(tools=tuple(s for s in specs if s.name == "tofu"))
 
     environment.facts.cache_clear()
     monkeypatch.setattr(environment, "probe", fake_probe)
