@@ -107,11 +107,7 @@ def _build_environment(model_name: str, workspace_dir: str) -> str:
     # supplied it, but the active model must not affect cacheable prompt text.
     from archie_agent import environment
 
-    try:
-        notes = _load_prompt("tool-notes.md")
-    except OSError:
-        notes = ""
-    return environment.render(environment.facts(), workspace_dir, notes, PYTHON)
+    return environment.render(_load_prompt("environment.md"), workspace_dir, PYTHON)
 
 
 # ---------------------------------------------------------------------------

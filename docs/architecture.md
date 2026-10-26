@@ -68,6 +68,8 @@ paths; configured mounts are appended separately.
 
 The image contains dependencies and system tools. `gh` on `PATH` is a repository wrapper (`container/bin/gh`, bind-mounted over the copy in the image) around the real binary, `gh-base`; it selects a GitHub token per call from the credential store, so GitHub tokens are not part of the container environment (see [Authentication and credentials](auth-credentials.md#github-cli-token-selection)). The runtime user is `archie`, with its UID matched to the host user during `archie build`. The home and persona mounts are read-write: a session can modify shared user data and repository-tracked persona content. Treat those mounts as a deliberate trust boundary, not as isolated per-container state.
 
+The system prompt's Environment section is the plain-markdown `persona/prompts/environment.md`, with installed tools and paths written out and a few probed values filled in by `agent/src/archie_agent/environment.py`. See [System prompt](system-prompt.md) for the prompt's structure and how to add a tool.
+
 ## Host HTTP API
 
 The orchestrator exposes these application routes:
