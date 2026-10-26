@@ -219,7 +219,7 @@ class AgentHarness:
 
         return ToolSpec(
             name="task",
-            description="Delegate one or more tasks to specialised child agents.",
+            description="Delegate one or more tasks to subagents.",
             schema={
                 "type": "object",
                 "properties": {

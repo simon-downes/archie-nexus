@@ -103,7 +103,7 @@ async def test_description_lists_agents_and_concurrency(tmp_path, monkeypatch):
     assert "up to 4 at a time" in spec.description
     assert "cannot delegate further" in spec.description
     assert "no conversation history" in spec.description
-    assert "default — General-purpose child agent" in spec.description
+    assert "default — General-purpose subagent" in spec.description
     assert "researcher — Researcher" in spec.description
 
 
