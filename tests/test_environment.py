@@ -11,9 +11,10 @@ JQ = ToolSpec("jq", "CLI")
 
 TEMPLATE = """---
 tools:
-  python: {category: Runtimes}
-  jq: {category: CLI}
-  tofu: {category: Cloud/IaC, note: use tofu not terraform.}
+  Runtimes: [python]
+  CLI: [jq]
+  Cloud/IaC:
+    - tofu: use tofu not terraform.
 ---
 ## Environment
 
@@ -86,7 +87,7 @@ def test_render_drops_guarded_lines_and_blank_runs():
 
 def test_render_inserts_values_verbatim():
     spec = ToolSpec("jq", "CLI", note="literal {user} and {?sudo}")
-    text = render(_template("  jq: {category: CLI}\n"), "/w", env=_facts(tools=(spec,)))
+    text = render(_template("  CLI: [jq]\n"), "/w", env=_facts(tools=(spec,)))
     assert "- `jq` — literal {user} and {?sudo}" in text
 
 
@@ -139,14 +140,16 @@ def test_parse_template_reads_specs_in_order():
         ("---\ntools: [\n---\nbody\n", "invalid YAML frontmatter"),
         ("---\n- a\n---\nbody\n", "frontmatter must be a mapping"),
         ("---\ntool: {}\n---\nbody\n", "unknown frontmatter key 'tool'"),
-        (_template("  jq: {}\n"), "tools.jq: category is required"),
-        (_template("  jq: {category: CLI, notes: x}\n"), "tools.jq: unknown key 'notes'"),
-        (_template("  jq: {category: 3}\n"), "tools.jq: category must be a non-empty string"),
-        (_template("  jq: CLI\n"), "tools.jq: entry must be a mapping"),
-        (
-            _template("  jq: {category: CLI, version_args: --version}\n"),
-            "tools.jq: unknown key 'version_args'",
-        ),
+        ("---\ntools: [jq]\n---\nbody\n", "tools must be a mapping of category to tool list"),
+        (_template("  CLI: jq\n"), "tools.CLI: must be a non-empty list of tools"),
+        (_template("  CLI: []\n"), "tools.CLI: must be a non-empty list of tools"),
+        (_template("  3: [jq]\n"), "tools.3: category must be a non-empty string"),
+        (_template("  CLI: [3]\n"), "tools.CLI: each tool must be a name"),
+        (_template('  CLI: [""]\n'), "tools.CLI: each tool must be a name"),
+        (_template("  CLI: [{jq: a, rg: b}]\n"), "tools.CLI: each tool must be a name"),
+        (_template("  CLI: [{jq: }]\n"), "tools.CLI: each tool must be a name"),
+        (_template("  CLI: [{jq: {category: CLI}}]\n"), "tools.CLI: each tool must be a name"),
+        (_template("  CLI: [jq]\n  Data: [jq]\n"), "tool 'jq' is listed more than once"),
         ("---\ntools:\n", "unterminated YAML frontmatter"),
     ],
 )
@@ -156,7 +159,7 @@ def test_parse_template_rejects_bad_input(text, message):
 
 
 def test_parse_template_allows_dashes_inside_frontmatter():
-    specs, body = parse_template(_template('  jq: {category: CLI, note: "a --- b"}\n', "B\n"))
+    specs, body = parse_template(_template('  CLI:\n    - jq: "a --- b"\n', "B\n"))
     assert specs[0].note == "a --- b"
     assert body == "B\n"
 

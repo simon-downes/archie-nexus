@@ -207,6 +207,11 @@ probe failure or timeout (5 s) → no version shown, as today.
 - After PR: the tool list moved under an `### Installed tools` heading after the exec line.
   Categories are separated by blank lines, and tools without a note share one bullet on the line
   under the category heading (supersedes the D10 layout). User request.
+- After PR: frontmatter restructured (supersedes D6's per-tool entries). `tools` maps each
+  category, in display order, to a list of binary names; `name: note` adds a note. With
+  `version_args` gone, a per-tool `category` field was only repetition. The renderer groups
+  with `itertools.groupby` because probed tools keep template order. A tool listed twice is
+  an error. User request.
 
 ## Risks
 

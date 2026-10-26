@@ -17,6 +17,7 @@ Template syntax:
 from __future__ import annotations
 
 import functools
+import itertools
 import os
 import platform
 import pwd
@@ -41,7 +42,6 @@ PATHS: tuple[tuple[str, str], ...] = (
 )
 
 _SOURCE = "environment.md"
-_TOOL_KEYS = frozenset({"category", "note"})
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _GUARD = re.compile(r"\{\?(\w+)\}")
 
@@ -66,7 +66,7 @@ class EnvironmentFacts:
     uid: int
     home: str
     sudo: bool
-    # Each declared tool found on PATH, in template order.
+    # Each declared tool found on PATH, in template order (grouped by category).
     tools: tuple[ToolSpec, ...] = ()
     # (display path, description) for each PATHS entry that is shown.
     paths: tuple[tuple[str, str], ...] = ()
@@ -94,33 +94,37 @@ def parse_template(text: str) -> tuple[tuple[ToolSpec, ...], str]:
     unknown = set(data) - {"tools"}
     if unknown:
         raise ValueError(f"{_SOURCE}: unknown frontmatter key {sorted(unknown)[0]!r}")
-    tools = data.get("tools") or {}
-    if not isinstance(tools, dict):
-        raise ValueError(f"{_SOURCE}: tools must be a mapping")
-    specs = tuple(_tool_spec(name, entry) for name, entry in tools.items())
-    return specs, "".join(lines[end + 1 :])
+    categories = data.get("tools") or {}
+    if not isinstance(categories, dict):
+        raise ValueError(f"{_SOURCE}: tools must be a mapping of category to tool list")
+    specs: list[ToolSpec] = []
+    for category, entries in categories.items():
+        where = f"{_SOURCE}: tools.{category}"
+        if not _text(category):
+            raise ValueError(f"{where}: category must be a non-empty string")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"{where}: must be a non-empty list of tools")
+        specs.extend(_tool_spec(category, entry, where) for entry in entries)
+    names = [spec.name for spec in specs]
+    duplicate = next((name for name in names if names.count(name) > 1), None)
+    if duplicate:
+        raise ValueError(f"{_SOURCE}: tool {duplicate!r} is listed more than once")
+    return tuple(specs), "".join(lines[end + 1 :])
 
 
-def _tool_spec(name: object, entry: object) -> ToolSpec:
-    where = f"{_SOURCE}: tools.{name}"
-    if not isinstance(name, str) or not name:
-        raise ValueError(f"{where}: tool name must be a non-empty string")
-    if not isinstance(entry, dict):
-        raise ValueError(f"{where}: entry must be a mapping")
-    unknown = set(entry) - _TOOL_KEYS
-    if unknown:
-        raise ValueError(f"{where}: unknown key {sorted(unknown)[0]!r}")
-    for key in _TOOL_KEYS:
-        value = entry.get(key)
-        if value is not None and not (isinstance(value, str) and value.strip()):
-            raise ValueError(f"{where}: {key} must be a non-empty string")
-    if entry.get("category") is None:
-        raise ValueError(f"{where}: category is required")
-    return ToolSpec(
-        name=name,
-        category=entry["category"].strip(),
-        note=entry["note"].strip() if entry.get("note") else None,
-    )
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _tool_spec(category: str, entry: object, where: str) -> ToolSpec:
+    """An entry is a binary name, or a one-key mapping of binary name to note."""
+    if isinstance(entry, dict) and len(entry) == 1:
+        [(name, note)] = entry.items()
+        if _text(name) and _text(note):
+            return ToolSpec(name.strip(), category.strip(), note.strip())
+    elif _text(entry):
+        return ToolSpec(entry.strip(), category.strip())
+    raise ValueError(f"{where}: each tool must be a name or a single `name: note` mapping")
 
 
 # ---------------------------------------------------------------------------
@@ -200,22 +204,16 @@ def facts(specs: tuple[ToolSpec, ...]) -> EnvironmentFacts:
 
 
 def _render_tools(tools: tuple[ToolSpec, ...]) -> str:
-    """One block per category, in template order, separated by blank lines.
+    """One block per category, separated by blank lines; tools sorted by name.
 
-    Tools are sorted by name. Tools without a note share one bullet, first;
-    each tool with a note follows as its own bullet.
+    Tools without a note share the first bullet; each noted tool gets its own.
     """
-    by_category: dict[str, list[ToolSpec]] = {}
-    for spec in tools:
-        by_category.setdefault(spec.category, []).append(spec)
     blocks = []
-    for category, specs in by_category.items():
-        specs.sort(key=lambda spec: spec.name.lower())
-        lines = [f"*{category}*:"]
-        plain = [f"`{spec.name}`" for spec in specs if not spec.note]
-        if plain:
-            lines.append(f"- {', '.join(plain)}")
-        lines.extend(f"- `{spec.name}` — {spec.note}" for spec in specs if spec.note)
+    for category, group in itertools.groupby(tools, key=lambda spec: spec.category):
+        specs = sorted(group, key=lambda spec: spec.name.lower())
+        plain = ", ".join(f"`{spec.name}`" for spec in specs if not spec.note)
+        lines = [f"*{category}*:", *([f"- {plain}"] if plain else [])]
+        lines += [f"- `{spec.name}` — {spec.note}" for spec in specs if spec.note]
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
