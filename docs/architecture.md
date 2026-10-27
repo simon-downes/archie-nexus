@@ -217,7 +217,7 @@ global:
   workspace_root: ~/dev
 agent:
   subagents:
-    max_concurrent: 3
+    max_concurrent: 5
 orchestrator:
   profiles:
     default:

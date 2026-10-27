@@ -70,7 +70,7 @@ class AgentEntry:
 
 DEFAULT_AGENT = AgentEntry(
     name="default",
-    description="General-purpose child agent for delegated tasks.",
+    description="General-purpose subagent for delegated tasks.",
     provider=None,
     model=None,
     skills=[],
@@ -294,6 +294,27 @@ def _resolve_model(
     return entry.model, model
 
 
+def _agent_names(agent_catalog: dict[str, AgentEntry]) -> list[str]:
+    """Names accepted by the task tool: the built-in default plus discovered agents."""
+    return [DEFAULT_AGENT.name, *sorted(n for n in agent_catalog if n != DEFAULT_AGENT.name)]
+
+
+def _task_description(agent_catalog: dict[str, AgentEntry], max_concurrent: int) -> str:
+    """Build the task tool description from the discovered agent catalog."""
+    agents = "; ".join(
+        f"{name} — {(agent_catalog.get(name) or DEFAULT_AGENT).description}"
+        for name in _agent_names(agent_catalog)
+    )
+    return (
+        "Delegate one or more tasks to subagents. Tasks in one call run in parallel, "
+        f"up to {max_concurrent} at a time; put independent tasks in one call. Subagents "
+        "cannot delegate further. Each subagent starts "
+        "with no conversation history, so the prompt must state the goal, the relevant "
+        "paths and what is already known, and the shape and length of the report. "
+        f"Agents: {agents}."
+    )
+
+
 def create_task_tool(
     *,
     agent_catalog: dict[str, AgentEntry],
@@ -309,7 +330,7 @@ def create_task_tool(
     exec_run_root: Path | None = None,
     runner_context: RunnerContextSource = None,
     turn_cost_limit: float = 50.0,
-    max_concurrent: int = 3,
+    max_concurrent: int = 5,
     live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
     | None = None,
 ) -> ToolSpec:
@@ -394,8 +415,10 @@ def create_task_tool(
                 ):
                     raise ValueError("task requires non-empty string agent and prompt")
                 entry = agent_catalog.get(agent_name)
+                if entry is None and agent_name == DEFAULT_AGENT.name:
+                    entry = DEFAULT_AGENT
                 if entry is None:
-                    available = ", ".join(sorted(agent_catalog)) or "(none)"
+                    available = ", ".join(_agent_names(agent_catalog))
                     warning = (
                         f"Warning: unknown agent '{agent_name}' (available: {available}); "
                         "using default agent. "
@@ -620,7 +643,7 @@ def create_task_tool(
 
     return ToolSpec(
         name="task",
-        description="Delegate one or more tasks to specialised child agents.",
+        description=_task_description(agent_catalog, max_concurrent),
         schema={
             "type": "object",
             "properties": {

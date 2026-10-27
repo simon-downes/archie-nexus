@@ -87,6 +87,27 @@ async def test_validation_errors_do_not_start_children(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_default_agent_is_accepted_without_warning(tmp_path, monkeypatch):
+    clients = [FakeLLMClient([[TextDelta(text="done"), Done("end_turn")]])]
+    spec, _ = await _make_tool(tmp_path, monkeypatch, clients)
+
+    result = await spec.handler(tasks=[{"agent": "default", "prompt": "go"}], _launch_scope="s")
+
+    assert result == "[0] default: done"
+
+
+@pytest.mark.asyncio
+async def test_description_lists_agents_and_concurrency(tmp_path, monkeypatch):
+    spec, _ = await _make_tool(tmp_path, monkeypatch, [], max_concurrent=4)
+
+    assert "up to 4 at a time" in spec.description
+    assert "cannot delegate further" in spec.description
+    assert "no conversation history" in spec.description
+    assert "default — General-purpose subagent" in spec.description
+    assert "researcher — Researcher" in spec.description
+
+
+@pytest.mark.asyncio
 async def test_unknown_agent_falls_back_without_sinking_valid_sibling(tmp_path, monkeypatch):
     clients = [
         FakeLLMClient([[TextDelta(text="fallback"), Done("end_turn")]]),
@@ -103,6 +124,7 @@ async def test_unknown_agent_falls_back_without_sinking_valid_sibling(tmp_path, 
     )
 
     assert "unknown agent 'missing'" in result
+    assert "(available: default, researcher)" in result
     assert "using default agent" in result
     assert "fallback" in result
     assert "valid" in result

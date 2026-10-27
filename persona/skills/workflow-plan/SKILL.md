@@ -87,8 +87,7 @@ preserved. A project moves to done when all its specs are done.
 
 **Determining the project root:**
 1. The nearest ancestor directory containing `.git` (handles sub-projects with own repos)
-2. Determine the project root from the project detection tool (refer to `# Available Tools`)
-3. If neither is available, ask the user
+2. If there is none, ask the user
 
 When working in a sub-project (e.g. a nested module inside a monorepo), the sub-project's
 `.git` takes precedence — plans go in the sub-project's `./plans/`.
@@ -183,14 +182,13 @@ The full four-phase process below. This is where implementable plans are produce
    of work, and any referenced files — aimed at answering discoverable questions, not
    exhaustively mapping the repo. When a question can't be answered from code, add it to the
    decision tree rather than digging further. For unfamiliar repos, explore by progressive
-   disclosure (see `# Available Tools` → "Exploring a codebase") and delegate wide surveys to a research subagent.
-   Also check project documentation (README, CONTRIBUTING, AGENTS.md) and determine
-   the project configuration (refer to `# Available Tools`). If an issue tracker is
-   configured (`issues.provider`), note it for use after plan approval. If no
-   tracker is configured, skip issue tracking silently.
+   disclosure (see `## Available Tools` → "Exploring a codebase") and delegate wide surveys to a `default` subagent.
+   Also check project documentation (README, CONTRIBUTING, AGENTS.md) for the project's
+   issue tracker. If one is named, note it for use after plan approval. If none is
+   named, skip issue tracking silently.
 
-   If multiple sources indicate different trackers, prefer: the user's explicit instruction,
-   then project configuration, then project documentation.
+   If multiple sources indicate different trackers, prefer the user's explicit instruction
+   over project documentation.
 
 5. **Grill the Decision Tree** — interview the user relentlessly to resolve every decision
    the design space contains. See [references/DECISION-GRILLING.md](references/DECISION-GRILLING.md)

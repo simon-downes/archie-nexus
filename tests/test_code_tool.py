@@ -464,15 +464,87 @@ class TestCodeIntegration:
         assert "def helper()" in result
 
     @pytest.mark.asyncio
-    async def test_directory_mode(self, tmp_path, monkeypatch):
+    async def test_directory_mode_returns_tree(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        (tmp_path / "README.md").write_text("# hi\n")
+        (tmp_path / "src" / "pkg").mkdir(parents=True)
+        (tmp_path / "src" / "pkg" / "a.py").write_text("def foo(): pass\n")
+        (tmp_path / "src" / "pkg" / "b.py").write_text("def bar(): pass\n")
+        result = await code(path=".")
+        assert result.startswith("./ (3 files: .py 2, .md 1)")
+        assert "README.md" in result
+        assert "src/ (2 files: .py 2)" in result
+        assert "pkg/ (2 files: .py 2)" in result
+        assert "a.py, b.py" in result
+        assert "def foo" not in result
+
+    @pytest.mark.asyncio
+    async def test_directory_mode_language_filter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        (tmp_path / "b.js").write_text("function bar() {}\n")
+        result = await code(path=".", language="python")
+        assert "a.py" in result
+        assert "b.js" not in result
+
+    @pytest.mark.asyncio
+    async def test_directory_mode_reduces_depth_to_fit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        for i in range(20):
+            for j in range(10):
+                d = tmp_path / f"d{i:02}" / f"s{j}"
+                d.mkdir(parents=True)
+                (d / "x.py").write_text("x = 1\n")
+        result = await code(path=".")
+        assert "d00/ (10 files: .py 10)" in result
+        assert "s0/" not in result
+        assert len(result.splitlines()) <= 160
+
+    @pytest.mark.asyncio
+    async def test_directory_mode_caps_files_and_dirs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        for i in range(30):
+            (tmp_path / f"f{i:02}.py").write_text("x = 1\n")
+            (tmp_path / f"d{i:02}").mkdir()
+            (tmp_path / f"d{i:02}" / "x.py").write_text("x = 1\n")
+        result = await code(path=".")
+        assert "… +18 more" in result
+        assert "… +5 more directories" in result
+
+    @pytest.mark.asyncio
+    async def test_directory_mode_lists_key_files_first(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        for i in range(30):
+            (tmp_path / f"a{i:02}.py").write_text("x = 1\n")
+        for name in ("README.md", "pyproject.toml", "AGENTS.md"):
+            (tmp_path / name).write_text("x\n")
+        result = await code(path=".")
+        first = result.splitlines()[1].strip()
+        assert first.startswith("AGENTS.md, README.md, pyproject.toml, a00.py")
+
+    @pytest.mark.asyncio
+    async def test_directory_mode_excludes_noise_dirs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        (tmp_path / "app.py").write_text("x = 1\n")
+        (tmp_path / "node_modules" / "lib").mkdir(parents=True)
+        (tmp_path / "node_modules" / "lib" / "i.js").write_text("x\n")
+        result = await code(path=".")
+        assert result.startswith("./ (1 file: .py 1)")
+        assert "node_modules" not in result
+
+    @pytest.mark.asyncio
+    async def test_directory_mode_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        assert await code(path=".") == "No files found."
+
+    @pytest.mark.asyncio
+    async def test_directory_name_search(self, tmp_path, monkeypatch):
         monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
         (tmp_path / "a.py").write_text("def foo(): pass\n")
         (tmp_path / "b.py").write_text("def bar(): pass\n")
-        result = await code(path=".")
-        assert "a.py" in result
-        assert "b.py" in result
-        assert "foo" in result
-        assert "bar" in result
+        result = await code(path=".", name="foo")
+        assert "a.py:1-1 — def foo()" in result
+        assert "bar" not in result
 
     @pytest.mark.asyncio
     async def test_name_search(self, tmp_path, monkeypatch):
@@ -483,26 +555,17 @@ class TestCodeIntegration:
         assert "bar" not in result
 
     @pytest.mark.asyncio
-    async def test_language_filter(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
-        (tmp_path / "a.py").write_text("def foo(): pass\n")
-        (tmp_path / "b.js").write_text("function bar() {}\n")
-        result = await code(path=".", language="python")
-        assert "foo" in result
-        assert "bar" not in result
-
-    @pytest.mark.asyncio
     async def test_nonexistent_path_raises(self, tmp_path, monkeypatch):
         monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
         with pytest.raises(FileNotFoundError):
             await code(path="nonexistent.py")
 
     @pytest.mark.asyncio
-    async def test_directory_skips_erroring_files(self, tmp_path, monkeypatch):
+    async def test_directory_search_skips_erroring_files(self, tmp_path, monkeypatch):
         monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
         (tmp_path / "good.py").write_text("def foo(): pass\n")
         (tmp_path / "bad.py").write_bytes(b"\x00binary content")
-        result = await code(path=".")
+        result = await code(path=".", name="foo")
         assert "foo" in result
 
     @pytest.mark.asyncio

@@ -125,14 +125,15 @@ for the code-reviewer subagent.
 
 ## 2. Run mechanical checks
 
-Spawn `qa-runner` subagent to run formatting, linting, and tests.
+Spawn a qa-runner subagent (`task` with agent `default`) to run formatting, linting,
+and tests.
 
 If mechanical checks fail → report failures. These must be fixed before proceeding
 to reasoning review (no point reviewing code that doesn't pass basic checks).
 
 ## 3. Run reasoning review
 
-Spawn `code-reviewer` subagent with:
+Spawn a code-reviewer subagent (`task` with agent `default`) with:
 - Full content of changed files
 - Context files: entry points, config, shared types touched by the changes
 - Relevant review dimensions (see below)
@@ -141,7 +142,7 @@ Spawn `code-reviewer` subagent with:
 **Partitioning (large reviews only):**
 - Under ~50 changed files → single code-reviewer subagent
 - Over ~50 changed files → partition by module/component, one subagent per partition
-  (up to 4 parallel), orchestrator synthesises findings
+  (all in one `task` call), orchestrator synthesises findings
 
 ## 4. Run plan alignment (plan-based modes only)
 
@@ -181,7 +182,7 @@ If the verdict is APPROVE or APPROVE WITH SUGGESTIONS and the work is on a featu
   change needed. PR merge handles the final transition.
 
 **Post-PR actions:** After creating the PR, send a Slack notification with the PR title
-and link to the project's configured channel (refer to `# Available Tools`). Message
+and link to the channel named in the project documentation, using the `slack` skill. Message
 format: `<PR title> <<url>|#<number>>`. If Slack is not configured for the project or
 the notification fails, skip silently — notifications are informational, not blocking.
 
@@ -252,13 +253,17 @@ Spec: APPROVE | REQUEST CHANGES | N/A (no plan)
 
 # Subagent Contract
 
-## qa-runner (existing)
+qa-runner and code-reviewer are roles, not agent definitions. Run both with the
+`default` agent and state the role, inputs, and output format in the prompt; the child
+sees nothing of this conversation.
+
+## qa-runner
 
 Runs formatting, linting, and tests. Returns pass/fail with details.
 
-## code-reviewer (new)
+## code-reviewer
 
-**Agent:** `code-reviewer`
+**Agent:** `default`
 
 **Resources (always loaded):** project `CONTRIBUTING.md` and `README.md` — provides
 project conventions and setup context.
@@ -277,8 +282,8 @@ specific quotes of problematic code. Report standards findings (conventions, sme
 error handling) separately from any spec/correctness observations — do not merge them
 into a single quality verdict. The orchestrator keeps the two axes distinct downstream.
 
-**Access:** read-only (read, glob, grep, shell, code). Must be able to trace outward
-from changed files to check callers and consumers.
+**Access:** tell it to stay read-only (read, glob, grep, shell, code); the harness doesn't
+enforce this. It must trace outward from changed files to check callers and consumers.
 
 **Constraint:** surfaces findings and questions. Does not suggest rewrites or
 alternative implementations.
