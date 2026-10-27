@@ -253,6 +253,8 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 
 ## Risks
 
+- PR base: the PR targets `main` but the branch was cut from `improve-tool-strategy`, so it includes unreviewed commit b074cff (pr.py warning; file-list mismatch lists that commit's 12 files). Noted in the PR body.
+
 - Chart.js under `style-src 'self'`: confirmed in M4; no CSP violations logged.
 - The orchestrator may not start in this container (Docker absent); browser evidence may need the app started with `list_sessions` unavailable. Plan 064 hit the same constraint.
 - The first sync after upgrade rebuilds the index from all logs (R10 bounds it); the old DB is archived, not deleted.
@@ -283,7 +285,7 @@ Evidence:
 
 Not verified: the orchestrator running under `archie serve` with Docker (this container has no Docker; Docker lookups were patched to return no sessions for the browser checks), and the upgrade path on the user's live `~/.nexus/metrics.db` (tested on copies and on fixtures only).
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/16
 CI: pending
 
 ## Follow-ups
