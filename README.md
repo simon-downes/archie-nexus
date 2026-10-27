@@ -17,7 +17,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 | Path | Responsibility |
 | --- | --- |
 | `cli/` | `archie` command, Textual TUI, orchestrator client, auth commands |
-| `orchestrator/` | Host-side HTTP/WebSocket service, Docker lifecycle, session proxy, metrics |
+| `orchestrator/` | Host-side HTTP/WebSocket service, Docker lifecycle, session proxy, log viewer, metrics index and insights pages |
 | `agent/` | Container-side Starlette service, agent loop, providers, core tools, plugin SDK, subagents |
 | `shared/` | Configuration, models, public commands/events, session-log persistence, credentials, plugin manifests |
 | `plugins/` | One directory per integration: `plugin.yaml`, code, skills, tests ([Plugins](docs/plugins.md)) |
@@ -49,13 +49,21 @@ archie start <profile>/<workspace>
 archie attach <profile>/<session-id-or-prefix>
 ```
 
+Usage insights come from the local metrics index and work without the orchestrator running. `archie stats` prints the overview; the subcommands are `sessions`, `session <id>`, `models`, `tools`, `subagents` and `errors`. Every view takes `--since` (`7d`, `all` or `YYYY-MM-DD`; default `30d`), `--until`, `--workspace`, `--model`, `--scope` (`all`, `root`, `subagent`) and `--json`. The same views, with charts and filters, are at `http://127.0.0.1:7600/ui/insights` while `archie serve` runs.
+
+```bash
+archie stats --since 7d
+archie stats sessions --sort cost --limit 20
+archie stats session <session-id> --json
+```
+
 Build the image again after changing Dockerfile or dependency layers. Source for `agent`, `shared`, `persona`, and `plugins` is mounted for development.
 
 ## Configuration and data
 
 The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), named `orchestrator.profiles`, per-integration `plugins.<id>` sections, and top-level `mounts` for host bind mounts. See [Configuration](docs/config.md) for the complete schema and mount examples.
 
-Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; aggregate request metrics are stored in `~/.nexus/metrics.db`. Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory and `ARCHIE_PLUGINS_DIR` the plugins directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
+Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; `~/.nexus/metrics.db` is a metadata index built from those logs (rebuildable at any time). Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory and `ARCHIE_PLUGINS_DIR` the plugins directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
 
 For multiple orchestrators, define named profiles under `orchestrator.profiles` and use `profile/value` arguments. `ARCHIE_HOST=host[:port]` overrides profile selection for CLI commands; the default port is 7600. The `serve` command binds to the configured default profile, so binding it to a non-loopback host exposes the orchestrator to that network.
 

@@ -1,0 +1,45 @@
+{% extends "insights/base.html" %}
+{% import "insights/_macros.html" as m %}
+{% block title %}Insights{% endblock %}
+{% block insights %}
+{% set t = data.totals %}
+<section class="chrome tiles">
+    <div class="tile"><span class="label">Cost</span><span class="value">{{ m.money(t.cost) }}</span></div>
+    <div class="tile"><span class="label">Sessions</span><span class="value">{{ m.num(t.sessions) }}</span></div>
+    <div class="tile"><span class="label">Turns</span><span class="value">{{ m.num(t.turns) }}</span></div>
+    <div class="tile"><span class="label">Requests</span><span class="value">{{ m.num(t.requests) }}</span></div>
+    <div class="tile"><span class="label">Cache hit</span><span class="value">{{ m.pct(t.cache_hit_pct) }}</span></div>
+    <div class="tile"><span class="label">Output tokens</span><span class="value">{{ m.num(t.output_tokens) }}</span></div>
+    <div class="tile"><span class="label">Request errors</span><span class="value">{{ m.num(t.errors) }}</span></div>
+    <div class="tile"><span class="label">Turn errors</span><span class="value">{{ m.num(t.turn_errors) }}</span></div>
+    <div class="tile"><span class="label">Interruptions</span><span class="value">{{ m.num(t.interruptions) }}</span></div>
+</section>
+<p class="chrome dim tokens-line">Prompt tokens: {{ m.num(t.input_tokens) }} uncached · {{ m.num(t.cache_read_tokens) }} cache read · {{ m.num(t.cache_write_tokens) }} cache write</p>
+{{ m.chart("daily-cost", "stacked-bar", data.daily_cost, "Daily cost by model (USD)") }}
+<div class="two-col">
+<section class="chrome">
+    <h2>Top workspaces</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>Workspace</th><th class="num">Sessions</th><th class="num">Requests</th><th class="num">Cost</th></tr></thead>
+        <tbody>
+        {%- for w in data.top_workspaces %}
+            <tr><td><a href="{{ link('/ui/insights', workspace=w.workspace) }}">{{ w.workspace }}</a></td><td class="num">{{ m.num(w.sessions) }}</td><td class="num">{{ m.num(w.requests) }}</td><td class="num">{{ m.money(w.cost) }}</td></tr>
+        {%- else %}<tr><td colspan="4" class="dim">No requests in range.</td></tr>
+        {%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+<section class="chrome">
+    <h2>Top models</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Cache hit</th><th class="num">Cost</th></tr></thead>
+        <tbody>
+        {%- for row in data.top_models %}
+            <tr><td><a href="{{ link('/ui/insights', model=row.model) }}">{{ row.model }}</a></td><td class="num">{{ m.num(row.requests) }}</td><td class="num">{{ m.pct(row.cache_hit_pct) }}</td><td class="num">{{ m.money(row.cost) }}</td></tr>
+        {%- else %}<tr><td colspan="4" class="dim">No requests in range.</td></tr>
+        {%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+</div>
+{% endblock %}

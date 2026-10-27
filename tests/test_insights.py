@@ -396,3 +396,25 @@ def test_filter_options(db):
     opts = insights.filter_options(db)
     assert opts["workspaces"] == ["alpha", "beta"]
     assert opts["models"] == ["m1", "m2"]
+
+
+def test_daily_series_fill_gaps(session_logs, tmp_path):
+    w = session_logs
+    w.write(
+        "g-01k0000000",
+        [
+            w.llm(cost_usd=1.0, sent_at="2026-07-01T10:00:00+00:00"),
+            w.llm(cost_usd=2.0, sent_at="2026-07-04T10:00:00+00:00", status="error", error="x"),
+        ],
+    )
+    MetricsIndex(tmp_path / "metrics.db", tmp_path / "sessions").sync()
+    conn = connect(tmp_path / "metrics.db")
+    try:
+        daily = insights.overview(conn, ALL)["daily_cost"]
+        errs = insights.errors(conn, ALL)["daily"]
+    finally:
+        conn.close()
+    assert daily["days"] == ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"]
+    assert daily["series"][0]["values"] == [1.0, 0.0, 0.0, 2.0]
+    assert errs["days"] == daily["days"]
+    assert errs["request_errors"] == [0, 0, 0, 1]

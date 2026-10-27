@@ -1,0 +1,40 @@
+<form class="chrome insights-filters" method="get" action="">
+    <label>Since
+        <select name="since">
+            {%- set since = raw.since or "30d" %}
+            {%- set preset = namespace(found=false) %}
+            {%- for value, label in since_presets %}
+            <option value="{{ value }}"{% if value == since %}{% set preset.found = true %} selected{% endif %}>{{ label }}</option>
+            {%- endfor %}
+            {%- if not preset.found %}<option value="{{ since }}" selected>{{ since }}</option>{% endif %}
+        </select>
+    </label>
+    <label>Or from <input type="date" name="from" value="{{ raw['from'] }}"></label>
+    <label>Until <input type="date" name="until" value="{{ raw.until }}"></label>
+    <label>Workspace
+        <select name="workspace">
+            <option value="">All</option>
+            {%- for w in options.workspaces %}
+            <option value="{{ w }}"{% if w == raw.workspace %} selected{% endif %}>{{ w }}</option>
+            {%- endfor %}
+        </select>
+    </label>
+    <label>Model
+        <select name="model">
+            <option value="">All</option>
+            {%- for m in options.models %}
+            <option value="{{ m }}"{% if m == raw.model %} selected{% endif %}>{{ m }}</option>
+            {%- endfor %}
+        </select>
+    </label>
+    <label>Scope
+        <select name="scope">
+            {%- for s in options.scopes %}
+            <option value="{{ s }}"{% if s == (raw.scope or "all") %} selected{% endif %}>{{ {"all": "Main + subagents", "root": "Main agent", "subagent": "Subagents"}[s] }}</option>
+            {%- endfor %}
+        </select>
+    </label>
+    {%- if sort is defined %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+    <button type="submit">Apply</button>
+    <a class="reset" href="?">Reset</a>
+</form>

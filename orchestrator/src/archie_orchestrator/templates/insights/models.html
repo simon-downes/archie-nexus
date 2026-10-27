@@ -1,0 +1,17 @@
+{% extends "insights/base.html" %}
+{% import "insights/_macros.html" as m %}
+{% block title %}Models — Insights{% endblock %}
+{% block insights %}
+{% set cost_chart = {"labels": data.models|map(attribute="model")|list, "values": data.models|map(attribute="cost")|list} %}
+{{ m.chart("model-cost", "hbar", cost_chart, "Cost per model (USD)") }}
+<div class="table-wrap chrome"><table class="insights">
+    <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Cost</th><th class="num">Prompt tokens</th><th class="num">Output tokens</th><th class="num">Cache hit</th><th class="num">p50</th><th class="num">p95</th><th class="num">Errors</th><th class="num">Error %</th><th class="num">Interrupted</th><th class="num">No usage</th></tr></thead>
+    <tbody>
+    {%- for r in data.models %}
+        <tr><td><a href="{{ link('/ui/insights', model=r.model) }}">{{ r.model }}</a></td><td class="num">{{ m.num(r.requests) }}</td><td class="num">{{ m.money(r.cost) }}</td><td class="num">{{ m.num(r.input_tokens + r.cache_read_tokens + r.cache_write_tokens) }}</td><td class="num">{{ m.num(r.output_tokens) }}</td><td class="num">{{ m.pct(r.cache_hit_pct) }}</td><td class="num">{{ m.ms(r.p50_ms) }}</td><td class="num">{{ m.ms(r.p95_ms) }}</td><td class="num{% if r.errors %} err{% endif %}">{{ m.num(r.errors) }}</td><td class="num">{{ m.pct(r.error_pct) }}</td><td class="num">{{ m.num(r.interrupted) }}</td><td class="num">{{ m.num(r.no_usage) }}</td></tr>
+    {%- else %}<tr><td colspan="12" class="dim">No requests in range.</td></tr>
+    {%- endfor %}
+    </tbody>
+</table></div>
+<p class="chrome dim">Latency percentiles use completed requests only. Errors count <code>status = error</code>; interrupted and no-usage requests are shown separately.</p>
+{% endblock %}

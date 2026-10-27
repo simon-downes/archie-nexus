@@ -1,0 +1,5 @@
+<nav class="chrome insights-nav" aria-label="Insights views">
+    {%- for key, path, label in views %}
+    <a href="{{ link(path) if link is defined else path }}"{% if key == view %} aria-current="page"{% endif %}>{{ label }}</a>
+    {%- endfor %}
+</nav>

@@ -196,6 +196,15 @@ def cache_hit(input_tokens: int, cache_read: int, cache_write: int) -> float | N
     return round(100.0 * (cache_read or 0) / total, 1)
 
 
+def day_span(days) -> list[str]:
+    """Every ``YYYY-MM-DD`` from the earliest to the latest of ``days``, inclusive."""
+    parsed = sorted({date.fromisoformat(d) for d in days if d})
+    if not parsed:
+        return []
+    count = (parsed[-1] - parsed[0]).days + 1
+    return [(parsed[0] + timedelta(days=i)).isoformat() for i in range(count)]
+
+
 def _pct(part: int, whole: int) -> float | None:
     return round(100.0 * part / whole, 1) if whole else None
 
@@ -306,7 +315,7 @@ def _daily_cost(conn, where: str, params: list, models_by_cost: list[str]) -> di
         f"FROM requests r {where} GROUP BY day, model ORDER BY day",
         params,
     ).fetchall()
-    days = sorted({r["day"] for r in rows})
+    days = day_span(r["day"] for r in rows)
     index = {day: i for i, day in enumerate(days)}
     names = [*top, *(["other"] if len(models_by_cost) > len(top) else [])]
     series = {name: [0.0] * len(days) for name in names}
@@ -685,6 +694,12 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
         )
     ]
     daily: dict[str, dict[str, int]] = {}
+    request_days = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT DISTINCT substr(r.timestamp, 1, 10) FROM requests r {rwhere}", rparams
+        )
+    ]
     for r in conn.execute(
         f"SELECT substr(r.timestamp, 1, 10) AS day, COUNT(*) FROM requests r {rwhere}{and_}"
         "r.status = 'error' GROUP BY day",
@@ -701,7 +716,7 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
             continue
         daily.setdefault(r[0], {})["turn_errors"] = r[1]
         daily[r[0]]["interruptions"] = r[2]
-    days = sorted(daily)
+    days = day_span([*request_days, *daily])
     return {
         "filters": f.as_dict(),
         "totals": {
@@ -717,8 +732,8 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
         "subagent_errors": subagent_errors,
         "daily": {
             "days": days,
-            "request_errors": [daily[d].get("request_errors", 0) for d in days],
-            "turn_errors": [daily[d].get("turn_errors", 0) for d in days],
-            "interruptions": [daily[d].get("interruptions", 0) for d in days],
+            "request_errors": [daily.get(d, {}).get("request_errors", 0) for d in days],
+            "turn_errors": [daily.get(d, {}).get("turn_errors", 0) for d in days],
+            "interruptions": [daily.get(d, {}).get("interruptions", 0) for d in days],
         },
     }

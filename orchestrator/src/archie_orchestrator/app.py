@@ -32,7 +32,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
-from archie_orchestrator import configure_logging
+from archie_orchestrator import configure_logging, insights_web
 from archie_orchestrator.auth import AuthError, AuthService
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.credential_refresh import credential_refresh_loop
@@ -508,6 +508,13 @@ app = Starlette(
         Route("/ui/sessions", session_list_page, methods=["GET"]),
         Route("/ui/sessions/{session_id}", session_detail_page, methods=["GET"]),
         Route("/ui/sessions/{session_id}/live", session_live, methods=["GET"]),
+        Route("/ui/insights", insights_web.overview_page, methods=["GET"]),
+        Route("/ui/insights/sessions", insights_web.sessions_page, methods=["GET"]),
+        Route("/ui/insights/sessions/{session_id}", insights_web.session_page, methods=["GET"]),
+        Route("/ui/insights/models", insights_web.models_page, methods=["GET"]),
+        Route("/ui/insights/tools", insights_web.tools_page, methods=["GET"]),
+        Route("/ui/insights/subagents", insights_web.subagents_page, methods=["GET"]),
+        Route("/ui/insights/errors", insights_web.errors_page, methods=["GET"]),
         Route("/health", health),
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),

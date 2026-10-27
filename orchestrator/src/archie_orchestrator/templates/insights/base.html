@@ -1,0 +1,15 @@
+{% extends "viewer/base.html" %}
+{% block title %}Insights{% endblock %}
+{% block styles %}<link rel="stylesheet" href="/static/insights/insights.css">{% endblock %}
+{% block scripts %}<script src="/static/vendor/chart.umd.min.js" defer></script>
+    <script src="/static/insights/insights.js" defer></script>{% endblock %}
+{% block content %}
+{% include "insights/_nav.html" %}
+{% if filters_bar is not defined or filters_bar %}{% include "insights/_filters.html" %}{% endif %}
+{% for notice in notices %}<p class="notice chrome">{{ notice }}</p>{% endfor %}
+{% if data is none %}
+<p class="empty chrome">No data yet.</p>
+{% else %}
+{% block insights %}{% endblock %}
+{% endif %}
+{% endblock %}

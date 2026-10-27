@@ -1,0 +1,182 @@
+/* Usage insights pages. Builds on viewer.css (same chrome, tables and notices). */
+
+.viewer .insights-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.viewer .insights-nav a[aria-current="page"] {
+    font-weight: 700;
+    text-decoration: none;
+    color: var(--nc-text);
+}
+
+.viewer .insights-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.5rem 0.9rem;
+    padding: 0.6rem 0.75rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    margin-bottom: 1rem;
+}
+
+.viewer .insights-filters label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.75rem;
+    color: var(--v-dim);
+    margin: 0;
+}
+
+.viewer .insights-filters select,
+.viewer .insights-filters input {
+    font-size: 0.85rem;
+    margin: 0;
+    min-width: 8rem;
+}
+
+.viewer .insights-filters button {
+    margin: 0;
+}
+
+.viewer .insights-filters .reset {
+    font-size: 0.8rem;
+    align-self: center;
+}
+
+.viewer .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+    gap: 0.6rem;
+    margin-bottom: 0.5rem;
+}
+
+.viewer .tile {
+    display: flex;
+    flex-direction: column;
+    padding: 0.6rem 0.75rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+}
+
+.viewer .tile .label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--v-dim);
+}
+
+.viewer .tile .value {
+    font-family: var(--v-mono);
+    font-size: 1.25rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer .tokens-line {
+    font-size: 0.8rem;
+    margin-block: 0 1rem;
+}
+
+.viewer .chart {
+    margin: 0 0 1.25rem;
+    padding: 0.75rem;
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    position: relative;
+    height: 20rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.viewer .chart canvas {
+    flex: 1;
+    min-height: 0;
+}
+
+.viewer .chart figcaption {
+    font-size: 0.75rem;
+    color: var(--v-dim);
+    margin-top: 0.4rem;
+}
+
+.viewer .two-col {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(26rem, 100%), 1fr));
+    gap: 1rem 1.5rem;
+}
+
+.viewer .two-col > * {
+    min-width: 0;
+}
+
+.viewer h2 {
+    font-size: 1rem;
+    margin-block: 1rem 0.5rem;
+}
+
+.viewer table.insights {
+    width: 100%;
+    font-size: 0.8rem;
+}
+
+.viewer table.insights th {
+    font-weight: 600;
+    color: var(--v-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+.viewer table.insights td,
+.viewer table.insights th {
+    padding: 0.3rem 0.55rem;
+}
+
+.viewer table.insights td.num,
+.viewer table.insights td.when,
+.viewer table.insights td.id {
+    font-family: var(--v-mono);
+    white-space: nowrap;
+}
+
+.viewer table.insights td.msg {
+    font-family: var(--v-mono);
+    font-size: 0.75rem;
+    word-break: break-word;
+}
+
+.viewer table.insights td.title {
+    max-width: 28rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.viewer table.insights .transcript {
+    font-size: 0.7rem;
+    margin-left: 0.3rem;
+}
+
+.viewer .status-error {
+    color: var(--v-err);
+}
+
+.viewer .status-interrupted {
+    color: var(--v-warn);
+}
+
+.viewer .status-completed {
+    color: var(--v-ok);
+}
+
+.viewer .session-head .title {
+    margin-block: 0.25rem;
+}

@@ -119,7 +119,7 @@ Codebase facts found during discovery:
 - R11 MUST implement the filters in D15/D16 and reject an invalid value with `InsightsError` naming it.
   - AC: `parse_filters(since="7d")` on 2026-10-26 gives since 2026-10-20; `since="2026-13-01"` raises naming it; `scope="root"` excludes child requests from totals.
 - R12 MUST return, for **overview**: total cost, sessions, turns, requests, input/output/cache read/cache write tokens, cache hit % (D18), request errors, turn errors, interruptions; daily cost per model (top 5 models, rest as `other`); top 10 workspaces and models by cost.
-  - AC: fixture totals match hand-computed values; daily series has one entry per UTC day with requests.
+  - AC: fixture totals match hand-computed values; daily series has one entry per UTC day from the first to the last day with requests, zero-filled (revised, M3).
 - R13 MUST return, for **sessions**: per session started, workspace, title, turns, requests, cost, tokens, request + turn error count, duration (started → last activity); sortable by `started` (default, desc), `cost`, `turns`, `requests`, `errors`, `duration`; capped at 200 with the total count.
   - AC: `sort="cost"` orders by cost desc; an unknown sort key raises `InsightsError`.
 - R14 MUST return, for **session detail**: the session row; per turn: status, requests, cost, max root `context_tokens`, tool calls, errors; per request (sequence order): timestamp, scope, model, context tokens, cost; tools used in the session; subagents with agent, requests and cost.
@@ -228,13 +228,13 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py` passes (covering R1, R5–R7, R11–R19); on the data copy each subcommand runs and `stats tools` lists `shell` and `read`.
 - **Outcome:** Added 31 insights tests (filters, all seven views, percentiles, date fallback, 200-row cap) and 15 more CLI tests (every subcommand in table and JSON form, literal `[exit: N]`, bad sort). CLI rendering: cells are escaped (Rich would otherwise eat `[exit: 2]`); error text wraps; the sessions title column takes only the width left over and is dropped below 12 characters. Verify: `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py` passes (75); full suite 2161 passed with only the 39 baseline failures; ruff clean. Real data copy: every subcommand exits 0; `stats tools --since all` lists `shell` (5,886 calls) and `read` (10.3k).
 
-### [ ] M3 — Web dashboard pages with tables and filters
+### [x] M3 — Web dashboard pages with tables and filters
 
 - **Approach:** `insights_web.py` handlers and seven templates extending `viewer/base.html`; follow `web.session_list_page` for threading and `_viewer_response` for the CSP. Filter bar partial with since/until/workspace/model/scope selects (workspace and model options from the index). Sort links on the sessions table. Add the nav link. Update docs (R24).
 - **Test seam:** ASGI client (`httpx.ASGITransport`) as in `tests/test_web_session_list.py`.
 - **Deliverable:** all seven pages render tables from the index with working filters.
 - **Verify:** `uv run pytest tests/test_web_insights.py tests/test_web_session_list.py` passes (R20–R22); `rg -n "/ui/insights|archie stats|ingest_files" docs README.md` finds the new content and `rg -n "only .llm_request. records" docs` finds nothing (R24).
-- **Outcome:**
+- **Outcome:** `insights_web.py` with seven handlers, templates under `templates/insights/`, `static/insights/insights.css`, nav links in both base templates. The filter bar is a GET form: since preset, an optional `from` date that overrides it, until, workspace, model, scope. Chart JSON blocks also landed here (M4 draws them). Docs updated (architecture metrics section rewritten, routes, data flow, proxy; README stats usage; event-spec). Verify: `uv run pytest tests/test_web_insights.py tests/test_web_session_list.py` passes (24 + session-list tests); `rg -n "/ui/insights|archie stats|ingest_files" docs README.md` finds 15 lines; `rg "only .llm_request. records|metrics writer|MetricsWriter" docs README.md` finds nothing. Full suite 2186 passed, only the 39 baseline failures. All pages return 200 against the real data copy.
 
 ### [ ] M4 — Charts
 
@@ -247,6 +247,8 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 ## Deviations
 
 - M1: the fold code for every event type and all seven query functions and CLI subcommands landed in M1 instead of M2; M2 now adds their tests, rendering fixes and any corrections. No scope change.
+- M3: the filter bar gained a `from` date input that overrides the `since` preset (a `<select>` can't take a custom date). D15 unchanged otherwise.
+- M3: daily series (overview cost, errors) are zero-filled across the whole day span instead of listing only days with data, so line and bar charts don't hide quiet days. R12's AC revised.
 
 ## Risks
 
