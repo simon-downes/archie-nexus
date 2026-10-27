@@ -28,7 +28,7 @@ identity, which should only be able to assume the configured roles. This entry i
 from `bedrock`, which the model provider uses. When the session token expires, run the login
 again on the host; running sessions use the new credentials at their next role renewal (see
 [How it works](#how-it-works)). The `env` mapping applies only if a user override sets
-`plugins.aws.auth.set_env: true`, which projects a startup snapshot that profile calls ignore.
+`plugins.aws.auth.set_env: true`, which exports the base credentials into shell commands; profile calls ignore them.
 
 ## Configuration
 

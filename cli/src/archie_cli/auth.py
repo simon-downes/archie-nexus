@@ -61,31 +61,7 @@ def _set_static_from_login(service: str) -> None:
     if provider.login == "aws_chain":
         _set_aws_from_chain(service, provider)
         return
-    if provider.env:
-        fields = {field: os.environ.get(env_name) for field, env_name in provider.env.items()}
-        missing = [env_name for field, env_name in provider.env.items() if not fields.get(field)]
-        if missing:
-            raise click.ClickException(f"Missing environment variables: {', '.join(missing)}")
-    else:
-        stdin_text = "" if sys.stdin.isatty() else sys.stdin.read().strip()
-        if stdin_text:
-            try:
-                fields = json.loads(stdin_text)
-            except json.JSONDecodeError as exc:
-                raise click.ClickException("Credential stdin must be a JSON object") from exc
-            if not isinstance(fields, dict):
-                raise click.ClickException("Credential stdin must be a JSON object")
-        else:
-            provider = PROVIDERS.get(service)
-            if provider is None or not hasattr(provider, "fields"):
-                raise click.ClickException(f"Unknown static provider: {service}")
-            fields = {}
-            for field in provider.fields:
-                fields[field] = click.prompt(
-                    f"{service} {field}",
-                    hide_input=_is_secret_field(field),
-                    err=True,
-                )
+    fields = _static_fields(service, provider)
     try:
         response = httpx.put(
             f"{_orchestrator_url()}/auth/credential/{service}", json=fields, timeout=10
@@ -94,6 +70,109 @@ def _set_static_from_login(service: str) -> None:
     except httpx.HTTPError as exc:
         raise click.ClickException("Could not set credentials through orchestrator") from exc
     click.echo(f"✓ Credentials saved for {service}.")
+
+
+def _static_fields(service: str, provider: StaticProvider) -> dict[str, str]:
+    """Collect static credential fields: environment, then JSON stdin or prompts.
+
+    Mapped environment variables that are set are used as they are. If any
+    field is still missing, a non-empty JSON object on stdin supplies all
+    fields; otherwise login prompts for each missing field on a terminal.
+    """
+    fields: dict[str, str] = {}
+    for field in provider.fields:
+        env_name = provider.env.get(field)
+        value = os.environ.get(env_name) if env_name else None
+        if value:
+            fields[field] = value
+            click.echo(f"Using {env_name} for {service} {field}.", err=True)
+    missing = [field for field in provider.fields if field not in fields]
+    if not missing:
+        return fields
+    if not sys.stdin.isatty():
+        stdin_text = sys.stdin.read().strip()
+        if stdin_text:
+            try:
+                piped = json.loads(stdin_text)
+            except json.JSONDecodeError as exc:
+                raise click.ClickException("Credential stdin must be a JSON object") from exc
+            if not isinstance(piped, dict):
+                raise click.ClickException("Credential stdin must be a JSON object")
+            return piped
+        hints = [provider.env[f] if f in provider.env else f for f in missing]
+        raise click.ClickException(
+            f"Missing {service} credential values: {', '.join(hints)}. "
+            "Set the environment variables, pipe a JSON object on stdin, or run in a terminal."
+        )
+    for field in missing:
+        fields[field] = click.prompt(
+            f"{service} {field}",
+            hide_input=_is_secret_field(field),
+            err=True,
+        )
+    return fields
+
+
+_PROMPT_TYPES = {"str": click.STRING, "int": click.INT, "float": click.FLOAT, "bool": click.BOOL}
+
+
+def _missing_settings(service: str, config) -> dict[str, str]:
+    """Scalar settings with no manifest default and no configured value: ``{name: type}``."""
+    import msgspec
+    from archie_shared.plugins.config import resolved_settings
+    from archie_shared.plugins.manifest import load_manifests
+
+    manifests = load_manifests()
+    if service not in manifests:
+        return {}
+    current = resolved_settings(service, config.plugins, manifests)
+    return {
+        name: spec.type
+        for name, spec in manifests[service].manifest.settings.items()
+        if spec.type in _PROMPT_TYPES
+        and (spec.default is msgspec.UNSET or spec.default is None)
+        and current.get(name) is None
+    }
+
+
+def _prompt_settings(service: str) -> None:
+    """Prompt for missing required scalar settings and write them to ``config.yaml``."""
+    from archie_shared.config import home_dir
+    from archie_shared.schemas import load_nexus_config
+
+    from archie_cli.config_edit import ConfigEditError, set_plugin_settings
+
+    missing = _missing_settings(service, load_nexus_config())
+    if not missing:
+        return
+    keys = ", ".join(f"plugins.{service}.settings.{name}" for name in missing)
+    if not sys.stdin.isatty():
+        click.echo(
+            f"Not set in config.yaml: {keys}. Add them to finish setting up {service}.", err=True
+        )
+        return
+    click.echo(
+        f"{service} needs settings that aren't in config.yaml. Leave blank to skip.", err=True
+    )
+    values = {}
+    for name, type_name in missing.items():
+        value = click.prompt(
+            f"{service} setting {name}",
+            default="",
+            show_default=False,
+            type=click.STRING,
+            err=True,
+        ).strip()
+        if value:
+            values[name] = _PROMPT_TYPES[type_name].convert(value, None, None)
+    if not values:
+        return
+    path = home_dir() / "config.yaml"
+    try:
+        set_plugin_settings(path, service, values)
+    except ConfigEditError as exc:
+        raise click.ClickException(f"Could not update {path}: {exc}") from exc
+    click.echo(f"✓ Saved {', '.join(values)} to {path}.", err=True)
 
 
 def _set_aws_from_chain(service: str, provider: StaticProvider) -> None:
@@ -146,7 +225,12 @@ def login(service: str):
         )
     if isinstance(PROVIDERS.get(service), StaticProvider):
         _set_static_from_login(service)
-        return
+    else:
+        _oauth_login(service)
+    _prompt_settings(service)
+
+
+def _oauth_login(service: str) -> None:
     try:
         response = httpx.post(f"{_orchestrator_url()}/auth/login/{service}", timeout=10)
         response.raise_for_status()

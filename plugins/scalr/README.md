@@ -37,8 +37,8 @@ plugins:
 
 | Key | Type | Default | Read | Meaning |
 | --- | --- | --- | --- | --- |
-| `settings.hostname` | str | none | container start | Exported as `SCALR_HOSTNAME` |
-| `settings.account` | str | none | container start | Exported as `SCALR_ACCOUNT` |
+| `settings.hostname` | str | none | next command | Exported as `SCALR_HOSTNAME` |
+| `settings.account` | str | none | next command | Exported as `SCALR_ACCOUNT` |
 
 No tool policy (no tools). `enabled: false` stops the token and both settings being exported
 and hides login and status for the provider.
@@ -46,11 +46,13 @@ and hides login and status for the provider.
 ## How it works
 
 `shared/src/archie_shared/credentials/runtime.py` (`runtime_environment()`) builds the
-environment for each new container: the stored `token` as `SCALR_TOKEN` (skipped when no
-credential is stored), and each setting that declares `env` in the manifest, when its value
-is set. Values are a snapshot at container start; start a new session after logging in again
-or changing settings (the orchestrator re-reads `config.yaml` on use, so it does not need a
-restart). Two plugins claiming the same variable fail container startup.
+environment for each shell command and exec run: the stored `token` as `SCALR_TOKEN`
+(skipped when no credential is stored), and each setting that declares `env` in the
+manifest, when its value is set. The agent recomputes it when `config.yaml` or
+`credentials.yaml` changes, so a new login or settings edit reaches running sessions at the
+next command. `archie auth login scalr` prompts for the token when `SCALR_TOKEN` is unset,
+and for `hostname` and `account` when they aren't in `config.yaml`. If two plugins claim the
+same variable, the agent keeps the last good variables, or shows a warning if it has none.
 
 ## Tests
 

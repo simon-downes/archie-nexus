@@ -139,14 +139,22 @@ async def run_shell(
     Returns:
         CompletedProcess with decoded stdout/stderr.
 
+    The environment includes the current credential and plugin-settings
+    variables (see ``_runtime_env``). If none could be loaded yet, the command
+    still runs and a warning line is prepended to stderr.
+
     Raises:
         asyncio.TimeoutError: If the process exceeds the timeout.
     """
+    from archie_agent.exec.tools._runtime_env import subprocess_env
+
+    env, warning = subprocess_env()
     proc = await asyncio.create_subprocess_shell(  # noqa: S604
         command,  # start_new_session below puts sh + descendants in one group
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=_resolve_cwd(cwd),
+        env=env,
         start_new_session=True,
     )
     if on_start:
@@ -160,8 +168,11 @@ async def run_shell(
         kill_process_group(proc)
         await proc.wait()
         raise
+    stderr = stderr_b.decode("utf-8", errors="replace")
+    if warning:
+        stderr = f"[archie warning: {warning}]\n{stderr}"
     return CompletedProcess(
         returncode=proc.returncode,
         stdout=stdout_b.decode("utf-8", errors="replace"),
-        stderr=stderr_b.decode("utf-8", errors="replace"),
+        stderr=stderr,
     )
