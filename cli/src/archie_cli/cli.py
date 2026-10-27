@@ -44,9 +44,11 @@ main.invoke = _main_invoke
 # Register subcommand groups
 from archie_cli.auth import auth  # noqa: E402
 from archie_cli.config_cmd import config  # noqa: E402
+from archie_cli.stats import stats  # noqa: E402
 
 main.add_command(auth)
 main.add_command(config)
+main.add_command(stats)
 
 
 @main.command()

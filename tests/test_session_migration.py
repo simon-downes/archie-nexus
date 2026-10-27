@@ -335,3 +335,30 @@ def test_migrate_sessions_cli_backfills_metrics(tmp_path, monkeypatch):
     finally:
         conn.close()
     assert row == ("session-5", "request-1", 2, 1)
+
+
+def test_migrate_sessions_cli_reports_metrics_failure(tmp_path, monkeypatch):
+    from archie_orchestrator.metrics import MetricsIndex
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    _write_legacy_log(sessions_dir / "session-6.jsonl")
+
+    def boom(self, conn, path, stats):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(MetricsIndex, "_sync_file", boom)
+    result = CliRunner().invoke(
+        main,
+        [
+            "migrate-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "--metrics-db",
+            str(tmp_path / "metrics.db"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "disk I/O error" in result.output
+    assert "rebuilt metrics" not in result.output

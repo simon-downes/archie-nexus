@@ -1,747 +1,522 @@
-"""Tests for MetricsWriter — SQLite storage and canonical event processing."""
+"""Tests for MetricsIndex: tailing session logs into the v4 metrics index."""
 
-import asyncio
+from __future__ import annotations
+
 import logging
 import sqlite3
-from datetime import UTC
-from pathlib import Path
 
 import pytest
-from archie_orchestrator.metrics import MetricsWriter, reset_and_backfill
-from archie_shared.events import LLMRequest, encode_event
+from archie_orchestrator import metrics
+from archie_orchestrator.metrics import SCHEMA_VERSION, MetricsIndex, reset_and_backfill
+from archie_shared.events import encode_event
+from archie_shared.session.log import session_accounting
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_next_event_id = 0
+SID = "proj-01k0000000"
+MARKER = "zebra-marker-7"
 
 
-def _make_llm_request(
-    *,
-    event_id: str | None = None,
-    turn: int = 1,
-    iteration: int = 1,
-    scope: str | None = None,
-    model_key: str = "bedrock-anthropic.claude-sonnet-4-6",
-    sent_at: str = "2026-07-01T10:00:00+00:00",
-    status: str = "completed",
-    input_tokens: int = 1000,
-    output_tokens: int = 200,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-    context_tokens: int = 12000,
-    cost_usd: float = 0.006,
-    duration_ms: int = 1234,
-) -> str:
-    """Encode a canonical llm_request event as it appears on the wire."""
-    global _next_event_id
-    if event_id is None:
-        _next_event_id += 1
-        event_id = f"evt-{_next_event_id:06d}"
-    return encode_event(
-        LLMRequest(
-            id=event_id,
-            scope=scope,
-            turn=turn,
-            iteration=iteration,
-            model_key=model_key,
-            sent_at=sent_at,
-            duration_ms=duration_ms,
-            status=status,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_write_tokens=cache_write_tokens,
-            context_tokens=context_tokens,
-            cost_usd=cost_usd,
-        )
+def _index(home) -> MetricsIndex:
+    return MetricsIndex(home / "metrics.db", home / "sessions")
+
+
+def _rows(home, sql, params=()):
+    conn = sqlite3.connect(home / "metrics.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(sql, params)]
+    finally:
+        conn.close()
+
+
+def _count(home, table, session_id=None):
+    sql = f"SELECT COUNT(*) AS n FROM {table}"
+    params = ()
+    if session_id:
+        sql += " WHERE session_id = ?"
+        params = (session_id,)
+    return _rows(home, sql, params)[0]["n"]
+
+
+def _full_session(w):
+    """A root turn with a task launching two children, a skill, an error and a compaction."""
+    return [
+        w.session_started(),
+        w.user(f"Plan the work\nsecond line {MARKER}", turn=1),
+        w.llm(
+            event_id="r1",
+            turn=1,
+            iteration=1,
+            cost_usd=0.10,
+            sent_at="2026-07-01T10:00:00+00:00",
+            duration_ms=2000,
+            context_tokens=1000,
+            input_tokens=5,
+            cache_read_tokens=900,
+            cache_write_tokens=95,
+        ),
+        w.tool_call(
+            "task",
+            {
+                "tasks": [
+                    {"agent": "default", "prompt": MARKER},
+                    {"agent": "research", "prompt": "x"},
+                ]
+            },
+            tool_use_id="tu-task",
+            request_id="r1",
+        ),
+        w.tool_call("skill", {"name": "build-it"}, tool_use_id="tu-skill", request_id="r1"),
+        w.tool_call(
+            "shell", {"command": f"echo {MARKER}"}, tool_use_id="tu-shell", request_id="r1"
+        ),
+        w.llm(
+            event_id="c0",
+            scope="tu-task",
+            index=0,
+            cost_usd=0.02,
+            sent_at="2026-07-01T10:00:03+00:00",
+        ),
+        w.turn_complete(scope="tu-task", index=0),
+        w.llm(
+            event_id="c1",
+            scope="tu-task",
+            index=1,
+            cost_usd=0.03,
+            status="error",
+            error="Throttled",
+            sent_at="2026-07-01T10:00:04+00:00",
+        ),
+        w.turn_error("child failed", scope="tu-task", index=1),
+        w.tool_result(f"done {MARKER}", tool_use_id="tu-task", duration_ms=5000),
+        w.tool_result("skill body " + MARKER, tool_use_id="tu-skill", duration_ms=0),
+        w.tool_result(
+            f"[exit: 1]\ncommand failed {MARKER}\nmore",
+            tool_use_id="tu-shell",
+            is_error=True,
+            duration_ms=40,
+        ),
+        w.assistant(f"All done {MARKER}", turn=1),
+        w.turn_complete(turn=1),
+        *w.compaction(turn=2),
+        w.user(f"again {MARKER}", turn=2),
+        w.llm(
+            event_id="r2",
+            turn=2,
+            cost_usd=0.05,
+            sent_at="2026-07-02T08:00:00+00:00",
+            context_tokens=1500,
+        ),
+        w.turn_error("provider down", turn=2),
+    ]
+
+
+def test_full_session_indexes_every_table(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, _full_session(w))
+    stats = _index(tmp_path).sync()
+
+    assert stats.files_changed == 1 and stats.errors == 0
+    session = _rows(tmp_path, "SELECT * FROM sessions")[0]
+    assert session["workspace"] == "proj"
+    assert session["title"] == "Plan the work"
+    assert session["initial_model"] == "m1"
+    assert session["started_at"] == "2026-07-01T09:59:00+00:00"
+    assert session["last_activity_at"].startswith("2026-07-02T08:00:00.1")
+
+    assert _count(tmp_path, "requests") == 4
+    req = _rows(tmp_path, "SELECT * FROM requests WHERE event_id = 'c1'")[0]
+    assert (req["status"], req["error"], req["subagent_index"], req["purpose"]) == (
+        "error",
+        "Throttled",
+        1,
+        "conversation",
     )
 
-
-def _rows(db_path: Path) -> list[dict]:
-    """Read all rows from the requests table as dicts."""
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM requests ORDER BY id").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Canonical llm_request event → correct row
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_llm_request_persisted_with_cost(tmp_path):
-    """llm_request event → correct row with cost_usd taken directly from the event."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    session_id = "proj-01abc12345"
-    batch = [
-        (
-            session_id,
-            _make_llm_request(
-                model_key="bedrock-anthropic.claude-sonnet-4-6",
-                input_tokens=1000,
-                output_tokens=200,
-                cost_usd=0.006,
-            ),
-        ),
+    turns = _rows(tmp_path, "SELECT turn, status, error, started_at FROM turns ORDER BY turn")
+    assert turns == [
+        {
+            "turn": 1,
+            "status": "completed",
+            "error": None,
+            "started_at": "2026-07-01T10:00:00+00:00",
+        },
+        {
+            "turn": 2,
+            "status": "error",
+            "error": "provider down",
+            "started_at": "2026-07-02T08:00:00+00:00",
+        },
     ]
 
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
+    tools = {r["name"]: r for r in _rows(tmp_path, "SELECT * FROM tool_calls")}
+    assert tools["skill"]["skill"] == "build-it"
+    assert tools["skill"]["duration_ms"] is None  # 0 means not recorded (D27)
+    assert tools["shell"]["is_error"] == 1
+    assert tools["shell"]["error_summary"] == f"[exit: 1] command failed {MARKER}"
+    assert tools["shell"]["timestamp"] == "2026-07-01T10:00:00+00:00"
+    assert tools["shell"]["model_key"] == "m1"
+    assert tools["task"]["duration_ms"] == 5000
 
-    rows = _rows(db)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["session_id"] == session_id
-    assert row["model_key"] == "bedrock-anthropic.claude-sonnet-4-6"
-    assert row["status"] == "completed"
-    assert row["input_tokens"] == 1000
-    assert row["output_tokens"] == 200
-    assert abs(row["cost_usd"] - 0.006) < 1e-9
-
-
-@pytest.mark.asyncio
-async def test_llm_request_token_and_scope_fields(tmp_path):
-    """All canonical token/scope fields are persisted verbatim."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    session_id = "proj-01abc12345"
-    expected = (500 * 3.0 + 100 * 15.0 + 2000 * 0.3 + 500 * 3.75) / 1_000_000
-    batch = [
-        (
-            session_id,
-            _make_llm_request(
-                model_key="bedrock-anthropic.claude-sonnet-4-6",
-                scope="planner",
-                turn=4,
-                iteration=2,
-                input_tokens=500,
-                output_tokens=100,
-                cache_read_tokens=2000,
-                cache_write_tokens=500,
-                context_tokens=42000,
-                cost_usd=expected,
-            ),
-        ),
+    subagents = _rows(
+        tmp_path,
+        "SELECT agent, subagent_index, status, error, parent_scope "
+        "FROM subagents ORDER BY subagent_index",
+    )
+    assert subagents == [
+        {
+            "agent": "default",
+            "subagent_index": 0,
+            "status": "completed",
+            "error": None,
+            "parent_scope": None,
+        },
+        {
+            "agent": "research",
+            "subagent_index": 1,
+            "status": "error",
+            "error": "child failed",
+            "parent_scope": None,
+        },
     ]
 
-    conn = sqlite3.connect(str(db))
+    compaction = _rows(tmp_path, "SELECT * FROM compactions")[0]
+    assert (
+        compaction["status"],
+        compaction["tokens_before"],
+        compaction["tokens_after"],
+        compaction["timestamp"],
+    ) == ("success", 1000, 100, "2026-07-01T10:05:00+00:00")
+
+    total = _rows(tmp_path, "SELECT SUM(cost_usd) AS c FROM requests")[0]["c"]
+    assert round(total, 6) == session_accounting(path)["total_cost"]
+
+
+def test_index_holds_no_content_beyond_title_and_error_summary(session_logs, tmp_path):
+    w = session_logs
+    w.write(SID, _full_session(w))
+    _index(tmp_path).sync()
+    conn = sqlite3.connect(tmp_path / "metrics.db")
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
+        hits = []
+        for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            for col in cols:
+                for (value,) in conn.execute(f"SELECT {col} FROM {table}"):
+                    if isinstance(value, str) and MARKER in value:
+                        hits.append((table, col, len(value)))
     finally:
         conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["model_key"] == "bedrock-anthropic.claude-sonnet-4-6"
-    assert row["turn"] == 4
-    assert row["iteration"] == 2
-    assert row["scope"] == "planner"
-    assert row["cache_read_tokens"] == 2000
-    assert row["cache_write_tokens"] == 500
-    assert row["context_tokens"] == 42000
-    assert abs(row["cost_usd"] - expected) < 1e-9
-
-
-def test_llm_request_zero_cost(tmp_path):
-    """llm_request with cost_usd=0.0 (e.g. local model) → row with zero cost."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(
-            conn,
-            [
-                (
-                    "unknown-session",
-                    _make_llm_request(model_key="ollama-qwen3:30b-a3b", cost_usd=0.0),
-                )
-            ],
-        )
-    finally:
-        conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 1
-    assert rows[0]["model_key"] == "ollama-qwen3:30b-a3b"
-    assert rows[0]["cost_usd"] == 0.0
-
-
-def test_model_key_recorded_per_event(tmp_path):
-    """Each llm_request records its own model_key; a mid-session switch is reflected."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [
-        (
-            sid,
-            _make_llm_request(
-                model_key="bedrock-anthropic.claude-sonnet-4-6",
-                turn=1,
-                iteration=1,
-                cost_usd=0.006,
-            ),
-        ),
-        (
-            sid,
-            _make_llm_request(
-                model_key="ollama-qwen3:30b-a3b",
-                turn=2,
-                iteration=1,
-                cost_usd=0.0,
-            ),
-        ),
-    ]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 2
-    assert rows[0]["model_key"] == "bedrock-anthropic.claude-sonnet-4-6"
-    assert rows[1]["model_key"] == "ollama-qwen3:30b-a3b"
-    assert rows[1]["cost_usd"] == 0.0
-
-
-def test_malformed_json_skipped_no_crash(tmp_path, caplog):
-    """Malformed JSON → skipped with warning, no crash, valid events still processed."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [
-        (sid, "not valid json{{{"),
-        (sid, _make_llm_request()),
-    ]
-
-    with caplog.at_level(logging.WARNING, logger="archie_orchestrator.metrics"):
-        conn = sqlite3.connect(str(db))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            writer._ensure_schema(conn)
-            writer._process_batch(conn, batch)
-        finally:
-            conn.close()
-
-    assert any("skipped" in r.message.lower() for r in caplog.records)
-    rows = _rows(db)
-    assert len(rows) == 1  # the valid llm_request event was processed
-
-
-def test_non_llm_request_events_ignored(tmp_path):
-    """Only llm_request events are ingested; other canonical frames are skipped."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    import json
-
-    sid = "proj-01abc12345"
-    batch = [
-        (
-            sid,
-            json.dumps(
-                {
-                    "type": "session_started",
-                    "id": "s1",
-                    "schema_version": 2,
-                    "sent_at": "2026-07-01T10:00:00+00:00",
-                    "model_key": "m",
-                }
-            ),
-        ),
-        (
-            sid,
-            json.dumps(
-                {
-                    "type": "text_delta",
-                    "id": "t1",
-                    "turn": 1,
-                    "iteration": 1,
-                    "scope": None,
-                    "request_id": "r1",
-                    "text": "hi",
-                }
-            ),
-        ),
-        (sid, _make_llm_request()),
-    ]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 1  # only the llm_request row
-
-
-def test_multiple_sessions_independent(tmp_path):
-    """Multiple sessions write independently with correct session_ids."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid_a = "project-a-01abc12345"
-    sid_b = "project-b-02def67890"
-
-    batch = [
-        (
-            sid_a,
-            _make_llm_request(
-                model_key="Model A", input_tokens=100, output_tokens=100, cost_usd=0.0002
-            ),
-        ),
-        (
-            sid_b,
-            _make_llm_request(
-                model_key="Model B", input_tokens=100, output_tokens=100, cost_usd=0.0004
-            ),
-        ),
-    ]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 2
-    by_session = {r["session_id"]: r for r in rows}
-    assert by_session[sid_a]["model_key"] == "Model A"
-    assert by_session[sid_b]["model_key"] == "Model B"
-    assert abs(by_session[sid_a]["cost_usd"] - 0.0002) < 1e-9
-    assert abs(by_session[sid_b]["cost_usd"] - 0.0004) < 1e-9
-
-
-def test_batch_processing_multiple_events(tmp_path):
-    """Multiple llm_request events in one batch all get inserted."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [
-        (sid, _make_llm_request(turn=1, iteration=1)),
-        (sid, _make_llm_request(turn=2, iteration=1)),
-        (sid, _make_llm_request(turn=3, iteration=1)),
-    ]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 3
-    assert {r["turn"] for r in rows} == {1, 2, 3}
-
-
-def test_duplicate_event_id_ignored(tmp_path):
-    """INSERT OR IGNORE dedupes on (session_id, event_id) — replays don't double-count."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [
-        (sid, _make_llm_request(event_id="dup-1", cost_usd=0.006)),
-        (sid, _make_llm_request(event_id="dup-1", cost_usd=0.006)),
-    ]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 1
-
-
-def test_infer_backend():
-    """_infer_backend returns correct values for known prefixes."""
-    w = MetricsWriter(Path("/tmp/unused.db"))
-    assert w._infer_backend("bedrock-anthropic.claude-sonnet-4-6") == "bedrock"
-    assert w._infer_backend("ollama-qwen3:30b-a3b") == "ollama"
-    assert w._infer_backend("openai-gpt-6-luna") == "openai"
-    assert w._infer_backend("anthropic-claude") is None
-    assert w._infer_backend("") is None
-
-
-@pytest.mark.asyncio
-async def test_schema_created_idempotent(tmp_path):
-    """Calling _ensure_schema twice does not raise (CREATE TABLE IF NOT EXISTS)."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    conn = sqlite3.connect(str(db))
-    try:
-        writer._ensure_schema(conn)
-        writer._ensure_schema(conn)  # second call must not raise
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='requests'"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    assert len(tables) == 1
-
-
-# ---------------------------------------------------------------------------
-# Async run() loop — queue draining and cancellation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_loop_processes_queue_items(tmp_path):
-    """run() drains the queue and writes llm_request rows to SQLite."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    writer.queue.put_nowait((sid, _make_llm_request(input_tokens=500, output_tokens=100)))
-
-    task = asyncio.create_task(writer.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    rows = _rows(db)
-    assert len(rows) == 1
-    assert rows[0]["input_tokens"] == 500
-
-
-@pytest.mark.asyncio
-async def test_run_loop_processes_queued_items_before_cancellation(tmp_path):
-    """Items enqueued while run() is active are pulled and written by the loop."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    task = asyncio.create_task(writer.run())
-    await asyncio.sleep(0.01)
-
-    sid = "proj-01abc12345"
-    writer.queue.put_nowait((sid, _make_llm_request(turn=1, iteration=1)))
-    writer.queue.put_nowait((sid, _make_llm_request(turn=2, iteration=1)))
-    # Give the loop time to drain the queue before we cancel.
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    rows = _rows(db)
-    assert len(rows) == 2
-
-
-@pytest.mark.asyncio
-async def test_run_loop_db_write_failure_continues(tmp_path, caplog):
-    """A DB write failure is logged but the loop continues processing."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    call_count = 0
-    original_process = writer._process_batch
-
-    def _failing_process(conn, batch):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise sqlite3.OperationalError("disk full")
-        original_process(conn, batch)
-
-    sid = "proj-01abc12345"
-    writer.queue.put_nowait((sid, _make_llm_request(turn=1, iteration=1)))
-
-    task = asyncio.create_task(writer.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    # Test passes if no unhandled exception propagated — process stayed alive
-
-
-def test_db_write_failure_logged_no_crash(tmp_path, caplog):
-    """sqlite3.Error during INSERT is logged and does not raise."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [(sid, _make_llm_request())]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        writer._ensure_schema(conn)
-        # Drop the table to force a write failure
-        conn.execute("DROP TABLE requests")
-        conn.commit()
-
-        with caplog.at_level(logging.WARNING, logger="archie_orchestrator.metrics"):
-            writer._process_batch(conn, batch)  # should not raise
-    finally:
-        conn.close()
-
-    assert any("skipped" in r.message.lower() for r in caplog.records)
-
-
-def test_pricing_uses_event_cost_verbatim(tmp_path):
-    """cost_usd is taken from the event, not recomputed from token categories."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-    session_id = "billable-session"
-    # cost = (100*2 + 20*4 + 30*0.5 + 5*1.0) / 1_000_000
-    expected = (100 * 2.0 + 20 * 4.0 + 30 * 0.5 + 5 * 1.0) / 1_000_000
-    batch = [
-        (
-            session_id,
-            _make_llm_request(
-                input_tokens=100,
-                output_tokens=20,
-                cache_read_tokens=30,
-                cache_write_tokens=5,
-                cost_usd=expected,
-            ),
-        ),
-    ]
-
-    conn = sqlite3.connect(str(db))
-    try:
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, batch)
-    finally:
-        conn.close()
-
-    row = _rows(db)[0]
-    assert row["input_tokens"] == 100
-    assert row["cache_read_tokens"] == 30
-    assert row["cache_write_tokens"] == 5
-    assert row["output_tokens"] == 20
-    assert row["cost_usd"] == pytest.approx(expected)
-
-
-# ---------------------------------------------------------------------------
-# Schema archival migration
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_stale_schema_archived_not_dropped(tmp_path):
-    """A stale-version DB is renamed to <path>.legacy.<UTC>, preserving its data."""
-    db = tmp_path / "metrics.db"
-
-    # Create a legacy (version 1) database with a marker table.
-    legacy = sqlite3.connect(str(db))
-    legacy.execute("CREATE TABLE old_marker (x INTEGER)")
-    legacy.execute("INSERT INTO old_marker VALUES (42)")
-    legacy.execute("PRAGMA user_version = 1")
-    legacy.commit()
-    legacy.close()
-
-    writer = MetricsWriter(db)
-    task = asyncio.create_task(writer.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    # A fresh version-3 DB exists at the original path.
-    conn = sqlite3.connect(str(db))
-    try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-        tables = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
-        assert "requests" in tables
-        assert "old_marker" not in tables
-    finally:
-        conn.close()
-
-    # The legacy database was archived (not dropped) and still holds old data.
-    archives = list(tmp_path.glob("metrics.db.legacy.*"))
-    assert len(archives) == 1
-    arch = sqlite3.connect(str(archives[0]))
-    try:
-        assert arch.execute("SELECT x FROM old_marker").fetchone()[0] == 42
-    finally:
-        arch.close()
-
-
-def test_migrate_collision_appends_suffix(tmp_path):
-    """Archival destination collisions append -1, -2, ... until unused."""
-    db = tmp_path / "metrics.db"
-
-    legacy = sqlite3.connect(str(db))
-    legacy.execute("PRAGMA user_version = 1")
-    legacy.commit()
-    legacy.close()
-
-    # Pre-create the first two candidate archive names for a fixed timestamp.
-    from datetime import datetime
-
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    (tmp_path / f"metrics.db.legacy.{stamp}").write_text("taken")
-    (tmp_path / f"metrics.db.legacy.{stamp}-1").write_text("taken")
-
-    writer = MetricsWriter(db)
-    writer._migrate_if_needed()
-
-    # The stale DB was moved to the first free slot (-2), leaving occupants intact.
-    assert (tmp_path / f"metrics.db.legacy.{stamp}-2").exists()
-    assert (tmp_path / f"metrics.db.legacy.{stamp}").read_text() == "taken"
-    assert (tmp_path / f"metrics.db.legacy.{stamp}-1").read_text() == "taken"
-    assert not db.exists()
-
-
-def test_current_schema_not_archived(tmp_path):
-    """A current version-2 DB is left in place (no archival, no data loss)."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    conn = sqlite3.connect(str(db))
-    try:
-        writer._ensure_schema(conn)
-        writer._process_batch(conn, [("sid", _make_llm_request(event_id="keep-1"))])
-    finally:
-        conn.close()
-
-    writer._migrate_if_needed()
-
-    assert not list(tmp_path.glob("metrics.db.legacy.*"))
-    assert len(_rows(db)) == 1
-
-
-# ---------------------------------------------------------------------------
-# Duplicate handling: identical no-op vs conflicting error
-# ---------------------------------------------------------------------------
-
-
-def test_conflicting_duplicate_logged_as_error(tmp_path, caplog):
-    """Same (session_id, event_id) with a different payload → logged as error, one row kept."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [
-        (sid, _make_llm_request(event_id="dup-1", cost_usd=0.006)),
-        (sid, _make_llm_request(event_id="dup-1", cost_usd=0.999)),
-    ]
-
+    assert [(t, c) for t, c, _ in hits] == [("tool_calls", "error_summary")]
+    assert all(n <= metrics.ERROR_SUMMARY_CHARS for _, _, n in hits)
+
+
+def test_sync_is_incremental_and_idempotent(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.user("hi"), w.llm(cost_usd=0.01)])
+    index = _index(tmp_path)
+    index.sync()
+    second = index.sync()
+    assert second.files_changed == 0
+    assert _count(tmp_path, "requests") == 1
+
+    with path.open("a") as out:
+        out.write(encode_event(w.llm(cost_usd=0.02)) + "\n")
+    third = index.sync()
+    assert third.events == 1
+    assert _count(tmp_path, "requests") == 2
+
+
+def test_partial_last_line_is_deferred(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.llm(cost_usd=0.01)])
+    line = encode_event(w.llm(cost_usd=0.02))
+    with path.open("a") as out:
+        out.write(line[:20])
+    index = _index(tmp_path)
+    index.sync()
+    assert _count(tmp_path, "requests") == 1
+    with path.open("a") as out:
+        out.write(line[20:] + "\n")
+    index.sync()
+    assert _count(tmp_path, "requests") == 2
+
+
+def test_rewritten_log_is_reingested(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.user("first"), w.llm(event_id="old", cost_usd=1.0)])
+    index = _index(tmp_path)
+    index.sync()
+    path.unlink()
+    w.write(SID, [w.user("replacement"), w.llm(event_id="new", cost_usd=2.0)])
+    stats = index.sync()
+    assert stats.reset == 1
+    assert [r["event_id"] for r in _rows(tmp_path, "SELECT event_id FROM requests")] == ["new"]
+    assert _rows(tmp_path, "SELECT title FROM sessions")[0]["title"] == "replacement"
+
+
+def test_shorter_log_is_reingested(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.user("first"), w.llm(event_id="a"), w.llm(event_id="b")])
+    index = _index(tmp_path)
+    index.sync()
+    lines = path.read_text().splitlines(keepends=True)
+    path.write_text("".join(lines[:2]))
+    index.sync()
+    assert [r["event_id"] for r in _rows(tmp_path, "SELECT event_id FROM requests")] == ["a"]
+
+
+def test_invalid_lines_are_counted_and_skipped(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.llm(cost_usd=0.01)])
+    with path.open("a") as out:
+        out.write("{not json\n")
+        out.write(encode_event(w.llm(cost_usd=0.02)) + "\n")
+    stats = _index(tmp_path).sync()
+    assert stats.invalid_lines == 1
+    assert _count(tmp_path, "requests") == 2
+    assert _rows(tmp_path, "SELECT invalid_lines FROM ingest_files")[0]["invalid_lines"] == 1
+
+
+def test_unreadable_file_is_recorded_and_sync_continues(session_logs, tmp_path):
+    w = session_logs
+    w.write("good-01k0000000", [w.llm(cost_usd=0.01)])
+    (w.dir / "bad-01k0000000.jsonl").mkdir()  # opening it raises IsADirectoryError
+    stats = _index(tmp_path).sync()
+    assert stats.errors == 1
+    assert _count(tmp_path, "requests") == 1
+    row = _rows(tmp_path, "SELECT error FROM ingest_files WHERE session_id = 'bad-01k0000000'")
+    assert row and row[0]["error"]
+
+
+def test_conflicting_duplicate_request_logs_error(session_logs, tmp_path, caplog):
+    w = session_logs
+    path = w.write(SID, [w.llm(event_id="dup", cost_usd=0.01)])
+    with path.open("a") as out:
+        out.write(encode_event(w.llm(event_id="dup", cost_usd=0.99)) + "\n")
     with caplog.at_level(logging.ERROR, logger="archie_orchestrator.metrics"):
-        conn = sqlite3.connect(str(db))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            writer._ensure_schema(conn)
-            writer._process_batch(conn, batch)
-        finally:
-            conn.close()
-
-    rows = _rows(db)
-    assert len(rows) == 1
-    assert abs(rows[0]["cost_usd"] - 0.006) < 1e-9  # first write wins
-    assert any("conflicting" in r.message.lower() for r in caplog.records)
+        _index(tmp_path).sync()
+    assert _rows(tmp_path, "SELECT cost_usd FROM requests")[0]["cost_usd"] == 0.01
+    assert "conflicting duplicate" in caplog.text
 
 
-def test_identical_duplicate_no_error(tmp_path, caplog):
-    """Identical replay of the same event → no error logged, one row kept."""
-    db = tmp_path / "metrics.db"
-    writer = MetricsWriter(db)
-
-    sid = "proj-01abc12345"
-    batch = [
-        (sid, _make_llm_request(event_id="dup-1", cost_usd=0.006)),
-        (sid, _make_llm_request(event_id="dup-1", cost_usd=0.006)),
+def test_task_with_json_string_tasks_and_missing_tasks(session_logs, tmp_path):
+    w = session_logs
+    w.write(
+        SID,
+        [
+            w.llm(event_id="r1"),
+            w.tool_call(
+                "task",
+                {"tasks": '[{"agent": "research", "prompt": "p"}, {"prompt": "q"}]'},
+                tool_use_id="tu-a",
+                request_id="r1",
+            ),
+            w.tool_call("task", {"source": "x"}, tool_use_id="tu-b", request_id="r1"),
+        ],
+    )
+    _index(tmp_path).sync()
+    agents = [
+        r["agent"]
+        for r in _rows(tmp_path, "SELECT agent FROM subagents ORDER BY scope, subagent_index")
     ]
-
-    with caplog.at_level(logging.ERROR, logger="archie_orchestrator.metrics"):
-        conn = sqlite3.connect(str(db))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            writer._ensure_schema(conn)
-            writer._process_batch(conn, batch)
-        finally:
-            conn.close()
-
-    assert len(_rows(db)) == 1
-    assert not any("conflicting" in r.message.lower() for r in caplog.records)
+    assert agents == ["research", "unknown"]
 
 
-def test_reset_and_backfill_rebuilds_integer_identity(tmp_path):
+def test_stale_schema_is_archived_and_rebuilt(session_logs, tmp_path):
+    w = session_logs
+    w.write(SID, [w.llm(cost_usd=0.01)])
     db = tmp_path / "metrics.db"
-    old_writer = MetricsWriter(db)
     conn = sqlite3.connect(db)
-    try:
-        old_writer._ensure_schema(conn)
-        old_writer._process_batch(conn, [("old-session", _make_llm_request(event_id="old"))])
-    finally:
-        conn.close()
+    conn.execute("CREATE TABLE requests (id INTEGER)")
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
 
-    log_path = tmp_path / "session-1.jsonl"
-    raw = _make_llm_request(event_id="new", turn=7, iteration=3)
-    log_path.write_text(raw + "\n" + raw + "\n")
+    _index(tmp_path).sync()
 
-    reset_and_backfill(db, [log_path])
-
-    rows = _rows(db)
-    assert len(rows) == 1
-    assert rows[0]["session_id"] == "session-1"
-    assert rows[0]["event_id"] == "new"
-    assert rows[0]["turn"] == 7
-    assert rows[0]["iteration"] == 3
-    assert list(tmp_path.glob("metrics.db.legacy.*"))
+    legacy = list(tmp_path.glob("metrics.db.legacy.*"))
+    assert len([p for p in legacy if not p.name.endswith(("-wal", "-shm"))]) == 1
+    assert metrics.schema_version(db) == SCHEMA_VERSION
+    assert _count(tmp_path, "requests") == 1
 
 
-def test_reset_and_backfill_propagates_database_failure(tmp_path, monkeypatch):
-    """A failed backfill must not be reported as a successful rebuild."""
+def test_current_schema_not_archived(session_logs, tmp_path):
+    w = session_logs
+    w.write(SID, [w.llm()])
+    index = _index(tmp_path)
+    index.sync()
+    index.sync()
+    assert not list(tmp_path.glob("metrics.db.legacy.*"))
+
+
+def test_archive_checkpoints_wal_and_leaves_no_side_files(tmp_path):
     db = tmp_path / "metrics.db"
-    log_path = tmp_path / "session-1.jsonl"
-    log_path.write_text(_make_llm_request(event_id="request-1") + "\n")
+    holder = sqlite3.connect(db)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("CREATE TABLE t (v INTEGER)")
+    holder.execute("INSERT INTO t VALUES (42)")
+    holder.commit()
+    assert (tmp_path / "metrics.db-wal").exists()
 
-    def fail_process(self, conn, batch, *, strict=False):
-        assert strict is True
-        raise sqlite3.OperationalError("disk full")
+    dest = metrics._archive_database(db)
+    holder.close()
 
-    monkeypatch.setattr(MetricsWriter, "_process_batch", fail_process)
+    assert not db.exists()
+    assert not (tmp_path / "metrics.db-wal").exists()
+    assert not (tmp_path / "metrics.db-shm").exists()
+    check = sqlite3.connect(dest)
+    try:
+        assert check.execute("SELECT v FROM t").fetchone() == (42,)
+    finally:
+        check.close()
 
-    with pytest.raises(sqlite3.OperationalError, match="disk full"):
-        reset_and_backfill(db, [log_path])
+
+def test_invalid_utf8_line_is_counted_as_invalid(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.llm()])
+    with path.open("ab") as out:
+        out.write(b"\xff\xfe\n")
+    stats = _index(tmp_path).sync()
+    assert stats.invalid_lines == 1 and stats.errors == 0
+
+
+def test_archive_collision_appends_suffix(tmp_path, monkeypatch):
+    db = tmp_path / "metrics.db"
+    db.write_bytes(b"")
+    first = metrics._archive_database(db)
+    db.write_bytes(b"")
+    second = metrics._archive_database(db)
+    assert first != second and second.name.startswith(first.name)
+
+
+def test_sync_without_wait_returns_none_when_locked(session_logs, tmp_path):
+    index = _index(tmp_path)
+    with index._locked(wait=True):
+        assert index.sync(wait=False) is None
+        assert index.try_lock() is False
+    assert index.try_lock() is True
+
+
+def test_sqlite_error_abandons_sync_without_raising(session_logs, tmp_path, monkeypatch):
+    w = session_logs
+    w.write(SID, [w.llm()])
+
+    def boom(self, conn, path, stats):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(MetricsIndex, "_sync_file", boom)
+    stats = _index(tmp_path).sync()
+    assert stats.errors == 1
+
+
+def test_reset_and_backfill_archives_and_rebuilds(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.llm(event_id="a", cost_usd=0.5)])
+    _index(tmp_path).sync()
+
+    stats = reset_and_backfill(tmp_path / "metrics.db", [path])
+
+    assert stats.files_changed == 1
+    assert list(tmp_path.glob("metrics.db.legacy.*"))
+    assert [r["event_id"] for r in _rows(tmp_path, "SELECT event_id FROM requests")] == ["a"]
+
+
+def test_reset_and_backfill_propagates_failure(session_logs, tmp_path, monkeypatch):
+    w = session_logs
+    path = w.write(SID, [w.llm()])
+
+    def boom(self, conn, path, stats):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(MetricsIndex, "_sync_file", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        reset_and_backfill(tmp_path / "metrics.db", [path])
+
+
+def test_reset_and_backfill_counts_invalid_lines_without_raising(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.llm()])
+    with path.open("a") as out:
+        out.write("[]\n")
+    stats = reset_and_backfill(tmp_path / "metrics.db", [path])
+    assert stats.invalid_lines == 1
+
+
+def test_deleted_log_keeps_rows(session_logs, tmp_path):
+    w = session_logs
+    path = w.write(SID, [w.llm(cost_usd=0.5)])
+    index = _index(tmp_path)
+    index.sync()
+    path.unlink()
+    index.sync()
+    assert _count(tmp_path, "requests") == 1
+
+
+def test_request_without_user_message_creates_turn(session_logs, tmp_path):
+    w = session_logs
+    w.write(SID, [w.llm(turn=3)])
+    _index(tmp_path).sync()
+    assert _rows(tmp_path, "SELECT turn, status FROM turns") == [{"turn": 3, "status": "open"}]
+
+
+def test_session_without_session_started_uses_ulid_start(session_logs, tmp_path):
+    w = session_logs
+    w.write("proj-01m5x8nn9a", [w.llm()])
+    _index(tmp_path).sync()
+    started = _rows(tmp_path, "SELECT started_at FROM sessions")[0]["started_at"]
+    assert started.startswith("2026-10-26")
+
+
+@pytest.mark.asyncio
+async def test_background_loop_indexes_appended_requests(session_logs, tmp_path, monkeypatch):
+    """A request appended with no client attached is indexed by the orchestrator loop (R8)."""
+    import asyncio
+
+    from archie_orchestrator import app as app_module
+
+    w = session_logs
+    path = w.write(SID, [w.llm(cost_usd=0.01)])
+    monkeypatch.setattr(app_module, "METRICS_SYNC_INTERVAL", 0.01)
+    task = asyncio.create_task(app_module._metrics_sync_loop(_index(tmp_path)))
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if metrics.is_current(tmp_path / "metrics.db") and _count(tmp_path, "requests") == 1:
+                break
+        with path.open("a") as out:
+            out.write(encode_event(w.llm(cost_usd=0.02)) + "\n")
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if _count(tmp_path, "requests") == 2:
+                break
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert _count(tmp_path, "requests") == 2
+
+
+def test_integrity_error_skips_only_that_file(session_logs, tmp_path, monkeypatch):
+    w = session_logs
+    w.write("a-01k0000000", [w.llm(cost_usd=0.01)])
+    w.write("b-01k0000000", [w.llm(cost_usd=0.02)])
+    real = MetricsIndex._sync_file
+
+    def flaky(self, conn, path, stats):
+        if path.stem == "a-01k0000000":
+            raise sqlite3.IntegrityError("NOT NULL constraint failed")
+        return real(self, conn, path, stats)
+
+    monkeypatch.setattr(MetricsIndex, "_sync_file", flaky)
+    stats = _index(tmp_path).sync()
+    assert stats.errors == 1
+    assert [r["session_id"] for r in _rows(tmp_path, "SELECT session_id FROM requests")] == [
+        "b-01k0000000"
+    ]
+    assert _rows(tmp_path, "SELECT error FROM ingest_files WHERE session_id = 'a-01k0000000'")
+
+
+def test_reader_connect_does_not_recreate_missing_db(tmp_path):
+    with pytest.raises(sqlite3.OperationalError):
+        metrics.connect(tmp_path / "metrics.db")
+    assert not (tmp_path / "metrics.db").exists()

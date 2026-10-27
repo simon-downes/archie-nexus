@@ -1,0 +1,58 @@
+{% extends "insights/base.html" %}
+{% import "insights/_macros.html" as m %}
+{% set filters_bar = false %}
+{% block title %}{{ session_id }} — Insights{% endblock %}
+{% block insights %}
+{% set s = data.session %}
+<section class="chrome session-head">
+    <p class="crumbs"><a href="{{ link('/ui/insights/sessions') }}">Sessions</a> /</p>
+    <h1 class="session-id">{{ s.session_id }} <a class="dim transcript" href="/ui/sessions/{{ s.session_id }}">transcript</a></h1>
+    {% if s.title %}<p class="title">{{ s.title }}</p>{% endif %}
+    <p class="facts">
+        <span><span class="dim">workspace</span> {{ s.workspace }}</span>
+        <span><span class="dim">started</span> {{ m.when(s.started_at) }} UTC</span>
+        <span><span class="dim">duration</span> {{ m.duration(s.duration_s) }}</span>
+        <span><span class="dim">turns</span> {{ m.num(s.turns) }}</span>
+        <span><span class="dim">requests</span> {{ m.num(s.requests) }}</span>
+        <span><span class="dim">cost</span> {{ m.money(s.cost) }}</span>
+        <span><span class="dim">cache hit</span> {{ m.pct(s.cache_hit_pct) }}</span>
+        <span><span class="dim">errors</span> {{ m.num(s.errors) }}</span>
+    </p>
+</section>
+{% set turn_chart = {"labels": data.turns|map(attribute="turn")|list, "values": data.turns|map(attribute="cost")|list} %}
+{% set ctx = data.requests|selectattr("scope", "none")|list %}
+{% set ctx_chart = {"labels": range(1, ctx|length + 1)|list, "values": ctx|map(attribute="context_tokens")|list, "turns": ctx|map(attribute="turn")|list} %}
+<div class="two-col">
+{{ m.chart("turn-cost", "bar", turn_chart, "Cost per turn (USD, includes subagents)") }}
+{{ m.chart("context", "line", ctx_chart, "Context tokens per main-agent request") }}
+</div>
+<section class="chrome">
+    <h2>Turns</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th class="num">Turn</th><th>Status</th><th class="num">Requests</th><th class="num">Tool calls</th><th class="num">Max context</th><th class="num">Cost</th><th class="num">Errors</th><th>Error</th></tr></thead>
+        <tbody>
+        {%- for t in data.turns %}
+            <tr><td class="num">{{ t.turn }}</td><td class="status-{{ t.status }}">{{ t.status }}</td><td class="num">{{ m.num(t.requests) }}</td><td class="num">{{ m.num(t.tool_calls) }}</td><td class="num">{{ m.num(t.context_tokens) }}</td><td class="num">{{ m.money(t.cost) }}</td><td class="num{% if t.errors %} err{% endif %}">{{ m.num(t.errors) }}</td><td class="errtext">{{ t.error or "" }}</td></tr>
+        {%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+<div class="two-col">
+<section class="chrome">
+    <h2>Tools</h2>
+    {% include "insights/_tool_table.html" %}
+</section>
+<section class="chrome">
+    <h2>Subagents</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th class="num">Turn</th><th>Agent</th><th>Status</th><th class="num">Requests</th><th class="num">Cost</th></tr></thead>
+        <tbody>
+        {%- for a in data.subagents %}
+            <tr><td class="num">{{ a.turn }}</td><td>{{ a.agent }}</td><td class="status-{{ a.status }}" {% if a.error %}title="{{ a.error }}"{% endif %}>{{ a.status }}</td><td class="num">{{ m.num(a.requests) }}</td><td class="num">{{ m.money(a.cost) }}</td></tr>
+        {%- else %}<tr><td colspan="5" class="dim">No subagents.</td></tr>
+        {%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+</div>
+{% endblock %}

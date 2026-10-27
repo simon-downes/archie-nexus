@@ -1,0 +1,10 @@
+{%- set tool_rows = data.tools %}
+<div class="table-wrap"><table class="insights">
+    <thead><tr><th>Tool</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Error %</th><th class="num">p50</th><th class="num">p95</th><th class="num">Mean size</th><th class="num">p95 size</th></tr></thead>
+    <tbody>
+    {%- for t in tool_rows %}
+        <tr><td>{{ t.name }}</td><td class="num">{{ m.num(t.calls) }}</td><td class="num{% if t.errors %} err{% endif %}">{{ m.num(t.errors) }}</td><td class="num">{{ m.pct(t.error_pct) }}</td><td class="num">{{ m.ms(t.p50_ms) }}</td><td class="num">{{ m.ms(t.p95_ms) }}</td><td class="num">{{ m.size(t.mean_bytes) }}</td><td class="num">{{ m.size(t.p95_bytes) }}</td></tr>
+    {%- else %}<tr><td colspan="8" class="dim">No tool calls.</td></tr>
+    {%- endfor %}
+    </tbody>
+</table></div>

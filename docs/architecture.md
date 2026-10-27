@@ -19,7 +19,7 @@ This document describes the implementation currently in the repository. Code and
 Nexus has four Python workspace packages:
 
 - **CLI (`cli/`)** — host-side `archie` command, Textual TUI, authentication commands, and clients for the orchestrator.
-- **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, discovers sessions, proxies session HTTP/WebSocket traffic, serves the session page, and records aggregate LLM request metrics.
+- **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, discovers sessions, proxies session HTTP/WebSocket traffic, serves the session page, log viewer and usage insights pages, and keeps the metrics index in step with the session logs.
 - **Agent (`agent/`)** — container-side Starlette application. It owns one session, the agent loop, model client, tools, skills, subagents, and session event log.
 - **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, and accounting.
 
@@ -81,6 +81,13 @@ The orchestrator exposes these application routes:
 | `GET` | `/ui/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search |
 | `GET` | `/ui/sessions/{id}` | session log viewer: transcript of one log |
 | `GET` | `/ui/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
+| `GET` | `/ui/insights` | usage insights overview; filters `since`, `from`, `until`, `workspace`, `model`, `scope` |
+| `GET` | `/ui/insights/sessions?sort=<key>` | insights: sortable session table |
+| `GET` | `/ui/insights/sessions/{id}` | insights: one session's turns, requests, tools and subagents |
+| `GET` | `/ui/insights/models` | insights: usage, latency and errors per model |
+| `GET` | `/ui/insights/tools` | insights: calls, errors, duration and result size per tool |
+| `GET` | `/ui/insights/subagents` | insights: subagent types and skill loads |
+| `GET` | `/ui/insights/errors` | insights: request, turn and subagent errors |
 | `GET` | `/health` | orchestrator liveness (`{"status":"ok"}`) |
 | `GET` | `/sessions` | list running sessions |
 | `POST` | `/sessions` | start a session; body `{"workspace":"name"}` |
@@ -98,11 +105,11 @@ The orchestrator exposes these application routes:
 | `GET` | `/auth/flow/{flow_id}` | query redacted OAuth flow status |
 | `POST` | `/auth/refresh/{provider}` | refresh OAuth credentials |
 | WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
-| `GET` | `/static/*` | static assets for the web pages (vendored nimble.css and htmx under `/static/vendor/`) |
+| `GET` | `/static/*` | static assets for the web pages (vendored nimble.css, htmx and Chart.js under `/static/vendor/`) |
 
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
 
-The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/ui/sessions/{id}/live` opens the agent `/stream` WebSocket, never sends on it, and does not feed the metrics writer. The viewer pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
+The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/ui/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only the metrics index; each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
 
 ### Authentication API security
 
@@ -125,11 +132,11 @@ A user message follows this path:
    in memory only; provider adapters send them when the model's catalog entry has `can_see`
    (Converse `image` blocks; Responses `input_image` data URLs) and otherwise substitute a fixed
    "image omitted" note. Ollama is always text-only. Inside exec, `read` returns the caption text.
-5. The orchestrator observes canonical `llm_request` frames and asynchronously writes them to
-   SQLite metrics. The metrics writer is best-effort and does not block the event relay.
+5. The orchestrator's metrics sync (every 15 s, plus on each insights page and `archie stats`
+   run) tails the session logs into the SQLite metrics index. It never touches the relay.
 6. The TUI applies live and stored events through one imperative `_apply_event(event, historical=...)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.
 
-The orchestrator WebSocket proxy is intended to be transparent: it forwards client text to the agent and agent text/binary frames back to the client. Metrics collection is best-effort and must not block or break the relay.
+The orchestrator WebSocket proxy is intended to be transparent: it forwards client text to the agent and agent text/binary frames back to the client without inspecting them.
 
 ## Event layers
 
@@ -205,7 +212,19 @@ At startup, an existing file is moved to the matching `.1` path (one backup gene
 
 ### Orchestrator metrics
 
-The orchestrator writes only `llm_request` records to `<ARCHIE_HOME_DIR>/metrics.db`, table `requests`. Uniqueness is `(session_id, event_id)`, making ingestion idempotent. The writer uses a bounded asynchronous queue and a schema version; an incompatible existing database is archived as a `.legacy.<UTC>` file before a fresh schema is created. The host-only `archie migrate-sessions` command archives and resets the index, then backfills it from migrated logs. Metrics are an aggregate/indexed view, not a replacement for the session JSONL source of truth.
+`<ARCHIE_HOME_DIR>/metrics.db` (schema `PRAGMA user_version = 4`) is a derived, metadata-only index of every log in `<ARCHIE_HOME_DIR>/sessions`. `MetricsIndex` (`orchestrator/src/archie_orchestrator/metrics.py`) reads each log from a byte offset stored in `ingest_files` and folds the canonical events into tables:
+
+- `sessions`: workspace, start time, initial model, title (first line of the first user message, ≤120 characters), last activity.
+- `requests`: one row per `llm_request`, including `status`, `stop_reason`, `error`, `subagent_index` and `purpose`. Recorded cost is never repriced.
+- `turns`: root turns with status (`open`, `completed`, `error`, `interrupted`) and first/last request times.
+- `tool_calls`: name, skill name for `skill` calls, request time and model, error flag, duration (`0` stored as NULL), result size, and the first line of an error result (≤200 characters).
+- `compactions`: reason, status, tokens before and after, saving and duration.
+- `subagents`: one row per `task` entry with its agent name, parent scope, and outcome from the child's terminal turn event.
+- `ingest_files`: offset, size, mtime, first-line hash, invalid-line count and last error per log.
+
+No other message content, tool input or tool output is stored. Sync is incremental and idempotent: unchanged files are skipped by size and mtime, a trailing partial line waits for the next sync, and a log that shrank or whose first line changed is re-ingested from the start. Rows for deleted logs are kept. Invalid lines are counted and skipped; an unreadable file records its error and the sync moves on.
+
+The orchestrator syncs every 15 seconds; `/ui/insights` pages and `archie stats` sync before they query. All syncs, schema checks and archives hold an exclusive `flock` on `metrics.db.lock`. A database with another schema version is archived (WAL checkpointed, renamed with its `-wal`/`-shm` files to `metrics.db.legacy.<UTC>[-N]`) and rebuilt from the logs. `archie migrate-sessions` archives the index and rebuilds it from the migrated logs in strict mode, so a file or SQLite error fails the command. Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
 
 ## Configuration, security, and ownership
 

@@ -100,9 +100,9 @@ that generated each assistant message and derives its turn/iteration from the re
 records, discards legacy shell records by discriminator, retains the source as `.legacy`,
 and writes each log through a same-directory temporary file and atomic rename. Logs
 declaring `session_started.schema_version == 2` are skipped. The command then archives
-and rebuilds `<ARCHIE_HOME_DIR>/metrics.db` from decoded migrated `llm_request` events.
-Metrics use integer `turn`/`iteration` columns and deduplicate by `(session_id, event_id)`;
-the session log remains the source of truth.
+and rebuilds the `<ARCHIE_HOME_DIR>/metrics.db` index from the migrated logs (all canonical
+event types; see [Architecture](architecture.md#orchestrator-metrics)). Requests deduplicate
+by `(session_id, event_id)`; the session log remains the source of truth.
 
 `tool_result.images` was added after schema version 2 and defaults to an empty list, so
 earlier logs decode unchanged. It records metadata only for images returned by the native

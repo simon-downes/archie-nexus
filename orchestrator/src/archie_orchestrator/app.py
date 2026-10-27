@@ -32,13 +32,13 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
-from archie_orchestrator import configure_logging
+from archie_orchestrator import configure_logging, insights_web
 from archie_orchestrator.auth import AuthError, AuthService
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.credential_refresh import credential_refresh_loop
 from archie_orchestrator.docker import DockerError, list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
-from archie_orchestrator.metrics import MetricsWriter
+from archie_orchestrator.metrics import MetricsIndex, default_index
 from archie_orchestrator.proxy import (
     get_active_ws_connections,
     proxy_events,
@@ -70,6 +70,19 @@ class CallbackAccessFilter(logging.Filter):
 log.addFilter(CallbackAccessFilter())
 logging.getLogger("uvicorn.access").addFilter(CallbackAccessFilter())
 
+METRICS_SYNC_INTERVAL = 15.0
+
+
+async def _metrics_sync_loop(index: MetricsIndex) -> None:
+    """Sync the metrics index from the session logs every METRICS_SYNC_INTERVAL seconds."""
+    while True:
+        try:
+            await asyncio.to_thread(index.sync)
+        except Exception as exc:  # noqa: BLE001 — the loop must survive a bad sync
+            log.warning("Metrics index sync failed: %s", exc)
+        await asyncio.sleep(METRICS_SYNC_INTERVAL)
+
+
 # ---------------------------------------------------------------------------
 # Lifespan — validate config at startup; it is re-read on use afterwards
 # ---------------------------------------------------------------------------
@@ -88,11 +101,8 @@ async def lifespan(app: Starlette):
     sessions = await asyncio.to_thread(list_sessions)
     log.info("Discovered %d running sessions", len(sessions))
 
-    # Start metrics writer background task
-    db_path = home_dir() / "metrics.db"
-    writer = MetricsWriter(db_path)
-    app.state.metrics_writer = writer
-    metrics_task = asyncio.create_task(writer.run())
+    # Keep the metrics index in step with the session logs.
+    metrics_task = asyncio.create_task(_metrics_sync_loop(default_index()))
 
     def _log_metrics_task_done(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -498,6 +508,13 @@ app = Starlette(
         Route("/ui/sessions", session_list_page, methods=["GET"]),
         Route("/ui/sessions/{session_id}", session_detail_page, methods=["GET"]),
         Route("/ui/sessions/{session_id}/live", session_live, methods=["GET"]),
+        Route("/ui/insights", insights_web.overview_page, methods=["GET"]),
+        Route("/ui/insights/sessions", insights_web.sessions_page, methods=["GET"]),
+        Route("/ui/insights/sessions/{session_id}", insights_web.session_page, methods=["GET"]),
+        Route("/ui/insights/models", insights_web.models_page, methods=["GET"]),
+        Route("/ui/insights/tools", insights_web.tools_page, methods=["GET"]),
+        Route("/ui/insights/subagents", insights_web.subagents_page, methods=["GET"]),
+        Route("/ui/insights/errors", insights_web.errors_page, methods=["GET"]),
         Route("/health", health),
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),

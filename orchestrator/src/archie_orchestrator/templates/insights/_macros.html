@@ -1,0 +1,17 @@
+{% macro money(v) -%}{% if v is none %}—{% else %}${{ "{:,.2f}".format(v) }}{% endif %}{%- endmacro %}
+{% macro num(v) -%}{% if v is none %}—{% else %}{{ "{:,}".format(v) }}{% endif %}{%- endmacro %}
+{% macro pct(v) -%}{% if v is none %}—{% else %}{{ "%.1f"|format(v) }}%{% endif %}{%- endmacro %}
+{% macro ms(v) -%}{% if v is none %}—{% elif v >= 1000 %}{{ "%.1f"|format(v / 1000) }}s{% else %}{{ v }}ms{% endif %}{%- endmacro %}
+{% macro size(v) -%}{% if v is none %}—{% elif v >= 1048576 %}{{ "%.1f"|format(v / 1048576) }}MB{% elif v >= 1024 %}{{ "%.1f"|format(v / 1024) }}KB{% else %}{{ v }}B{% endif %}{%- endmacro %}
+{% macro duration(s) -%}{% if s is none %}—{% elif s >= 3600 %}{{ s // 3600 }}h{{ "%02d"|format((s % 3600) // 60) }}m{% elif s >= 60 %}{{ s // 60 }}m{{ "%02d"|format(s % 60) }}s{% else %}{{ s }}s{% endif %}{%- endmacro %}
+{% macro when(ts) -%}{% if ts %}{{ ts[:16]|replace("T", " ") }}{% else %}—{% endif %}{%- endmacro %}
+{% macro chart(id, kind, payload, label) -%}
+<figure class="chart chrome">
+    <canvas data-chart="{{ id }}" data-kind="{{ kind }}" role="img" aria-label="{{ label }}"></canvas>
+    <script type="application/json" id="chart-{{ id }}">{{ payload|tojson }}</script>
+    <figcaption>{{ label }}</figcaption>
+</figure>
+{%- endmacro %}
+{% macro session_links(sid) -%}
+<a href="/ui/insights/sessions/{{ sid }}">{{ sid }}</a> <a class="dim transcript" href="/ui/sessions/{{ sid }}" title="Transcript">log</a>
+{%- endmacro %}
