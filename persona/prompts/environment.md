@@ -29,6 +29,7 @@ Exec interpreter: {exec_python}. /opt/archie/venv runs this agent — don't inst
 
 *Cloud/IaC*:
 - `aws`, `gh`, `terraform-docs`
+- `cf` — Cloudflare's CLI (beta), authenticated with a read-only API token; load the `cloudflare` skill before using it.
 - `scalr` — about 365 commands; work through these steps instead of guessing names or fields:
   1. Find the command, then its flags: `scalr -help | grep -i <noun>`, then `scalr -help <command>`. Command help lists the command's filters (`-filter-*`, `-query`), sort keys and the relationships `-include` accepts. It doesn't describe the response.
   2. Filter on the server with those flags rather than fetching everything. Output is large JSON: an array for lists, an object for one record. Related records are only `{id, type}` unless you name them in `-include`. Handle the output as described under "Large or unknown JSON".

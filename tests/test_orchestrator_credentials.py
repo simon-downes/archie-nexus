@@ -35,6 +35,7 @@ async def test_provider_discovery_is_complete_and_secret_free():
     assert response.status_code == 200
     providers = {item["name"]: item for item in response.json()}
     assert set(providers) == {
+        "cloudflare",
         "notion",
         "slack",
         "github",
@@ -50,6 +51,7 @@ async def test_provider_discovery_is_complete_and_secret_free():
     assert providers["datadog"]["fields"] == ["api_key", "app_key"]
     assert "site" not in providers["datadog"]  # D8: site is plugins.datadog.settings.site
     assert providers["incident_io"]["fields"] == ["api_key"]
+    assert providers["cloudflare"]["fields"] == ["api_token"]
     assert "site" not in providers["incident_io"]
     assert providers["bedrock"]["fields"] == [
         "aws_access_key_id",

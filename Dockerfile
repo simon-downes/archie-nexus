@@ -58,11 +58,12 @@ RUN uv python install "$(cat /opt/archie/.python-version)" && \
     ln -s "$PYTHON_PATH/bin/python3" /usr/local/bin/python3 && \
     ln -s /usr/local/bin/python3 /usr/local/bin/python
 
-# --- Node.js (latest LTS; includes npm and npx) + agent-browser ---
+# --- Node.js (latest LTS; includes npm and npx) + agent-browser + Cloudflare cf CLI ---
+# cf is pinned: it is beta, and the cloudflare plugin's skill names exact commands.
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install --global agent-browser && \
-    node --version && npx --version && agent-browser --version && \
+    npm install --global agent-browser cf@1.0.0-beta.21 && \
+    node --version && npx --version && agent-browser --version && CF_SEND_TELEMETRY=false cf --version && \
     rm -rf /var/lib/apt/lists/*
 
 # Install jq
@@ -243,6 +244,9 @@ USER ${USERNAME}
 
 # Use Debian's native Chromium build (Chrome for Testing has no Linux ARM64 build).
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Turn off the cf CLI's usage telemetry; every ephemeral container would look like a new install.
+ENV CF_SEND_TELEMETRY=false
 
 # Go module/build caches live in the user's home (GOPATH defaults to ~/go).
 ENV PATH="/home/${USERNAME}/go/bin:${PATH}"

@@ -112,6 +112,8 @@ Per-plugin notes (each plugin's full settings, policy and scope rules are in its
   (default `false`, needed for mail label/archive changes); a `scope` is not supported.
   `settings.timezone` (default `Europe/London`) sets the day boundaries for
   `calendar.today()` and `calendar.upcoming()`; an unknown zone falls back to the default.
+- `cloudflare` has no tool policy. `settings.account_id` (default none) is exported into new
+  containers as `CLOUDFLARE_ACCOUNT_ID` for the `cf` CLI.
 
 ## Migrating an old config
 

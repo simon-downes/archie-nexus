@@ -11,6 +11,7 @@ and how to run its tests.
 | Plugin | Kind |
 | --- | --- |
 | [aws](aws/README.md) | Startup hook writing AWS CLI profiles; no tools |
+| [cloudflare](cloudflare/README.md) | Read-only API token and account id for the `cf` CLI, plus a skill; no code |
 | [datadog](datadog/README.md) | REST tools, `datadog` |
 | [github](github/README.md) | Credential for the `gh` wrapper; no code |
 | [google](google/README.md) | REST tools, `mail`, `calendar`, `drive`, `meet`, `google` |

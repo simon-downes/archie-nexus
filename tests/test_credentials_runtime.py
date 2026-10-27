@@ -43,6 +43,22 @@ def test_runtime_environment_skips_unset_settings(monkeypatch, tmp_path):
     assert runtime_environment(config) == {"SCALR_TOKEN": "scalr", "SCALR_HOSTNAME": "host"}
 
 
+def test_runtime_environment_projects_cloudflare_token_and_account(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    replace_credential("cloudflare", {"api_token": "cf-token"})
+    config = NexusConfig(plugins={"cloudflare": PluginConfig(settings={"account_id": "acct"})})
+    assert runtime_environment(config) == {
+        "CLOUDFLARE_API_TOKEN": "cf-token",
+        "CLOUDFLARE_ACCOUNT_ID": "acct",
+    }
+
+
+def test_runtime_environment_projects_cloudflare_token_without_account(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    replace_credential("cloudflare", {"api_token": "cf-token"})
+    assert runtime_environment(NexusConfig()) == {"CLOUDFLARE_API_TOKEN": "cf-token"}
+
+
 def test_old_scalr_entry_with_hostname_fails_only_scalr(monkeypatch, tmp_path):
     """A pre-D9 stored scalr entry is rejected by name; other providers are unaffected."""
     from archie_shared.credentials.store import get_credential

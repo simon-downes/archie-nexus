@@ -25,7 +25,7 @@ Nexus has four Python workspace packages:
 
 `persona/` is content rather than a package: prompts, agents, and procedure skills are mounted into the container and loaded by the agent.
 
-`plugins/` holds one directory per integration (Datadog, incident.io, Jira, Notion, Slack, Google, AWS, GitHub, Scalr) with its `plugin.yaml`, code, skills, and tests. The host reads manifests through `shared/src/archie_shared/plugins/` for credentials and config validation; inside the container the exec runner imports plugin code as `archie_plugins.<id>` and exposes its tools only inside `exec`, under the plugin's namespaces. Core tools (`exec/tools/`) are flat and native. See [Plugins](plugins.md).
+`plugins/` holds one directory per integration (Datadog, incident.io, Jira, Notion, Slack, Google, AWS, GitHub, Scalr, Cloudflare) with its `plugin.yaml`, code, skills, and tests. The host reads manifests through `shared/src/archie_shared/plugins/` for credentials and config validation; inside the container the exec runner imports plugin code as `archie_plugins.<id>` and exposes its tools only inside `exec`, under the plugin's namespaces. Core tools (`exec/tools/`) are flat and native. See [Plugins](plugins.md).
 
 ## Runtime topology and lifecycle
 

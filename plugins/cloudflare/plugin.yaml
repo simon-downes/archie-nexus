@@ -1,0 +1,9 @@
+name: cloudflare
+credential:
+  kind: static
+  fields: [api_token]
+  env:
+    api_token: CLOUDFLARE_API_TOKEN
+  set_env: true
+settings:
+  account_id: {type: str, env: CLOUDFLARE_ACCOUNT_ID}

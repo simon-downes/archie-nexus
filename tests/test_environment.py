@@ -111,6 +111,7 @@ def test_shipped_template_renders():
     assert "- `~/.nexus/brain` — the brain (curated knowledge store)" in lines
     assert "- `go`, `node`, `npm`, `python`, `uv`" in lines
     assert any(line.startswith("- `tofu` — OpenTofu") for line in lines)
+    assert any(line.startswith("- `cf` — Cloudflare") for line in lines)
     assert "\n\n\n" not in text
 
 
