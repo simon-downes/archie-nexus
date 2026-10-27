@@ -472,7 +472,7 @@ class AgentHarness:
                 )
             )
             return None
-        replacement = build_replacement(outcome.summary, mode, pending)
+        replacement = build_replacement(outcome.summary, mode, pending, self.log_path)
         tokens_after = self._estimate_context([replacement], use_baseline=False)
         stats = outcome.stats
         debug = ";".join(

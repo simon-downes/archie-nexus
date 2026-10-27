@@ -97,7 +97,7 @@ def test_instructions_carry_state_rules(phrase):
 
 def test_add_turn_merges_user_message_into_compacted_turn():
     session = Session("m", _model(), "merge")
-    session.turns = [build_replacement("summary", "manual", [])]
+    session.turns = [build_replacement("summary", "manual", [], "/logs/s.jsonl")]
     merged = session.add_turn("user", "next")
     assert merged is session.turns[0]
     assert len(session.turns) == 1
@@ -180,13 +180,20 @@ def test_fit_rounds_drops_oldest_and_keeps_newest():
 )
 def test_replacement_shape(mode, tail):
     pending = [TextBlock("pending")]
-    turn = build_replacement("summary", mode, pending)
+    turn = build_replacement("summary", mode, pending, "/logs/s.jsonl")
     assert turn.role == "user"
     assert turn.compacted
     assert turn.content[0].text.startswith("Earlier conversation was compacted")
     assert "<summary>" in turn.content[1].text
+    pointer = turn.content[2].text
+    assert "session log at /logs/s.jsonl" in pointer
+    for name in ("user_message", "assistant_message", "tool_call", "tool_result"):
+        assert name in pointer
+    for field in ('"turn"', '"content"', '"input"', '"tool_use_id"'):
+        assert field in pointer
+    assert "grep this log" in pointer
     if mode == "manual":
-        assert len(turn.content) == 2
+        assert len(turn.content) == 3
     elif mode == "start_of_turn":
         assert turn.content[-1] == pending[0]
     else:

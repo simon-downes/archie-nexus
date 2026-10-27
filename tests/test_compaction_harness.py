@@ -158,6 +158,7 @@ async def test_manual_compaction_persists_order_and_replaces_transcript(tmp_path
     assert len(session.turns) == 1
     assert session.turns[0].compacted
     assert harness._loaded_content_keys == set()
+    assert any(str(harness.log_path) in text for text in _texts(session.turns[0]))
     assert session.total_cost > 0
     assert harness.turn_active is False
 
@@ -407,10 +408,11 @@ async def test_manual_then_auto_carries_only_new_message(tmp_path):
     # ... and carries only the new message, not the old framing or summary.
     sent = llm.calls[1]["messages"][0]
     texts = _texts(sent)
-    assert len(texts) == 3
+    assert len(texts) == 4
     assert "auto" in texts[1]
-    assert "manual" not in "".join(texts)
-    assert texts[2] == "turn two"
+    assert str(harness.log_path) in texts[2]
+    assert "manual" not in "".join(texts[:2] + texts[3:])
+    assert texts[3] == "turn two"
 
 
 async def test_unanswered_message_after_failed_turn_is_summarised(tmp_path):
@@ -441,7 +443,9 @@ async def test_unanswered_message_after_failed_turn_is_summarised(tmp_path):
     assert result is not None and result.messages is not None
     texts = _texts(result.messages[0])
     assert texts[-1] == "turn two"
-    assert "unanswered" not in "".join(texts)
+    # The log pointer names tmp_path, which contains the test name; check only
+    # the summary and pending blocks for the old message.
+    assert "unanswered" not in "".join(texts[:2] + texts[3:])
 
 
 async def test_still_over_limit_after_compaction_ends_turn_with_error(tmp_path):

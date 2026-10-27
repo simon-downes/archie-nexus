@@ -152,7 +152,7 @@ event field.
 - **Verify:** `uv run pytest tests/test_compaction.py -q` passes, including the new heading-order test.
 - **Outcome:** `INSTRUCTIONS` now lists 12 sections with per-section guidance, the carry-forward rule and the leave-out-the-pointer rule. `tests/test_compaction.py` passes (31 passed), including `test_instructions_list_state_sections_in_order` and `test_instructions_carry_state_rules`. `LOG_POINTER` was added in this commit too; M2 wires it in.
 
-### [ ] M2 — Replacement turn points to the session log
+### [x] M2 — Replacement turn points to the session log
 
 - **Approach:** Add `LOG_POINTER` to `compaction_prompts.py`. Add a `log_path` parameter to
   `build_replacement` and update the call in `harness._compact` and the two calls in
@@ -165,7 +165,7 @@ event field.
 - **Test seam:** `build_replacement` and `AgentHarness.run_manual_compaction`.
 - **Deliverable:** every compacted turn names the log and how to search it.
 - **Verify:** `uv run pytest tests/test_compaction.py tests/test_compaction_harness.py -q` passes; `rg "session log" docs/architecture.md` matches.
-- **Outcome:**
+- **Outcome:** `build_replacement` takes `log_path` and appends `LOG_POINTER` after the summary; `_compact` passes `self.log_path`; `docs/architecture.md` describes the block. `tests/test_compaction.py tests/test_compaction_harness.py`: 69 passed. Two existing harness tests asserted exact block counts or that a word was absent from all blocks; they now account for the pointer block, whose path contains the pytest test name.
 
 ### [ ] M3 — cost_saved_usd prices the avoided cache write
 
