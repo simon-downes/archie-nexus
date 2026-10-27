@@ -91,13 +91,13 @@ def credential() -> OAuthCredential:
     return value
 
 
-def clean(value: Any, maximum: int = 500) -> str | None:
+def clean(value: Any, maximum: int | None = 500) -> str | None:
     if not isinstance(value, str):
         return None
     value = value.strip()
     if not value or _CONTROL.search(value):
         return None
-    return value[:maximum]
+    return value if maximum is None else value[:maximum]
 
 
 def safe_url(value: Any) -> str | None:

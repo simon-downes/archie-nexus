@@ -101,7 +101,7 @@ For example:
   `archie auth login slack` adds newly requested scopes to the existing token.
 - Google requests offline access with consent.
 
-Overrides are configured for the running orchestrator under `plugins.<id>.auth` in `config.yaml` and read at startup (see [Configuration](config.md)). Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `plugins.google.auth.client_id` is required before `archie auth login google` can start. Slack takes its `client_id` the same way:
+Overrides are configured under `plugins.<id>.auth` in `config.yaml`; the orchestrator re-reads them on each auth request, so edits apply without a restart (see [Configuration](config.md)). Google uses fixed authorization and token endpoints but does not support dynamic client registration, so `plugins.google.auth.client_id` is required before `archie auth login google` can start. Slack takes its `client_id` the same way:
 
 ```yaml
 plugins:
@@ -315,7 +315,7 @@ host <ARCHIE_HOME_DIR> → /home/archie/.nexus
 
 The agent therefore sees the same credentials file at its container-side `ARCHIE_HOME_DIR` and can use the shared credential APIs. Bedrock integrations explicitly read the typed `bedrock` entry and fall back to the normal AWS chain when appropriate.
 
-Credential updates do not send a live control-plane event to running agents. A running process may already have loaded credentials. New containers see the latest persisted file; restarting a session is the way to ensure a newly started process reloads changed credentials.
+Credential updates do not send a live control-plane event to running agents. A running process may already have loaded credentials. New containers see the latest persisted file. Two integrations read the store on every call, so a new login reaches running sessions: the `gh` wrapper (see [GitHub CLI token selection](#github-cli-token-selection)) and the AWS `credential_process` helper (see [AWS credential refresh](#aws-credential-refresh)). For other credentials, restarting a session is the way to ensure a newly started process reloads changed values.
 
 ### Startup environment projection
 
@@ -329,12 +329,12 @@ Current mappings are:
 | Provider | Mapping | `set_env` |
 | --- | --- | --- |
 | `bedrock` | `aws_access_key_id` → `AWS_ACCESS_KEY_ID`, `aws_secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `aws_session_token` → `AWS_SESSION_TOKEN` | `false` |
-| `aws` | `access_key_id` → `AWS_ACCESS_KEY_ID`, `secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `session_token` → `AWS_SESSION_TOKEN` | `true` |
+| `aws` | `access_key_id` → `AWS_ACCESS_KEY_ID`, `secret_access_key` → `AWS_SECRET_ACCESS_KEY`, `session_token` → `AWS_SESSION_TOKEN` | `false` |
 | `scalr` | `token` → `SCALR_TOKEN` | `true` |
 | `cloudflare` | `api_token` → `CLOUDFLARE_API_TOKEN` | `true` |
 | `openai` | `api_key` → `OPENAI_API_KEY` | `false` |
 
-This preserves the distinction between Bedrock and general AWS credentials: Bedrock integrations read the typed `bedrock` entry, while the general `aws` entry supplies standard AWS environment variables for shell commands, the AWS CLI, and `exec`.
+The `aws` mapping is unused by default: containers get AWS access through the generated profiles, which read the store on every call (see [AWS credential refresh](#aws-credential-refresh)). Setting `plugins.aws.auth.set_env: true` projects the base credentials again. Profile calls ignore them, but calls without a profile would use them, and they stay frozen at container start.
 
 Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`, `plugins.cloudflare.settings.account_id` → `CLOUDFLARE_ACCOUNT_ID`. Non-scalar settings cannot be projected: a manifest that puts `env` on a non-scalar or nested field is rejected at load. A plugin with `enabled: false` projects neither credentials nor settings.
 
@@ -365,6 +365,28 @@ Owner detection uses argument patterns rather than gh's flag definitions. A `gh 
 
 Upgrading from the single `github.token` field: the old entry fails validation and `archie auth status` reports it as needing reauthentication. Rerun `archie auth login github`. Also remove any `plugins.github.auth.env` override from `config.yaml`; mapping the removed `token` field stops containers from starting.
 
+### AWS credential refresh
+
+The `aws` credential is not projected into the container environment. When `plugins.aws.settings.profiles` is set, the AWS plugin's startup hook writes `~/.aws/config` with a base profile, `archie-base`, and one role profile per entry:
+
+```ini
+[profile archie-base]
+region = eu-west-1
+credential_process = /opt/archie/plugins/aws/bin/credential-process
+
+[profile staging]
+region = eu-west-1
+role_arn = arn:aws:iam::111111111111:role/agent-access
+source_profile = archie-base
+```
+
+`credential-process` reads the `aws` entry from `credentials.yaml` with `yq` each time it runs and prints it as `credential_process` JSON. It writes nothing and keeps nothing in the environment. To renew expired credentials, run `aws-vault exec <profile> -- archie auth login aws` (or another login that refreshes the AWS chain) on the host; running sessions pick up the new values without a restart:
+
+- Role credentials are reused until about 15 minutes before they expire. The AWS CLI caches them under `~/.aws/cli/cache` across calls; an SDK session keeps them in memory. When they are due for renewal, the client gets base credentials from the helper, which reads the store, and assumes the role again. A new login therefore takes effect at the next role renewal (within an hour with the default role session length), and immediately for a profile with no cached role credentials.
+- The helper reports an `Expiration` 20 minutes ahead, because the store does not record the real one. Clients treat credentials within 15 minutes of `Expiration` as due for refresh, so a long-running SDK session never holds base credentials for more than about 5 minutes before it runs the helper again. Without an `Expiration`, SDK sessions would keep the first base credentials forever.
+
+If the store has no usable `aws` entry, the helper exits 1 with a message naming `archie auth login aws`, and the AWS CLI reports that error.
+
 ## Security model
 
 The auth API follows the current trusted local deployment model:
@@ -394,6 +416,8 @@ aws sso login
 archie auth login aws
 archie auth status
 ```
+
+Run the same login again when the credentials expire; running sessions pick up the new values (see [AWS credential refresh](#aws-credential-refresh)).
 
 ### Configure Bedrock
 

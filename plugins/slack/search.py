@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -239,10 +238,4 @@ async def search(
     if sort == "timestamp":
         results.sort(key=lambda item: item["id"])
         results.sort(key=lambda item: item["timestamp"] or "", reverse=True)
-    results = results[:limit]
-    while (
-        len(json.dumps(results, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 12_000
-        and results
-    ):
-        results.pop()
-    return results
+    return results[:limit]

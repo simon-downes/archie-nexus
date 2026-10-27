@@ -1,0 +1,745 @@
+"""Markdown <-> ADF conversion and its use by the Jira tools; no live Jira access."""
+
+import random
+import time
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from archie_plugins.jira.adf import adf_to_markdown, markdown_to_adf
+from archie_plugins.jira.issues import (
+    JiraInputError,
+    add_comment,
+    create_issue,
+    get_issue,
+    update_issue,
+)
+
+WRITE = {"jira": {"write": {"enabled": True, "scope": ["PLAT"]}}}
+
+
+def text(value, *marks):
+    node = {"type": "text", "text": value}
+    if marks:
+        node["marks"] = list(marks)
+    return node
+
+
+BR = {"type": "hardBreak"}
+
+
+def para(*content):
+    return {"type": "paragraph", "content": list(content)}
+
+
+def doc(*content):
+    return {"type": "doc", "version": 1, "content": list(content)}
+
+
+def _client(*responses):
+    client = AsyncMock()
+    client.request.side_effect = list(responses)
+    return client
+
+
+# --- Tracer: lines and paragraphs -----------------------------------------------------------
+
+
+def test_multiline_text_keeps_lines_and_paragraphs():
+    assert markdown_to_adf("a\nb\n\nc") == doc(para(text("a"), BR, text("b")), para(text("c")))
+
+
+def test_crlf_matches_lf_and_trailing_newlines_are_ignored():
+    assert markdown_to_adf("a\r\nb\r\n\r\nc\r\n\r\n") == markdown_to_adf("a\nb\n\nc")
+
+
+def test_single_line_and_unicode():
+    assert markdown_to_adf("héllo — 日本 😀") == doc(para(text("héllo — 日本 😀")))
+
+
+def test_raw_html_is_literal_text():
+    assert markdown_to_adf("<b>x</b>") == doc(para(text("<b>x</b>")))
+    assert markdown_to_adf("<div>\nq\n</div>") == doc(
+        para(text("<div>"), BR, text("q"), BR, text("</div>"))
+    )
+
+
+def test_empty_input_is_an_empty_document():
+    assert markdown_to_adf("") == doc()
+
+
+# --- Rich Markdown --------------------------------------------------------------------------
+
+# Allowed block children, copied from the plan's table (Atlassian ADF node reference). Kept
+# separate from adf.ALLOWED so a wrong production entry fails here.
+_CELL = {"paragraph", "heading", "bulletList", "orderedList", "codeBlock", "blockquote"}
+ALLOWED = {
+    "doc": _CELL | {"panel", "rule", "table"},
+    "listItem": {"paragraph", "bulletList", "orderedList", "codeBlock"},
+    "blockquote": {"paragraph", "bulletList", "orderedList", "codeBlock"},
+    "panel": {"paragraph", "heading", "bulletList", "orderedList"},
+    "tableCell": _CELL | {"panel", "rule"},
+    "tableHeader": _CELL | {"panel", "rule"},
+}
+INLINE = {"text", "hardBreak"}
+MARKS = {"strong", "em", "strike", "code", "link"}
+
+
+def validate(node, parent="doc"):
+    """Fail if a produced node breaks the ADF nesting and mark rules the plan lists."""
+    kind = node["type"]
+    content = node.get("content", [])
+    if kind == "doc":
+        assert node["version"] == 1
+    if kind in ALLOWED:
+        for child in content:
+            assert child["type"] in ALLOWED[kind], f"{child['type']} inside {kind}"
+        if kind != "doc":
+            assert content, f"empty {kind}"
+    if kind == "listItem":
+        assert content[0]["type"] in {"paragraph", "codeBlock"}
+    if kind in {"bulletList", "orderedList"}:
+        assert content and all(child["type"] == "listItem" for child in content)
+    if kind == "table":
+        assert parent in {"doc"} and content
+        assert all(row["type"] == "tableRow" for row in content)
+    if kind == "tableRow":
+        assert content and all(c["type"] in {"tableCell", "tableHeader"} for c in content)
+    if kind in {"paragraph", "heading"}:
+        assert all(child["type"] in INLINE for child in content)
+    if kind == "heading":
+        assert 1 <= node["attrs"]["level"] <= 6
+    if kind == "codeBlock":
+        assert all(c["type"] == "text" and "marks" not in c for c in content)
+    if kind == "panel":
+        assert node["attrs"]["panelType"] in {"info", "note", "warning", "success", "error"}
+    if kind == "text":
+        assert node["text"], "empty text node"
+        types = [mark["type"] for mark in node.get("marks", [])]
+        assert set(types) <= MARKS and len(types) == len(set(types))
+        if "code" in types:
+            assert set(types) <= {"code", "link"}
+    for child in content:
+        validate(child, kind)
+
+
+def test_headings_and_marks():
+    assert markdown_to_adf("## Title **b**\n\n*i* ~~s~~ `c` ***bi***") == doc(
+        {
+            "type": "heading",
+            "attrs": {"level": 2},
+            "content": [text("Title "), text("b", {"type": "strong"})],
+        },
+        para(
+            text("i", {"type": "em"}),
+            text(" "),
+            text("s", {"type": "strike"}),
+            text(" "),
+            text("c", {"type": "code"}),
+            text(" "),
+            text("bi", {"type": "strong"}, {"type": "em"}),
+        ),
+    )
+
+
+def test_links_images_and_code_marks():
+    link = {"type": "link", "attrs": {"href": "https://x.test", "title": "T"}}
+    assert markdown_to_adf('[a **b**](https://x.test "T")') == doc(
+        para(text("a ", link), text("b", {"type": "strong"}, link))
+    )
+    # code keeps only link; empty link text shows the URL; images become links.
+    assert markdown_to_adf(
+        "**[`c`](https://l.test)** [](https://u.test) ![alt](https://i.test)"
+    ) == doc(
+        para(
+            text("c", {"type": "code"}, {"type": "link", "attrs": {"href": "https://l.test"}}),
+            text(" "),
+            text("https://u.test", {"type": "link", "attrs": {"href": "https://u.test"}}),
+            text(" "),
+            text("alt", {"type": "link", "attrs": {"href": "https://i.test"}}),
+        )
+    )
+    assert markdown_to_adf("<https://a.test>") == doc(
+        para(text("https://a.test", {"type": "link", "attrs": {"href": "https://a.test"}}))
+    )
+
+
+def item(*content):
+    return {"type": "listItem", "content": list(content)}
+
+
+def test_nested_and_ordered_lists():
+    assert markdown_to_adf("- a\n  - b\n- c\n\n7. x\n8. y") == doc(
+        {
+            "type": "bulletList",
+            "content": [
+                item(para(text("a")), {"type": "bulletList", "content": [item(para(text("b")))]}),
+                item(para(text("c"))),
+            ],
+        },
+        {
+            "type": "orderedList",
+            "attrs": {"order": 7},
+            "content": [item(para(text("x"))), item(para(text("y")))],
+        },
+    )
+    assert markdown_to_adf("0. z")["content"][0]["attrs"] == {"order": 0}
+    assert "attrs" not in markdown_to_adf("1. z")["content"][0]
+
+
+def test_empty_list_items_get_an_empty_paragraph():
+    assert markdown_to_adf("-\n-\n  - x") == doc(
+        {
+            "type": "bulletList",
+            "content": [
+                item(para()),
+                item(para(), {"type": "bulletList", "content": [item(para(text("x")))]}),
+            ],
+        }
+    )
+
+
+def test_code_blocks_quotes_and_rules():
+    assert markdown_to_adf("```python extra\nx = 1\n  y\n```\n\n    indented\n\n---\n\n> q") == doc(
+        {"type": "codeBlock", "attrs": {"language": "python"}, "content": [text("x = 1\n  y")]},
+        {"type": "codeBlock", "content": [text("indented")]},
+        {"type": "rule"},
+        {"type": "blockquote", "content": [para(text("q"))]},
+    )
+    assert markdown_to_adf("```\n```") == doc({"type": "codeBlock", "content": []})
+
+
+def cell(kind, *content):
+    return {"type": kind, "content": list(content) or [para()]}
+
+
+def test_tables_have_header_cells_and_padded_rows():
+    result = markdown_to_adf("| a | b |\n|---|---|\n| 1 |\n| `x` | |")
+    assert result == doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        cell("tableHeader", para(text("a"))),
+                        cell("tableHeader", para(text("b"))),
+                    ],
+                },
+                {
+                    "type": "tableRow",
+                    "content": [cell("tableCell", para(text("1"))), cell("tableCell", para())],
+                },
+                {
+                    "type": "tableRow",
+                    "content": [
+                        cell("tableCell", para(text("x", {"type": "code"}))),
+                        cell("tableCell", para()),
+                    ],
+                },
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("keyword", "panel_type"),
+    [
+        ("NOTE", "info"),
+        ("TIP", "success"),
+        ("IMPORTANT", "note"),
+        ("WARNING", "warning"),
+        ("caution", "error"),
+    ],
+)
+def test_alerts_become_panels(keyword, panel_type):
+    assert markdown_to_adf(f"> [!{keyword}]\n> Body **b**\n>\n> - i") == doc(
+        {
+            "type": "panel",
+            "attrs": {"panelType": panel_type},
+            "content": [
+                para(text("Body "), text("b", {"type": "strong"})),
+                {"type": "bulletList", "content": [item(para(text("i")))]},
+            ],
+        }
+    )
+
+
+def test_alert_edge_cases():
+    assert markdown_to_adf("> [!TIP]") == doc(
+        {"type": "panel", "attrs": {"panelType": "success"}, "content": [para()]}
+    )
+    # A marker followed by text on the same line is not an alert (GitHub rule).
+    assert markdown_to_adf("> [!NOTE] x")["content"][0]["type"] == "blockquote"
+    assert markdown_to_adf("> [!OTHER]\n> x")["content"][0]["type"] == "blockquote"
+
+
+def test_disallowed_nesting_degrades():
+    strong = {"type": "strong"}
+    # Heading in a list item becomes a bold paragraph; a quote in a quote is spliced in.
+    assert markdown_to_adf("- a\n\n  # h\n\n> > deep") == doc(
+        {"type": "bulletList", "content": [item(para(text("a")), para(text("h", strong)))]},
+        {"type": "blockquote", "content": [para(text("deep"))]},
+    )
+    # A table in a list becomes one paragraph per row.
+    table_in_list = markdown_to_adf("- x\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |")
+    assert table_in_list["content"][0]["content"][0]["content"][1:] == [
+        para(text("a | b")),
+        para(text("1 | 2")),
+    ]
+    # Code and a rule in a panel: code becomes code-marked lines, the rule is dropped.
+    assert markdown_to_adf("> [!NOTE]\n> ```\n> a\n> b\n> ```\n> ***") == doc(
+        {
+            "type": "panel",
+            "attrs": {"panelType": "info"},
+            "content": [para(text("a", {"type": "code"}), BR, text("b", {"type": "code"}))],
+        }
+    )
+
+
+CORPUS = [
+    "a\nb\n\nc",
+    "# H1\n## H2 `code`\n###### H6",
+    "*i* **b** ~~s~~ `c` [l](https://x.test) ![i](https://i.test)",
+    "- a\n  - b\n    - c\n- d\n\n3. x\n4. y",
+    "```js\nlet x;\n```\n\n    indented\n\n---",
+    "> quote\n>\n> - item\n>\n> ```\n> code\n> ```",
+    "| h1 | h2 |\n|----|----|\n| **a** | `b` |\n| c |",
+    "> [!WARNING]\n> careful\n>\n> ## heading in panel",
+    "- [ ] task\n- [x] done",
+    "- a\n\n  > q\n\n  | t |\n  |---|\n  | 1 |\n\n  # h\n\n  > [!NOTE]\n  > n",
+    "> > > a\n> > > ```\n> > > c\n> > > ```",
+    "<b>raw</b> & &amp; \\* snake_case __init__ 1. #x [x] |p|",
+]
+
+
+@pytest.mark.parametrize("source", CORPUS)
+def test_corpus_produces_valid_adf(source):
+    validate(markdown_to_adf(source))
+
+
+def test_deep_and_mixed_nesting_never_raises():
+    sources = [
+        "> " * 50 + "x",
+        "".join("  " * level + "- l\n" for level in range(50)),
+        "- > - > - > # h\n  > | a |\n  > |---|\n  > | 1 |",
+        "> [!NOTE]\n> > [!TIP]\n> > - ```\n> >   c\n> >   ```",
+        "[" * 500 + "x" + "]" * 500,
+        "*" * 1000,
+        "\x00\t\v\f",
+    ]
+    for source in sources:
+        validate(markdown_to_adf(source))
+
+
+def _texts(node):
+    return (
+        [node["text"]]
+        if node["type"] == "text"
+        else [t for child in node.get("content", []) for t in _texts(child)]
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["> " * 150 + "deep text", "- " * 150 + "deep text", "> - " * 16000 + "deep text"],
+)
+def test_nesting_past_parser_limit_falls_back_to_plain_lines(source):
+    result = markdown_to_adf(source)
+    validate(result)
+    assert any("deep text" in value for value in _texts(result))
+
+
+def test_nesting_within_limit_keeps_structure():
+    result = markdown_to_adf("> " * 40 + "deep")
+    validate(result)
+    assert result["content"][0]["type"] == "blockquote"
+    assert _texts(result) == ["deep"]
+
+
+# --- Write functions ------------------------------------------------------------------------
+
+
+async def test_create_issue_sends_structured_description(policy):
+    policy(WRITE)
+    client = _client({"key": "PLAT-1", "id": "1"})
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        await create_issue("PLAT", "s", description="one\ntwo\n\nthree")
+    fields = client.request.call_args_list[0].kwargs["json"]["fields"]
+    assert fields["description"] == doc(para(text("one"), BR, text("two")), para(text("three")))
+
+
+async def test_create_issue_omits_whitespace_only_description(policy):
+    policy(WRITE)
+    client = _client({"key": "PLAT-1", "id": "1"})
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        await create_issue("PLAT", "s", description="  \n")
+    assert "description" not in client.request.call_args_list[0].kwargs["json"]["fields"]
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [(" \n ", None), ("a\nb", doc(para(text("a"), BR, text("b"))))],
+)
+async def test_update_issue_description(description, expected, policy):
+    policy(WRITE)
+    client = _client(None, {"id": "1", "key": "PLAT-1", "fields": {}})
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        await update_issue("PLAT-1", description=description)
+    assert client.request.call_args_list[0].kwargs["json"]["fields"] == {"description": expected}
+
+
+async def test_add_comment_sends_structured_body(policy):
+    policy(WRITE)
+    client = _client({"id": "9", "body": doc()})
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        await add_comment("PLAT-1", "x\ny")
+    assert client.request.call_args_list[0].kwargs["json"]["body"] == doc(
+        para(text("x"), BR, text("y"))
+    )
+
+
+async def test_add_comment_rejects_blank_body_before_any_request(policy):
+    policy(WRITE)
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        with pytest.raises(JiraInputError):
+            await add_comment("PLAT-1", " \n ")
+    factory.assert_not_called()
+
+
+async def test_body_limit_is_jira_cap(policy):
+    policy(WRITE)
+    client = _client(
+        {"key": "PLAT-1", "id": "1"},
+        None,
+        {"id": "1", "key": "PLAT-1", "fields": {}},
+        {"id": "9", "body": doc()},
+    )
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        await create_issue("PLAT", "s", description="d" * 32767)
+        await update_issue("PLAT-1", description="e" * 32767)
+        await add_comment("PLAT-1", "c" * 32767)
+    calls = client.request.call_args_list
+    assert calls[0].kwargs["json"]["fields"]["description"] == doc(para(text("d" * 32767)))
+    assert calls[1].kwargs["json"]["fields"]["description"] == doc(para(text("e" * 32767)))
+    assert calls[3].kwargs["json"]["body"] == doc(para(text("c" * 32767)))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: create_issue("PLAT", "s", description="d" * 32768),
+        lambda: update_issue("PLAT-1", description="d" * 32768),
+        lambda: add_comment("PLAT-1", "c" * 32768),
+    ],
+)
+async def test_over_limit_is_rejected_before_any_request(call, policy):
+    policy(WRITE)
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        with pytest.raises(JiraInputError, match="32767"):
+            await call()
+    factory.assert_not_called()
+
+
+# --- ADF -> Markdown ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("node", "expected"),
+    [
+        (doc(para(text("a"), BR, text("b")), para(text("c"))), "a\nb\n\nc"),
+        (doc({"type": "heading", "attrs": {"level": 3}, "content": [text("T")]}), "### T"),
+        (
+            doc(para(text("b", {"type": "strong"}), text(" "), text("i", {"type": "em"}))),
+            "**b** *i*",
+        ),
+        (
+            doc(para(text("s", {"type": "strike"}), text(" "), text("c", {"type": "code"}))),
+            "~~s~~ `c`",
+        ),
+        (
+            doc(para(text("l", {"type": "link", "attrs": {"href": "https://x.test"}}))),
+            "[l](https://x.test)",
+        ),
+        (
+            doc({"type": "orderedList", "attrs": {"order": 3}, "content": [item(para(text("x")))]}),
+            "3. x",
+        ),
+        (
+            doc({"type": "codeBlock", "attrs": {"language": "py"}, "content": [text("a\n```")]}),
+            "````py\na\n```\n````",
+        ),
+        (doc({"type": "rule"}), "---"),
+        (doc({"type": "blockquote", "content": [para(text("q"))]}), "> q"),
+        (
+            doc({"type": "panel", "attrs": {"panelType": "warning"}, "content": [para(text("w"))]}),
+            "> [!WARNING]\n>\n> w",
+        ),
+    ],
+)
+def test_reader_renders_written_nodes(node, expected):
+    assert adf_to_markdown(node) == expected
+
+
+def test_reader_renders_jira_only_nodes():
+    node = doc(
+        {"type": "expand", "attrs": {"title": "More"}, "content": [para(text("hidden"))]},
+        para(
+            {"type": "mention", "attrs": {"id": "acct", "text": "@Alex Smith"}},
+            text(" "),
+            {"type": "mention", "attrs": {"id": "acct"}},
+            text(" "),
+            {"type": "status", "attrs": {"text": "IN PROGRESS", "color": "blue"}},
+            text(" "),
+            {"type": "date", "attrs": {"timestamp": "1735732800000"}},
+            text(" "),
+            {"type": "emoji", "attrs": {"shortName": ":smile:", "text": "😄"}},
+            text(" "),
+            {"type": "inlineCard", "attrs": {"url": "https://jira.test/browse/PLAT-1"}},
+            text(" "),
+            text("u", {"type": "underline"}, {"type": "textColor", "attrs": {"color": "#f00"}}),
+        ),
+        {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"alt": "shot.png"}}]},
+        {
+            "type": "taskList",
+            "content": [
+                {"type": "taskItem", "attrs": {"state": "DONE"}, "content": [text("done")]},
+                {"type": "taskItem", "attrs": {"state": "TODO"}, "content": [text("todo")]},
+            ],
+        },
+        {"type": "blockCard", "attrs": {"url": "https://x.test/page"}},
+        {"type": "someFutureNode", "content": [para(text("kept"))]},
+    )
+    assert adf_to_markdown(node) == (
+        "**More**\n\nhidden\n\n"
+        "@Alex Smith @user [IN PROGRESS] 2025-01-01 😄 <https://jira.test/browse/PLAT-1> u\n\n"
+        "[attachment: shot.png]\n\n"
+        "- [x] done\n- [ ] todo\n\n"
+        "<https://x.test/page>\n\n"
+        "kept"
+    )
+
+
+def test_reader_splits_raw_newlines_from_old_plugin_writes():
+    stored = doc(para(text("## Plan\n- one\n- two")))
+    assert adf_to_markdown(stored) == "\\## Plan\n\\- one\n\\- two"
+    assert markdown_to_adf(adf_to_markdown(stored)) == doc(
+        para(text("## Plan"), BR, text("- one"), BR, text("- two"))
+    )
+
+
+def test_reader_renders_jira_editor_tables():
+    cell_blocks = [
+        para(text("a")),
+        {"type": "bulletList", "content": [item(para(text("x"))), item(para(text("y")))]},
+        {"type": "codeBlock", "content": [text("c|d")]},
+    ]
+    table = doc(
+        {
+            "type": "table",
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        cell("tableCell", *cell_blocks),
+                        cell("tableCell", para(text("p|q"))),
+                    ],
+                },
+            ],
+        }
+    )
+    assert adf_to_markdown(table) == (
+        "|  |  |\n| --- | --- |\n| a<br>- x<br>- y<br>`c\\|d` | p\\|q |"
+    )
+
+
+def test_reader_never_raises_on_malformed_adf():
+    for value in [
+        None,
+        5,
+        [],
+        {},
+        {"type": "doc", "content": "x"},
+        {"content": [None, 3, {"text": 7}]},
+        {"type": "heading", "attrs": {"level": 99}, "content": [text("h")]},
+    ]:
+        assert isinstance(adf_to_markdown(value), str)
+    deep: dict = {"type": "blockquote", "content": [para(text("bottom"))]}
+    for _ in range(5000):
+        deep = {"type": "blockquote", "content": [deep]}
+    assert "bottom" in adf_to_markdown(doc(deep))
+
+
+ROUND_TRIP = CORPUS + [
+    "> [!NOTE]\n> x\n\n> [!TIP]",
+    "*a* **b** ***c*** ~~**d**~~ **a***b*",
+    '[a *b* `c`](https://x.test "t\\"q") [](https://u.test)',
+    "1986\\. A great year",
+    "- a\n- b\n\n- c\n\n1. a\n\n2) b",
+    "\\#5 issue\n\\+ x\n\\> y",
+    "&copy; &#169; a < b <c> x_y _z_",
+    "| a \\| b | `x\\|y` |\n|---|---|\n| 1 | 2 |",
+    "x\\\ny\\\n\\\nz",
+    "# Title #\n\nSetext\n===",
+    "- \n-\n  - x\n- 2) y",
+]
+
+
+@pytest.mark.parametrize("source", ROUND_TRIP)
+def test_round_trip_is_stable(source):
+    written = markdown_to_adf(source)
+    assert markdown_to_adf(adf_to_markdown(written)) == written
+
+
+async def test_get_issue_returns_markdown_description_and_comments(policy):
+    description = markdown_to_adf("# Plan\n\n- one\n- two")
+    issue = {
+        "id": "1",
+        "key": "PLAT-1",
+        "fields": {
+            "description": description,
+            "comment": {"comments": [{"id": "5", "body": markdown_to_adf("**done**")}]},
+            "attachment": [],
+        },
+    }
+    client = _client(issue)
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        result = await get_issue("PLAT-1")
+    assert result["description"] == "# Plan\n\n- one\n- two"
+    assert result["comments"][0]["body"] == "**done**"
+
+
+async def test_get_issue_missing_description_is_null(policy):
+    client = _client(
+        {"id": "1", "key": "PLAT-1", "fields": {"comment": {"comments": []}, "attachment": []}}
+    )
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        assert (await get_issue("PLAT-1"))["description"] is None
+
+
+async def test_add_comment_returns_markdown(policy):
+    policy(WRITE)
+    client = _client({"id": "9", "body": markdown_to_adf("a\n\n- b")})
+    with patch("archie_plugins.jira.issues.jira_client") as factory:
+        factory.return_value.__aenter__.return_value = client
+        assert (await add_comment("PLAT-1", "a\n\n- b"))["body"] == "a\n\n- b"
+
+
+_FUZZ_ATOMS = [
+    "a",
+    "b c",
+    "*",
+    "**",
+    "_",
+    "__",
+    "~",
+    "~~",
+    "`",
+    "``",
+    "[",
+    "]",
+    "(",
+    ")",
+    "<",
+    ">",
+    "&amp;",
+    "&",
+    "#",
+    "# ",
+    "- ",
+    "+ ",
+    "1. ",
+    "2) ",
+    "> ",
+    "|",
+    "\\",
+    "\n",
+    "\n\n",
+    "  ",
+    " ",
+    "\t",
+    "x_y",
+    "https://e.test",
+    "[l](https://u.test)",
+    "![i](https://i.test)",
+    "<https://a.test>",
+    "```",
+    "---",
+    "===",
+    "> [!NOTE]\n",
+    "| a | b |\n|---|---|\n",
+    "    ",
+    "!",
+    '"',
+    "'",
+    "é",
+    "😀",
+    "1986.",
+    "[x]",
+    "[ ] ",
+]
+
+
+def test_random_markdown_round_trips_and_validates():
+    """Seeded fuzz: any input yields valid ADF, and reading it back writes the same ADF."""
+    rng = random.Random(73)
+    for _ in range(3000):
+        source = "".join(rng.choice(_FUZZ_ATOMS) for _ in range(rng.randint(1, 25)))
+        written = markdown_to_adf(source)
+        validate(written)
+        assert markdown_to_adf(adf_to_markdown(written)) == written, source
+
+
+def test_links_without_a_usable_target_stay_text():
+    # Empty or non-web targets lose the link; "![d](data:x)" isn't an image to markdown-it.
+    assert markdown_to_adf("[x]() ![alt]() ![](data:image/png;base64,AAA) ![d](data:x)") == doc(
+        para(text("x alt  ![d](data:x)"))
+    )
+    assert markdown_to_adf("[j](javascript:alert(1))") == doc(
+        para(text("[j](javascript:alert(1))"))
+    )
+
+
+def test_reader_keeps_jira_only_blocks_inside_table_cells():
+    media = {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"alt": "shot.png"}}]}
+    expand = {"type": "nestedExpand", "attrs": {"title": "More"}, "content": [para(text("hidden"))]}
+    task = {"type": "taskItem", "attrs": {"state": "DONE"}, "content": [text("done")]}
+    cells = [
+        cell("tableCell", para(text("img:")), media),
+        cell("tableCell", {"type": "blockCard", "attrs": {"url": "https://x.test/a"}}),
+        cell("tableCell", expand),
+        cell("tableCell", {"type": "taskList", "content": [task]}),
+    ]
+    table = {"type": "table", "content": [{"type": "tableRow", "content": cells}]}
+    assert adf_to_markdown(doc(table)).split("\n")[2] == (
+        "| img:<br>[attachment: shot.png] | <https://x.test/a> | **More**<br>hidden | - [x] done |"
+    )
+
+
+def test_reader_never_raises_on_non_string_code_text():
+    for bad in (5, None, ["x"]):
+        code = {"type": "codeBlock", "content": [{"type": "text", "text": bad}]}
+        row = {"type": "tableRow", "content": [cell("tableCell", code)]}
+        assert isinstance(adf_to_markdown(doc(code, {"type": "table", "content": [row]})), str)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        ("*a* " * 8192)[:32767],
+        ("**a** " * 5461)[:32767],
+        ("~~a~~ " * 5461)[:32767],
+        ("a[](https://b.test)" * 1800)[:32767],
+        ("[a](https://b.test) " * 1600)[:32767],
+    ],
+)
+def test_worst_case_size_converts_quickly(source):
+    started = time.perf_counter()
+    adf_to_markdown(markdown_to_adf(source))
+    assert time.perf_counter() - started < 1.0

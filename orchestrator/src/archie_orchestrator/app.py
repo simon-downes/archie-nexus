@@ -25,20 +25,20 @@ from pathlib import Path
 
 import httpx
 import msgspec
-from archie_shared.config import home_dir
-from archie_shared.schemas import load_nexus_config
+from archie_shared.config import ConfigError, home_dir
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
-from archie_orchestrator import configure_logging
+from archie_orchestrator import configure_logging, insights_web
 from archie_orchestrator.auth import AuthError, AuthService
+from archie_orchestrator.config_source import config_source
 from archie_orchestrator.credential_refresh import credential_refresh_loop
 from archie_orchestrator.docker import DockerError, list_sessions
 from archie_orchestrator.lifecycle import start_session, stop_session
-from archie_orchestrator.metrics import MetricsWriter
+from archie_orchestrator.metrics import MetricsIndex, default_index
 from archie_orchestrator.proxy import (
     get_active_ws_connections,
     proxy_events,
@@ -70,27 +70,39 @@ class CallbackAccessFilter(logging.Filter):
 log.addFilter(CallbackAccessFilter())
 logging.getLogger("uvicorn.access").addFilter(CallbackAccessFilter())
 
+METRICS_SYNC_INTERVAL = 15.0
+
+
+async def _metrics_sync_loop(index: MetricsIndex) -> None:
+    """Sync the metrics index from the session logs every METRICS_SYNC_INTERVAL seconds."""
+    while True:
+        try:
+            await asyncio.to_thread(index.sync)
+        except Exception as exc:  # noqa: BLE001 — the loop must survive a bad sync
+            log.warning("Metrics index sync failed: %s", exc)
+        await asyncio.sleep(METRICS_SYNC_INTERVAL)
+
+
 # ---------------------------------------------------------------------------
-# Lifespan — load config once at startup
+# Lifespan — validate config at startup; it is re-read on use afterwards
 # ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    """Load NexusConfig at startup and store on app state."""
+    """Validate config at startup and wire services to the live config source."""
     configure_logging()
     app.state.start_time = datetime.now(UTC)
-    app.state.config = load_nexus_config()
-    app.state.auth_service = AuthService(app.state.config)
+    # Fail fast on an invalid config at startup; later reads go through
+    # config_source so edits apply without restarting the orchestrator.
+    config_source.get()
+    app.state.auth_service = AuthService(config_source.latest)
     # list_sessions() shells out to docker (blocking) — keep it off the loop.
     sessions = await asyncio.to_thread(list_sessions)
     log.info("Discovered %d running sessions", len(sessions))
 
-    # Start metrics writer background task
-    db_path = home_dir() / "metrics.db"
-    writer = MetricsWriter(db_path)
-    app.state.metrics_writer = writer
-    metrics_task = asyncio.create_task(writer.run())
+    # Keep the metrics index in step with the session logs.
+    metrics_task = asyncio.create_task(_metrics_sync_loop(default_index()))
 
     def _log_metrics_task_done(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -158,7 +170,10 @@ async def sessions_post(request: Request) -> Response:
             status_code=400,
         )
 
-    config = request.app.state.config
+    try:
+        config = config_source.get()
+    except ConfigError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
     try:
         descriptor = await asyncio.to_thread(start_session, workspace, config)
@@ -493,6 +508,13 @@ app = Starlette(
         Route("/ui/sessions", session_list_page, methods=["GET"]),
         Route("/ui/sessions/{session_id}", session_detail_page, methods=["GET"]),
         Route("/ui/sessions/{session_id}/live", session_live, methods=["GET"]),
+        Route("/ui/insights", insights_web.overview_page, methods=["GET"]),
+        Route("/ui/insights/sessions", insights_web.sessions_page, methods=["GET"]),
+        Route("/ui/insights/sessions/{session_id}", insights_web.session_page, methods=["GET"]),
+        Route("/ui/insights/models", insights_web.models_page, methods=["GET"]),
+        Route("/ui/insights/tools", insights_web.tools_page, methods=["GET"]),
+        Route("/ui/insights/subagents", insights_web.subagents_page, methods=["GET"]),
+        Route("/ui/insights/errors", insights_web.errors_page, methods=["GET"]),
         Route("/health", health),
         Route("/sessions", sessions_get, methods=["GET"]),
         Route("/sessions", sessions_post, methods=["POST"]),

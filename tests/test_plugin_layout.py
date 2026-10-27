@@ -12,18 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCANNED = ("agent", "tests", "plugins", "shared", "orchestrator", "cli")
 SKIP_PARTS = {"__pycache__", ".venv"}
 
-# Procedure skills stay in ``persona/skills``; integration skills live in their plugin (M3).
-PROCEDURE_SKILLS = {
-    "build-it",
-    "council",
-    "create-skill",
-    "research",
-    "review-plan",
-    "workflow-implement",
-    "workflow-plan",
-    "workflow-review",
-}
-
 # Integrations already moved out of ``agent/src/archie_agent/exec/tools/``; append on each move.
 # Maps plugin id -> the old core module names under ``archie_agent.exec.tools``.
 MOVED = {
@@ -109,14 +97,14 @@ def test_plugin_tools_match_declared_namespaces():
     assert not problems, "\n".join(problems)
 
 
-def test_every_plugin_with_code_has_a_skill():
+def test_every_plugin_with_tools_has_a_skill():
+    """Tools are only discoverable by the model through a skill; hook-only plugins need none."""
     missing = [
         pid
         for pid, loaded in _manifests().items()
-        if (loaded.manifest.entry or (loaded.root / "__init__.py").is_file())
-        and not _skill_files(loaded)
+        if loaded.manifest.namespaces and not _skill_files(loaded)
     ]
-    assert not missing, f"plugins with code but no skill: {missing}"
+    assert not missing, f"plugins with tool namespaces but no skill: {missing}"
 
 
 def _plugin_skill_dirs() -> list[Path]:
@@ -158,15 +146,23 @@ def test_plugin_skill_does_not_leak_internals(skill_dir):
     assert not leaked, f"{skill_dir}/SKILL.md mentions {leaked}"
 
 
-def test_persona_skills_holds_only_procedure_skills():
-    present = {
-        p.name
-        for p in (ROOT / "persona" / "skills").iterdir()
-        if p.is_dir() and SKIP_PARTS.isdisjoint({p.name})
-    }
-    assert present <= PROCEDURE_SKILLS, (
-        f"integration skills belong in plugins/<id>/skills: {sorted(present - PROCEDURE_SKILLS)}"
-    )
+def _skill_names(skills_root: Path) -> dict[str, Path]:
+    return {_frontmatter(path)["name"]: path for path in sorted(skills_root.glob("*/SKILL.md"))}
+
+
+def test_skill_names_are_unique_across_persona_and_plugins():
+    """Skill discovery keys by name, so a duplicate silently shadows the earlier copy."""
+    seen: dict[str, Path] = {}
+    duplicates = []
+    roots = [ROOT / "persona" / "skills"] + [m.skills_dir for _, m in sorted(_manifests().items())]
+    for root in roots:
+        for name, path in _skill_names(root).items():
+            if name in seen:
+                duplicates.append(
+                    f"{name}: {seen[name].relative_to(ROOT)} and {path.relative_to(ROOT)}"
+                )
+            seen[name] = path
+    assert not duplicates, "duplicate skill names:\n" + "\n".join(duplicates)
 
 
 # Plugins whose code takes credentials/policy/settings only from ``context()`` (M6+);

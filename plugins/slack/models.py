@@ -101,7 +101,7 @@ def message_projection(value: dict[str, Any]) -> tuple[dict[str, Any], datetime]
     timestamp = normalize_timestamp(value.get("ts") or value.get("timestamp"))
     identifier = safe_id(value.get("id") or value.get("ts") or value.get("timestamp"))
     target = conversation(value.get("conversation") or value.get("channel"), value)
-    text = bounded(value.get("text"), 4000)
+    text = value.get("text") if isinstance(value.get("text"), str) and value.get("text") else None
     if not timestamp or not identifier or not target or text is None:
         return None
     return {

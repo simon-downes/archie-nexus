@@ -12,6 +12,7 @@ from archie_agent.compaction import (
     fit_rounds,
     is_compact_command,
 )
+from archie_agent.compaction_prompts import INSTRUCTIONS
 from archie_agent.llm._types import TextDelta, Usage
 from archie_agent.session import Session, Turn
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
@@ -69,9 +70,34 @@ def test_effective_limit_uses_percent_and_clamped_tokens(caplog):
     assert "clamping" in caplog.text
 
 
+def test_instructions_list_state_sections_in_order():
+    headings = [line[3:] for line in INSTRUCTIONS.splitlines() if line.startswith("## ")]
+    assert headings == [
+        "Goal",
+        "Instructions and Preferences",
+        "Progress",
+        "Decisions and Discoveries",
+        "Workspace State",
+        "Environment and Workarounds",
+        "Artefacts",
+        "Files and Findings",
+        "Commands and Identifiers",
+        "Working Text",
+        "Current Task",
+        "Next Steps",
+    ]
+
+
+@pytest.mark.parametrize(
+    "phrase", ["as of compaction", "carry forward", "verbatim", "path[:line]", "session log"]
+)
+def test_instructions_carry_state_rules(phrase):
+    assert phrase in INSTRUCTIONS
+
+
 def test_add_turn_merges_user_message_into_compacted_turn():
     session = Session("m", _model(), "merge")
-    session.turns = [build_replacement("summary", "manual", [])]
+    session.turns = [build_replacement("summary", "manual", [], "/logs/s.jsonl")]
     merged = session.add_turn("user", "next")
     assert merged is session.turns[0]
     assert len(session.turns) == 1
@@ -154,13 +180,20 @@ def test_fit_rounds_drops_oldest_and_keeps_newest():
 )
 def test_replacement_shape(mode, tail):
     pending = [TextBlock("pending")]
-    turn = build_replacement("summary", mode, pending)
+    turn = build_replacement("summary", mode, pending, "/logs/s.jsonl")
     assert turn.role == "user"
     assert turn.compacted
     assert turn.content[0].text.startswith("Earlier conversation was compacted")
     assert "<summary>" in turn.content[1].text
+    pointer = turn.content[2].text
+    assert "session log at /logs/s.jsonl" in pointer
+    for name in ("user_message", "assistant_message", "tool_call", "tool_result"):
+        assert name in pointer
+    for field in ('"turn"', '"content"', '"input"', '"tool_use_id"'):
+        assert field in pointer
+    assert "grep this log" in pointer
     if mode == "manual":
-        assert len(turn.content) == 2
+        assert len(turn.content) == 3
     elif mode == "start_of_turn":
         assert turn.content[-1] == pending[0]
     else:

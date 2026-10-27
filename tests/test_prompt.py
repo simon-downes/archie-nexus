@@ -73,6 +73,15 @@ def test_subagent_prompt_excludes_soul(monkeypatch, tmp_path):
     assert "<soul.md>" not in child
 
 
+def test_delegation_guidance_is_root_only():
+    """Children have no task tool, so only the root prompt carries task guidance."""
+    root = build_system_prompt("test-model")
+    child = build_subagent_prompt("test-model", "You are a researcher.").flatten()
+    assert "### Delegating with task" in root
+    assert "### Delegating with task" not in child
+    assert "`task`" not in child
+
+
 def test_build_environment_contains_workspace_without_model():
     """Environment section includes workspace but not the active model."""
     env = _build_environment("test-model-v1", "/workspace")

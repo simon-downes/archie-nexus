@@ -32,6 +32,25 @@ def test_normalize_fetch_envelope_extracts_page_content_and_ancestry():
     assert result["properties"] == {"title": "Archie Test"}
 
 
+def test_normalize_fetch_returns_long_page_content_whole():
+    body = "line of a long page\n" * 2000  # ~40,000 characters, past the old 8,000 cap
+    raw = {
+        "metadata": {"type": "page"},
+        "title": "Long",
+        "text": f'<page url="https://app.notion.com/p/{PAGE}"><content>\n{body}</content></page>',
+    }
+    assert normalize_fetch(raw, PAGE)["content"] == body.strip()
+
+
+def test_normalize_comments_returns_long_bodies_whole():
+    body = "c" * 20000
+    raw = {
+        "text": '<discussions total-count="1"><comment id="comment-1" url="u" user-url="user://s" '
+        f'datetime="2026-09-17T18:35:02Z">{body}</comment></discussions>'
+    }
+    assert normalize_comments(raw)[0]["body"] == body
+
+
 def test_normalize_fetch_extracts_wrapped_database_urls():
     raw = {
         "metadata": {"type": "database"},

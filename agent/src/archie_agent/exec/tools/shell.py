@@ -37,6 +37,7 @@ async def shell(
     on_start: Callable[[asyncio.subprocess.Process], Any] | None = None,
 ) -> str:
     """Execute a shell command and return stdout, stderr, and exit code.
+    Output starts with "[exit: N]"; a non-zero exit is returned, not raised.
 
     Args:
         command: Shell command to execute.

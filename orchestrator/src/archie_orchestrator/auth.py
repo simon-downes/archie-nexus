@@ -1,6 +1,7 @@
 """Orchestrator-owned provider and credential authentication."""
 
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -118,9 +119,20 @@ class AuthFlowStore:
 
 @dataclass
 class AuthService:
-    config: NexusConfig
+    """Auth operations against the current config.
+
+    ``source`` is a fixed ``NexusConfig`` or a zero-argument callable returning
+    one; a callable is invoked on every ``config`` access so config edits apply
+    without restarting the orchestrator.
+    """
+
+    source: NexusConfig | Callable[[], NexusConfig]
     flows: AuthFlowStore = field(default_factory=AuthFlowStore)
     transport: object | None = None
+
+    @property
+    def config(self) -> NexusConfig:
+        return self.source() if callable(self.source) else self.source
 
     def redirect_uri(self, request_origin: str, provider: str) -> str:
         public_url = self.config.orchestrator.profiles.get("default")

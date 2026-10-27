@@ -19,7 +19,13 @@ from archie_shared.schemas import CompactionConfig
 from archie_shared.types import ContentBlock, ImageBlock, TextBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
 
-from archie_agent.compaction_prompts import CONTINUATION, FRAMING, INSTRUCTIONS, SYSTEM
+from archie_agent.compaction_prompts import (
+    CONTINUATION,
+    FRAMING,
+    INSTRUCTIONS,
+    LOG_POINTER,
+    SYSTEM,
+)
 from archie_agent.event_factory import EventFactory, now_utc
 from archie_agent.loop import _RequestResult, stream_once
 from archie_agent.prompt import SystemPrompt, flatten_system_prompt
@@ -225,10 +231,12 @@ def build_replacement(
     summary: str,
     mode: Literal["start_of_turn", "mid_turn", "manual"],
     pending: list[ContentBlock],
+    log_path: Path | str,
 ) -> Turn:
     blocks: list[ContentBlock] = [
         TextBlock(FRAMING),
         TextBlock(f"<summary>\n{summary}\n</summary>"),
+        TextBlock(LOG_POINTER.format(log_path=log_path)),
     ]
     if mode == "start_of_turn":
         blocks.extend(pending)

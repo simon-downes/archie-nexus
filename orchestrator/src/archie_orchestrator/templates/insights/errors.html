@@ -1,0 +1,56 @@
+{% extends "insights/base.html" %}
+{% import "insights/_macros.html" as m %}
+{% block title %}Errors — Insights{% endblock %}
+{% block insights %}
+{% set t = data.totals %}
+<section class="chrome tiles">
+    <div class="tile"><span class="label">Request errors</span><span class="value">{{ m.num(t.request_errors) }}</span></div>
+    <div class="tile"><span class="label">Turn errors</span><span class="value">{{ m.num(t.turn_errors) }}</span></div>
+    <div class="tile"><span class="label">Subagent errors</span><span class="value">{{ m.num(t.subagent_errors) }}</span></div>
+    <div class="tile"><span class="label">Interrupted requests</span><span class="value">{{ m.num(t.interrupted_requests) }}</span></div>
+    <div class="tile"><span class="label">No-usage requests</span><span class="value">{{ m.num(t.no_usage_requests) }}</span></div>
+</section>
+{{ m.chart("daily-errors", "multi-line", data.daily, "Daily request errors, turn errors and interruptions") }}
+<div class="two-col">
+<section class="chrome">
+    <h2>Request errors by model</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>Model</th><th class="num">Errors</th></tr></thead>
+        <tbody>
+        {%- for r in data.by_model %}<tr><td>{{ r.model }}</td><td class="num">{{ m.num(r.errors) }}</td></tr>
+        {%- else %}<tr><td colspan="2" class="dim">None.</td></tr>{%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+<section class="chrome">
+    <h2>Commonest request errors</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>Model</th><th class="num">Count</th><th>Error</th></tr></thead>
+        <tbody>
+        {%- for e in data.top_messages %}<tr><td>{{ e.model }}</td><td class="num">{{ m.num(e.count) }}</td><td class="errtext">{{ e.error or "" }}</td></tr>
+        {%- else %}<tr><td colspan="3" class="dim">None.</td></tr>{%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+</div>
+<section class="chrome">
+    <h2>Turn errors</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>When (UTC)</th><th>Session</th><th class="num">Turn</th><th>Error</th></tr></thead>
+        <tbody>
+        {%- for e in data.turn_errors %}<tr><td class="when">{{ m.when(e.at) }}</td><td class="id">{{ m.session_links(e.session_id) }}</td><td class="num">{{ e.turn }}</td><td class="errtext">{{ e.error or "" }}</td></tr>
+        {%- else %}<tr><td colspan="4" class="dim">None.</td></tr>{%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+<section class="chrome">
+    <h2>Subagent errors</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>When (UTC)</th><th>Session</th><th>Agent</th><th>Error</th></tr></thead>
+        <tbody>
+        {%- for e in data.subagent_errors %}<tr><td class="when">{{ m.when(e.at) }}</td><td class="id">{{ m.session_links(e.session_id) }}</td><td>{{ e.agent }}</td><td class="errtext">{{ e.error or "" }}</td></tr>
+        {%- else %}<tr><td colspan="4" class="dim">None.</td></tr>{%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+{% endblock %}

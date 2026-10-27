@@ -100,7 +100,7 @@ extend it where a skill genuinely needs more.
 whichever reads better. Keep the core sequence above recognisable; slot the extras
 around it rather than reordering the spine.
 
-Reference tools via `# Available Tools` rather than hardcoding names. Keep in the body
+Reference tools via `## Available Tools` rather than hardcoding names. Keep in the body
 what every use needs; move path-specific depth to `references/`.
 
 ---

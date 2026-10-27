@@ -331,7 +331,7 @@ async def test_native_truncation_applied(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     # Create a very large file
-    large_content = "x" * 20000 + "\n"
+    large_content = "x" * 40000 + "\n"
     (workspace / "big.txt").write_text(large_content)
     monkeypatch.setattr("archie_agent.exec.tools.fs.WORKSPACE", workspace)
 
@@ -358,9 +358,9 @@ async def test_native_truncation_applied(tmp_path, monkeypatch):
 
     results = _get_tool_results(ws)
     assert len(results) == 1
-    # The result should be truncated — result_bytes should be less than 20000
-    # (The native handler caps at _MAX_RESULT_CHARS = 16000 + marker)
-    assert results[0]["result_bytes"] <= 16200  # 16000 + marker + header
+    # The result should be truncated — result_bytes should be less than 40000
+    # (The native handler caps at _MAX_RESULT_CHARS = 32000 + marker)
+    assert results[0]["result_bytes"] <= 32400  # 32000 + marker
     assert results[0]["is_error"] is False
 
 

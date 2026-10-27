@@ -107,11 +107,7 @@ def _build_environment(model_name: str, workspace_dir: str) -> str:
     # supplied it, but the active model must not affect cacheable prompt text.
     from archie_agent import environment
 
-    try:
-        notes = _load_prompt("tool-notes.md")
-    except OSError:
-        notes = ""
-    return environment.render(environment.facts(), workspace_dir, notes, PYTHON)
+    return environment.render(_load_prompt("environment.md"), workspace_dir, PYTHON)
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +123,17 @@ def _build_brain_guidance() -> str:
     return "\n\n".join(parts)
 
 
-def _build_tools() -> str:
-    """Build the tools section: strategy (from persona) + aggregated guidelines."""
+def _build_tools(*, delegation: bool = True) -> str:
+    """Build the tools section: strategy (from persona) + aggregated guidelines.
+
+    ``delegation`` adds the ``task`` guidance. Child agents have no ``task``
+    tool, so their prompts omit it.
+    """
     guidelines = get_tool_guidelines()
 
     parts = [_load_prompt("tools-strategy.md")]
+    if delegation:
+        parts.append("\n\n" + _load_prompt("delegation.md"))
 
     if guidelines:
         bullet_list = "\n".join(f"- {g}" for g in guidelines)
@@ -257,7 +259,7 @@ def build_subagent_prompt(
     static_sections = [
         body.strip(),
         _build_environment(model_name, workspace_dir),
-        _build_tools(),
+        _build_tools(delegation=False),
         _build_brain_guidance(),
     ]
     if catalog:

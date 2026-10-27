@@ -5,7 +5,7 @@ description: >
   implementability before it reaches an implementor. Use when reviewing a plan before
   implementation, checking a plan for gaps or unresolved decisions, validating a plan is
   ready to hand off, or when asked to "review this plan", "check the plan", or "is this
-  plan ready". Delegates the audit to a research subagent with a clean context window and
+  plan ready". Delegates the audit to a `default` subagent with a clean context window and
   read-only codebase access, so claims like "follows the pattern in auth.ts" are verified
   rather than trusted. Not for reviewing code or pull requests (use workflow-review),
   creating or modifying plans (use workflow-plan), or reviewing a roadmap.
@@ -57,7 +57,7 @@ Review). It is the automatic quality gate for Phase 4.
 
 ## 2. Spawn the review subagent
 
-Delegate to a **research subagent** per the **Subagent contract** below. A clean context
+Delegate to a **`default` subagent** per the **Subagent contract** below. A clean context
 window matters — the reviewer must judge the plan as an implementor in a fresh session
 would, not through the lens of the conversation that produced it.
 
@@ -91,8 +91,9 @@ The user should never see a plan with unresolved decisions that could have been 
 
 # Subagent contract
 
-- **Type:** research (read-only: read, glob, grep, index, bash). Clean context window,
-  separate from the planning conversation.
+- **Type:** `default` agent. Tell it to stay read-only (read, glob, grep, code, shell);
+  the harness doesn't enforce this. Clean context window, separate from the planning
+  conversation.
 - **Input** (inline into the prompt):
   - the complete plan content (objective, requirements, design, milestones);
   - the review criteria from [references/REVIEW-CRITERIA.md](references/REVIEW-CRITERIA.md);
@@ -108,7 +109,7 @@ The user should never see a plan with unresolved decisions that could have been 
 **User:** "Review plans/031-rate-limiter.md before I hand it to implement."
 
 1. **Locate:** path given → use it.
-2. **Spawn** a research subagent per the Subagent contract: inline the full plan, the
+2. **Spawn** a `default` subagent per the Subagent contract: inline the full plan, the
    review criteria, and the repo root; instruct it to surface findings only.
 3. Subagent verifies claims against the codebase and returns structured findings — e.g.
    *"Milestone 2 references `middleware/throttle.ts`, which does not exist"* and *"the

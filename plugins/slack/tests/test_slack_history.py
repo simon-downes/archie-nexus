@@ -40,6 +40,13 @@ async def test_thread_parent_first_and_reply_chronological():
     assert [item["text"] for item in result] == ["parent", "early", "late"]
 
 
+async def test_messages_return_long_text_whole():
+    payload = {"ok": True, "messages": [_message("2.000000", "m" * 20000)]}
+    with patch("archie_plugins.slack.messages.api_call", new=AsyncMock(return_value=payload)):
+        result = await messages("C1")
+    assert result[0]["text"] == "m" * 20000
+
+
 async def test_invalid_history_bound_makes_no_request():
     with patch("archie_plugins.slack.messages.api_call", new=AsyncMock()) as call:
         with pytest.raises(SlackValidationError):

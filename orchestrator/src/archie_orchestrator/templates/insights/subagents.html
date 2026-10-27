@@ -1,0 +1,31 @@
+{% extends "insights/base.html" %}
+{% import "insights/_macros.html" as m %}
+{% block title %}Subagents & skills — Insights{% endblock %}
+{% block insights %}
+<div class="two-col">
+<section class="chrome">
+    <h2>Subagents</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>Agent</th><th class="num">Launches</th><th class="num">Errors</th><th class="num">Requests</th><th class="num">Cost</th><th class="num">Cost / launch</th></tr></thead>
+        <tbody>
+        {%- for a in data.agents %}
+            <tr><td>{{ a.agent }}</td><td class="num">{{ m.num(a.launches) }}</td><td class="num{% if a.errors %} err{% endif %}">{{ m.num(a.errors) }}</td><td class="num">{{ m.num(a.requests) }}</td><td class="num">{{ m.money(a.cost) }}</td><td class="num">{{ m.money(a.cost_per_launch) }}</td></tr>
+        {%- else %}<tr><td colspan="6" class="dim">No subagents in range.</td></tr>
+        {%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+<section class="chrome">
+    <h2>Skills</h2>
+    <div class="table-wrap"><table class="insights">
+        <thead><tr><th>Skill</th><th class="num">Loads</th><th class="num">Sessions</th></tr></thead>
+        <tbody>
+        {%- for s in data.skills %}
+            <tr><td>{{ s.skill }}</td><td class="num">{{ m.num(s.loads) }}</td><td class="num">{{ m.num(s.sessions) }}</td></tr>
+        {%- else %}<tr><td colspan="3" class="dim">No skills loaded in range.</td></tr>
+        {%- endfor %}
+        </tbody>
+    </table></div>
+</section>
+</div>
+{% endblock %}

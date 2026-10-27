@@ -1,8 +1,20 @@
-"""Tests for the probed environment section."""
+"""Tests for the environment section rendered from persona/prompts/environment.md."""
 
+import pytest
 from archie_agent import environment
-from archie_agent.environment import EnvironmentFacts, _tool_notes, render
+from archie_agent.environment import EnvironmentFacts, render
 from archie_agent.prompt import _build_environment, _load_prompt
+
+TEMPLATE = """## Environment
+
+{?container}In a container.
+
+System: {os_name} ({arch}) · User: {user} (uid {uid}) · Home: {home} · CWD: {workspace_dir}
+{?sudo}Passwordless sudo.
+
+
+Brain: {brain_dir}. Exec interpreter: {exec_python}.
+"""
 
 
 def _facts(**overrides) -> EnvironmentFacts:
@@ -13,90 +25,101 @@ def _facts(**overrides) -> EnvironmentFacts:
         "user": "archie",
         "uid": 502,
         "home": "/home/archie",
-        "cwd": "/workspace",
         "sudo": True,
-        "runtimes": ("python 3.13 + uv", "node 24 + npm", "go 1.27"),
-        "tools": {"CLI": ("rg", "jq"), "Cloud/IaC": ("aws", "tofu")},
-        "persistent": (("/workspace", "project files"), ("~/.nexus", "agent data")),
-        "archie_self": ("/opt/archie/agent",),
-        "available": frozenset({"rg", "jq", "aws", "tofu", "agent-browser"}),
+        "brain_dir": "~/.nexus/brain",
     }
     base.update(overrides)
     return EnvironmentFacts(**base)
 
 
-NOTES = """<!-- comment -->
-- `agent-browser` — headless Chromium
-  continuation line.
-- `tofu` — use tofu not terraform.
-- `scalr` — not installed here.
-"""
+# --- rendering ---------------------------------------------------------------
 
 
-def test_render_key_facts():
-    text = render(_facts(), "/workspace", NOTES, "/opt/archie/venv/bin/python")
-    assert "don't run docker or compose" in text
-    assert "System: Debian 13 (aarch64) · User: archie (uid 502) · Home: /home/archie" in text
-    assert "CWD: /workspace" in text
-    assert "`~` is /home/archie, not /root" in text
-    assert "Passwordless sudo" in text
-    assert "- Runtimes: python 3.13 + uv, node 24 + npm, go 1.27" in text
-    assert "- CLI: rg, jq" in text
-    assert "- ~/.nexus — agent data" in text
-    assert "/opt/archie/agent hold this agent's own code" in text
-    assert "don't install into it" in text
-
-
-def test_render_lists_all_self_paths():
-    paths = ("/opt/archie/agent", "/opt/archie/persona", "/opt/archie/plugins")
-    text = render(_facts(archie_self=paths), "/workspace")
-    assert (
-        "/opt/archie/agent, /opt/archie/persona and /opt/archie/plugins hold this agent's own code"
-        in text
+def test_render_fills_values():
+    text = render(TEMPLATE, "/workspace", "/venv/bin/python", env=_facts())
+    assert text == (
+        "## Environment\n\n"
+        "In a container.\n\n"
+        "System: Debian 13 (aarch64) · User: archie (uid 502) · Home: /home/archie · "
+        "CWD: /workspace\n"
+        "Passwordless sudo.\n\n"
+        "Brain: ~/.nexus/brain. Exec interpreter: /venv/bin/python."
     )
-    assert "/opt/archie/plugins" in environment.ARCHIE_SELF_PATHS
 
 
-def test_render_omits_absent_facts():
-    text = render(
-        _facts(
-            in_container=False, sudo=False, runtimes=(), tools={}, persistent=(), archie_self=()
-        ),
-        "/workspace",
-    )
-    assert "docker" not in text
+def test_render_drops_guarded_lines_and_blank_runs():
+    text = render(TEMPLATE, "/workspace", env=_facts(in_container=False, sudo=False))
+    assert "container" not in text
     assert "sudo" not in text
-    assert "Preinstalled" not in text
-    assert "Persistent" not in text
-    assert "own code" not in text
+    assert "\n\n\n" not in text
+    assert text.startswith("## Environment\n\nSystem:")
+    assert text.endswith("Exec interpreter: /opt/archie/venv/bin/python.")
 
 
-def test_tool_notes_only_for_installed_tools():
-    kept = _tool_notes(NOTES, frozenset({"agent-browser", "tofu"}))
-    assert kept == [
-        "- `agent-browser` — headless Chromium\n  continuation line.",
-        "- `tofu` — use tofu not terraform.",
-    ]
-    assert _tool_notes(NOTES, frozenset()) == []
+def test_render_inserts_values_verbatim():
+    text = render("{user}\n", "/w", env=_facts(user="literal {home} and {?sudo}"))
+    assert text == "literal {home} and {?sudo}"
 
 
-def test_render_is_deterministic():
-    facts = _facts()
-    assert render(facts, "/workspace", NOTES) == render(facts, "/workspace", NOTES)
+def test_render_unknown_placeholder_raises():
+    with pytest.raises(ValueError, match=r"environment.md: unknown placeholder \{nope\}"):
+        render("Hello {nope}\n", "/w", env=_facts())
 
 
-def test_shipped_tool_notes_parse():
-    """Every shipped note entry is keyed by a backticked binary."""
-    notes = _load_prompt("tool-notes.md")
-    everything = frozenset(
-        line.split("`")[1] for line in notes.splitlines() if line.startswith("- `")
+def test_render_unknown_guard_raises():
+    with pytest.raises(ValueError, match=r"environment.md: unknown guard \{\?nope\}"):
+        render("{?nope}Hello\n", "/w", env=_facts())
+
+
+def test_render_mid_line_guard_raises():
+    with pytest.raises(ValueError, match=r"guard \{\?sudo\} must start a line"):
+        render("Hello {?sudo}there\n", "/w", env=_facts())
+
+
+# --- probing -------------------------------------------------------------------
+
+
+def test_probe_runs_on_this_host():
+    facts = environment.probe()
+    assert facts.user
+    assert facts.home.startswith("/")
+    assert isinstance(facts.sudo, bool)
+
+
+def test_display_path_uses_tilde_inside_home(tmp_path):
+    home = str(tmp_path / "home")
+    assert environment._display_path(tmp_path / "home" / ".nexus" / "brain", home) == (
+        "~/.nexus/brain"
     )
-    assert {"agent-browser", "tofu", "pandoc", "pdftotext", "cf"} <= everything
-    assert len(_tool_notes(notes, everything)) == len(everything)
+    assert environment._display_path(tmp_path / "srv" / "brain", home) == str(
+        tmp_path / "srv" / "brain"
+    )
 
 
-def test_cf_is_a_probed_cloud_cli():
-    assert "cf" in environment.TOOL_CATEGORIES["Cloud/IaC"]
+def test_probe_reports_configured_brain_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path / "brain"))
+    assert environment.probe().brain_dir == str((tmp_path / "brain").resolve())
+
+
+# --- shipped template ----------------------------------------------------------
+
+
+def test_shipped_template_renders():
+    text = render(_load_prompt("environment.md"), "/workspace", env=_facts())
+    lines = text.splitlines()
+    assert "### Installed tools" in lines
+    assert "- `~/.nexus/brain` — the brain (curated knowledge store)" in lines
+    assert "- `go`, `node`, `npm`, `python`, `uv`" in lines
+    assert any(line.startswith("- `tofu` — OpenTofu") for line in lines)
+    assert any(line.startswith("- `cf` — Cloudflare") for line in lines)
+    assert "\n\n\n" not in text
+
+
+def test_shipped_template_drops_guarded_lines():
+    env = _facts(in_container=False, sudo=False)
+    text = render(_load_prompt("environment.md"), "/workspace", env=env)
+    assert "Docker container" not in text
+    assert "Passwordless sudo" not in text
 
 
 def test_build_environment_uses_cached_probe(monkeypatch):
@@ -116,10 +139,3 @@ def test_build_environment_uses_cached_probe(monkeypatch):
     assert first == second
     assert len(calls) == 1
     assert "- `tofu` — OpenTofu" in first
-
-
-def test_probe_runs_on_this_host():
-    facts = environment.probe()
-    assert facts.user
-    assert facts.home.startswith("/")
-    assert isinstance(facts.sudo, bool)

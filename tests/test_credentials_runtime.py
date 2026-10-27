@@ -5,11 +5,20 @@ from archie_shared.plugins.config import PluginAuthConfig, PluginConfig
 from archie_shared.schemas import NexusConfig
 
 
-def test_runtime_environment_projects_selected_credentials(monkeypatch, tmp_path):
+def test_runtime_environment_projects_no_aws_credentials_by_default(monkeypatch, tmp_path):
+    """aws is read per call by its credential_process; bedrock is never projected."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     replace_credential("aws", {"access_key_id": "AKIA", "secret_access_key": "secret"})
     replace_credential("bedrock", {"aws_access_key_id": "BEDROCK"})
-    env = runtime_environment(NexusConfig())
+    assert runtime_environment(NexusConfig()) == {}
+
+
+def test_runtime_environment_projects_aws_when_override_sets_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    replace_credential("aws", {"access_key_id": "AKIA", "secret_access_key": "secret"})
+    replace_credential("bedrock", {"aws_access_key_id": "BEDROCK"})
+    config = NexusConfig(plugins={"aws": PluginConfig(auth=PluginAuthConfig(set_env=True))})
+    env = runtime_environment(config)
     assert env == {"AWS_ACCESS_KEY_ID": "AKIA", "AWS_SECRET_ACCESS_KEY": "secret"}
 
 

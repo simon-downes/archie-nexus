@@ -167,7 +167,7 @@ async def test_get_incident_detail_includes_participants_alerts_and_bounds(fake)
     assert detail["participants"]["active"][0]["name"] == "Sam"
     assert detail["participants"]["passive"][0]["id"] == "u3"
     assert detail["alert_ids"] == ["al-1"]
-    assert len(detail["summary"]) == 8000
+    assert detail["summary"] == "Elevated 5xx " + "x" * 9000
     assert detail["creator"]["name"] == "Alex"
     assert detail["role_assignments"] == [
         {

@@ -7,7 +7,7 @@ def test_subagents_config_defaults():
     # Constructing through the typed top-level schema exercises default factories.
     from archie_shared.schemas import NexusConfig
 
-    assert NexusConfig().agent.subagents.max_concurrent == 3
+    assert NexusConfig().agent.subagents.max_concurrent == 5
 
 
 def test_subagents_config_loads_yaml(tmp_path: Path):

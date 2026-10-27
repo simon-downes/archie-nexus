@@ -197,7 +197,7 @@ async def test_get_alert_includes_attributes_and_incident_ids(fake):
         {"name": "teams", "values": ["payments", "core"]},
     ]
     assert result["incident_ids"] == ["01INC"]
-    assert len(result["description"]) == 8000
+    assert len(result["description"]) == 9000
 
 
 async def test_get_alert_rejects_path_traversal(fake):
@@ -302,8 +302,8 @@ async def test_postmortem_content_is_bounded(fake):
         "work",
     )
     result = await get_postmortem("pm1")
-    assert len(result["content"]) == 8000
-    assert result["content_truncated"] is True
+    assert result["content"] == "# Notes\n" + "y" * 9000
+    assert "content_truncated" not in result
     assert result["editors"][0]["name"] == "Sam"
 
 

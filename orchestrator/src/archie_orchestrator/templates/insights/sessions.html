@@ -1,0 +1,34 @@
+{% extends "insights/base.html" %}
+{% import "insights/_macros.html" as m %}
+{% block title %}Sessions — Insights{% endblock %}
+{% block insights %}
+<p class="chrome count">{% if data.sessions|length < data.total %}Showing {{ data.sessions|length }} of {{ data.total }}{% else %}{{ data.total }} session{{ "" if data.total == 1 else "s" }}{% endif %}</p>
+{% macro th(key, label, numeric=true) -%}
+<th{% if numeric %} class="num"{% endif %}>{% if key == sort %}<span aria-sort="descending">{{ label }} ▾</span>{% else %}<a href="{{ link('/ui/insights/sessions', sort=key) }}">{{ label }}</a>{% endif %}</th>
+{%- endmacro %}
+<div class="table-wrap chrome"><table class="insights sessions-table">
+    <thead><tr>
+        {{ th("started", "Started (UTC)", false) }}
+        <th>Session</th><th>Workspace</th><th>Title</th>
+        {{ th("turns", "Turns") }}{{ th("requests", "Requests") }}{{ th("cost", "Cost") }}
+        <th class="num">Cache hit</th>{{ th("errors", "Errors") }}{{ th("duration", "Duration") }}
+    </tr></thead>
+    <tbody>
+    {%- for s in data.sessions %}
+        <tr data-session-id="{{ s.session_id }}">
+            <td class="when">{{ m.when(s.started_at) }}</td>
+            <td class="id">{{ m.session_links(s.session_id) }}</td>
+            <td>{{ s.workspace }}</td>
+            <td class="title">{{ s.title or "" }}</td>
+            <td class="num">{{ m.num(s.turns) }}</td>
+            <td class="num">{{ m.num(s.requests) }}</td>
+            <td class="num">{{ m.money(s.cost) }}</td>
+            <td class="num">{{ m.pct(s.cache_hit_pct) }}</td>
+            <td class="num{% if s.errors %} err{% endif %}">{{ m.num(s.errors) }}</td>
+            <td class="num">{{ m.duration(s.duration_s) }}</td>
+        </tr>
+    {%- else %}<tr><td colspan="10" class="dim">No sessions in range.</td></tr>
+    {%- endfor %}
+    </tbody>
+</table></div>
+{% endblock %}

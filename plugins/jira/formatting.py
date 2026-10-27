@@ -1,31 +1,22 @@
-"""Provider-to-model Jira formatting helpers."""
+"""Provider-to-model Jira formatting helpers.
+
+Read-side text is returned whole; the exec result cap bounds what reaches the model.
+Explicit limits remain only for short metadata fields.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
-_MAX_TEXT = 8000
+from .adf import adf_to_markdown
 
 
-def text(value: Any, limit: int = _MAX_TEXT) -> str | None:
+def text(value: Any, limit: int | None = None) -> str | None:
     if value is None:
         return None
-    if isinstance(value, str):
-        return value[:limit]
-    return str(value)[:limit]
-
-
-def adf_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value[:_MAX_TEXT]
-    if isinstance(value, dict):
-        return " ".join(adf_text(v) for k, v in value.items() if k in {"text", "content", "body"})[
-            :_MAX_TEXT
-        ]
-    if isinstance(value, list):
-        return " ".join(adf_text(v) for v in value)[:_MAX_TEXT]
-    return ""
+    value = value if isinstance(value, str) else str(value)
+    return value if limit is None else value[:limit]
 
 
 def gmt(value: Any) -> str | None:
@@ -73,7 +64,7 @@ def comment(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": text(item.get("id")),
         "author": text((item.get("author") or {}).get("displayName")),
-        "body": adf_text(item.get("body")),
+        "body": adf_to_markdown(item.get("body")),
         "created": gmt(item.get("created")),
     }
 

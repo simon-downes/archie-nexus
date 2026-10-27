@@ -60,7 +60,7 @@ one on the fly following the same format.
 
 Single round of initial positions. No cross-referencing. Fast sanity check.
 
-- Up to 4 parallel subagent calls
+- Up to 4 perspectives, all in one `task` call
 - ~10-15 seconds
 - 30-80 words per perspective
 - Use for: "Am I missing something obvious?" or "Quick gut check on this"
@@ -196,11 +196,11 @@ name what would break the tie.
 
 # Subagent Configuration
 
-- **Type:** `general` subagent for each perspective (see `# Available Tools`).
+- **Type:** `default` agent for each perspective, with the perspective stated in the prompt.
 - **Model:** same model for all (default to the current session's model).
 - **Parallelism:** all perspectives within a round run in parallel — spawn them in a
-  single batch. Keep a round to **at most 4 perspectives** so they run concurrently
-  rather than queueing.
+  single `task` call. The `task` description states how many run at a time per call;
+  extra perspectives queue behind the first batch.
 - **Between rounds:** sequential (Round 2 needs Round 1 output, Round 3 needs both).
 
 ---

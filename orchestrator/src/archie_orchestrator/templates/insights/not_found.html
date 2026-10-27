@@ -1,0 +1,8 @@
+{% extends "viewer/base.html" %}
+{% block title %}Not found — Insights{% endblock %}
+{% block content %}
+<section class="chrome">
+    <h1>Session not found</h1>
+    <p>No indexed session named <code>{{ session_id }}</code>. <a href="/ui/insights/sessions">Back to sessions</a>.</p>
+</section>
+{% endblock %}

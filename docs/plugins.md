@@ -153,10 +153,11 @@ Each plugin is configured under `plugins.<id>` in `~/.nexus/config.yaml`:
 - `auth`: overrides for the credential provider, such as an OAuth `client_id`.
 - `settings`: values validated against the manifest's `settings`.
 
-`policy` is re-read before every exec call. `enabled` is read at startup for which plugins
+`policy` is re-read before every exec call. `enabled` is read at session start for which plugins
 are imported and which skills are listed; a plugin disabled while a session runs has both
 policy blocks turned off from the next exec call. `auth` and `settings` are read at
-startup. Unknown plugin ids, unknown fields, wrong types, a `write` block for a plugin
+session start; the orchestrator re-reads `config.yaml` on use, so no orchestrator restart
+is needed (see [Configuration](config.md)). Unknown plugin ids, unknown fields, wrong types, a `write` block for a plugin
 without writes and a `scope` for a plugin without one are load errors. See
 [Configuration](config.md#plugins) for examples.
 
@@ -209,7 +210,9 @@ from archie_agent.exec.plugin import ToolError, context, require_read, require_w
 of enabled plugins once at startup, before the harness is built, each inside its own
 context with `workspace=None` and an empty policy. A failing hook, a missing function or
 an async function stops the agent with a message naming the plugin. AWS uses a hook to
-write `~/.aws/config` from `plugins.aws.settings.profiles`. `~/.aws` must not be mounted
+write `~/.aws/config` from `plugins.aws.settings.profiles`; its profiles get base credentials
+from `plugins/aws/bin/credential-process`, which reads the credential store on every call.
+`~/.aws` must not be mounted
 into containers when `plugins.aws.settings.profiles` is set: the hook refuses to overwrite a
 mounted `~/.aws` or `~/.aws/config`, or any existing `~/.aws/config` that does not start
 with its generated header.

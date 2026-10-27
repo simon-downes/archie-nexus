@@ -30,9 +30,10 @@ async def test_get_page_returns_bounded_projection_and_properties():
         "id": ROOT,
         "type": "page",
         "title": "Page",
-        "content": "body",
         "properties": {"Status": "Open"},
+        "content": "body",
     }
+    assert list(result)[-1] == "content"
 
 
 async def test_get_page_denies_unrelated_resource():

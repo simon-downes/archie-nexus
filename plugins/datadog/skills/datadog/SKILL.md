@@ -33,7 +33,7 @@ description: >
   A `scope` in either block is not supported; setting one makes every Datadog call fail with `DatadogPolicyError`.
 - Get explicit user intent before creating or changing a monitor. A monitor can page people. Prefer `validate_monitor` first.
 - Calls return JSON-serializable values or raise typed errors; they do not return error objects.
-- Results are normalised and bounded (see each function). The exec result is truncated at 16,000 characters, so keep `limit`s small and return only the fields you need. A large dashboard alone can be over 10,000 characters.
+- Results are normalised and bounded (see each function). The exec result shown to you is capped at 32,000 characters, but data inside the script is not. If a result may exceed the cap, process it in the script and return only the part you need, or write it to a file under `/tmp` and read it in chunks with `read(path, offset, limit)`. Keep `limit`s small. A large dashboard alone can be over 10,000 characters.
 - Logs and spans can contain customer data. Search narrowly (service, status, time window), and don't copy raw log messages into Slack, Jira or other external places without need.
 - Results are a snapshot of a live system. Say when data was read if timing matters.
 

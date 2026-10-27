@@ -127,7 +127,6 @@ def _event(raw: Any) -> dict[str, Any] | None:
     return {
         "id": event_id,
         "summary": clean(raw.get("summary"), 500),
-        "description": clean(raw.get("description"), 4000),
         "start": start,
         "end": end,
         "status": clean(raw.get("status"), 32),
@@ -136,6 +135,7 @@ def _event(raw: Any) -> dict[str, Any] | None:
         "location": clean(raw.get("location"), 500),
         "meet_url": conference_url or safe_url(raw.get("hangoutLink")),
         "provenance": "google.calendar",
+        "description": clean(raw.get("description"), None),
     }
 
 

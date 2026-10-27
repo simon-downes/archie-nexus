@@ -235,8 +235,8 @@ class TestNativeHandler:
         handler = _native_handler(fn)
         result = await handler()
         assert len(result) < len(long_text)
-        assert result.endswith("\n[…truncated]")
-        assert len(result) == _MAX_RESULT_CHARS + len("\n[…truncated]")
+        assert result.startswith("x" * _MAX_RESULT_CHARS + "\n[…truncated: showed 32,000 of 33,000")
+        assert result.endswith("See the exec guidance on large results.]")
 
     @pytest.mark.asyncio
     async def test_no_truncation_under_limit(self):

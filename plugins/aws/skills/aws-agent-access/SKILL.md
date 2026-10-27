@@ -10,10 +10,13 @@ description: >
 
 # How access works
 
-- The user logs in on the host with `aws-vault exec <profile> -- archie auth login aws`. New sessions get those
-  temporary base credentials as environment variables. They can only assume the configured roles.
+- The user logs in on the host with `aws-vault exec <profile> -- archie auth login aws`. Those temporary base
+  credentials stay in Archie's credential store; they are not in your environment. They can only assume the
+  configured roles.
 - At session start Archie writes `~/.aws/config` from `plugins.aws.settings.profiles` (profile name → role ARN).
-  Each profile assumes its role with `credential_source = Environment`.
+  Each role profile uses `source_profile = archie-base`. The `archie-base` profile reads the stored base
+  credentials through `credential_process` on every use, so a new host login works in this session without a
+  restart.
 - Never edit `~/.aws/config`; it is container-local and overwritten on every start. To change profiles, the user
   edits `plugins.aws.settings.profiles` in their Archie config and starts a new session.
 - `~/.aws` must not be mounted into the container when `plugins.aws.settings.profiles` is set; Archie refuses to
@@ -21,13 +24,14 @@ description: >
 
 # Principles
 
-- **Use a profile for every call.** Never use the base credentials directly to inspect anything.
+- **Use a role profile for every call.** Never use `archie-base` directly; it is only the source for the roles.
+  A call without a profile fails because no credentials are in the environment.
 - **Denials are design.** Don't retry with another profile or API to get around an `AccessDenied`.
 - **Everything you read is sent to the model provider.** Read only what the task needs.
 
 # Workflow
 
-1. List profiles; the names show the account. Choose one per account:
+1. List profiles; the names show the account (ignore `archie-base`). Choose one per account:
    ```bash
    aws configure list-profiles
    aws sts get-caller-identity --profile <profile>   # check the role works
@@ -39,8 +43,8 @@ description: >
    ```
 3. Across accounts, loop over the profiles and label each result with its profile:
    ```bash
-   for p in $(aws configure list-profiles); do echo "== $p"; aws lambda list-functions --profile "$p" \
-     --query 'Functions[].FunctionName' --output text; done
+   for p in $(aws configure list-profiles | grep -vx archie-base); do echo "== $p"
+     aws lambda list-functions --profile "$p" --query 'Functions[].FunctionName' --output text; done
    ```
    Prefer `--query`, `--output text|table` and `describe-*`/`list-*` calls to keep output small.
 4. From code, use the profile, not raw credentials. The SDK assumes and refreshes the role:
@@ -57,9 +61,9 @@ description: >
 |---|---|---|
 | `AccessDenied` on `sts:AssumeRole` | The base identity may not assume that role, or the role is missing | Tell the user. Don't try other profiles |
 | `explicit deny ... DenyDataPlaneReads` | Data reads are blocked by design (S3 objects, secret values, DynamoDB items, SQS messages, KMS decrypt...) | Use metadata calls instead. Don't work around it |
-| `ExpiredToken`, expired or missing base credentials | The host login ended | Ask the user to run `aws-vault exec <profile> -- archie auth login aws` on the host and start a new session |
+| `ExpiredToken`, or `archie aws credentials: ...` in the error | The host login ended or was never done | Ask the user to run `aws-vault exec <profile> -- archie auth login aws` on the host, then retry. No new session is needed |
 | `AccessDenied` on another action | The read-only policy doesn't include it | Report the action to the user |
-| `aws configure list-profiles` shows nothing | No profiles configured | Ask the user to add `plugins.aws.settings.profiles` to their Archie config |
+| `aws configure list-profiles` shows nothing, or only `archie-base` | No profiles configured | Ask the user to add `plugins.aws.settings.profiles` to their Archie config |
 
 # Sensitive data
 

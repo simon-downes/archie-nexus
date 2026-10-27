@@ -27,7 +27,7 @@ description: >
 
   A `read.scope` is not supported; setting one makes every call fail with `IncidentIoPolicyError`.
 - Calls return JSON-serializable values or raise typed errors; they do not return error objects.
-- Results are normalised and bounded: text fields are capped at 8,000 characters and nested lists at 50 entries. The exec result is also truncated at 16,000 characters, so request small `limit`s and return only the fields you need.
+- Results are normalised. Nested lists are capped at 50 entries; summaries, descriptions and post-mortem content are returned whole. The exec result shown to you is capped at 32,000 characters, but data inside the script is not. If a result may exceed the cap, process it in the script and return only the part you need, or write it to a file under `/tmp` and read it in chunks with `read(path, offset, limit)`. Request small `limit`s.
 - Results are a point-in-time snapshot of a live system. Say when data was read if timing matters.
 
 ## Choose the right function
@@ -198,7 +198,7 @@ Returns post-mortem documents, newest first:
 
 ### `incident_io.get_postmortem(postmortem_id)`
 
-Returns a post-mortem plus `content`, its Markdown capped at 8,000 characters, and `content_truncated`, which is true when the cap cut it short. `content` is `null` when the document has no in-app content.
+Returns a post-mortem plus `content`, its full Markdown. `content` is `null` when the document has no in-app content.
 
 ### `incident_io.list_teams(limit=25)`
 

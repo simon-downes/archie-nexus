@@ -37,7 +37,7 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
 class SubagentsConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Limits specific to concurrent child-agent delegation."""
 
-    max_concurrent: int = 3
+    max_concurrent: int = 5
 
 
 class CompactionConfig(msgspec.Struct, forbid_unknown_fields=True):

@@ -117,9 +117,8 @@ async def read_reference(file_id: str, purpose: str) -> dict[str, Any]:
         "file": file_result,
         "folder_id": result.get("parents", [None])[0] if result.get("parents") else None,
         "format": "reference",
-        "content": None,
-        "truncated": False,
         "provenance": "google.drive",
+        "content": None,
     }
     if not purpose.startswith("read") or mime_type not in exportable | textual:
         return envelope
@@ -133,12 +132,10 @@ async def read_reference(file_id: str, purpose: str) -> dict[str, Any]:
     content = await drive_request(operation, {"id": file_id, "mime_type": mime_type}, token)
     if not isinstance(content, str):
         return envelope
-    content = content[:100000]
     envelope.update(
         {
             "format": "csv" if mime_type == "application/vnd.google-apps.spreadsheet" else "text",
             "content": content,
-            "truncated": len(content) == 100000,
         }
     )
     return envelope

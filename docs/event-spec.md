@@ -49,7 +49,7 @@ fields or targets a child with both `scope` and `subagent_index`; partial target
 | `text_delta` | live-only | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `text: string`, `subagent_index: int?` |
 | `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?`, `purpose: conversation \| compaction` |
 | `compaction_start` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `tokens_before: int`, `estimated_next_request_cost_usd: float?`, `model_key: string`, `sent_at: string`, `subagent_index: int?` |
-| `compaction_complete` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `status: success \| failure \| interrupted`, `tokens_before: int`, `tokens_after: int?`, `cost_saved_usd: float`, `duration_ms: int`, `error: string?`, `summary: string?`, `debug: string`, `subagent_index: int?`, `estimated_next_request_cost_usd: float?` |
+| `compaction_complete` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `status: success \| failure \| interrupted`, `tokens_before: int`, `tokens_after: int?`, `cost_saved_usd: float`, `duration_ms: int`, `error: string?`, `summary: string?`, `debug: string`, `subagent_index: int?`, `estimated_next_request_cost_usd: float?`, `skills_loaded: list[string]` |
 | `context_compacted` | persisted (legacy, no longer emitted) | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `summary: string`, `model_key: string`, `tokens_before: int`, `tokens_after: int`, `duration_ms: int`, `debug: string`, `subagent_index: int?` |
 | `tool_call` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `name: string`, `input: dict[string, object]`, `subagent_index: int?` |
 | `tool_result` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `tool_use_id: string`, `content: string`, `is_error: bool`, `duration_ms: int`, `result_bytes: int`, `result_lines: int`, `subagent_index: int?`, `images: list[{format: string, width: int, height: int, bytes: int, source: string}]` |
@@ -61,7 +61,7 @@ fields or targets a child with both `scope` and `subagent_index`; partial target
 | `session_status` | live-only | `model_key: string`, `git_branch: string` |
 | `error_notice` | live-only | `kind: string`, `message: string` |
 
-Compaction operations are persisted as `compaction_start` followed by the compactor `llm_request` (omitted when the transcript cannot be fitted and no provider request is made) and exactly one `compaction_complete`. Compaction failures are reported only through a `failure` or `interrupted` completion. `estimated_next_request_cost_usd` is the active conversation model's pre-compaction estimate for a cold-cache request; it is set only for `cold_cache` compactions and repeated on the completion. Clients display it when present and `cost_saved_usd` otherwise. `tokens_before` and `tokens_after` are provider-facing context estimates: heuristic estimates include the system prompt and tool configuration; provider-baseline estimates retain the provider's reported boundary. `cost_saved_usd` is a display estimate and is not an accounting source.
+Compaction operations are persisted as `compaction_start` followed by the compactor `llm_request` (omitted when the transcript cannot be fitted and no provider request is made) and exactly one `compaction_complete`. Compaction failures are reported only through a `failure` or `interrupted` completion. `estimated_next_request_cost_usd` is the active conversation model's pre-compaction estimate for a cold-cache request; it is set only for `cold_cache` compactions and repeated on the completion. Clients display it when present and `cost_saved_usd` otherwise. `skills_loaded` lists the sorted names of skills whose body was loaded when compaction started; it is set on every status and decodes as `[]` from older logs. `tokens_before` and `tokens_after` are provider-facing context estimates: heuristic estimates include the system prompt and tool configuration; provider-baseline estimates retain the provider's reported boundary. `cost_saved_usd` is a display estimate and is not an accounting source. On success it prices the removed tokens at the active model's cache write rate (its input rate when it has none): the cache write the next request avoids, assuming a cold cache. It ignores cache reads on later requests, and it overstates the saving for a compaction that happens while the cache is warm.
 
 There is no public `usage` event. Provider usage is folded into the persisted
 `llm_request`; clients derive cumulative token and cost totals by summing those events,
@@ -100,11 +100,18 @@ that generated each assistant message and derives its turn/iteration from the re
 records, discards legacy shell records by discriminator, retains the source as `.legacy`,
 and writes each log through a same-directory temporary file and atomic rename. Logs
 declaring `session_started.schema_version == 2` are skipped. The command then archives
-and rebuilds `<ARCHIE_HOME_DIR>/metrics.db` from decoded migrated `llm_request` events.
-Metrics use integer `turn`/`iteration` columns and deduplicate by `(session_id, event_id)`;
-the session log remains the source of truth.
+and rebuilds the `<ARCHIE_HOME_DIR>/metrics.db` index from the migrated logs (all canonical
+event types; see [Architecture](architecture.md#orchestrator-metrics)). Requests deduplicate
+by `(session_id, event_id)`; the session log remains the source of truth.
 
 `tool_result.images` was added after schema version 2 and defaults to an empty list, so
 earlier logs decode unchanged. It records metadata only for images returned by the native
 `read` tool (format, final dimensions, encoded size, source path). Image bytes are kept only
 in the agent's in-memory transcript and are never persisted or sent to clients.
+
+`compaction_complete.skills_loaded` was added without a protocol version change and defaults
+to an empty list, so earlier logs decode unchanged. Events are decoded with unknown fields
+forbidden, so a client built before the field existed drops every new `compaction_complete`
+as malformed; update the CLI with the agent. Before this change, `cost_saved_usd` priced the
+removed tokens at the input rate, so older records are about 20% lower for the same saving
+on models whose cache write costs 1.25× input.

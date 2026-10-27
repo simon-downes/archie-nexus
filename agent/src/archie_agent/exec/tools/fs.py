@@ -76,6 +76,8 @@ async def read(
     path: str, offset: int | None = None, limit: int | None = None, raw: bool = False
 ) -> str | ToolImage:
     """Read a file from the workspace. Image files (PNG, JPEG, GIF, WebP) are returned as images.
+    Text is line-numbered unless raw=True; lines over 500 characters are truncated.
+    Results over 32,000 characters are truncated; read large files in chunks with offset/limit.
 
     Args:
         path: File path (relative to /workspace/ or any visible absolute path).
@@ -156,6 +158,8 @@ async def read(
 @tool
 async def grep(pattern: str, include: str | None = None, path: str | None = None) -> str:
     """Search file contents using regex via ripgrep.
+    Matching is case-insensitive. Results are grouped by file, most recently modified
+    first, and show at most 50 files.
 
     Args:
         pattern: Regex pattern to search for.
@@ -372,6 +376,7 @@ async def glob(pattern: str, path: str | None = None) -> str:
 @tool
 async def write(path: str, content: str) -> str:
     """Write content to a file, creating parent directories as needed.
+    Returns the path and line count, which confirms the write.
 
     Args:
         path: File path (relative to /workspace/ or any visible absolute path).
@@ -398,6 +403,7 @@ async def write(path: str, content: str) -> str:
 @tool
 async def edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
     """Apply a string replacement edit to a file.
+    Returns a unified diff, which confirms the edit.
 
     Args:
         path: File path (relative to /workspace/ or any visible absolute path).

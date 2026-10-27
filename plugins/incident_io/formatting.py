@@ -1,18 +1,22 @@
-"""Provider-to-model normalisers. Every output is bounded and free of raw payloads."""
+"""Provider-to-model normalisers. Outputs are free of raw payloads.
+
+Long text (summaries, descriptions, post-mortem content) is returned whole; the exec result
+cap bounds what reaches the model. Short metadata fields and nested lists stay bounded.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
-MAX_TEXT = 8000
 MAX_NESTED = 50
 
 
-def text(value: Any, limit: int = MAX_TEXT) -> str | None:
+def text(value: Any, limit: int | None = None) -> str | None:
     if value is None or isinstance(value, (dict, list)):
         return None
-    return str(value)[:limit]
+    value = str(value)
+    return value if limit is None else value[:limit]
 
 
 def gmt(value: Any) -> str | None:

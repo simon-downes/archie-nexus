@@ -15,7 +15,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, Union, get_args, get_origin
 
-from archie_agent.exec.tool import _MAX_RESULT_CHARS
+from archie_agent.exec.tool import truncate_result
 from archie_agent.exec.tools import get_all_tools
 from archie_agent.exec.tools.images import ToolImage
 from archie_agent.tools import ToolSpec
@@ -259,8 +259,8 @@ def _tool_description(fn: Callable) -> str:
 def _native_handler(fn: Callable) -> Callable:
     """Wrap a tool function with the global truncation backstop.
 
-    The wrapper awaits the tool function and applies _MAX_RESULT_CHARS
-    truncation. Since all tool fns now return strings, this is a simple
+    The wrapper awaits the tool function and applies truncate_result
+    (the _MAX_RESULT_CHARS cap). Since all tool fns now return strings, this is a simple
     passthrough + length check.
 
     The harness's generic dispatch does str(result) on the return — since
@@ -290,10 +290,7 @@ def _native_handler(fn: Callable) -> Callable:
         # Defensive: all tools should return str, but handle None gracefully
         if result is None:
             return ""
-        text = str(result)
-        if len(text) > _MAX_RESULT_CHARS:
-            return text[:_MAX_RESULT_CHARS] + "\n[…truncated]"
-        return text
+        return truncate_result(str(result))
 
     return wrapper
 
