@@ -1,22 +1,13 @@
 ---
 name: cloudflare
 description: >
-  Read-only Cloudflare inspection with the cf CLI and a scoped API token: Workers, Queues, Workflows,
-  Workers VPC, R2, Workers KV, zones and domains, DNS, SSL and certificates, WAF and firewall rules,
-  Turnstile and Tunnels. Use when asked to inspect, list, compare or debug Cloudflare resources, or
-  when a cf command fails. Not for creating, changing or deleting Cloudflare resources (they are
-  managed by Terraform and the token is read-only), or for reading secret values.
+  Read-only Cloudflare inspection with the cf CLI: Workers, Queues, Workflows, Workers VPC, R2,
+  Workers KV, zones and domains, DNS, SSL and certificates, WAF and firewall rules, Turnstile and
+  Tunnels. Use when asked to inspect, list, compare or debug Cloudflare resources, or when a cf
+  command fails: "check the DNS for", "why is this worker failing", "what WAF rules does this zone
+  have". Not for creating, changing or deleting Cloudflare resources (they are managed by
+  Terraform), or for reading secret values.
 ---
-
-# How access works
-
-- Every new session gets a read-only Cloudflare API token as `CLOUDFLARE_API_TOKEN`, and the
-  account id as `CLOUDFLARE_ACCOUNT_ID` when the user has configured one. `cf` reads both
-  itself; never pass the token on the command line or print it.
-- The token's permissions are the only permission layer. They decide which areas and zones
-  you can read. Nothing else limits `cf`.
-- `cf` is a beta CLI generated from the Cloudflare API. It prints JSON on stdout and errors on
-  stderr. Pipe output through `jq` to keep only the fields you need.
 
 # Principles
 
@@ -29,35 +20,35 @@ description: >
   exit 1. Create and update commands don't ask: only the token stops them. If you ran a write by
   mistake, tell the user what you ran and its output, and don't retry.
 - **Don't read secret values** unless the user asks for that specific value:
-  `cf tunnels token get` (tunnel run token), `cf kv keys get` (KV values) and `cf r2 objects get`
-  (object bodies). Listing names and metadata is fine. `cf workers secrets list` and
+  `cf tunnels token get` (tunnel run token), `cf kv keys get` (KV values), `cf r2 objects get`
+  (object bodies) and `cf turnstile widgets get` (includes the widget secret). Listing names and
+  metadata is fine. `cf workers secrets list` and
   `cf workers secrets get` return names only.
-- **Everything you read is sent to the model provider.** Read only what the task needs, and
-  filter large lists with `jq` and the command's own filters.
 
-# Workflow
+# Using cf
 
-1. Check the token and account:
-   ```bash
-   cf auth whoami
-   echo "${CLOUDFLARE_ACCOUNT_ID:-unset}"
-   ```
-2. If the account id is unset, find it, then set it on every account-scoped command. Each
-   shell call is a new process, so an `export` on its own is lost before the next call:
-   ```bash
-   cf accounts list | jq -r '.[] | "\(.id)  \(.name)"'
-   CLOUDFLARE_ACCOUNT_ID=<account-id> cf workers list
-   ```
-   If `cf accounts list` is denied, ask the user to set `plugins.cloudflare.settings.account_id`
-   in their Archie config and start a new session.
-3. Zone commands take `-z <zone>`, a zone id or a domain name such as `-z example.com`.
-4. Find a command you don't know, then check its flags and the API call it makes:
-   ```bash
-   cf cli search "list worker routes"
-   cf workers list --help
-   cf schema workers list
-   cf workers list --dry-run      # prints the request without sending it
-   ```
+- **Find the command, don't guess it.** `cf` is a beta CLI generated from the Cloudflare API, and
+  names don't always match the dashboard. Search by intent, then read the flags:
+  ```bash
+  cf cli search "get tunnel configuration"     # ranked JSON list; starting with a verb works best
+  cf tunnels config get --help
+  cf schema tunnels config get                  # the API operation, path and query parameters
+  cf tunnels config get <tunnel-id> --dry-run   # the request it would send, without sending it
+  ```
+  Search results include write commands; check the verb before you run one.
+- **Output is JSON.** Results go to stdout and errors to stderr. For list commands, stdout is the
+  bare `result` array. Use `jq` to keep only the fields you need.
+- **Lists return one page, silently.** `cf` drops `result_info` from the output, so nothing says
+  whether more pages exist. If the array is as long as the page size, assume it is incomplete:
+  - Page-numbered lists (`--per-page`, `--page`): fetch the next page.
+  - Cursor-paged lists (`cf kv keys list`, `cf r2 objects list`, `cf workflows instances list`):
+    the cursor never reaches you. Raise `--limit` or `--per-page`, or narrow with `--prefix` or
+    `--status`. `cf r2 objects list` can continue with `--start-after <last key>`.
+  If you still can't get the whole list, tell the user the result may be incomplete.
+- **Filter on the server.** Many list commands take filter flags; check `--help` before
+  filtering a full list with `jq`. For example, `cf dns records list` takes `--type`, `--name`,
+  `--name-contains`, `--content-contains`, `--proxied` and `--search`.
+- **Zones take `-z <zone>`**, a zone id or a domain name such as `-z example.com`.
 
 # Commands by area
 
@@ -82,7 +73,8 @@ Commands below are reads. `<...>` is a value you supply.
 
 - `cf workflows list`, `cf workflows get <workflow-name>`
 - `cf workflows instances list --workflow-name <name> --status errored`
-- `cf workflows instances get <instance-id> --workflow-name <name>`: status and step logs.
+- `cf workflows instances get <instance-id> --workflow-name <name>`: status and step logs. Add
+  `--simple` for metadata only, or `--order desc` for the latest steps first.
 - `cf workflows versions list --workflow-name <name>`
 
 ### Workers VPC
@@ -108,7 +100,7 @@ Commands below are reads. `<...>` is a value you supply.
 
 ### DNS
 
-- `cf dns records list -z <zone>` with `--type`, `--name` or `--name-contains` to filter.
+- `cf dns records list -z <zone>`, filtered with the flags under *Using cf*.
 - `cf dns records get <dns-record-id> -z <zone>`
 - `cf dns records export -z <zone>`: the zone as a BIND file.
 - `cf dns dnssec get -z <zone>`
@@ -119,7 +111,8 @@ Commands below are reads. `<...>` is a value you supply.
 - `cf ssl certificate-packs list -z <zone>`: add `--status all` to include inactive packs.
 - `cf ssl verification get -z <zone>`: validation status for pending certificates.
 - `cf ssl custom-certificates list -z <zone>`
-- `cf ssl origin-ca-certificates list --zone-id <zone-id>`: needs the zone id, not the domain.
+- `cf ssl origin-ca-certificates list --zone-id <zone-id>`: ignores `-z` and doesn't resolve a
+  domain; pass the 32-character id from `cf zones list`.
 
 ### WAF
 
@@ -133,8 +126,8 @@ WAF custom rules, managed rules and rate limits are rulesets, one entry point pe
 
 ### Turnstile
 
-- `cf turnstile widgets list`, `cf turnstile widgets get <sitekey>`: the site key is public;
-  the widget secret is not returned.
+- `cf turnstile widgets list`: names, site keys, domains and modes, without secrets. Use it
+  instead of `get`, which returns the widget secret.
 
 ### Tunnels
 
@@ -142,17 +135,15 @@ WAF custom rules, managed rules and rate limits are rulesets, one entry point pe
 - `cf tunnels config get <tunnel-id>`: ingress rules of a remotely managed tunnel.
 - `cf tunnels connections list --tunnel-id <tunnel-id>`: connectors, versions and locations.
 
-# Errors
+# Example
 
-- **"No authentication token found"**: no token is stored. Ask the user to run
-  `archie auth login cloudflare` on the host and start a new session; stop.
-- **`[9106]`, `[10000]` or "Authentication failed"**: the token is invalid, expired or
-  lacks the permission. Report the command and stop.
-- **403 or "permission"**: the token doesn't grant that area or zone. Report which area was
-  denied and carry on with the rest of the task.
-- **`<account-id>` in a `--dry-run` URL, or an account error**: `CLOUDFLARE_ACCOUNT_ID` is unset;
-  follow Workflow step 2.
-- **"Aborted." after a command you ran**: a destructive command needed `--force`. Nothing
-  changed. Don't add `--force`.
-- **Unknown command or flag**: `cf` is beta and commands change between releases. Use
-  `cf cli search` and `--help`; don't guess flags.
+"`app.example.com` returns 502s."
+
+1. `cf dns records list -z example.com --name app.example.com | jq '.[] | {type, content, proxied}'`
+   shows a proxied CNAME to `<tunnel-id>.cfargotunnel.com`.
+2. `cf tunnels connections list --tunnel-id <tunnel-id>` returns an empty array: no connector is
+   running.
+3. `cf tunnels config get <tunnel-id> | jq '.config.ingress'` confirms that the hostname routes to
+   `http://localhost:8080`.
+4. Report it: the tunnel has no live connector, so Cloudflare can't reach the origin. The fix is on
+   the host that runs `cloudflared`, not in Cloudflare.

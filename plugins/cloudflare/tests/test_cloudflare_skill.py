@@ -74,6 +74,7 @@ def test_skill_covers_area(area):
         "`cf tunnels token get`",
         "`cf kv keys get`",
         "`cf r2 objects get`",
+        "`cf turnstile widgets get`",
     ],
 )
 def test_principles_state_rule(phrase):
@@ -86,7 +87,12 @@ def test_no_example_command_passes_force():
 
 def test_secret_reads_appear_only_in_principles():
     rest = _text().replace(_section("Principles"), "")
-    for secret in ("cf tunnels token get", "cf kv keys get", "cf r2 objects get"):
+    for secret in (
+        "cf tunnels token get",
+        "cf kv keys get",
+        "cf r2 objects get",
+        "cf turnstile widgets get",
+    ):
         assert secret not in rest
 
 
