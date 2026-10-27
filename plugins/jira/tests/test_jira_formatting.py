@@ -1,12 +1,13 @@
 """Read-side text is returned whole; the exec result cap bounds what reaches the model."""
 
-from archie_plugins.jira.formatting import adf_text, attachment, comment, text
+from archie_plugins.jira.adf import adf_to_markdown
+from archie_plugins.jira.formatting import attachment, comment, text
 
 
 def test_long_adf_description_is_returned_whole():
     body = "d" * 20000
     doc = {"type": "doc", "content": [{"type": "paragraph", "content": [{"text": body}]}]}
-    assert adf_text(doc) == body
+    assert adf_to_markdown(doc) == body
 
 
 def test_long_comment_body_is_returned_whole():
