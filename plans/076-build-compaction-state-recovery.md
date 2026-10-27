@@ -138,7 +138,7 @@ event field.
 
 ## Milestones
 
-### [ ] M1 — Compaction prompt asks for state sections
+### [x] M1 — Compaction prompt asks for state sections
 
 - **Approach:** Rewrite `INSTRUCTIONS` in `compaction_prompts.py`, keeping the existing rules
   (omit empty sections, never invent a goal, preserve exact text, resolve terse replies,
@@ -150,7 +150,7 @@ event field.
 - **Test seam:** the `INSTRUCTIONS` constant (`tests/test_compaction.py`).
 - **Deliverable:** compaction requests ask for the twelve sections.
 - **Verify:** `uv run pytest tests/test_compaction.py -q` passes, including the new heading-order test.
-- **Outcome:**
+- **Outcome:** `INSTRUCTIONS` now lists 12 sections with per-section guidance, the carry-forward rule and the leave-out-the-pointer rule. `tests/test_compaction.py` passes (31 passed), including `test_instructions_list_state_sections_in_order` and `test_instructions_carry_state_rules`. `LOG_POINTER` was added in this commit too; M2 wires it in.
 
 ### [ ] M2 — Replacement turn points to the session log
 

@@ -12,6 +12,7 @@ from archie_agent.compaction import (
     fit_rounds,
     is_compact_command,
 )
+from archie_agent.compaction_prompts import INSTRUCTIONS
 from archie_agent.llm._types import TextDelta, Usage
 from archie_agent.session import Session, Turn
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
@@ -67,6 +68,31 @@ def test_effective_limit_uses_percent_and_clamped_tokens(caplog):
         limit = effective_limit(model, CompactionConfig(percent=95, tokens=990_000))
     assert limit == 950_000
     assert "clamping" in caplog.text
+
+
+def test_instructions_list_state_sections_in_order():
+    headings = [line[3:] for line in INSTRUCTIONS.splitlines() if line.startswith("## ")]
+    assert headings == [
+        "Goal",
+        "Instructions and Preferences",
+        "Progress",
+        "Decisions and Discoveries",
+        "Workspace State",
+        "Environment and Workarounds",
+        "Artefacts",
+        "Files and Findings",
+        "Commands and Identifiers",
+        "Working Text",
+        "Current Task",
+        "Next Steps",
+    ]
+
+
+@pytest.mark.parametrize(
+    "phrase", ["as of compaction", "carry forward", "verbatim", "path[:line]", "session log"]
+)
+def test_instructions_carry_state_rules(phrase):
+    assert phrase in INSTRUCTIONS
 
 
 def test_add_turn_merges_user_message_into_compacted_turn():
