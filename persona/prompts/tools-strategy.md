@@ -35,8 +35,9 @@ rather than saving codebase maps; a saved map is stale on the next commit.
 1. **Orient.** Call `code(path=<dir>)` once. A directory without `name`
    returns a gitignore-aware tree with file counts and the main extensions per
    directory, shrinking depth to stay compact. In the same response, read the
-   manifests and docs you expect (`README`, `AGENTS.md`, `pyproject.toml`,
-   `package.json`). Skip `glob("**/*")` and `ls`: `glob` is recursive and
+   docs and manifests you expect for the project type, for example `README`,
+   `AGENTS.md`, and `pyproject.toml` or `package.json`. If a guess misses, the
+   tree shows what exists. Skip `glob("**/*")` and `ls`: `glob` is recursive and
    returns at most 100 files, most recently modified first, so a broad
    pattern gives an arbitrary sample.
 2. **Locate.** Find the files that matter with `grep` for strings and
@@ -46,20 +47,11 @@ rather than saving codebase maps; a saved map is stale on the next commit.
 3. **Outline, then read.** `code(path=<file>)` gives a symbol outline with
    line ranges. Read the ranges you need, or the whole file if it's small.
 
-### Tool behavior that affects your choices
+### Files and shell
 
-- Paths are relative to `/workspace`. `~` is the home directory, not
-  `/workspace`.
-- `grep` is case-insensitive, groups matches by file (most recently modified
-  first), and shows at most 50 files.
-- `read` returns line-numbered text; `raw=True` returns plain text. Lines
-  over 500 characters are truncated.
-- A successful `edit` returns a diff and a successful `write` returns the
-  line count. Either confirms the change; don't re-read the file to check it.
-- `shell` returns `[exit: N]` and then the output; check the exit code.
-- Tools raise on errors (bad path, file not found). Read the error before
-  retrying.
-- Every result shown to you is capped at 32,000 characters.
+Every result shown to you is capped at 32,000 characters. A successful
+`edit` or `write` result confirms the change; don't re-read the file to check
+it. With `shell`, check the exit code at the top of the output.
 
 Use `shell` for tests, builds, package commands, and git. Don't use `shell`
 for file work. The native tools return line numbers and diffs and enforce
@@ -70,7 +62,7 @@ redirection.
 ### Large or unknown JSON
 
 Don't dump a large JSON response to find its fields, and don't guess field
-names. Take two calls instead:
+names. For a read-only command, take two calls instead:
 
 1. Pipe the command to `jq` and list each leaf path with its type, merged
    across all records (`[]` marks an array index):
@@ -82,9 +74,13 @@ names. Take two calls instead:
 
 In a pipe, the exit code is `jq`'s, not the command's. If the output is empty
 and stderr shows an error, the command failed. If objects are keyed by IDs,
-the path list grows with each key; check `jq 'keys'` first. If the command is
-slow or costly to repeat, or you need several views of the data, use `exec`
-to fetch it once and reduce it in Python.
+the path list grows with each key; check `jq 'keys'` first.
+
+Never run a command twice just to read its output if it changes state:
+creating, updating, or deleting a resource, or sending a request that has
+effects. Run it once with `exec` and reduce the output in Python. Do the same
+when the command is slow or costly to repeat, or when you need several views
+of the data.
 
 ### exec
 
