@@ -1,6 +1,6 @@
 # 075 — Usage insights: metrics index, `archie stats` and web dashboard
 
-Status: reviewing
+Status: done
 Branch: build-it/075-usage-insights (base: improve-tool-strategy @ b074cff)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/075-usage-insights
 
@@ -274,7 +274,20 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 
 ## Outcome
 
+`metrics.db` (schema v4) is now a metadata-only index of every session log. The orchestrator builds it by tailing the logs every 15 s, and each insights page and `archie stats` run syncs it first. Seven views are available two ways: `archie stats` (tables or `--json`, works without the orchestrator) and `/ui/insights` pages with filters, sortable tables and Chart.js charts. The proxy no longer inspects frames.
+
+Evidence:
+- Full suite: 2195 passed, only the 39 baseline failures; ruff check and format clean.
+- Real data copy (303 logs, 212 MB): cold sync 1.65 s, warm sync 0.007 s; `archie stats --since all` total cost equals the `session_accounting` sum exactly.
+- Browser (headless Chromium, real data copy and a synthetic demo set): every chart drew, no page errors, no CSP violations, light and dark themes checked.
+
+Not verified: the orchestrator running under `archie serve` with Docker (this container has no Docker; Docker lookups were patched to return no sessions for the browser checks), and the upgrade path on the user's live `~/.nexus/metrics.db` (tested on copies and on fixtures only).
+
 PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Agent self-analysis skill over the metrics index (deferred by the user; D3).
+- Time to first token per request: not recorded in `llm_request`, so latency views show only total duration.
+- `no_usage` requests (585 locally) look like a stream-accounting gap in the agent; worth investigating separately.
