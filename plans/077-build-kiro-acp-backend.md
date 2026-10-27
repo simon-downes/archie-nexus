@@ -29,7 +29,9 @@ spike artefacts in `/tmp/kiro-spike/`). User decisions recorded there:
 - `credits` is a new `llm_request` field and `cost_usd` is derived from it;
 - one generated `archie-worker` subagent; skills from enabled plugins only;
 - `contentCollection` must be `disabled` and verified on every new session;
-- `autopilot` on; local sessions only; no Kiro session resume (`~/.kiro` stays ephemeral);
+- `autopilot` on; local Kiro sessions only (no Kiro remote session sources or cloud sandbox;
+  this is unrelated to Archie's orchestrator profiles, which work with `--kiro` as with native);
+  no Kiro session resume (`~/.kiro` stays ephemeral);
 - ACP is a native Kiro interface, so the terms-of-use concern is resolved.
 
 Spike facts this plan relies on (verified 2026-10-27 unless marked):
@@ -112,20 +114,22 @@ Codebase facts:
 | D9  | Source of canonical tool events | the ACP stream (`tool_call` / `tool_call_update`); the MCP server only executes | MCP server emits events | ACP carries `toolCallId`, scope (`agentSubtaskId`) and the content the model actually saw; MCP calls can't be correlated to ACP IDs | self |
 | D10 | Kiro-internal tool calls | `tool_load` and "Subagent Response" are dropped from the canonical log; skill loads become `skill`; subagent dispatches become `task` with `{"tasks":[{"agent","prompt"}]}` | logging `tool_load`; new event kinds | existing TUI, viewer and metrics already understand `skill` and `task`; `tool_load` is Kiro overhead | self |
 | D11 | Subagent scope | child events use `scope` = the dispatch `toolCallId`, `subagent_index` 0; child terminal from the dispatch's final status | one scope per Kiro execution ID | matches the native contract (scope = launching tool call ID) | self |
-| D12 | Iterations and request IDs | per scope, a segment = one `iteration` with its own ULID `request_id`. A scope's first update opens iteration 0. Once a `tool_result` has been written in the current iteration, the scope's next text or tool call opens the next iteration (`iteration_start`, new `request_id`). `assistant_message` is flushed for the scope before its next tool call, before a new iteration, and at scope end. The turn's `llm_request` has its own ULID | one request ID per turn | the TUI drops `text_delta`s for a request key after its `assistant_message` (`tui/app.py` lines 437, 732), so text after a tool call needs a new key; segments mirror the native text-then-tools iteration shape | self |
-| D13 | Tool-call timestamps when `llm_request` comes last | metrics `_apply_request` (conversation purpose) backfills `tool_calls.timestamp` and `model_key` for rows of the same turn whose `timestamp IS NULL` | emit `llm_request` before tools; give `tool_call` a timestamp field | Kiro reports credits only at turn end and events are immutable; native rows always resolve at insert, so the backfill touches nothing for them | self |
+| D12 | Iterations and request IDs | per scope, a segment = one `iteration` with its own ULID `request_id`. A scope's first update opens iteration 0 with an `iteration_start`. Once a `tool_result` has been written in the current iteration, or a dropped internal call (D10) followed text, the scope's next text or tool call opens the next iteration (`iteration_start`, new `request_id`). `assistant_message` is flushed for the scope before its next tool call, before a new iteration, and at scope end. The turn's `llm_request` has its own ULID | one request ID per turn | the TUI drops `text_delta`s for a request key after its `assistant_message` (`tui/app.py` lines 437, 732), so text after a tool call needs a new key; segments mirror the native text-then-tools iteration shape | self |
+| D13 | Tool-call timestamps when `llm_request` comes last | metrics `_apply_request` (root, conversation purpose) backfills `tool_calls.timestamp` and `model_key` for every row of the same session and turn, any scope, whose `timestamp IS NULL` | emit `llm_request` before tools; give `tool_call` a timestamp field; match by `request_id` | Kiro tool calls carry segment request IDs (D12) that never equal the turn's `llm_request` id, so `_request_info` returns nothing; Kiro reports credits only at turn end and events are immutable; native rows resolve at insert, so the backfill touches nothing for them | self |
 | D14 | How Kiro events are built | `EventFactory(model: ModelEntry | None)` builds all events except `llm_request`; `request()` raises if `model` is None. The translator builds `LLMRequest` directly with credits and the precomputed cost | dummy `ModelEntry`; a cost override on `request()` | `request()` zeroes cost for non-completed status, but aborted Kiro turns are charged; a dummy entry would fake token rates | self |
 | D15 | Tool result size | MCP layer re-caps results at 29,000 characters with Archie's truncation marker; the Kiro prompt says 29,000 | keep 32,000 | Kiro replaces anything over 30,000 with a 500-char preview | self |
 | D16 | Monthly credit total for overage pricing | at harness start, sum `credits` from `llm_request` lines in `~/.nexus/sessions/*.jsonl` with mtime ≥ period start and `sent_at` ≥ period start; then keep a running total in memory | read `metrics.db`; a new state file | the session logs are the accounting source of truth (CONTRIBUTING); metrics.db is orchestrator-owned and lags 15 s | self |
-| D17 | Startup failure handling | any failed check (missing key, Kiro exit, step timeout, `config_error`, wrong mode, builtin tool tag other than `read`, `contentCollection` not `disabled`, `autopilot` not on, default model not offered, MCP not `connected`) writes the reason to `~/.nexus/logs/kiro/<session-id>.startup-error`, logs it, and exits the agent process (code 1). For `backend=kiro` the orchestrator appends that file's text to the "exited during startup" error, so `archie start --kiro` prints it | start degraded; fall back to native; reason only in container logs | fail closed: a silent fallback would run Kiro's built-in tools or collect content; the container runs with `--rm`, so its logs are gone | self |
+| D17 | Startup failure handling | any failed check (missing key, Kiro exit, step timeout, `config_error`, wrong mode, builtin tool tag other than `read`, `contentCollection` not `disabled`, `autopilot` not on, default model not offered, MCP not `connected`) writes the reason to `~/.nexus/logs/kiro/<session-id>.startup-error`, logs it, and exits the agent process (code 1). In `start_session`, a new `except DockerError` around `wait_for_ready` (for `backend=kiro`, both the exited and the timeout paths) stops the container as the `RuntimeError` branch does and re-raises a `DockerError` whose `stderr` appends the file's text when it exists, so `archie start --kiro` prints it | start degraded; fall back to native; reason only in container logs | fail closed: a silent fallback would run Kiro's built-in tools or collect content; the container runs with `--rm`, so its logs are gone | self |
 | D18 | Startup time budget | Kiro startup has a 30 s overall deadline; each step waits at most the remaining time. The orchestrator's `wait_for_ready` uses 45 s for `backend=kiro` (30 s otherwise); the CLI's 60 s POST timeout stays | 60 s per step | the spike's startup took under 3 s; 45 s leaves room for `uv sync` and the deadline, and stays under the CLI's 60 s | self |
 | D19 | What the agent's `lifespan` does on Kiro | loads config and the catalog; skips `get_model(global.model)`, the compaction-model check and `create_llm_client`; runs `startup_runner_state` and `run_startup_hooks` as today; builds `LiveToolPolicy` as today; `SessionStarted.model_key` = `kiro/<default_model>` | run the native checks too; skip plugin hooks | a bad `global.model` must not block a Kiro session; plugin hooks prepare state the Archie tools need | self |
-| D20 | Kiro dies mid-session | stdout EOF marks the harness dead; the active turn ends with `turn_error` "Kiro backend stopped: <exit code>"; later messages get `turn_error` "Kiro backend stopped; start a new session" | auto-restart | restart loses Kiro's conversation state anyway; no resume (user) | self |
-| D21 | `/compact` on Kiro | live `error_notice` kind `unsupported`, message "Kiro compacts automatically; /compact is not available" | `_kiro/session/compact` | untested method; Kiro auto-compacts at 80 % | self |
+| D20 | Kiro dies mid-session | stdout EOF marks the harness dead; the active turn ends with a persisted `turn_error` "Kiro backend stopped: <exit code>"; later messages write no `user_message` and get a live `error_notice` kind `turn_error` "Kiro backend stopped; start a new session" (the TUI ends its turn on that kind) | auto-restart | restart loses Kiro's conversation state anyway; no resume (user) | self |
+| D21 | `/compact` on Kiro | `KiroHarness.run_manual_compaction()` releases its turn flag (taken by `try_begin_turn`) and emits a live `error_notice` kind `manual_compaction_failed`, message "Kiro compacts automatically; /compact is not available" (a kind the TUI already ends the turn on) | `_kiro/session/compact` | untested method; Kiro auto-compacts at 80 % | self |
 | D22 | Interrupt targeting one subagent | cancels the whole turn (`session/cancel`) and kills every running MCP tool process | ignore | Kiro has no per-subagent cancel; the user pressed stop | self |
 | D23 | Permission requests | answer `session/request_permission` with outcome `cancelled` and log a warning naming the tool | auto-allow | the rules should prevent prompts; anything else is unexpected and must not be granted | self |
 | D24 | Raw ACP frame log | `~/.nexus/logs/kiro/<session-id>.acp.jsonl`, `{t, dir, msg}` per frame, both directions | none | the spike's main debugging tool; same sensitivity as the session log in the same home | self |
 | D25 | TUI for Kiro sessions | status bar shows `<kiro id> (Kiro)`; model palette lists `kiro/<id>` for the CLI host config's `kiro.models` when the session model key starts with `kiro/`, catalog models otherwise. With a remote profile whose config differs, the agent rejects unknown keys with `error_notice unknown_model` | a new wire event listing models | no protocol change; the CLI already reads `config.yaml` | self |
+| D27 | Encoding `credits` | `LLMRequest.credits` is omitted from the encoding when `None` (`omit_defaults=True` on `LLMRequest`), so native request lines are byte-identical to today | always encode `"credits": null` | older CLIs decode with unknown fields forbidden and would drop every native `llm_request`; omitting keeps that hazard to Kiro lines only | self |
+| D28 | Unmapped Kiro tool calls | a `tool_call` that is not `@archie/*`, a skill load, a subagent dispatch, `tool_load` or "Subagent Response" is logged canonically under `name` = `_meta.kiro.toolId` or the title, input = `rawInput`, plus a warning in the agent log | drop it; fail the session | the user should see every action the model took; the startup tag check already blocks real built-ins | self |
 | D26 | Tool result images | translator decodes each `rawOutput.imageBase64Urls` data URL: format from the MIME type, `bytes` = decoded length, width/height from Pillow, `source` "" | no image metadata | Pillow is already an agent dependency; the TUI and viewer show image metadata | self |
 
 ## Requirements
@@ -197,8 +201,8 @@ Event mapping
   `turn_complete(stop_reason)`, `turn_interrupted` for `cancelled`, or `turn_error` for a
   JSON-RPC error / Kiro exit.
   - AC: translator tests on frames copied from the spike runs, fed with explicit receive
-    times: text → tool → text yields iterations 0 and 1 with distinct `request_id`s, and
-    iteration 0's `assistant_message` precedes its `tool_call`.
+    times: text → tool → text yields `iteration_start` 0 and 1 with distinct `request_id`s,
+    and iteration 0's `assistant_message` precedes its `tool_call`.
   - AC: TUI test (`tests/test_tui_canonical.py`): the translated events stream both text
     segments live.
 - MUST map skill loads to `tool_call name "skill" input {"name"}` and subagents to
@@ -207,17 +211,22 @@ Event mapping
   parent `tool_result` with the child's answer.
   - AC: translator test on the spike's run2 subagent frames.
 - MUST drop `tool_load` and "Subagent Response" tool calls.
-  - AC: translator test: those updates produce no events and later events are unaffected.
+  - AC: translator test on run1 frames (`text | tool_load | text | @archie/shell`): no event
+    for `tool_load`; the two texts land in iterations 0 and 1.
+- MUST log unmapped Kiro tool calls per D28.
+  - AC: translator test: a `tool_call` with `_meta.kiro.toolId` "web_search" yields
+    `tool_call name web_search` and its `tool_result`.
 - MUST let metrics give Kiro tool calls the turn's request timestamp and model key (D13).
   - AC: `tests/test_orchestrator_metrics.py`: fold `tool_call` then `llm_request` of the
     same turn; the `tool_calls` row has the request's `sent_at` and `model_key`. A native
     sequence (request first) is unchanged.
 
 Accounting
-- MUST add optional `credits: float | None = None` to `llm_request` (native requests
-  `null`), documented in `docs/event-spec.md` with the older-client note; older logs without
-  the field still decode.
-  - AC: decode test for an old line; round-trip with credits.
+- MUST add optional `credits: float | None = None` to `llm_request`, omitted from the
+  encoding when `None` (D27), documented in `docs/event-spec.md` with the older-client note;
+  older logs without the field still decode.
+  - AC: decode test for an old line; round-trip with credits; a native request encodes with
+    no `credits` key.
 - MUST record per turn `credits` = sum of `promptTurnSummaries[].usage` with unit `credit`,
   `cost_usd` = credits priced at `rate_usd` until the period's cumulative credits reach
   `included`, `overage_rate_usd` beyond (split when a turn crosses), status `completed` for
@@ -240,13 +249,15 @@ Session control
   `1 ≤ resets_on ≤ 31`, rates ≥ 0.
   - AC: config tests for each invalid case.
 - MUST answer `/compact` on Kiro with D21's `error_notice` and start no turn.
-  - AC: app test: `/compact` on a Kiro harness yields `error_notice` kind `unsupported`.
+  - AC: app test: `/compact` on a Kiro harness yields `error_notice` kind
+    `manual_compaction_failed`, writes no `user_message`, and `turn_active` is false after.
 - MUST answer `session/request_permission` with outcome `cancelled` and a warning (D23).
   - AC: fake sends a permission request mid-turn; its recorded response has outcome
     `cancelled`; the warning names the tool.
 - MUST handle Kiro death per D20.
-  - AC: fake exits mid-turn → `turn_error` containing "Kiro backend stopped"; the next
-    message → `turn_error` "Kiro backend stopped; start a new session".
+  - AC: fake exits mid-turn → persisted `turn_error` containing "Kiro backend stopped"; the
+    next message → live `error_notice` kind `turn_error` with "start a new session", no new
+    persisted event, and `turn_active` false.
 - MUST log raw ACP frames per D24, filter the SQLite `ExperimentalWarning` from stderr and
   log other stderr lines at warning level.
   - AC: fake-Kiro test: the frame log has an `out` `initialize` and an `in` `session/new`
@@ -403,7 +414,9 @@ dead, Kiro killed, active turn `turn_error`.
 
 - **Approach:** `kiro/acp.py`, `kiro/agent_files.py` (without skills), `kiro/mcp_server.py`,
   `kiro/translate.py` (segments, Archie tools, terminal, `llm_request`), `kiro/harness.py`
-  with the happy-path startup sequence (no D17 checks yet beyond "Kiro exited"); `prompt.py`
+  with the startup sequence including the telemetry merge and the three
+  `set_config_option` calls (so the live smoke never runs with content collection on), but
+  without the D17 verification checks beyond "Kiro exited"; `prompt.py`
   Kiro builders and `kiro.md`; `truncate_result` limit; `app.py` selects `KiroHarness` on
   `ARCHIE_BACKEND=kiro` per D19 and closes it on shutdown; frame log and stderr filter.
   Tests use `tests/fake_kiro.py`, a scripted ACP agent run with `sys.executable` whose
@@ -432,7 +445,7 @@ dead, Kiro killed, active turn `turn_error`.
 ### [ ] M3 — startup checks and failure reporting
 
 - **Approach:** in `KiroHarness.start()`: the D17 checks, the D18 deadline, the
-  startup-error file; `app.py` exits 1 on `KiroStartupError`. Telemetry settings merge.
+  startup-error file; `app.py` exits 1 on `KiroStartupError`.
 - **Test seam:** `KiroHarness.start()` with fake scenarios, one per D17 condition.
 - **Deliverable:** every misconfiguration stops the session with a named reason on disk.
 - **Verify:** `uv run pytest -q tests/test_kiro_harness.py -k startup` passes; live: with
@@ -497,8 +510,8 @@ dead, Kiro killed, active turn `turn_error`.
 - Concurrent Kiro sessions don't see each other's credits until restart, so overage pricing
   can lag by the other session's usage.
 - Kiro or its service changes (preview models withdrawn, new tool tags) fail startup closed.
-- Adding `credits` to every `llm_request` makes older CLIs drop new request lines
-  (`forbid_unknown_fields`); documented, update the CLI with the agent.
+- Kiro `llm_request` lines carry `credits`, so older CLIs drop them (`forbid_unknown_fields`);
+  native lines are unchanged (D27). Documented: update the CLI with the agent.
 - Live smoke runs overwrite `~/.kiro/agents/archie*.json` in this dev container.
 
 ## Review
@@ -528,6 +541,14 @@ dead, Kiro killed, active turn `turn_error`.
     ℹ️ new test file marked → Code structure lists new tests. ℹ️ translator purity → `feed`
     takes receive time. ℹ️ images → D26. ℹ️ `sent_at` → D2. ℹ️ older-client note → Accounting
     requirement and Risks. ℹ️ 32,000 vs 29,000 prompt text → prompt requirement and AC.
+
+- Plan review pass 2: 1 ❌, 6 ⚠️, 3 ℹ️, all accepted. ❌ `/compact` notice kind left the TUI
+  stuck → D21 uses `manual_compaction_failed` and releases the turn flag. ⚠️ DockerError not
+  caught → D17 names the handler. ⚠️ `credits: null` on native lines → D27 omits it. ⚠️ remote
+  profiles → Context clarifies "local" means Kiro sessions, not Archie profiles. ⚠️ M2 smoke
+  without content-collection off → M2 does the settings calls. ⚠️ unmapped tool calls → D28.
+  ⚠️ D20 event type → live `error_notice`. ℹ️ D13 reason, iteration 0 `iteration_start`, and
+  `tool_load` segment split → D13, D12 and ACs updated. Two passes done; no review left.
 
 ## Outcome
 
