@@ -33,9 +33,7 @@ def _session_model(
         provider=BedrockProvider(model_id="session"),
         can_cache=cache_ttl is not None,
         cache_ttl_seconds=cache_ttl,
-        cost=CostConfig(
-            rates=[Rate(input=5, output=25, cache_read=0.5, cache_write=cache_write)]
-        ),
+        cost=CostConfig(rates=[Rate(input=5, output=25, cache_read=0.5, cache_write=cache_write)]),
         max_output_tokens=1000,
     )
 
@@ -192,6 +190,57 @@ async def test_cost_saved_prices_avoided_cache_write(tmp_path, cache_write, pric
     removed = complete.tokens_before - complete.tokens_after
     assert removed > 0
     assert complete.cost_saved_usd == pytest.approx(removed * price / 1e6)
+
+
+async def test_compaction_records_loaded_skills(tmp_path):
+    harness, _, _ = _harness(tmp_path, [], [_summary()])
+    harness.session.add_turn("user", "hello")
+    harness._loaded_content_keys.update(
+        {
+            ("workflow-plan", "__body__"),
+            ("build-it", "__body__"),
+            ("build-it", "references/PLAN-FORMAT.md"),
+            ("research", "references/only.md"),
+        }
+    )
+
+    await harness.run_manual_compaction()
+
+    complete = _of(_events(harness), CompactionComplete)[0]
+    assert complete.status == "success"
+    assert complete.skills_loaded == ["build-it", "workflow-plan"]
+
+
+async def test_failed_compaction_records_loaded_skills(tmp_path):
+    class FailingClient:
+        model_id = "failing"
+
+        def stream(self, messages, system, tool_config=None, history_boundary=None):
+            yield Usage(10, 0)
+            raise RuntimeError("expired")
+
+    harness, _, _ = _harness(tmp_path, [])
+    harness._compaction_llm = FailingClient()
+    harness.session.add_turn("user", "hello")
+    harness._loaded_content_keys.add(("build-it", "__body__"))
+
+    await harness.run_manual_compaction()
+
+    complete = _of(_events(harness), CompactionComplete)[0]
+    assert complete.status == "failure"
+    assert complete.skills_loaded == ["build-it"]
+    assert harness._loaded_content_keys == {("build-it", "__body__")}
+
+
+def test_compaction_complete_without_skills_loaded_decodes():
+    line = (
+        b'{"type":"compaction_complete","id":"01J","turn":1,"iteration":0,"scope":null,'
+        b'"request_id":"r","reason":"manual","status":"success","tokens_before":10,'
+        b'"tokens_after":2,"cost_saved_usd":0.0,"duration_ms":1,"error":null,"summary":"s"}'
+    )
+    event = decode_event(line, persisted=True)
+    assert isinstance(event, CompactionComplete)
+    assert event.skills_loaded == []
 
 
 async def test_manual_empty_transcript_does_not_call_provider(tmp_path):

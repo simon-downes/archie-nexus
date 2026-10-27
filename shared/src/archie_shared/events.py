@@ -112,6 +112,7 @@ class CompactionComplete(
     debug: str = ""
     subagent_index: int | None = None
     estimated_next_request_cost_usd: float | None = None
+    skills_loaded: list[str] = []
 
 
 class ContextCompacted(

@@ -158,7 +158,7 @@ summary dropped. The session log
 remains append-only: `compaction_start` is persisted before the compaction `llm_request`, followed by
 `compaction_complete`. New compactions emit only this pair; clients still decode and render historical
 `context_compacted` records. The completion carries the status, error or summary, token estimates,
-display cost, and duration. Compaction failures are reported through the failed completion, not a
+display cost, duration, and `skills_loaded` (the skills whose content a successful compaction drops). Compaction failures are reported through the failed completion, not a
 separate `error_notice`. Compaction
 requests use `purpose=compaction`, are priced at the configured compaction model, and contribute to
 session totals without changing the active conversation context display.

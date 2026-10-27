@@ -1,6 +1,6 @@
 # 076 — Compaction state recovery
 
-Status: building
+Status: reviewing
 Branch: build-it/076-compaction-state-recovery (base: main @ 53923ce)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/076-compaction-state-recovery
 
@@ -181,7 +181,7 @@ event field.
 - **Verify:** `uv run pytest tests/test_compaction_harness.py -q` passes; `rg "cache write" docs/event-spec.md` matches.
 - **Outcome:** `_compact` prices the saving at `cache_write or input`. `test_cost_saved_prices_avoided_cache_write[6.25-6.25]` failed against the old formula and passes now; `[0.0-5]` covers the input fallback. `tests/test_compaction_harness.py`: 40 passed. `docs/event-spec.md` states the cold-cache assumption.
 
-### [ ] M4 — compaction_complete records skills_loaded
+### [x] M4 — compaction_complete records skills_loaded
 
 - **Approach:** Compute
   `skills_loaded = sorted({name for name, key in self._loaded_content_keys if key == BODY_KEY})`
@@ -194,7 +194,7 @@ event field.
 - **Edge cases:** reference loaded without its body → not listed; no skills → `[]`.
 - **Deliverable:** `compaction_complete` reports the loaded skills.
 - **Verify:** the full check commands pass, with no new failures; `rg skills_loaded docs/event-spec.md docs/architecture.md` matches both.
-- **Outcome:**
+- **Outcome:** `CompactionComplete.skills_loaded: list[str] = []`, computed from body keys before the compactor runs and set on both completions. New tests: `test_compaction_records_loaded_skills`, `test_failed_compaction_records_loaded_skills`, `test_compaction_complete_without_skills_loaded_decodes`. Full suite: 2154 passed (baseline 2143 + 11 new); `ruff check` and `ruff format --check` pass; `rg skills_loaded` matches both docs.
 
 ## Deviations
 
