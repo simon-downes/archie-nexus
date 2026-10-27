@@ -82,6 +82,22 @@ def test_delegation_guidance_is_root_only():
     assert "`task`" not in child
 
 
+def test_coding_standards_follow_tools_in_root_and_child():
+    """Root and child prompts both carry the coding standards, after the tools section."""
+    root = build_system_prompt("test-model")
+    child = build_subagent_prompt("test-model", "You are a reviewer.").flatten()
+    for prompt in (root, child):
+        assert prompt.index("### Guidelines") < prompt.index("## Coding standards")
+        assert prompt.index("## Coding standards") < prompt.index("## Brain")
+
+
+def test_git_guidance_in_tools_section():
+    """Git conventions live in the tools strategy, shared by root and child prompts."""
+    tools = _build_tools(delegation=False)
+    assert "### Git" in tools
+    assert "--force-with-lease" in tools
+
+
 def test_build_environment_contains_workspace_without_model():
     """Environment section includes workspace but not the active model."""
     env = _build_environment("test-model-v1", "/workspace")
