@@ -217,8 +217,8 @@ event field.
 
 Delivered recommendations 1, 2 and 6: the 12-section compaction prompt, the session-log pointer in every replacement turn, cache-write `cost_saved_usd`, and `skills_loaded`. Evidence: the full suite passes (2154 passed, baseline 2143); `ruff check` and `ruff format --check` pass; the new cost test failed against the old formula. Not verified: summary quality from the real compaction model with the new prompt, and whether agents use the log pointer. Both need live sessions.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/15
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
