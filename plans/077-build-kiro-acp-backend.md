@@ -1,6 +1,6 @@
 # 077 — Kiro ACP backend
 
-Status: planning
+Status: building
 Branch: build-it/077-kiro-acp-backend (base: main @ 4ee641d)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/077-kiro-acp-backend
 
@@ -128,7 +128,7 @@ Codebase facts:
 | D23 | Permission requests | answer `session/request_permission` with outcome `cancelled` and log a warning naming the tool | auto-allow | the rules should prevent prompts; anything else is unexpected and must not be granted | self |
 | D24 | Raw ACP frame log | `~/.nexus/logs/kiro/<session-id>.acp.jsonl`, `{t, dir, msg}` per frame, both directions | none | the spike's main debugging tool; same sensitivity as the session log in the same home | self |
 | D25 | TUI for Kiro sessions | status bar shows `<kiro id> (Kiro)`; model palette lists `kiro/<id>` for the CLI host config's `kiro.models` when the session model key starts with `kiro/`, catalog models otherwise. With a remote profile whose config differs, the agent rejects unknown keys with `error_notice unknown_model` | a new wire event listing models | no protocol change; the CLI already reads `config.yaml` | self |
-| D27 | Encoding `credits` | `LLMRequest.credits` is omitted from the encoding when `None` (`omit_defaults=True` on `LLMRequest`), so native request lines are byte-identical to today | always encode `"credits": null` | older CLIs decode with unknown fields forbidden and would drop every native `llm_request`; omitting keeps that hazard to Kiro lines only | self |
+| D27 | Encoding `credits` | `LLMRequest.credits` is omitted from the encoding when `None` (`credits: float | msgspec.UnsetType = msgspec.UNSET`; `omit_defaults` would also drop native `stop_reason`/`error` nulls), so native request lines are byte-identical to today | always encode `"credits": null` | older CLIs decode with unknown fields forbidden and would drop every native `llm_request`; omitting keeps that hazard to Kiro lines only | self |
 | D28 | Unmapped Kiro tool calls | a `tool_call` that is not `@archie/*`, a skill load, a subagent dispatch, `tool_load` or "Subagent Response" is logged canonically under `name` = `_meta.kiro.toolId` or the title, input = `rawInput`, plus a warning in the agent log | drop it; fail the session | the user should see every action the model took; the startup tag check already blocks real built-ins | self |
 | D26 | Tool result images | translator decodes each `rawOutput.imageBase64Urls` data URL: format from the MIME type, `bytes` = decoded length, width/height from Pillow, `source` "" | no image metadata | Pillow is already an agent dependency; the TUI and viewer show image metadata | self |
 
@@ -222,8 +222,8 @@ Event mapping
     sequence (request first) is unchanged.
 
 Accounting
-- MUST add optional `credits: float | None = None` to `llm_request`, omitted from the
-  encoding when `None` (D27), documented in `docs/event-spec.md` with the older-client note;
+- MUST add optional `credits: float` to `llm_request`, absent (`UNSET`) for native requests and
+  omitted from the encoding (D27), documented in `docs/event-spec.md` with the older-client note;
   older logs without the field still decode.
   - AC: decode test for an old line; round-trip with credits; a native request encodes with
     no `credits` key.
@@ -351,7 +351,7 @@ kiro:
     overage_rate_usd: 0.04              # float ≥ 0
 ```
 
-These values are the defaults. `LLMRequest.credits: float | None = None`. Period start =
+These values are the defaults. `LLMRequest.credits: float | UnsetType = UNSET`. Period start =
 the latest `resets_on` day (clamped to the month's length) at 00:00 UTC that is ≤ now.
 Files under `~/.nexus/logs/kiro/`: `<session-id>.acp.jsonl` (appended for the session's
 life) and `<session-id>.startup-error` (written only on startup failure); neither is
