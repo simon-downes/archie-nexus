@@ -110,6 +110,40 @@ def _sync_index():
     return index
 
 
+def _open_index():
+    """Sync the index and open it for reading."""
+    import sqlite3
+
+    from archie_orchestrator.metrics import connect
+
+    index = _sync_index()
+    try:
+        return connect(index.db_path)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Metrics index unavailable: {exc}") from None
+
+
+def _group_options(keys: tuple[str, ...]) -> dict:
+    """Options given explicitly on ``archie stats`` itself, for a subcommand left at defaults.
+
+    ``archie stats --since 7d tools`` applies ``--since 7d`` to ``tools``; an option
+    given on the subcommand wins.
+    """
+    ctx = click.get_current_context()
+    parent = ctx.parent
+    if parent is None or parent.command is not stats:
+        return {}
+    result = {}
+    for key in keys:
+        parent_source = parent.get_parameter_source(key)
+        own_source = ctx.get_parameter_source(key)
+        explicit_parent = parent_source not in (None, click.core.ParameterSource.DEFAULT)
+        own_default = own_source in (None, click.core.ParameterSource.DEFAULT)
+        if explicit_parent and own_default:
+            result[key] = parent.params[key]
+    return result
+
+
 def _filter_options(func: Callable) -> Callable:
     options = [
         click.option(
@@ -142,16 +176,17 @@ def _run(view: Callable[..., dict], render: Callable[[dict, Console], None], fil
         @wraps(body)
         def command(as_json: bool = False, **kwargs):
             from archie_orchestrator import insights
-            from archie_orchestrator.metrics import connect
 
             filter_keys = ("since", "until", "workspace", "model", "scope")
+            inherited = _group_options(("as_json", *filter_keys))
+            as_json = inherited.pop("as_json", as_json)
+            kwargs.update({k: v for k, v in inherited.items() if k in kwargs})
             raw = {k: kwargs.pop(k) for k in filter_keys if k in kwargs}
             try:
                 filters = insights.parse_filters(**raw) if filtered else None
             except insights.InsightsError as exc:
                 raise click.BadParameter(str(exc)) from None
-            index = _sync_index()
-            conn = connect(index.db_path)
+            conn = _open_index()
             try:
                 extra = body(**kwargs) or {}
                 args = (conn, filters) if filtered else (conn,)
@@ -186,7 +221,7 @@ def _filters_line(data: dict) -> str:
             parts.append(f"{key} {f[key]}")
     if f.get("scope", "all") != "all":
         parts.append(f"scope {f['scope']}")
-    return "[dim]" + ", ".join(parts) + "[/]"
+    return "[dim]" + escape(", ".join(parts)) + "[/]"
 
 
 def render_overview(data: dict, console: Console) -> None:
@@ -276,9 +311,9 @@ def render_sessions(data: dict, console: Console) -> None:
 
 def render_session(data: dict, console: Console) -> None:
     s = data["session"]
-    console.print(f"[bold]{s['session_id']}[/]  {s['title'] or ''}")
+    console.print(f"[bold]{escape(s['session_id'])}[/]  {escape(s['title'] or '')}")
     console.print(
-        f"[dim]started {s['started_at'] or '—'} · {_num(s['turns'])} turns · "
+        f"[dim]started {escape(s['started_at'] or '—')} · {_num(s['turns'])} turns · "
         f"{_num(s['requests'])} requests · {_money(s['cost'])} · cache hit "
         f"{_pct(s['cache_hit_pct'])} · {_duration(s['duration_s'])}[/]"
     )
@@ -525,10 +560,9 @@ def sessions_cmd(sort: str, limit: int):
 def session_cmd(session_id: str, as_json: bool):
     """Turns, tools and subagents for one session."""
     from archie_orchestrator import insights
-    from archie_orchestrator.metrics import connect
 
-    index = _sync_index()
-    conn = connect(index.db_path)
+    as_json = _group_options(("as_json",)).get("as_json", as_json)
+    conn = _open_index()
     try:
         data = insights.session_detail(conn, session_id)
     except KeyError:

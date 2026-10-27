@@ -222,3 +222,26 @@ def test_templates_have_no_inline_script_or_style():
         assert "style=" not in text, path.name
         for tag in re.findall(r"<script[^>]*>", text):
             assert 'type="application/json"' in tag or "src=" in tag, (path.name, tag)
+
+
+@pytest.mark.asyncio
+async def test_sync_failure_shows_notice_and_renders(home, monkeypatch):
+    MetricsIndex(home / "metrics.db", home / "sessions").sync()
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(MetricsIndex, "sync", boom)
+    resp = await _get("/ui/insights?since=all")
+    assert resp.status_code == 200
+    assert "Index sync failed: disk on fire" in resp.text
+    assert "$1.85" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_unindexed_session_while_updating_is_200_with_notice(home):
+    index = MetricsIndex(home / "metrics.db", home / "sessions")
+    with index._locked(wait=True):
+        resp = await _get(f"/ui/insights/sessions/{SID}")
+    assert resp.status_code == 200
+    assert "Index is updating" in resp.text

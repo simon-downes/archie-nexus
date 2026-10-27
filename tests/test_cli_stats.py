@@ -111,3 +111,56 @@ def test_stats_session_json(home):
 def test_stats_bad_sort_rejected(home):
     result = _invoke("sessions", "--sort", "nope")
     assert result.exit_code == 2
+
+
+def test_group_options_apply_to_subcommand(home):
+    result = _invoke("--since", "all", "--json", "tools")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["filters"]["since"] is None
+
+
+def test_subcommand_option_wins_over_group(home):
+    result = _invoke(
+        "--workspace", "nope", "models", "--workspace", "proj", "--json", "--since", "all"
+    )
+    assert json.loads(result.output)["filters"]["workspace"] == "proj"
+
+
+def test_session_title_with_markup_prints_literally(session_logs, tmp_path):
+    w = session_logs
+    w.write("mk-01k0000000", [w.user("fix [/] and [exit: 2] now"), w.llm()])
+    result = _invoke("session", "mk-01k0000000")
+    assert result.exit_code == 0, result.output
+    assert "fix [/] and [exit: 2] now" in result.output
+
+
+def test_filter_values_with_markup_print_literally(home):
+    result = _invoke("--since", "all", "--workspace", "[/]")
+    assert result.exit_code == 0, result.output
+    assert "workspace [/]" in result.output
+
+
+def test_waits_for_lock_with_notice(home, monkeypatch):
+    import threading
+
+    from archie_cli import stats as stats_module
+    from archie_orchestrator.metrics import MetricsIndex
+
+    monkeypatch.setattr(stats_module, "_WAIT_NOTICE_AFTER", 0.05)
+    index = MetricsIndex(home / "metrics.db", home / "sessions")
+    release = threading.Event()
+
+    def hold():
+        with index._locked(wait=True):
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    threading.Timer(0.3, release.set).start()
+    try:
+        result = _invoke("--since", "all", "--json")
+    finally:
+        release.set()
+        holder.join()
+    assert result.exit_code == 0
+    assert "Waiting for index sync" in result.stderr

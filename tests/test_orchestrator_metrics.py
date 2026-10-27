@@ -494,3 +494,29 @@ async def test_background_loop_indexes_appended_requests(session_logs, tmp_path,
         with pytest.raises(asyncio.CancelledError):
             await task
     assert _count(tmp_path, "requests") == 2
+
+
+def test_integrity_error_skips_only_that_file(session_logs, tmp_path, monkeypatch):
+    w = session_logs
+    w.write("a-01k0000000", [w.llm(cost_usd=0.01)])
+    w.write("b-01k0000000", [w.llm(cost_usd=0.02)])
+    real = MetricsIndex._sync_file
+
+    def flaky(self, conn, path, stats):
+        if path.stem == "a-01k0000000":
+            raise sqlite3.IntegrityError("NOT NULL constraint failed")
+        return real(self, conn, path, stats)
+
+    monkeypatch.setattr(MetricsIndex, "_sync_file", flaky)
+    stats = _index(tmp_path).sync()
+    assert stats.errors == 1
+    assert [r["session_id"] for r in _rows(tmp_path, "SELECT session_id FROM requests")] == [
+        "b-01k0000000"
+    ]
+    assert _rows(tmp_path, "SELECT error FROM ingest_files WHERE session_id = 'a-01k0000000'")
+
+
+def test_reader_connect_does_not_recreate_missing_db(tmp_path):
+    with pytest.raises(sqlite3.OperationalError):
+        metrics.connect(tmp_path / "metrics.db")
+    assert not (tmp_path / "metrics.db").exists()

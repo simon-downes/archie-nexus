@@ -676,9 +676,9 @@ TUI text frames   → agent
 agent frames      → TUI
 ```
 
-On the agent-to-TUI path, it performs a cheap marker check for accounting events. A live
-`llm_request` frame is copied into a bounded metrics queue while the original frame continues to the
-TUI. Metrics ingestion is best-effort: a metrics failure must not delay or break the session relay.
+On the agent-to-TUI path, it forwards frames without inspecting them. The SQLite metrics index is
+built separately, by tailing the session logs (see [Architecture](architecture.md#orchestrator-metrics)),
+so requests made while no client is attached are still indexed.
 
 The SQLite metrics database is an index for aggregate queries. It is not the canonical event store.
 The JSONL session log remains authoritative.

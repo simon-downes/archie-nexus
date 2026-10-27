@@ -198,7 +198,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 ### Data flow and error handling
 
 - **Sync:** acquire `metrics.db.lock` (D8, D30) → ensure schema (archive non-v4) → list `*.jsonl` in the sessions dir, or use the explicit path list from `reset_and_backfill` → per file: stat; skip if unchanged; `BEGIN IMMEDIATE`; read `ingest_files`; rewrite check (D9) → delete the session's rows in every table; read bytes from `offset` to the last `\n`; decode each line with `decode_event(..., persisted=True)`; fold; update `ingest_files`; `COMMIT`.
-- Invalid line → count in `invalid_lines`, log at debug, continue. Undecodable bytes / `OSError` → set `ingest_files.error`, log a warning, roll back that file, continue with the next. `sqlite3.Error` → log a warning, abandon this sync (the next one retries). In strict mode (`reset_and_backfill`), file and SQLite errors raise instead; invalid lines are still counted, not raised, and conflicting duplicates are still logged per D28.
+- Invalid line (including non-UTF-8 bytes, which `decode_event` rejects) → count in `invalid_lines`, continue. `OSError` or a non-operational `sqlite3.Error` (e.g. `IntegrityError`) for one file → roll back that file, set `ingest_files.error`, log a warning, continue with the next. `sqlite3.OperationalError` (locked, I/O) → log a warning, abandon this sync (the next one retries). Readers open the DB without create (`mode=rw`), so a DB archived mid-request is not recreated empty. (revised, code review) In strict mode (`reset_and_backfill`), file and SQLite errors raise instead; invalid lines are still counted, not raised, and conflicting duplicates are still logged per D28.
 - Duplicate event IDs: D28.
 - `task` call whose input has no `tasks` list (or JSON-string list) → no `subagents` rows; children's requests still count under their scope.
 - **Query:** web handler → `asyncio.to_thread(sync)` → parse filters (notices for invalid) → `asyncio.to_thread(query)` → render. A sync failure on a page request is logged and the page renders from the existing index with a notice "Index sync failed: <reason>".
@@ -247,6 +247,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 ## Deviations
 
 - M1: the fold code for every event type and all seven query functions and CLI subcommands landed in M1 instead of M2; M2 now adds their tests, rendering fixes and any corrections. No scope change.
+- Review: `archie stats` group-level options (`archie stats --since all tools`) now apply to the subcommand unless the subcommand sets them; previously they were silently dropped. R19 behaviour clarified, no scope change.
 - M3: the filter bar gained a `from` date input that overrides the `since` preset (a `<select>` can't take a custom date). D15 unchanged otherwise.
 - M3: daily series (overview cost, errors) are zero-filled across the whole day span instead of listing only days with data, so line and bar charts don't hide quiet days. R12's AC revised.
 
@@ -259,6 +260,17 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 ## Review
 
 - Plan review: 1 pass; 3 ❌, 9 ⚠️, 7 ℹ️. All accepted. R9 now names the carried-over behaviours and a strict `reset_and_backfill`; R7/D7 allow the title explicitly; strict mode added to the error design; M1 Verify compares against `session_accounting` sums; D16 defines date filtering for turns/compactions/sessions; D26–D30 added (status vocabulary, zero durations, duplicates, subagent outcomes, lock and page-during-sync); `subagents` gains status/error; missing `tasks` handled; sync takes explicit paths; stale counts in D12/D13/Context updated; R10 and M3 Verify name commands. Second pass: blockers confirmed resolved; 4 ⚠️, 3 ℹ️ accepted (migrate test file named, R10 timed in-process, WAL files moved on archive, empty state when schema not v4, lock held across `reset_and_backfill`, strict-mode line handling, D25 reordered).
+- Code review: roles `general` and `risk` (risk ran because the diff builds SQL, renders untrusted log text in HTML and a terminal, and changes a CLI interface and a per-request code path). One round.
+  - Fixed ⚠️ (general) group-level `archie stats` options were ignored when a subcommand followed; now inherited unless the subcommand sets them (`test_group_options_apply_to_subcommand`, `test_subcommand_option_wins_over_group`).
+  - Fixed ⚠️ (risk) the session title and filter values were printed as Rich markup; `[/]` crashed `stats session` and `[exit: 2]` vanished. Now escaped (`test_session_title_with_markup_prints_literally`, `test_filter_values_with_markup_print_literally`).
+  - Fixed ℹ️ stale metrics-queue text in `docs/session-protocol-walkthrough.md`.
+  - Fixed ℹ️ added tests for the "Index sync failed" page notice and the CLI "Waiting for index sync…" notice.
+  - Fixed ℹ️ dead `UnicodeDecodeError` branch removed; plan error text now states that non-UTF-8 lines count as invalid.
+  - Fixed ℹ️ (risk) readers no longer recreate an archived DB: `connect()` opens with `mode=rw`; pages show "Index is updating" and the CLI exits 1 with "Metrics index unavailable" (`test_reader_connect_does_not_recreate_missing_db`).
+  - Answered ❓ (risk) a per-file `sqlite3.Error` no longer stops the whole sync: only `OperationalError` aborts; other errors skip and record that file (`test_integrity_error_skips_only_that_file`).
+  - Answered ❓ (general) an unindexed session ID while the index is updating renders 200 with the notice instead of 404, on purpose: the session may appear when the sync finishes (`test_unindexed_session_while_updating_is_200_with_notice`).
+  - Spec check: every MUST traced to code and a passing test; R10 and R23's drawing traced to the recorded measurements and the browser check.
+- Merge risk: Medium: the first sync after upgrade archives the v3 `metrics.db` and rebuilds it from the logs (1.7 s on 212 MB here); a fold bug would show wrong numbers in a derived, rebuildable index, and the logs stay untouched.
 
 ## Outcome
 

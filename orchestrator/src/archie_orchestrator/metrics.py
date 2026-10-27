@@ -129,9 +129,14 @@ class SyncStats:
     reset: int = 0
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    """Open the index with WAL, a busy timeout and ``sqlite3.Row`` rows."""
-    conn = sqlite3.connect(str(db_path), timeout=5.0, check_same_thread=False)
+def connect(db_path: Path, *, create: bool = False) -> sqlite3.Connection:
+    """Open the index with WAL, a busy timeout and ``sqlite3.Row`` rows.
+
+    Readers pass ``create=False`` (the default), so a database archived since the
+    last sync raises ``sqlite3.OperationalError`` instead of being recreated empty.
+    """
+    uri = f"{Path(db_path).resolve().as_uri()}?mode={'rwc' if create else 'rw'}"
+    conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -509,7 +514,7 @@ class MetricsIndex:
             log.info(
                 "Metrics database schema v%s != v%s; archived to %s", version, SCHEMA_VERSION, dest
             )
-        conn = connect(self.db_path)
+        conn = connect(self.db_path, create=True)
         for statement in _SCHEMA:
             conn.execute(statement)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -552,20 +557,22 @@ class MetricsIndex:
                 stats.files_seen += 1
                 try:
                     self._sync_file(conn, Path(path), stats)
-                except (OSError, UnicodeDecodeError) as exc:
-                    conn.rollback()
-                    if strict:
-                        raise
-                    stats.errors += 1
-                    log.warning("Metrics index skipped %s: %s", path, exc)
-                    self._record_error(conn, Path(path), str(exc))
-                except sqlite3.Error:
+                except sqlite3.OperationalError:
+                    # Locked, disk or I/O trouble: the next sync retries from here.
                     conn.rollback()
                     if strict:
                         raise
                     log.warning("Metrics index sync abandoned at %s", path, exc_info=True)
                     stats.errors += 1
                     break
+                except (OSError, sqlite3.Error) as exc:
+                    # A problem with this file: record it and index the rest.
+                    conn.rollback()
+                    if strict:
+                        raise
+                    stats.errors += 1
+                    log.warning("Metrics index skipped %s: %s", path, exc)
+                    self._record_error(conn, Path(path), str(exc))
         finally:
             conn.close()
         return stats

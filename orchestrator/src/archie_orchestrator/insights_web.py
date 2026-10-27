@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from collections.abc import Callable
 from urllib.parse import urlencode
 
@@ -76,7 +77,10 @@ def _sync_and_query(query: Callable) -> tuple[object, list[str]]:
         if UPDATING not in notices:
             notices.append(UPDATING)
         return None, notices
-    conn = connect(index.db_path)
+    try:
+        conn = connect(index.db_path)
+    except sqlite3.OperationalError:  # archived since the sync (migrate-sessions)
+        return None, [*notices, UPDATING]
     try:
         return query(conn), notices
     finally:
