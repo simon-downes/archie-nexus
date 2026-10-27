@@ -62,25 +62,20 @@ redirection.
 ### Large or unknown JSON
 
 Don't dump a large JSON response to find its fields, and don't guess field
-names. For a read-only command, take two calls instead:
+names. Capture the output once and explore the file:
 
-1. Pipe the command to `jq` and list each leaf path with its type, merged
-   across all records (`[]` marks an array index):
+1. Run the command once. Save the output with `tee` and list each leaf path
+   with its type in the same call (`[]` marks an array index):
    ```sh
-   <command> | jq -r '[paths(type|IN("object","array")|not) as $p | ($p|map(if type=="number" then "[]" end)|join(".")) + ": " + (getpath($p)|type)] | unique[]'
+   set -o pipefail; <command> | tee /tmp/out.json | jq -r '[paths(type|IN("object","array")|not) as $p | ($p|map(if type=="number" then "[]" end)|join(".")) + ": " + (getpath($p)|type)] | unique[]'
    ```
-2. Run the command again with a filter that selects only what you need, e.g.
-   `jq -r '.[] | [.id, .name] | @tsv'`.
+2. Filter the file, not the command, for each view you need, e.g.
+   `jq -r '.[] | [.id, .name] | @tsv' /tmp/out.json`.
 
-In a pipe, the exit code is `jq`'s, not the command's. If the output is empty
-and stderr shows an error, the command failed. If objects are keyed by IDs,
-the path list grows with each key; check `jq 'keys'` first.
-
-Never run a command twice just to read its output if it changes state:
-creating, updating, or deleting a resource, or sending a request that has
-effects. Run it once with `exec` and reduce the output in Python. Do the same
-when the command is slow or costly to repeat, or when you need several views
-of the data.
+Never `read` the whole file. If objects are keyed by IDs, the path list grows
+with each key, so check `jq 'keys' /tmp/out.json` first. Never run a command
+that changes state again just to see its output. If you need logic that `jq`
+can't express, load the file in `exec` and reduce it in Python.
 
 ### exec
 
