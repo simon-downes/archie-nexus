@@ -1,6 +1,6 @@
 # 075 — Usage insights: metrics index, `archie stats` and web dashboard
 
-Status: building
+Status: reviewing
 Branch: build-it/075-usage-insights (base: improve-tool-strategy @ b074cff)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/075-usage-insights
 
@@ -236,13 +236,13 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Verify:** `uv run pytest tests/test_web_insights.py tests/test_web_session_list.py` passes (R20–R22); `rg -n "/ui/insights|archie stats|ingest_files" docs README.md` finds the new content and `rg -n "only .llm_request. records" docs` finds nothing (R24).
 - **Outcome:** `insights_web.py` with seven handlers, templates under `templates/insights/`, `static/insights/insights.css`, nav links in both base templates. The filter bar is a GET form: since preset, an optional `from` date that overrides it, until, workspace, model, scope. Chart JSON blocks also landed here (M4 draws them). Docs updated (architecture metrics section rewritten, routes, data flow, proxy; README stats usage; event-spec). Verify: `uv run pytest tests/test_web_insights.py tests/test_web_session_list.py` passes (24 + session-list tests); `rg -n "/ui/insights|archie stats|ingest_files" docs README.md` finds 15 lines; `rg "only .llm_request. records|metrics writer|MetricsWriter" docs README.md` finds nothing. Full suite 2186 passed, only the 39 baseline failures. All pages return 200 against the real data copy.
 
-### [ ] M4 — Charts
+### [x] M4 — Charts
 
 - **Approach:** Vendor Chart.js 4.5.1 (`https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js`) and add its MIT licence to `static/vendor/LICENSES.md`. Embed each chart's series with Jinja's `tojson` filter in `<script type="application/json" id="chart-…">`; `insights.js` finds `canvas[data-chart]`, reads the matching JSON, and draws (stacked bar for daily cost, bar for per-turn cost and per-model cost, line for context tokens and daily errors).
 - **Test seam:** ASGI client for the JSON blocks; browser evidence for drawing.
 - **Deliverable:** the four chart sets in R23 render in a browser.
 - **Verify:** `uv run pytest tests/test_web_insights.py -k chart` passes; headless browser screenshot of `/ui/insights` and a session detail page shows drawn charts and no CSP errors in the console.
-- **Outcome:**
+- **Outcome:** Vendored Chart.js 4.5.1 UMD (SHA-256 `48444a82…c9f54a`, MIT licence added to `static/vendor/LICENSES.md`); `static/insights/insights.js` draws five chart kinds from the JSON blocks. Chart text uses the body's computed colour, because nimble's `--nc-text` is a `light-dark()` value that Chart.js can't parse (found in dark-mode browser check). Error cells renamed from `.msg` to `.errtext`, because `viewer.css` styles `.msg` as transcript text. Verify: `uv run pytest tests/test_web_insights.py -k chart` passes (4); headless Chromium against the orchestrator on the real data copy (Docker lookups patched to empty): every canvas on overview, session detail, errors and models has a Chart instance; no page errors; no CSP violations in the console; light and dark screenshots checked.
 
 ## Deviations
 
@@ -252,7 +252,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 
 ## Risks
 
-- Chart.js under `style-src 'self'`: Chart.js sets canvas sizes through the CSSOM, which CSP allows; confirm in M4's browser check.
+- Chart.js under `style-src 'self'`: confirmed in M4; no CSP violations logged.
 - The orchestrator may not start in this container (Docker absent); browser evidence may need the app started with `list_sessions` unavailable. Plan 064 hit the same constraint.
 - The first sync after upgrade rebuilds the index from all logs (R10 bounds it); the old DB is archived, not deleted.
 

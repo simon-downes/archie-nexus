@@ -32,7 +32,7 @@
         <thead><tr><th class="num">Turn</th><th>Status</th><th class="num">Requests</th><th class="num">Tool calls</th><th class="num">Max context</th><th class="num">Cost</th><th class="num">Errors</th><th>Error</th></tr></thead>
         <tbody>
         {%- for t in data.turns %}
-            <tr><td class="num">{{ t.turn }}</td><td class="status-{{ t.status }}">{{ t.status }}</td><td class="num">{{ m.num(t.requests) }}</td><td class="num">{{ m.num(t.tool_calls) }}</td><td class="num">{{ m.num(t.context_tokens) }}</td><td class="num">{{ m.money(t.cost) }}</td><td class="num{% if t.errors %} err{% endif %}">{{ m.num(t.errors) }}</td><td class="msg">{{ t.error or "" }}</td></tr>
+            <tr><td class="num">{{ t.turn }}</td><td class="status-{{ t.status }}">{{ t.status }}</td><td class="num">{{ m.num(t.requests) }}</td><td class="num">{{ m.num(t.tool_calls) }}</td><td class="num">{{ m.num(t.context_tokens) }}</td><td class="num">{{ m.money(t.cost) }}</td><td class="num{% if t.errors %} err{% endif %}">{{ m.num(t.errors) }}</td><td class="errtext">{{ t.error or "" }}</td></tr>
         {%- endfor %}
         </tbody>
     </table></div>

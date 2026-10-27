@@ -11,7 +11,7 @@
         <thead><tr><th>Tool</th><th class="num">Count</th><th>First line of the error</th></tr></thead>
         <tbody>
         {%- for e in data.top_errors %}
-            <tr><td>{{ e.name }}</td><td class="num">{{ m.num(e.count) }}</td><td class="msg">{{ e.error or "" }}</td></tr>
+            <tr><td>{{ e.name }}</td><td class="num">{{ m.num(e.count) }}</td><td class="errtext">{{ e.error or "" }}</td></tr>
         {%- else %}<tr><td colspan="3" class="dim">No tool errors in range.</td></tr>
         {%- endfor %}
         </tbody>

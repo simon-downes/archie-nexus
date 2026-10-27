@@ -147,14 +147,14 @@
     white-space: nowrap;
 }
 
-.viewer table.insights td.msg {
+.viewer table.insights td.errtext {
     font-family: var(--v-mono);
     font-size: 0.75rem;
     word-break: break-word;
 }
 
 .viewer table.insights td.title {
-    max-width: 28rem;
+    max-width: 18rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -163,6 +163,10 @@
 .viewer table.insights .transcript {
     font-size: 0.7rem;
     margin-left: 0.3rem;
+}
+
+.viewer table.insights td.id a {
+    display: inline;
 }
 
 .viewer .status-error {
