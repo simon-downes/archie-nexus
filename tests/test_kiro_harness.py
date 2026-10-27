@@ -360,3 +360,136 @@ async def test_builtin_tag_after_startup_kills_backend(home, tmp_path, monkeypat
         assert "Kiro backend stopped" in events[-1].message
     finally:
         await h.close()
+
+
+def _skill(root: Path, name: str) -> Path:
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n")
+    return path
+
+
+async def test_agent_file_lists_skills_of_enabled_plugins_only(home, tmp_path, monkeypatch):
+    plugins = tmp_path / "plugins"
+    for plugin in ("enabledp", "disabledp"):
+        (plugins / plugin).mkdir(parents=True)
+        (plugins / plugin / "plugin.yaml").write_text(f"name: {plugin}\n")
+        _skill(plugins / plugin / "skills", f"{plugin}-skill")
+    persona = tmp_path / "persona"
+    persona_skill = _skill(persona / "skills", "persona-skill")
+    (persona / "prompts").mkdir()
+    from archie_shared.config import persona_dir
+
+    for prompt in (persona_dir() / "prompts").glob("*.md"):
+        (persona / "prompts" / prompt.name).write_text(prompt.read_text())
+    monkeypatch.setenv("ARCHIE_PLUGINS_DIR", str(plugins))
+    monkeypatch.setenv("ARCHIE_PERSONA_DIR", str(persona))
+    monkeypatch.setenv("HOME", str(tmp_path / "userhome"))
+    # Without plugins/kiro the credential type is unknown; the env fallback supplies the key.
+    monkeypatch.setenv("KIRO_API_KEY", SECRET)
+    h = KiroHarness(
+        NexusConfig(),
+        session_id="kirotest-01",
+        log_dir=home / "sessions",
+        tool_policy=LiveToolPolicy({}, loader=None, enabled=["enabledp"]),
+        kiro_home=tmp_path / "kiro",
+        command=[sys.executable, str(FAKE)],
+        workspace=str(tmp_path),
+    )
+    await h.start()
+    await h.close()
+    agent = json.loads((tmp_path / "kiro" / "agents" / "archie.json").read_text())
+    assert sorted(agent["resources"]) == sorted(
+        [
+            f"skill://{persona_skill}",
+            f"skill://{plugins / 'enabledp' / 'skills' / 'enabledp-skill' / 'SKILL.md'}",
+        ]
+    )
+
+
+def _config_sets(tmp_path: Path) -> list[tuple[str, str]]:
+    return [
+        (r["in"]["params"]["configId"], r["in"]["params"]["value"])
+        for r in _record(tmp_path)
+        if r.get("in", {}).get("method") == "session/set_config_option"
+    ]
+
+
+def _kiro_config(**kiro) -> NexusConfig:
+    import msgspec
+
+    return msgspec.convert({"kiro": kiro}, NexusConfig)
+
+
+async def test_effort_applied_when_model_offers_it(home, tmp_path):
+    h = _harness(home, tmp_path)
+    h._kiro = _kiro_config(default_model="claude-sonnet-5.5", effort="low").kiro
+    h.session.model_id = "kiro/claude-sonnet-5.5"
+    await h.start()
+    await h.close()
+    assert _config_sets(tmp_path)[-2:] == [("model", "claude-sonnet-5.5"), ("effortLevel", "low")]
+
+
+async def test_effort_unsupported_level_warns_and_keeps_default(home, tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    h = _harness(home, tmp_path)
+    h._kiro = _kiro_config(effort="max").kiro  # gpt-5.6-luna offers no effort in the fake
+    await h.start()
+    await h.close()
+    assert "effortLevel" not in [c for c, _ in _config_sets(tmp_path)]
+    assert "does not offer effort 'max'" in caplog.text
+
+
+async def test_effort_unset_sends_nothing(harness, tmp_path):
+    assert "effortLevel" not in [c for c, _ in _config_sets(tmp_path)]
+
+
+async def test_switch_model_reapplies_effort(home, tmp_path):
+    h = _harness(home, tmp_path)
+    h._kiro = _kiro_config(effort="high").kiro
+    await h.start()
+    try:
+        assert await h.switch_model("kiro/claude-opus-5.5") is None
+    finally:
+        await h.close()
+    assert _config_sets(tmp_path)[-2:] == [("model", "claude-opus-5.5"), ("effortLevel", "high")]
+
+
+async def test_switch_model_rejects_model_outside_allowlist(home, tmp_path):
+    h = _harness(home, tmp_path)
+    h._kiro = _kiro_config(models=["gpt-5.6-luna"]).kiro
+    await h.start()
+    try:
+        assert await h.switch_model("kiro/claude-opus-5.5") == "Unknown model: kiro/claude-opus-5.5"
+        assert h.session.model_id == "kiro/gpt-5.6-luna"
+    finally:
+        await h.close()
+
+
+async def test_app_model_switch_routes_to_kiro(harness, monkeypatch):
+    from archie_shared.commands import SwitchModelCommand
+    from archie_shared.events import SessionStatus
+
+    from archie_agent import app as app_module
+
+    seen: list = []
+    original = harness.event_bus.emit
+
+    async def capture(event, target=None):
+        seen.append(event)
+        return await original(event, target)
+
+    harness.event_bus.emit = capture
+    monkeypatch.setattr(app_module, "_agent", harness)
+    monkeypatch.setattr(app_module, "_catalog", {})
+    monkeypatch.setattr(app_module, "_config", NexusConfig())
+    websocket = object()
+    await app_module._handle_model_switch(SwitchModelCommand(model_key="bedrock-x"), websocket)
+    assert [(e.kind, e.message) for e in seen if isinstance(e, ErrorNotice)] == [
+        ("unknown_model", "Unknown model: bedrock-x")
+    ]
+    await app_module._handle_model_switch(
+        SwitchModelCommand(model_key="kiro/claude-sonnet-5.5"), websocket
+    )
+    assert seen[-1].__class__ is SessionStatus
+    assert seen[-1].model_key == "kiro/claude-sonnet-5.5"

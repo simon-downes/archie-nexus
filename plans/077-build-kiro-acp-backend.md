@@ -491,7 +491,13 @@ dead, Kiro killed, active turn `turn_error`.
 - **Verify:** `uv run pytest -q tests/test_kiro_*.py`; live with the M2 driver: "load the
   `research` skill, then delegate `echo SUB-OK` to archie-worker"; the log has a `skill` call
   and a `task` call with a scoped child `tool_call shell`.
-- **Outcome:**
+- **Outcome:** Skill resources and the skill/subagent translation were built in M2 (the
+  translator was easier to write whole). M4 added the disabled-plugin generator test
+  (`test_agent_file_lists_skills_of_enabled_plugins_only`, which also covers the
+  `KIRO_API_KEY` env fallback) and the live check. Live: the log had `tool_call skill
+  {"name": "research"}`, `tool_call task` (agent `archie-worker`), and a child `tool_call
+  shell` scoped to the dispatch ID with `subagent_index` 0. The child `turn_complete`
+  came before the parent `tool_result`, which reported `SUB-OK`.
 
 ### [ ] M5 — session control: interrupt, model switch, effort, compaction, permissions, death
 
@@ -504,7 +510,15 @@ dead, Kiro killed, active turn `turn_error`.
 - **Verify:** `uv run pytest -q tests/test_kiro_*.py tests/test_model_switch.py`; live with the
   M2 driver: "run `sleep 60` with the shell tool" with `--interrupt-after 8` → a
   `turn_interrupted` event, and `pgrep -f "sleep 60"` finds nothing.
-- **Outcome:**
+- **Outcome:** Most of M5 landed in M2. M5 added tests for effort set, unsupported and
+  unset; for effort re-applied on model switch; for rejecting a model outside the
+  allowlist; and for `app._handle_model_switch` routing to Kiro. Live: interrupt after 8 s
+  gave `turn_interrupted` with an `interrupted` `llm_request`, and no `sleep 60` process
+  was left. A switch to `bedrock-…` gave `error_notice unknown_model`, and a switch to
+  `kiro/claude-haiku-5.5` gave `session_status` with that key. With `kiro.effort: low` on
+  `claude-haiku-5.5`, Kiro advertised `effortLevel` after the model was set (options
+  `low…max`); `set_config_option effortLevel low` returned `effortLevel low`. This closes
+  the effort risk. Full suite and Ruff pass.
 
 ### [ ] M6 — per-session selection and TUI
 
@@ -540,9 +554,8 @@ dead, Kiro killed, active turn `turn_error`.
 
 ## Risks
 
-- `effortLevel` was not in the spike's advertised `configOptions` (the default model `auto`
-  has no effort). Assumed it is advertised once an effort-capable model is selected; M5 live
-  check confirms, otherwise effort is sent as `_meta.kiro.effortLevel` on `session/new`.
+- ~~`effortLevel` not advertised before a model is chosen~~ — resolved in M5: Kiro
+  advertises it after `model` is set, and setting it works.
 - Response shape of `session/set_config_option` is undocumented; verification falls back to
   the latest `config_option_update`.
 - Single `skill://` file paths (not globs) are assumed to work like the spike's globs.
