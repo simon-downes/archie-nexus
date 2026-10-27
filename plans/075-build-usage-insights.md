@@ -29,13 +29,13 @@ Codebase facts found during discovery:
   `subagent_index`, `purpose`.
 - Ingestion is fed by `proxy.py:proxy_stream`, which enqueues `llm_request` frames only while
   a client WebSocket is attached. Requests made while no client is attached are never
-  indexed (observed: one missing request in `tillo-platform-01m5mgsthh`).
+  indexed (observed at review: the logs hold 5 more `llm_request` events than the DB).
 - `GET /metrics` and `GET /sessions/{id}/metrics` (`app.py:_query_metrics`) return totals and
   a per-model breakdown; no CLI code calls them.
 - The orchestrator already serves a session log viewer (plan 064): `/ui/sessions` and
   `/ui/sessions/{id}` in `web.py`, Jinja templates in `templates/viewer/`, vendored
   nimble.css and htmx, a strict CSP (`VIEWER_CSP`), no build step.
-- Local data: 303 logs, 199 MB; a full JSON scan takes ~0.7 s. Event counts: 37k tool calls,
+- Local data: 303 logs, 212 MB; a full JSON scan takes ~0.7 s. Event counts: 37k tool calls,
   26k requests, 2.8k turns, 138 turn errors, 80 interruptions, 72 compactions.
 - CONTRIBUTING invariants: `llm_request` is the only cost/token source; recorded cost is
   never repriced; child `scope` is the launching task's `tool_use_id`.
@@ -64,16 +64,16 @@ Codebase facts found during discovery:
 | D4  | Where ingestion reads from | The session JSONL logs, incrementally by byte offset per file (`MetricsIndex.sync`) | Keep the proxy WebSocket feed; feed both | The proxy only sees frames while a client is attached, so detached work is lost (one request already missing). The log is the source of truth and is append-only, so one code path covers live updates and backfill | self |
 | D5  | When the index syncs | An orchestrator background task every 15 s, plus a sync at the start of every dashboard request and every `archie stats` run | Sync only on query; only background | Queries never show stale data; the background task keeps the per-request sync to a few changed files | self |
 | D6  | The proxy metrics feed | Removed (`_METRICS_MARKERS` enqueue and `MetricsWriter`) | Keep as a second writer | Two writers of the same rows add a conflict path and no data | self |
-| D7  | What the index stores | Metadata only: IDs, timestamps, counts, sizes, statuses, names, model keys, skill and agent names, truncated error text. No message content, tool inputs or tool output beyond a 200-char error first line | Full text | Keeps `metrics.db` small and free of conversation content; the transcript viewer already serves content from the logs | self |
-| D8  | Schema change | Schema v4; a non-v4 DB is archived by the existing `.legacy.<UTC>` mechanism and rebuilt from logs on first sync | In-place `ALTER TABLE` migration | The DB is a derived index; the archive path already exists and preserves old data | self |
+| D7  | What the index stores | Metadata only: IDs, timestamps, counts, sizes, statuses, names, model keys, skill and agent names, truncated error text. The only content kept: the session title (D25, ≤120 chars of the first user message) and the first line of an error tool result (≤200 chars). No other message content, tool inputs or tool output | Full text; no content at all | Keeps `metrics.db` small; the transcript viewer already serves content. A title is what makes a session recognisable in a table | self |
+| D8  | Schema change | Schema v4; a non-v4 DB is archived by the existing `.legacy.<UTC>` mechanism and rebuilt from logs on first sync. The schema check, archive and every sync run while holding an exclusive `fcntl.flock` on `metrics.db.lock` | In-place `ALTER TABLE` migration; archive only at orchestrator startup | The DB is a derived index; the archive path already exists. The CLI, the background loop and page requests can all sync, so one lock is the single owner of archive and writes | self |
 | D9  | Log rewritten (e.g. by `migrate-sessions`) | If the file is shorter than the stored offset, or the SHA-256 of its first line changed, delete that session's rows and re-ingest from byte 0 | Ignore; full rebuild | Offsets are meaningless after a rewrite; per-session reset is cheap | self |
 | D10 | Log file deleted | Keep its rows | Delete them | Deleting a log shouldn't erase cost history; the index is still rebuildable from the logs that remain | self |
 | D11 | Partial last line | Consume only through the last `\n`; the rest is read next sync | Parse it | The agent may be mid-append | self |
-| D12 | Event timestamps | Only `llm_request`, `session_started` and `compaction_start` carry `sent_at`. Tool calls take their request's `sent_at` (the request always precedes its tool calls: 8,780/8,780 observed); turns take the first and last request times | Add timestamps to events | Changing `shared/events.py` is a cross-package wire change; derivation covers every view | self |
-| D13 | Subagent turn attribution | Child requests carry the parent's `turn` (1,731/1,731 observed), so a turn's cost is the sum of every request in the session with that turn | Walk the scope chain | Matches the data; `scope_inclusive_costs` remains the per-scope rollup | self |
+| D12 | Event timestamps | Only `llm_request`, `session_started` and `compaction_start` carry `sent_at`. Tool calls take their request's `sent_at` (the request always precedes its tool calls: 37,019/37,019 observed); turns take the first and last request times of that turn (any scope); a turn or compaction with no timestamp falls back to the session's `started_at` in queries | Add timestamps to events | Changing `shared/events.py` is a cross-package wire change; derivation covers every view, and the fallback keeps the 4 request-less error turns visible under a date filter | self |
+| D13 | Subagent turn attribution | Child requests carry the parent's `turn` (6,291/6,291 observed), so a turn's cost is the sum of every request in the session with that turn | Walk the scope chain | Matches the data; `scope_inclusive_costs` remains the per-scope rollup | self |
 | D14 | Where queries live | New `orchestrator/src/archie_orchestrator/insights.py`: pure functions over a `sqlite3.Connection` returning JSON-serialisable dicts; both the web routes and the CLI call them | Separate SQL in CLI and web; HTTP API for the CLI | One implementation can't drift. The CLI already depends on `archie-orchestrator` (`migrate-sessions` imports it) and must work when the orchestrator isn't running | self |
 | D15 | Common filters | `since`, `until` (UTC dates, `until` exclusive), `workspace` (exact), `model` (exact `model_key`), `scope` (`all` / `root` / `subagent`). `since` accepts `Nd` (today and the N−1 previous UTC days), `all` or `YYYY-MM-DD`; default `30d` | Free-text query like the log viewer | Matches the stated "filtering" with fields the data has; one parser serves both surfaces | self |
-| D16 | What each filter applies to | Dates: request/tool `timestamp`, session `started_at` for the session list. Workspace: every table via `session_id`. Model: requests and tool calls (via their request). Scope: requests and tool calls; turn and session counts ignore it | Apply everywhere | Turns and sessions have no single model or scope | self |
+| D16 | What each filter applies to | Dates: requests and tool calls by `timestamp`; turns, turn errors, interruptions and subagent runs by the turn's effective time (D12); compactions by effective time; the session list and the overview session count by session `started_at`. Workspace: every table via `session_id`. Model: requests and tool calls (via their request). Scope: requests and tool calls; turn and session counts ignore it | Apply everywhere; count sessions active in range | Turns and sessions have no single model or scope. "Sessions started in range" matches the session list, so the two numbers agree | self |
 | D17 | Percentiles | Nearest-rank p50/p95 computed in Python from fetched values | SQLite extension | SQLite has no percentile function; at ~37k tool calls a fetch is cheap | self |
 | D18 | Cache hit rate | `cache_read / (input + cache_read + cache_write)` | Over all tokens incl. output | Fraction of prompt tokens served from cache, the number that drives cost | self |
 | D19 | Web pages | Server-rendered Jinja pages under `/ui/insights…`, extending `templates/viewer/base.html`, with the viewer CSP. Filter bar is a plain GET form; sorting is `sort=` links in table headers | SPA; htmx partials | Same stack as plan 064; full-page GET keeps every view linkable and testable | self |
@@ -82,6 +82,11 @@ Codebase facts found during discovery:
 | D22 | Row caps | Sessions list 200 rows ("Showing 200 of N"), top error lists 20, tool table unlimited | Pagination | Same cap and wording as the log viewer (`MAX_ROWS`) | self |
 | D23 | Invalid web filter values | Ignore that filter and show a notice naming it | HTTP 400 | Same behaviour as the log viewer's bad dates | self |
 | D24 | Existing `GET /metrics` API | Keep; `requests` keeps its v3 columns so `_query_metrics` works unchanged | Remove | No caller found, but it's a documented route; keeping it costs nothing | self |
+| D26 | Status vocabulary | Request "errors" = `status='error'`; `interrupted` and `no_usage` are counted and shown separately; error rate = errors / all requests | Count all non-completed as errors | 585 `no_usage` rows are mostly stream-accounting gaps, not failures; folding them in would bury real errors | self |
+| D27 | Tool `duration_ms = 0` | Stored as NULL (not recorded); percentiles use non-NULL values | Keep 0 | `ToolResult.duration_ms` defaults to 0 and 3,842 older results never recorded it; zeros would skew p50 down | self |
+| D28 | Duplicate event IDs within a log | First occurrence wins (`INSERT OR IGNORE`); a duplicate `llm_request` whose material columns differ is logged at error level (current `_process_batch` behaviour) | Raise `EventIdConflict` and skip the file | The tailer decodes lines itself, bypassing `SessionLog`'s conflict check; keeping the first wins keeps the rest of the session indexed | self |
+| D29 | Subagent turn outcomes | Child `turn_complete`/`turn_error`/`turn_interrupted` set `status` and `error` on the `subagents` row (`scope`, `subagent_index`); `turns` stays root-only | Store child turns in `turns` | A child run is one turn; the errors view lists root turn errors (116) and subagent errors (22) separately | self |
+| D30 | Page request during a running sync | Try the lock without blocking; if held, skip the sync and render from the current index with the notice "Index is updating; figures may be incomplete". The CLI blocks on the lock, printing "Waiting for index sync…" to stderr after 1 s | Block page requests | A cold rebuild takes seconds to tens of seconds; the page should not hang | self |
 | D25 | Session title | First line of the first root `user_message`, ≤120 characters | No title | Sessions are unrecognisable by ID alone; one line is metadata-sized | self |
 
 ## Requirements
@@ -101,13 +106,13 @@ Codebase facts found during discovery:
 - R6 MUST keep request costs as recorded (CONTRIBUTING invariant): `SUM(cost_usd)` per session equals `session_accounting(path)["total_cost"]`.
   - AC: equality holds for the fixture log.
 - R7 MUST keep indexed data metadata-only (D7).
-  - AC: after indexing a log whose messages and tool results contain a marker string, the marker appears in no table except a ≤200-char `tool_calls.error_summary` for an error result.
+  - AC: after indexing a log whose assistant messages, tool inputs and tool results contain a marker string (and whose second user message does too), the marker appears in no column except `tool_calls.error_summary` (≤200 chars, error results only); `sessions.title` holds only the first user message's first line, ≤120 chars.
 - R8 MUST sync in the background in the orchestrator (D5) and no longer enqueue from the proxy (D6).
   - AC: the lifespan starts a sync task; `proxy.py` has no reference to the metrics queue; a request appended while no client is attached is indexed by the next sync.
-- R9 MUST keep `archie migrate-sessions` rebuilding the index (archive, then full sync).
-  - AC: the existing `reset_and_backfill` tests pass against the new implementation.
-- R10 MUST rebuild the local data (303 logs, 199 MB) cold in under 30 s, and run a no-change sync in under 0.5 s.
-  - AC: measured on a copy of `~/.nexus/sessions` and recorded in M1's Outcome.
+- R9 MUST keep `archie migrate-sessions` rebuilding the index: `reset_and_backfill(db_path, paths)` archives the existing DB, syncs exactly those paths in strict mode, and raises on any file or SQLite error so the command reports failure.
+  - AC: after `reset_and_backfill`, the old DB exists as `metrics.db.legacy.*` and the new DB's `requests` match the given logs; with a sync step patched to raise `sqlite3.OperationalError`, `reset_and_backfill` raises it; `archie migrate-sessions` on that failure exits 1 and does not print "rebuilt metrics".
+- R10 MUST rebuild the local data (303 logs, 212 MB) cold in under 30 s, and run a no-change sync in under 0.5 s.
+  - AC: with `ARCHIE_HOME_DIR=/tmp/075-home` holding a copy of `~/.nexus/sessions`, `time uv run archie stats --since all` with no `metrics.db` (cold) and again (warm) meet the bounds; timings recorded in M1's Outcome.
 
 **Queries (shared by CLI and web)**
 
@@ -125,8 +130,8 @@ Codebase facts found during discovery:
   - AC: a failing `shell` call appears in both outputs.
 - R17 MUST return, for **subagents and skills**: per agent name launches, requests, cost and cost per launch; per skill name loads and sessions.
   - AC: a `task` call with agents `default` and `research` yields two agent rows with their children's costs; `skill` with `name: build-it` counts one load.
-- R18 MUST return, for **errors**: request errors by model with the top 20 error messages; turn errors (session, turn, message) newest first, capped at 200; and daily counts of request errors, turn errors and interruptions.
-  - AC: the fixture's `turn_error` and an `error` request appear.
+- R18 MUST return, for **errors**: request errors (D26) by model with the top 20 error messages; counts of `interrupted` and `no_usage` requests; root turn errors (session, turn, message) newest first, capped at 200; subagent errors (session, agent, message) newest first, capped at 200 (D29); and daily counts of request errors, turn errors and interruptions.
+  - AC: the fixture's root `turn_error`, a child `turn_error` and an `error` request each appear in their list; a `no_usage` request is not counted as an error.
 
 **CLI**
 
@@ -167,7 +172,7 @@ Out of scope: an agent skill (D3), authentication, OTel/Prometheus export, CSV e
 
 ### Code structure
 
-- `orchestrator/src/archie_orchestrator/metrics.py` (rewritten): `SCHEMA_VERSION = 4`, `MetricsIndex(db_path, sessions_dir)` with `sync() -> SyncStats`, `connect() -> sqlite3.Connection` (WAL, `busy_timeout=5000`, `row_factory=Row`); `reset_and_backfill(db_path, session_log_paths)` kept (archive then sync of those paths); `MetricsWriter` and its queue removed. Per-event fold functions are private.
+- `orchestrator/src/archie_orchestrator/metrics.py` (rewritten): `SCHEMA_VERSION = 4`, `MetricsIndex(db_path, sessions_dir)` with `sync(paths=None, *, strict=False, wait=True) -> SyncStats | None` (returns None when `wait=False` and the lock is held), `connect() -> sqlite3.Connection` (WAL, `busy_timeout=5000`, `row_factory=Row`); `reset_and_backfill(db_path, session_log_paths)` kept (archive then sync of those paths); `MetricsWriter` and its queue removed. Per-event fold functions are private.
 - `orchestrator/src/archie_orchestrator/insights.py` (new): `InsightsError(ValueError)`, `Filters` dataclass, `parse_filters(since, until, workspace, model, scope, today=None)`, `overview`, `sessions`, `session_detail`, `models`, `tools`, `subagents`, `errors` — each `(conn, filters, …) -> dict`; `percentile(values, p)`.
 - `orchestrator/src/archie_orchestrator/insights_web.py` (new): route handlers; reuses `web.templates`, `web._viewer_response`, `web.session_log_path`'s ID pattern (`web._SESSION_ID`).
 - `orchestrator/src/archie_orchestrator/app.py`: lifespan runs `_metrics_sync_loop` (every `METRICS_SYNC_INTERVAL = 15.0` s, in a thread) instead of `MetricsWriter.run`; register the seven routes.
@@ -187,14 +192,15 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - `turns`: `session_id`, `turn INT`, `status TEXT NOT NULL` (`open` | `completed` | `error` | `interrupted`), `stop_reason TEXT NULL`, `error TEXT NULL` (≤500), `started_at TEXT NULL`, `ended_at TEXT NULL`. PK `(session_id, turn)`. Root scope only; created by the root `user_message`, or by the first root request of a turn with no user message.
 - `tool_calls`: `session_id`, `tool_use_id`, `event_id`, `turn`, `iteration`, `scope NULL`, `subagent_index NULL`, `request_id`, `timestamp NULL`, `model_key NULL` (from the request), `name`, `skill TEXT NULL` (input `name` when `name = 'skill'`), `is_error INT NULL`, `duration_ms INT NULL`, `result_bytes INT NULL`, `result_lines INT NULL`, `error_summary TEXT NULL` (first non-empty line of an error result, ≤200). `UNIQUE(session_id, tool_use_id)`; `tool_result` updates the row.
 - `compactions`: `session_id`, `request_id`, `turn`, `scope NULL`, `reason`, `model_key NULL`, `timestamp NULL`, `status TEXT NULL`, `tokens_before INT NULL`, `tokens_after INT NULL`, `cost_saved_usd REAL NULL`, `duration_ms INT NULL`, `error TEXT NULL` (≤500). `UNIQUE(session_id, request_id)`; `compaction_start` inserts, `compaction_complete` upserts. Legacy `context_compacted` inserts a `success` row.
-- `subagents`: `session_id`, `scope` (the task `tool_use_id`), `subagent_index INT`, `agent TEXT NOT NULL`, `parent_scope TEXT NULL`, `turn INT`. PK `(session_id, scope, subagent_index)`. One row per entry of the `task` input `tasks` (a list, or a JSON string of one); entries without a string `agent` record `"unknown"`.
+- `subagents`: `session_id`, `scope` (the task `tool_use_id`), `subagent_index INT`, `agent TEXT NOT NULL`, `parent_scope TEXT NULL`, `turn INT`, `status TEXT NOT NULL DEFAULT 'open'`, `error TEXT NULL` (≤500) (D29). PK `(session_id, scope, subagent_index)`. One row per entry of the `task` input `tasks` (a list, or a JSON string of one); entries without a string `agent` record `"unknown"`.
 - Indexes: `requests(timestamp)`, `requests(session_id)`, `requests(model_key)`, `tool_calls(name)`, `tool_calls(timestamp)`, `sessions(started_at)`.
 
 ### Data flow and error handling
 
-- **Sync:** list `*.jsonl` → per file: stat; skip if unchanged; `BEGIN IMMEDIATE`; read `ingest_files`; rewrite check (D9) → delete the session's rows in every table; read bytes from `offset` to the last `\n`; decode each line with `decode_event(..., persisted=True)`; fold; update `ingest_files`; `COMMIT`.
-- Invalid line → count in `invalid_lines`, log at debug, continue. Undecodable bytes / `OSError` → set `ingest_files.error`, log a warning, roll back that file, continue with the next. `sqlite3.OperationalError: database is locked` after `busy_timeout` → log a warning, abandon this sync (the next one retries).
-- Duplicate event IDs: `INSERT OR IGNORE` on the unique keys (the log's own duplicate handling made them identical or unreadable).
+- **Sync:** acquire `metrics.db.lock` (D8, D30) → ensure schema (archive non-v4) → list `*.jsonl` in the sessions dir, or use the explicit path list from `reset_and_backfill` → per file: stat; skip if unchanged; `BEGIN IMMEDIATE`; read `ingest_files`; rewrite check (D9) → delete the session's rows in every table; read bytes from `offset` to the last `\n`; decode each line with `decode_event(..., persisted=True)`; fold; update `ingest_files`; `COMMIT`.
+- Invalid line → count in `invalid_lines`, log at debug, continue. Undecodable bytes / `OSError` → set `ingest_files.error`, log a warning, roll back that file, continue with the next. `sqlite3.Error` → log a warning, abandon this sync (the next one retries). In strict mode (`reset_and_backfill`), file and SQLite errors raise instead.
+- Duplicate event IDs: D28.
+- `task` call whose input has no `tasks` list (or JSON-string list) → no `subagents` rows; children's requests still count under their scope.
 - **Query:** web handler → `asyncio.to_thread(sync)` → parse filters (notices for invalid) → `asyncio.to_thread(query)` → render. A sync failure on a page request is logged and the page renders from the existing index with a notice "Index sync failed: <reason>".
 
 ### Non-functional
@@ -210,7 +216,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Test seam:** `MetricsIndex.sync()` against `session_logs` fixture logs; `insights.overview()`; `archie stats` via `CliRunner`.
 - **Edge cases:** partial last line → deferred; rewritten log → reset; v3 DB → archived; locked DB → warning, no crash.
 - **Deliverable:** `archie stats` prints cost, requests, tokens, cache hit % and per-model cost for the last 30 days from an index built from the logs.
-- **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py tests/test_orchestrator_metrics_api.py tests/test_proxy_metrics_integration.py tests/test_canonical_session_events.py` passes; on a copy of `~/.nexus/sessions` under a temp `ARCHIE_HOME_DIR`, `archie stats --since all` shows total cost within $0.01 of the 1,052.6 observed in the v3 DB, and cold/warm sync times meet R10.
+- **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py tests/test_orchestrator_metrics_api.py tests/test_proxy_metrics_integration.py tests/test_canonical_session_events.py tests/test_cli_migrate_sessions.py` passes (if that file doesn't exist, the migrate test goes in `tests/test_orchestrator_metrics.py`); with `ARCHIE_HOME_DIR=/tmp/075-home` (copy of `~/.nexus/sessions`), `archie stats --since all --json` total cost is within $0.01 of the sum of `session_accounting(path)["total_cost"]` over the copied logs, and the R10 timings meet their bounds.
 - **Outcome:**
 
 ### [ ] M2 — Full index and the remaining `archie stats` views
@@ -227,7 +233,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Approach:** `insights_web.py` handlers and seven templates extending `viewer/base.html`; follow `web.session_list_page` for threading and `_viewer_response` for the CSP. Filter bar partial with since/until/workspace/model/scope selects (workspace and model options from the index). Sort links on the sessions table. Add the nav link. Update docs (R24).
 - **Test seam:** ASGI client (`httpx.ASGITransport`) as in `tests/test_web_session_list.py`.
 - **Deliverable:** all seven pages render tables from the index with working filters.
-- **Verify:** `uv run pytest tests/test_web_insights.py tests/test_web_session_list.py` passes (R20–R22, R24).
+- **Verify:** `uv run pytest tests/test_web_insights.py tests/test_web_session_list.py` passes (R20–R22); `rg -n "/ui/insights|archie stats|ingest_files" docs README.md` finds the new content and `rg -n "only .llm_request. records" docs` finds nothing (R24).
 - **Outcome:**
 
 ### [ ] M4 — Charts
@@ -247,6 +253,8 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - The first sync after upgrade rebuilds the index from all logs (R10 bounds it); the old DB is archived, not deleted.
 
 ## Review
+
+- Plan review: 1 pass; 3 ❌, 9 ⚠️, 7 ℹ️. All accepted. R9 now names the carried-over behaviours and a strict `reset_and_backfill`; R7/D7 allow the title explicitly; strict mode added to the error design; M1 Verify compares against `session_accounting` sums; D16 defines date filtering for turns/compactions/sessions; D26–D30 added (status vocabulary, zero durations, duplicates, subagent outcomes, lock and page-during-sync); `subagents` gains status/error; missing `tasks` handled; sync takes explicit paths; stale counts in D12/D13/Context updated; R10 and M3 Verify name commands. Second pass run for the ❌ fixes.
 
 ## Outcome
 
