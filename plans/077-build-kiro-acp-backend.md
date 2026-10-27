@@ -469,7 +469,16 @@ dead, Kiro killed, active turn `turn_error`.
 - **Verify:** `uv run pytest -q tests/test_kiro_harness.py -k startup` passes; live: with
   `kiro.default_model: no-such-model` in `/tmp/kiro-smoke/home/config.yaml`, the agent exits 1
   and `/tmp/kiro-smoke/home/logs/kiro/kirosmoke-01.startup-error` names the model.
-- **Outcome:**
+- **Outcome:** `KiroHarness.start()` checks each D17 condition: config error, mode not
+  `archie`, built-in tags other than `read`, set-config values verified from each response
+  (`contentCollection`, `autopilot`, `model`), default model not offered, MCP not connected
+  or no `@archie/*` tags, Kiro exit, and the 30 s deadline. After startup, a config error or
+  a new disallowed tag marks the backend dead and kills Kiro, and the active turn ends in
+  `turn_error`. Evidence: `tests/test_kiro_harness.py` (one parametrised case per
+  condition, a post-startup case, and the lifespan error-file case); full suite and Ruff
+  pass. Live: with `kiro.default_model: no-such-model` the agent stopped, and
+  `logs/kiro/kirosmoke-01.startup-error` read "Kiro does not offer kiro.default_model
+  'no-such-model'".
 
 ### [ ] M4 — skills and the archie-worker subagent
 
@@ -523,6 +532,9 @@ dead, Kiro killed, active turn `turn_error`.
 - M2: `ArchieMcpServer.cancel_all()` also kills tool processes that start before the next
   turn's `reset()`; without it a call reaching the MCP server just after an interrupt ran
   to completion and blocked Kiro's cancel.
+- M3: the agent process exits with code 3, not 1: uvicorn turns a `SystemExit` raised in
+  the lifespan into exit 3, as it already does for native startup failures. The
+  orchestrator only needs the container to exit and reads the reason from the file.
 - M2: Kiro logs `acp.content_collection.resolved {"enabled":true}` at process start, before
   the session exists; the per-session set and its verified response are what apply.
 

@@ -321,3 +321,42 @@ async def test_app_lifespan_startup_failure_writes_error_file(home, tmp_path, mo
     assert exc.value.code == 1
     reason = (home / "logs" / "kiro" / "kirotest-01.startup-error").read_text()
     assert "No Kiro API key" in reason
+
+
+@pytest.mark.parametrize(
+    ("scenario", "reason"),
+    [
+        ("config_error", "agent config error"),
+        ("wrong_mode", "Kiro mode is 'vibe'"),
+        ("builtin_tag", "built-in tools shell"),
+        ("sticky_collection", "contentCollection is 'enabled'"),
+        ("autopilot_off", "autopilot is 'off'"),
+        ("no_model", "does not offer kiro.default_model 'gpt-5.6-luna'"),
+        ("mcp_failed", "archie MCP server is connecting"),
+        ("exit_on_start", "Kiro backend stopped (exit code 7)"),
+        ("hang", "timed out"),
+    ],
+)
+async def test_startup_check_fails_closed(home, tmp_path, monkeypatch, scenario, reason):
+    monkeypatch.setenv("FAKE_KIRO_SCENARIO", scenario)
+    h = _harness(home, tmp_path, startup_timeout=2.0)
+    started = time.monotonic()
+    with pytest.raises(KiroStartupError) as exc:
+        await h.start()
+    assert time.monotonic() - started < 4
+    assert reason in str(exc.value)
+    await h.close()
+
+
+async def test_builtin_tag_after_startup_kills_backend(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_SCENARIO", "late_builtin")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await asyncio.wait_for(h.handle_message("run it"), 10)
+        assert h.dead
+        events = _log(home)
+        assert isinstance(events[-1], TurnError)
+        assert "Kiro backend stopped" in events[-1].message
+    finally:
+        await h.close()

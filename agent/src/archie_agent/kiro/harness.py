@@ -52,6 +52,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 KIRO_COMMAND = ("kiro-cli", "acp", "--agent-engine=v3")
+# Built-in Kiro tool tags the archie agent may advertise: ``read`` is the
+# ``disclose_context`` (skill) category. Anything else means Kiro fell back to built-ins.
+ALLOWED_BUILTIN_TAGS = frozenset({"read"})
 STARTUP_TIMEOUT_S = 30.0
 DEAD_MESSAGE = "Kiro backend stopped; start a new session"
 
@@ -158,6 +161,8 @@ class KiroHarness:
         self._translator: TurnTranslator | None = None
         self._dead = False
         self._closing = False
+        self._started = False
+        self._changed = asyncio.Event()
         self._exit_code: int | None = None
         self._ledger = CreditLedger(self._kiro.credits)
         self._tasks: set[asyncio.Task] = set()
@@ -272,20 +277,34 @@ class KiroHarness:
             if not self._kiro_session_id:
                 raise KiroStartupError("Kiro session/new returned no sessionId")
             self.config_options = (result or {}).get("configOptions") or self.config_options
+            self._check_agent()
+            mode = config_value(self.config_options, "mode")
+            if mode != agent_files.ROOT_AGENT:
+                raise KiroStartupError(
+                    f"Kiro mode is {mode!r}, not {agent_files.ROOT_AGENT!r}: "
+                    "the archie agent did not load"
+                )
+            if self._kiro.default_model not in self.model_options():
+                raise KiroStartupError(
+                    f"Kiro does not offer kiro.default_model {self._kiro.default_model!r}"
+                )
             await self._set_config("contentCollection", "disabled", remaining)
             await self._set_config("autopilot", "on", remaining)
             await self._set_config("model", self._kiro.default_model, remaining)
             await self._apply_effort(self._kiro.default_model, remaining)
+            await self._wait_for_tools(remaining)
         except TimeoutError as exc:
-            raise KiroStartupError("Kiro startup timed out") from exc
+            raise KiroStartupError(f"Kiro startup timed out: {exc or 'no response'}") from exc
         except AcpError as exc:
             raise KiroStartupError(f"Kiro startup failed: {exc}") from exc
+        self._started = True
         log.info(
             "Kiro session ready",
             extra={"kiro_session": self._kiro_session_id, "model": self.session.model_id},
         )
 
     async def _set_config(self, config_id: str, value: str, remaining) -> None:
+        """Set one config option and verify Kiro reports the new value."""
         assert self._acp is not None
         result = await self._acp.request(
             "session/set_config_option",
@@ -294,6 +313,51 @@ class KiroHarness:
         )
         if isinstance(result, dict) and result.get("configOptions"):
             self.config_options = result["configOptions"]
+        actual = config_value(self.config_options, config_id)
+        if actual != value:
+            raise KiroStartupError(f"Kiro {config_id} is {actual!r} after setting {value!r}")
+
+    def _agent_problem(self) -> str | None:
+        """Reason the archie agent config is unusable, or None."""
+        if self.config_errors:
+            err = self.config_errors[0]
+            return f"Kiro agent config error in {err.get('path', '?')}: {err.get('error', err)}"
+        if self.tool_tags is not None:
+            bad = sorted(
+                str(t.get("tag"))
+                for t in self.tool_tags
+                if isinstance(t, dict)
+                and t.get("source") == "builtin"
+                and t.get("tag") not in ALLOWED_BUILTIN_TAGS
+            )
+            if bad:
+                return f"Kiro advertised built-in tools {', '.join(bad)}; only Archie tools are allowed"
+        return None
+
+    def _check_agent(self) -> None:
+        problem = self._agent_problem()
+        if problem:
+            raise KiroStartupError(problem)
+
+    async def _wait_for_tools(self, remaining) -> None:
+        """Wait until the archie MCP server is connected and Archie tools are advertised."""
+        while True:
+            self._check_agent()
+            status = (self.mcp_status or {}).get("status")
+            tags = self.tool_tags or []
+            has_archie = any(
+                isinstance(t, dict) and str(t.get("tag", "")).startswith("@archie/") for t in tags
+            )
+            if status == "connected" and has_archie:
+                return
+            self._changed.clear()
+            try:
+                await asyncio.wait_for(self._changed.wait(), remaining("the archie MCP server"))
+            except TimeoutError:
+                raise KiroStartupError(
+                    f"Kiro's archie MCP server is {status or 'not reported'}"
+                    + ("" if has_archie else "; no Archie tools advertised")
+                ) from None
 
     async def _apply_effort(self, model_id: str, remaining=None) -> None:
         """Set ``kiro.effort`` when the model offers it; unset means the model default."""
@@ -366,6 +430,22 @@ class KiroHarness:
         elif method == "_kiro/customAgent/config_error":
             self.config_errors.append(params)
             log.error("Kiro agent config error: %s", params.get("error") or params)
+        else:
+            return
+        self._changed.set()
+        if self._started and not self._dead:
+            problem = self._agent_problem()
+            if problem:
+                self._fail(problem)
+
+    def _fail(self, reason: str) -> None:
+        """Fail closed after startup: mark the backend dead and kill Kiro (D17)."""
+        log.error("Stopping the Kiro backend: %s", reason)
+        self._dead = True
+        if self._acp is not None:
+            task = asyncio.get_running_loop().create_task(self._acp.close())
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     def _on_exit(self, code: int | None) -> None:
         self._exit_code = code

@@ -5,7 +5,9 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
 - ``FAKE_KIRO_RECORD``: JSONL file; the fake appends ``{"env": {...}}`` at start and
   every request or response it receives.
 - ``FAKE_KIRO_HOME``: Kiro home holding ``agents/archie.json`` (for the MCP URL).
-- ``FAKE_KIRO_SCENARIO``: startup variant (``ok`` by default).
+- ``FAKE_KIRO_SCENARIO``: startup variant: ``ok`` (default), ``config_error``,
+  ``wrong_mode``, ``builtin_tag``, ``sticky_collection``, ``autopilot_off``, ``no_model``,
+  ``mcp_failed``, ``exit_on_start``, ``hang``, ``late_builtin`` (bad tag after startup).
 - The prompt text picks the turn: ``error`` → JSON-RPC error; ``exit`` → exit 3
   mid-turn; ``sleep`` → MCP ``shell sleep 30`` until ``session/cancel``;
   ``permission`` → ask permission; anything else → text, ``tool_load``, MCP
@@ -25,6 +27,8 @@ HOME = Path(os.environ.get("FAKE_KIRO_HOME", str(Path.home() / ".kiro")))
 SCENARIO = os.environ.get("FAKE_KIRO_SCENARIO", "ok")
 SESSION = "sess_fake"
 MODELS = ["auto", "claude-opus-5.5", "claude-sonnet-5.5", "gpt-5.6-luna", "gpt-5.6-sol"]
+if SCENARIO == "no_model":
+    MODELS = ["auto", "claude-sonnet-5.5"]
 
 state = {"contentCollection": "enabled", "autopilot": "on", "model": "auto", "mode": "archie"}
 cancelled = asyncio.Event()
@@ -259,42 +263,42 @@ async def prompt(rid: int, params: dict) -> None:
     send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
 
 
+def notify(method: str, params: dict) -> None:
+    send({"jsonrpc": "2.0", "method": method, "params": {"sessionId": SESSION, **params}})
+
+
+def tags(*builtin: str) -> None:
+    listed = [{"source": "builtin", "tag": t} for t in builtin]
+    notify("_kiro/tools/didChange", {"tags": [*listed, {"source": "mcp", "tag": "@archie/shell"}]})
+
+
+def mcp_status(status: str) -> None:
+    notify("_kiro/mcp/status", {"servers": [{"name": "archie", "status": status}]})
+
+
 async def session_new(rid: int, params: dict) -> None:
+    if SCENARIO == "hang":
+        return
     state["mode"] = (params.get("_meta") or {}).get("kiro", {}).get("modeId", "vibe")
-    send(
-        {
-            "jsonrpc": "2.0",
-            "method": "_kiro/mcp/status",
-            "params": {
-                "sessionId": SESSION,
-                "servers": [{"name": "archie", "status": "connecting"}],
+    if SCENARIO == "wrong_mode":
+        state["mode"] = "vibe"
+    if SCENARIO == "config_error":
+        notify(
+            "_kiro/customAgent/config_error",
+            {
+                "path": str(HOME / "agents" / "archie.json"),
+                "reasonCode": "invalid_config",
+                "error": "AgentFileFormatError: bad",
             },
-        }
-    )
+        )
+    mcp_status("connecting")
     await asyncio.sleep(0.01)
-    send(
-        {
-            "jsonrpc": "2.0",
-            "method": "_kiro/mcp/status",
-            "params": {
-                "sessionId": SESSION,
-                "servers": [{"name": "archie", "status": "connected"}],
-            },
-        }
-    )
-    send(
-        {
-            "jsonrpc": "2.0",
-            "method": "_kiro/tools/didChange",
-            "params": {
-                "sessionId": SESSION,
-                "tags": [
-                    {"source": "builtin", "tag": "read"},
-                    {"source": "mcp", "tag": "@archie/shell"},
-                ],
-            },
-        }
-    )
+    if SCENARIO != "mcp_failed":
+        mcp_status("connected")
+    if SCENARIO == "builtin_tag":
+        tags("read", "shell")
+    else:
+        tags("read")
     send(
         {"jsonrpc": "2.0", "id": rid, "result": {"sessionId": SESSION, "configOptions": options()}}
     )
@@ -307,10 +311,15 @@ async def handle(msg: dict) -> None:
     elif method == "session/new":
         await session_new(rid, params)
     elif method == "session/set_config_option":
-        if not (SCENARIO == "sticky_collection" and params["configId"] == "contentCollection"):
+        sticky = {"sticky_collection": "contentCollection", "autopilot_off": "autopilot"}
+        if SCENARIO == "autopilot_off":
+            state["autopilot"] = "off"
+        if sticky.get(SCENARIO) != params["configId"]:
             state[params["configId"]] = params["value"]
         send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": options()}})
     elif method == "session/prompt":
+        if SCENARIO == "late_builtin":
+            tags("read", "web_search")
         asyncio.create_task(prompt(rid, params))
     elif method == "session/cancel":
         cancelled.set()
@@ -324,6 +333,9 @@ async def handle(msg: dict) -> None:
 
 async def main() -> None:
     record({"env": {"KIRO_API_KEY": os.environ.get("KIRO_API_KEY"), "argv": sys.argv[1:]}})
+    if SCENARIO == "exit_on_start":
+        print("fatal: cannot start", file=sys.stderr, flush=True)
+        sys.exit(7)
     print("(node:1) ExperimentalWarning: SQLite is an experimental feature", file=sys.stderr)
     print("[INFO] routine progress", file=sys.stderr)
     print("fake kiro: started", file=sys.stderr, flush=True)
