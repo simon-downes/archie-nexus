@@ -108,3 +108,10 @@ the session log remains the source of truth.
 earlier logs decode unchanged. It records metadata only for images returned by the native
 `read` tool (format, final dimensions, encoded size, source path). Image bytes are kept only
 in the agent's in-memory transcript and are never persisted or sent to clients.
+
+`compaction_complete.skills_loaded` was added without a protocol version change and defaults
+to an empty list, so earlier logs decode unchanged. Events are decoded with unknown fields
+forbidden, so a client built before the field existed drops every new `compaction_complete`
+as malformed; update the CLI with the agent. Before this change, `cost_saved_usd` priced the
+removed tokens at the input rate, so older records are about 20% lower for the same saving
+on models whose cache write costs 1.25× input.

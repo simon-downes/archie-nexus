@@ -1,6 +1,6 @@
 # 076 — Compaction state recovery
 
-Status: reviewing
+Status: done
 Branch: build-it/076-compaction-state-recovery (base: main @ 53923ce)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/076-compaction-state-recovery
 
@@ -200,6 +200,7 @@ event field.
 
 ## Risks
 
+- Older CLIs reject `compaction_complete` events carrying `skills_loaded` (documented in `docs/event-spec.md`).
 - A longer prompt can make the compactor produce longer summaries, which raises
   `tokens_after` slightly. The report's median after compaction is 9.3k, so a few hundred
   extra tokens are immaterial.
@@ -209,10 +210,12 @@ event field.
 ## Review
 
 - Plan review: 1 pass, no ❌. Accepted: split M3 into M3/M4; pointer docs moved to M2 with greppable ACs; non-caching fixture named; Commands and Identifiers guidance; D6 reworded from "lower bound" to a stated cold-cache assumption; D7 reason tied to a control group; TUI line fixed; "absolute" dropped (path used as is); `tool_use_id` in the pointer; stale-pointer instruction (D8).
-- Code review:
-- Merge risk:
+- Code review: `general` and `risk` (the diff changes a persisted event schema and puts a filesystem path into the provider-facing turn), one round, no ❌. Fixed: harness asserts for `skills_loaded == []` (cost test) and on the interrupted path (`test_interrupt_during_manual_compaction_keeps_transcript`) and on the success test; reflowed the `docs/architecture.md` compaction paragraph and described `skills_loaded` as "loaded when compaction started"; added a `docs/event-spec.md` compatibility note (old clients drop new `compaction_complete` events, as with `tool_result.images` before; older `cost_saved_usd` records are about 20% lower). Answered ❓: tests seed `_loaded_content_keys` directly, following the existing `test_manual_compaction_persists_order_and_replaces_transcript`; skill-tool behaviour is covered in its own tests. Noted, no change: the log path and the instruction to grep a log of earlier tool results expose nothing that wasn't already in the conversation.
+- Merge risk: Medium: an older CLI connected to a new agent drops every `compaction_complete` (forbid_unknown_fields), so the compaction entry never resolves in that TUI. The CLI and agent normally ship together, and the same precedent exists for `tool_result.images`. Prompt changes only affect summary content and are easy to revert.
 
 ## Outcome
+
+Delivered recommendations 1, 2 and 6: the 12-section compaction prompt, the session-log pointer in every replacement turn, cache-write `cost_saved_usd`, and `skills_loaded`. Evidence: the full suite passes (2154 passed, baseline 2143); `ruff check` and `ruff format --check` pass; the new cost test failed against the old formula. Not verified: summary quality from the real compaction model with the new prompt, and whether agents use the log pointer. Both need live sessions.
 
 PR: pending
 CI: pending

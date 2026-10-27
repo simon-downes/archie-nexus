@@ -157,6 +157,7 @@ async def test_manual_compaction_persists_order_and_replaces_transcript(tmp_path
     assert _of(events, CompactionComplete)[0].request_id == request.id
     assert _of(events, CompactionComplete)[0].status == "success"
     assert _of(events, CompactionComplete)[0].error is None
+    assert _of(events, CompactionComplete)[0].skills_loaded == ["build-it"]
     assert len(session.turns) == 1
     assert session.turns[0].compacted
     assert harness._loaded_content_keys == set()
@@ -190,6 +191,7 @@ async def test_cost_saved_prices_avoided_cache_write(tmp_path, cache_write, pric
     removed = complete.tokens_before - complete.tokens_after
     assert removed > 0
     assert complete.cost_saved_usd == pytest.approx(removed * price / 1e6)
+    assert complete.skills_loaded == []
 
 
 async def test_compaction_records_loaded_skills(tmp_path):
@@ -781,6 +783,7 @@ async def test_interrupt_during_manual_compaction_keeps_transcript(tmp_path):
     client.harness = harness
     harness._compaction_llm = client
     harness.session.add_turn("user", "hello")
+    harness._loaded_content_keys.add(("build-it", "__body__"))
     harness._turn_active = True
     notices = []
     original = harness.event_bus.emit
@@ -798,6 +801,7 @@ async def test_interrupt_during_manual_compaction_keeps_transcript(tmp_path):
     (complete,) = _of(_events(harness), CompactionComplete)
     assert complete.status == "interrupted"
     assert complete.error == "Compaction interrupted"
+    assert complete.skills_loaded == ["build-it"]
     assert _texts(harness.session.turns[0]) == ["hello"]
     assert harness.turn_active is False
 
