@@ -225,7 +225,10 @@ class SessionLogWriter:
         context_tokens: int = 100,
         event_id: str | None = None,
         stop_reason: str | None = None,
+        credits: float | None = None,
     ) -> LLMRequest:
+        import msgspec
+
         return LLMRequest(
             id=event_id or self._id("lr"),
             scope=scope,
@@ -245,6 +248,7 @@ class SessionLogWriter:
             error=error,
             subagent_index=index,
             purpose=purpose,
+            credits=msgspec.UNSET if credits is None else credits,
         )
 
     def tool_call(

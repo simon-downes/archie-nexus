@@ -37,10 +37,12 @@ class EventFactory:
         self,
         path: Path,
         model_key: str,
-        model: ModelEntry,
+        model: ModelEntry | None,
         scope: str | None = None,
         subagent_index: int | None = None,
     ):
+        # ``model`` is None for backends without a token-priced catalog entry (Kiro);
+        # those build their own ``LLMRequest`` and must not call ``request()``.
         self.path = path
         self.model_key = model_key
         self.model = model
@@ -61,6 +63,8 @@ class EventFactory:
         request_id: str | None = None,
         purpose: Literal["conversation", "compaction"] = "conversation",
     ) -> LLMRequest:
+        if self.model is None:
+            raise RuntimeError(f"no token pricing for {self.model_key}; build LLMRequest directly")
         actual_usage = usage
         usage = usage or Usage(0, 0, 0, 0)
         context_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens

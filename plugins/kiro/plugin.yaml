@@ -1,0 +1,9 @@
+name: kiro
+# Kiro API key for sessions started with `archie start --kiro`.
+# `archie auth login kiro` reads it from KIRO_API_KEY; it is not exported into containers.
+credential:
+  kind: static
+  fields: [api_key]
+  env:
+    api_key: KIRO_API_KEY
+  set_env: false

@@ -100,6 +100,47 @@ def get_profile(config: OrchestratorConfig, name: str = "default") -> Orchestrat
     raise KeyError(name)
 
 
+KIRO_EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+KIRO_DEFAULT_MODELS = (
+    "claude-opus-5.5",
+    "claude-sonnet-5.5",
+    "claude-haiku-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
+
+
+class KiroCreditsConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Kiro subscription credits used to price each Kiro turn."""
+
+    included: Annotated[float, msgspec.Meta(ge=0)] = 2000.0
+    resets_on: Annotated[int, msgspec.Meta(ge=1, le=31)] = 1
+    rate_usd: Annotated[float, msgspec.Meta(ge=0)] = 0.02
+    overage_rate_usd: Annotated[float, msgspec.Meta(ge=0)] = 0.04
+
+
+class KiroConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Settings for sessions started with ``archie start --kiro``."""
+
+    default_model: str = "gpt-5.6-luna"
+    models: tuple[str, ...] = KIRO_DEFAULT_MODELS
+    effort: str | None = None
+    credits: KiroCreditsConfig = msgspec.field(default_factory=KiroCreditsConfig)
+
+    def __post_init__(self) -> None:
+        if not self.models:
+            raise ValueError("kiro.models must not be empty")
+        if any(not isinstance(m, str) or not m.strip() for m in self.models):
+            raise ValueError("kiro.models entries must be non-empty strings")
+        if self.default_model not in self.models:
+            raise ValueError(f"kiro.default_model '{self.default_model}' is not in kiro.models")
+        if self.effort is not None and self.effort not in KIRO_EFFORT_LEVELS:
+            raise ValueError(
+                f"kiro.effort '{self.effort}' must be one of {', '.join(KIRO_EFFORT_LEVELS)}"
+            )
+
+
 MountConfig = str | tuple[str, str]
 
 
@@ -117,6 +158,7 @@ class NexusConfig(msgspec.Struct, forbid_unknown_fields=True):
     orchestrator: OrchestratorConfig = msgspec.field(default_factory=OrchestratorConfig)
     plugins: dict[str, PluginConfig] = msgspec.field(default_factory=dict)
     mounts: tuple[MountConfig, ...] = ()
+    kiro: KiroConfig = msgspec.field(default_factory=KiroConfig)
 
 
 def _reject_removed_sections(path: Path, data: object) -> None:

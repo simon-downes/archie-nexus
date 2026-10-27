@@ -520,3 +520,61 @@ def test_reader_connect_does_not_recreate_missing_db(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         metrics.connect(tmp_path / "metrics.db")
     assert not (tmp_path / "metrics.db").exists()
+
+
+def test_turn_request_after_tool_calls_backfills_timestamp(session_logs, tmp_path):
+    """Kiro writes the turn's llm_request after its tool calls (077 D13)."""
+    w = session_logs
+    w.write(
+        "kiro-01k0000000",
+        [
+            w.session_started(model_key="kiro/gpt-5.6-luna"),
+            w.user("go", turn=1),
+            w.tool_call("shell", {"command": "ls"}, tool_use_id="k1", request_id="seg-0"),
+            w.tool_result("ok", tool_use_id="k1"),
+            w.tool_call(
+                "read", {"path": "x"}, tool_use_id="k2", request_id="c-seg", scope="k1", index=0
+            ),
+            w.llm(
+                event_id="turn-req",
+                model_key="kiro/gpt-5.6-luna",
+                iteration=0,
+                sent_at="2026-10-01T10:00:00+00:00",
+                credits=0.5,
+            ),
+            w.turn_complete(turn=1),
+        ],
+    )
+    w.write(
+        "native-01k0000000",
+        [
+            w.user("go", turn=1),
+            w.llm(event_id="n1", sent_at="2026-07-01T09:00:00+00:00"),
+            w.tool_call("shell", {}, tool_use_id="n-tc", request_id="n1"),
+            w.llm(event_id="n2", iteration=2, sent_at="2026-07-01T09:05:00+00:00", model_key="m2"),
+        ],
+    )
+    _index(tmp_path).sync()
+    rows = _rows(
+        tmp_path, "SELECT session_id, tool_use_id, timestamp, model_key FROM tool_calls ORDER BY 2"
+    )
+    assert rows == [
+        {
+            "session_id": "kiro-01k0000000",
+            "tool_use_id": "k1",
+            "timestamp": "2026-10-01T10:00:00+00:00",
+            "model_key": "kiro/gpt-5.6-luna",
+        },
+        {
+            "session_id": "kiro-01k0000000",
+            "tool_use_id": "k2",
+            "timestamp": "2026-10-01T10:00:00+00:00",
+            "model_key": "kiro/gpt-5.6-luna",
+        },
+        {
+            "session_id": "native-01k0000000",
+            "tool_use_id": "n-tc",
+            "timestamp": "2026-07-01T09:00:00+00:00",
+            "model_key": "m1",
+        },
+    ]

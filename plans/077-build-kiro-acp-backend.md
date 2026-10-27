@@ -393,7 +393,7 @@ dead, Kiro killed, active turn `turn_error`.
 
 ## Milestones
 
-### [ ] M1 — prefactor: config, credential, credits contract
+### [x] M1 — prefactor: config, credential, credits contract
 
 - **Approach:** `KiroConfig` / `KiroCreditsConfig` in `schemas.py` with a `__post_init__`
   validator (msgspec structs) raising `ValueError` mapped to `ConfigError` like existing
@@ -408,7 +408,12 @@ dead, Kiro killed, active turn `turn_error`.
 - **Verify:** `uv run pytest -q tests/test_nexus_config.py tests/test_session_events.py
   tests/test_kiro_credits.py tests/test_plugin_layout.py tests/test_orchestrator_metrics.py`
   passes, then full `uv run pytest`.
-- **Outcome:**
+- **Outcome:** Built `KiroConfig`/`KiroCreditsConfig` (`schemas.py`), `plugins/kiro/`,
+  `LLMRequest.credits` (UNSET, omitted for native), `archie_shared/kiro.py` (pricing,
+  `CreditLedger`, log scan, paths, model keys), optional `EventFactory` model, and the
+  metrics backfill. The plan named this module `kiro_credits`; it is `archie_shared/kiro.py` as
+  in Code structure. Evidence: full `uv run pytest` 2,473 passed; `ruff check .` clean;
+  provider registry tests updated for the new `kiro` credential.
 
 ### [ ] M2 — tracer: a Kiro turn with an Archie tool, end to end
 

@@ -420,6 +420,15 @@ class _Folder:
             (end, sid),
         )
         self._touch_turn(event.turn, event.sent_at)
+        if event.scope is None and event.purpose == "conversation":
+            # Kiro writes one llm_request per turn after the turn's tool calls, whose
+            # segment request ids never match it; give those rows the turn's request
+            # time and model. Native rows already resolved at insert and are untouched.
+            self.conn.execute(
+                "UPDATE tool_calls SET timestamp = ?, model_key = ? "
+                "WHERE session_id = ? AND turn = ? AND timestamp IS NULL",
+                (event.sent_at, event.model_key, sid, event.turn),
+            )
 
     def _apply_tool_call(self, event: ToolCall) -> None:
         sent_at, model_key = self._request_info(event.request_id)

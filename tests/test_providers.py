@@ -17,6 +17,7 @@ def test_all_services_present():
         "datadog",
         "incident_io",
         "openai",
+        "kiro",
         "google",
     }
     assert set(PROVIDERS.keys()) == expected
@@ -34,6 +35,7 @@ def test_static_providers():
         "datadog",
         "incident_io",
         "openai",
+        "kiro",
     }
     for name in static_services:
         provider = PROVIDERS[name]
@@ -214,6 +216,8 @@ EXPECTED_PROVIDERS = {
     ),
     "incident_io": StaticProvider(name="incident_io", fields=["api_key"]),
     "jira": StaticProvider(name="jira", fields=["email", "token", "cloud_id"]),
+    # Plan 077: API key for the Kiro ACP backend; passed only to kiro-cli.
+    "kiro": StaticProvider(name="kiro", fields=["api_key"], env={"api_key": "KIRO_API_KEY"}),
     "notion": OAuthProvider(name="notion", server_url="https://mcp.notion.com"),
     # Plan 071: API key for the direct OpenAI backend; not exported into containers.
     "openai": StaticProvider(name="openai", fields=["api_key"], env={"api_key": "OPENAI_API_KEY"}),

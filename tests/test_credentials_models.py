@@ -28,6 +28,7 @@ def test_all_agent_kit_providers_have_typed_definitions():
         "datadog",
         "incident_io",
         "openai",
+        "kiro",
     }
     assert set(CREDENTIAL_TYPES) == set(PROVIDERS)
     assert CREDENTIAL_TYPES["bedrock"] is BedrockCredential
