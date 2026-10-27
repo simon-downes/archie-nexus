@@ -467,10 +467,9 @@ async def test_switch_model_rejects_model_outside_allowlist(home, tmp_path):
 
 
 async def test_app_model_switch_routes_to_kiro(harness, monkeypatch):
+    from archie_agent import app as app_module
     from archie_shared.commands import SwitchModelCommand
     from archie_shared.events import SessionStatus
-
-    from archie_agent import app as app_module
 
     seen: list = []
     original = harness.event_bus.emit
