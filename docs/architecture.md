@@ -151,12 +151,15 @@ and `turn_interrupted`. The live-only set is exactly `handshake`, `session_statu
 
 Root turns may compact at iteration boundaries before a provider request. Manual `/compact` performs
 one dedicated no-tools summary request and replaces the in-memory root transcript with one compacted
-user turn; automatic threshold and cold-cache compactions use the same replacement. The session log
-remains append-only: `compaction_start` is persisted before the compaction `llm_request`, followed by
-`compaction_complete`. New compactions emit only this pair; clients still decode and render historical
-`context_compacted` records. The completion carries the status, error or summary, token estimates,
-display cost, and duration. Compaction failures are reported through the failed completion, not a
-separate `error_notice`. Compaction
+user turn; automatic threshold and cold-cache compactions use the same replacement. After the
+summary, the replacement turn has a block that names the session log path and explains how to
+search it (event types, `turn`, `content`, `input`, `tool_use_id`), so the agent can recover details
+the summary dropped. The session log remains append-only: `compaction_start` is persisted before the
+compaction `llm_request`, followed by `compaction_complete`. New compactions emit only this pair;
+clients still decode and render historical `context_compacted` records. The completion carries the
+status, error or summary, token estimates, display cost, duration, and `skills_loaded` (the skills
+loaded when compaction started). Compaction failures are reported through the failed completion,
+not a separate `error_notice`. Compaction
 requests use `purpose=compaction`, are priced at the configured compaction model, and contribute to
 session totals without changing the active conversation context display.
 
