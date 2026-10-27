@@ -62,11 +62,12 @@ prompt or JSON stdin; it fails naming the variable when it is unset):
 CLOUDFLARE_API_TOKEN=... archie auth login cloudflare
 ```
 
-Login stores whatever is in `CLOUDFLARE_API_TOKEN`, without checking its permissions. Shells
-used for Terraform or wrangler often hold an Edit token in that variable, so set the variable
-to the dedicated read-only token on the command line, as above.
+Login uses `CLOUDFLARE_API_TOKEN` when it is set and prompts for the token otherwise. It does
+not check the token's permissions. Shells used for Terraform or wrangler often hold an Edit
+token in that variable, so set the variable to the dedicated read-only token on the command
+line, as above. If `settings.account_id` is unset, login then prompts for it on the terminal.
 
-`set_env: true`: new containers get `CLOUDFLARE_API_TOKEN`.
+`set_env: true`: agent shell commands and exec runs get `CLOUDFLARE_API_TOKEN`.
 
 ## Configuration
 
@@ -80,7 +81,7 @@ plugins:
 
 | Key | Type | Default | Read | Meaning |
 | --- | --- | --- | --- | --- |
-| `settings.account_id` | str | none | container start | Exported as `CLOUDFLARE_ACCOUNT_ID`; `cf` uses it for account-scoped commands |
+| `settings.account_id` | str | none | each command | Exported as `CLOUDFLARE_ACCOUNT_ID`; `cf` uses it for account-scoped commands |
 
 No tool policy (no tools). `enabled: false` stops the token and the account id being exported
 and hides login and status for the provider.
@@ -88,9 +89,10 @@ and hides login and status for the provider.
 ## How it works
 
 `shared/src/archie_shared/credentials/runtime.py` (`runtime_environment()`) builds the
-environment for each new container: the stored `api_token` as `CLOUDFLARE_API_TOKEN` (skipped
-when no credential is stored), and `account_id` as `CLOUDFLARE_ACCOUNT_ID` when set. Values are
-a snapshot at container start; restart the session after logging in again or changing settings.
+environment that the agent adds to each shell command and exec run: the stored `api_token` as `CLOUDFLARE_API_TOKEN` (skipped
+when no credential is stored), and `account_id` as `CLOUDFLARE_ACCOUNT_ID` when set. The agent
+re-reads `config.yaml` and `credentials.yaml` when either changes, so a new login or setting
+applies to the next command without restarting the session.
 
 ## Tests
 

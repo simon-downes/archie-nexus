@@ -11,13 +11,13 @@ import asyncio
 import inspect
 import json
 import logging
-import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from archie_agent.exec.envelope import Envelope
+from archie_agent.exec.tools._runtime_env import subprocess_env
 from archie_agent.exec.tools._subprocess import kill_process_group
 from archie_agent.tools import ToolRegistry, ToolSpec
 
@@ -72,7 +72,8 @@ async def run_exec(
         (run_dir / "context.json").write_text(json.dumps(runner_context), encoding="utf-8")
 
     # Spawn the runner subprocess.
-    env = os.environ.copy()
+    # Current credential/settings variables, so a new login reaches this run.
+    env, env_warning = subprocess_env()
     try:
         proc = await asyncio.create_subprocess_exec(
             python,
@@ -120,6 +121,8 @@ async def run_exec(
     except OSError:
         pass  # Best-effort cleanup
 
+    if env_warning:
+        envelope.stderr = f"[archie warning: {env_warning}]\n{envelope.stderr}"
     return envelope
 
 

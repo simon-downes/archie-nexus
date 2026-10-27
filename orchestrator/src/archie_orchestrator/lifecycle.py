@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 
 from archie_shared.config import home_dir
-from archie_shared.credentials.runtime import runtime_environment
 from archie_shared.events import UserMessage
 from archie_shared.schemas import NexusConfig, expand_workspace_root
 from archie_shared.session import (
@@ -127,7 +126,6 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     container_persona = "/opt/archie/persona"
     plugins_dir_host = REPO_ROOT / "plugins"
     configured_brain = os.environ.get("ARCHIE_BRAIN_DIR")
-    credential_env = runtime_environment(config)
 
     docker_cmd = [
         "docker",
@@ -148,7 +146,6 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         "-e",
         f"ARCHIE_SESSION_ID={session_id}",
         *(["-e", f"ARCHIE_BRAIN_DIR={configured_brain}"] if configured_brain else []),
-        *[arg for name, value in credential_env.items() for arg in ("-e", f"{name}={value}")],
         "-v",
         f"{agent_dir}:{CONTAINER_AGENT_DIR}:rw",
         "-v",

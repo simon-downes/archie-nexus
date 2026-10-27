@@ -34,10 +34,14 @@ The agent reads each section when a session starts, except `plugins.<id>.policy`
 The orchestrator re-reads `config.yaml` when it uses it, so most edits apply without
 restarting it:
 
-- Starting a session reads the file as it is at that moment: `mounts`, `workspace_root`,
-  plugin `enabled` and `settings` exported as environment variables (Scalr's
-  `SCALR_HOSTNAME`), and credential environment variables. An invalid file makes
-  `POST /sessions` fail with the validation error; no session starts with a stale config.
+- Starting a session reads the file as it is at that moment: `mounts` and
+  `workspace_root`. An invalid file makes `POST /sessions` fail with the validation
+  error; no session starts with a stale config.
+- Plugin `settings` that declare `env` (Scalr's `SCALR_HOSTNAME`) and credential
+  environment variables are not part of session start. The agent reads them from the
+  current file for each shell command and exec run, and keeps the last good values if
+  the file becomes invalid (see
+  [Command environment projection](auth-credentials.md#command-environment-projection)).
 - Authentication (`archie auth ...`, the auth web page and the background OAuth refresh)
   reads `plugins.<id>.auth` overrides, `plugins.<id>.enabled` and the `default`
   profile's `public_url` on each use. If the file becomes invalid, these keep using the

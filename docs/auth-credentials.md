@@ -177,7 +177,7 @@ bedrock → aws_access_key_id, aws_secret_access_key, aws_session_token
 aws     → access_key_id, secret_access_key, session_token
 ```
 
-For Scalr, the CLI reads `SCALR_TOKEN` into `token`. The non-secret hostname and account are plugin settings, projected into new agent containers as `SCALR_HOSTNAME` and `SCALR_ACCOUNT`:
+For Scalr, the CLI reads `SCALR_TOKEN` into `token`, or prompts for it when the variable is unset. The non-secret hostname and account are plugin settings, projected into agent commands as `SCALR_HOSTNAME` and `SCALR_ACCOUNT`; login prompts for them when they are missing:
 
 ```yaml
 plugins:
@@ -189,7 +189,7 @@ plugins:
 
 A stored `scalr` entry that still has `hostname`/`account` fields (pre-settings shape) fails validation as unknown fields; move the values to `plugins.scalr.settings` and re-run `archie auth login scalr`.
 
-For Cloudflare, the CLI reads `CLOUDFLARE_API_TOKEN` into `api_token`. Login stores whatever token is in the variable without checking its permissions, so set it to a dedicated read-only token on the command line (`CLOUDFLARE_API_TOKEN=... archie auth login cloudflare`); its permissions are the only limit on what the agent's `cf` CLI can do (see `plugins/cloudflare/README.md`). The non-secret account id is a plugin setting, projected into new agent containers as `CLOUDFLARE_ACCOUNT_ID`:
+For Cloudflare, the CLI reads `CLOUDFLARE_API_TOKEN` into `api_token`. Login stores the token it is given (from the variable or the prompt) without checking its permissions, so use a dedicated read-only token (`CLOUDFLARE_API_TOKEN=... archie auth login cloudflare`); its permissions are the only limit on what the agent's `cf` CLI can do (see `plugins/cloudflare/README.md`). The non-secret account id is a plugin setting, projected into agent commands as `CLOUDFLARE_ACCOUNT_ID`; login prompts for it if it is unset:
 
 ```yaml
 plugins:
@@ -198,7 +198,9 @@ plugins:
       account_id: 0123456789abcdef0123456789abcdef
 ```
 
-For other static providers, the CLI accepts a JSON object on stdin. If stdin is not a non-empty pipe, it prompts interactively for the provider’s declared fields. Secret-like fields such as tokens, keys, and passwords are hidden while prompting.
+For other static providers, the CLI first uses each mapped environment variable that is set, such as `SCALR_TOKEN`. If fields are still missing, it reads a JSON object from stdin when stdin is a non-empty pipe; that object supplies all fields. Otherwise it prompts on the terminal for each missing field. Secret-like fields such as tokens, keys, and passwords are hidden while prompting. With no terminal, no stdin and missing fields, login fails and names the missing variables.
+
+After the credential is saved, for both static and OAuth providers, the CLI checks the plugin's settings. For each scalar setting (`str`, `int`, `float`, `bool`) with no manifest default and no value in `config.yaml`, it prompts on the terminal; an empty answer skips the setting. Answers are written to `plugins.<id>.settings` in `config.yaml` with `ruamel.yaml`, which keeps comments; a file with non-default indentation may be re-indented. The edited file is validated before it replaces the original. Without a terminal, the CLI lists the missing setting keys instead. List and dict settings, such as `plugins.github.settings.work_orgs`, are never prompted for.
 
 Datadog uses `api_key` and `app_key` as secrets. Its non-secret site is the plugin setting `plugins.datadog.settings.site`, default `app.datadoghq.eu`; Datadog API clients derive the API host (`https://api.datadoghq.eu` by default) from that site:
 
@@ -315,14 +317,14 @@ host <ARCHIE_HOME_DIR> → /home/archie/.nexus
 
 The agent therefore sees the same credentials file at its container-side `ARCHIE_HOME_DIR` and can use the shared credential APIs. Bedrock integrations explicitly read the typed `bedrock` entry and fall back to the normal AWS chain when appropriate.
 
-Credential updates do not send a live control-plane event to running agents. A running process may already have loaded credentials. New containers see the latest persisted file. Two integrations read the store on every call, so a new login reaches running sessions: the `gh` wrapper (see [GitHub CLI token selection](#github-cli-token-selection)) and the AWS `credential_process` helper (see [AWS credential refresh](#aws-credential-refresh)). For other credentials, restarting a session is the way to ensure a newly started process reloads changed values.
+Credential updates do not send a live control-plane event to running agents. A running process may already have loaded credentials. New containers see the latest persisted file. The agent rebuilds the projected environment for each new shell command and exec run (see [Command environment projection](#command-environment-projection)), so a new login reaches running sessions at the next command. The `gh` wrapper (see [GitHub CLI token selection](#github-cli-token-selection)) and the AWS `credential_process` helper (see [AWS credential refresh](#aws-credential-refresh)) also read the store on every call. A process that is already running, such as the agent's own LLM client or a long-lived server started from a shell, keeps the values it loaded.
 
-### Startup environment projection
+### Command environment projection
 
 Static provider descriptors may define an `env` mapping from credential fields to process environment variables and a `set_env` flag. The mapping is used in both directions:
 
 - `archie auth login` reads configured environment variables into credential fields for providers that define them;
-- the orchestrator reads stored credential fields at container startup and exports them only when `set_env: true`.
+- the agent reads stored credential fields when it starts each shell command or exec run, and exports them only when `set_env: true`.
 
 Current mappings are:
 
@@ -334,13 +336,15 @@ Current mappings are:
 | `cloudflare` | `api_token` → `CLOUDFLARE_API_TOKEN` | `true` |
 | `openai` | `api_key` → `OPENAI_API_KEY` | `false` |
 
-The `aws` mapping is unused by default: containers get AWS access through the generated profiles, which read the store on every call (see [AWS credential refresh](#aws-credential-refresh)). Setting `plugins.aws.auth.set_env: true` projects the base credentials again. Profile calls ignore them, but calls without a profile would use them, and they stay frozen at container start.
+The `aws` mapping is unused by default: containers get AWS access through the generated profiles, which read the store on every call (see [AWS credential refresh](#aws-credential-refresh)). Setting `plugins.aws.auth.set_env: true` projects the base credentials again. Profile calls ignore them, but calls without a profile would use them.
 
 Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`, `plugins.cloudflare.settings.account_id` → `CLOUDFLARE_ACCOUNT_ID`. Non-scalar settings cannot be projected: a manifest that puts `env` on a non-scalar or nested field is rejected at load. A plugin with `enabled: false` projects neither credentials nor settings.
 
-Only explicitly enabled providers are projected. Missing providers are skipped, and mapping errors such as unknown credential fields, invalid environment names, or duplicate environment ownership fail container startup before Docker is invoked. Environment values are never logged.
+Only explicitly enabled providers are projected. Missing providers are skipped. Environment values are never logged.
 
-Projection is a startup snapshot. New containers use the latest stored credentials; an already-running agent keeps its original environment and must be restarted to receive changed values. Environment variables are inherited by processes inside the container and may be visible to processes with access to the container, so mappings should remain limited to tools that need them.
+The agent computes the variables from the current `config.yaml` and `credentials.yaml` and caches them until either file's modification time or size changes. `grep`, `glob` and `code` subprocesses don't get them. If the variables can't be computed, for example because `config.yaml` fails validation, a store entry is invalid, or a mapping names an unknown credential field, an invalid environment name or a variable that two owners claim, the agent keeps using the last variables it computed successfully, as the live tool policy keeps its last valid snapshot. If it has none yet, the command runs without them and its stderr starts with an `[archie warning: …]` line. For errors outside `config.yaml` the warning gives only the exception type, so it never quotes the store.
+
+The orchestrator no longer passes these variables to `docker run`. Environment variables are inherited by processes inside the container and may be visible to processes with access to the container, so mappings should remain limited to tools that need them.
 
 ### GitHub CLI token selection
 

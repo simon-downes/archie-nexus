@@ -77,7 +77,7 @@ Static fields:
 | --- | --- | --- |
 | `fields` | required | Credential field names, at least one |
 | `env` | `{}` | Field → environment variable. `archie auth login` reads these variables; keys must be in `fields` |
-| `set_env` | `false` | Export the `env` variables into new containers |
+| `set_env` | `false` | Export the `env` variables into agent shell commands and exec runs |
 | `login` | none | `aws_chain`: `archie auth login` reads the AWS credential chain |
 
 OAuth fields:
@@ -119,8 +119,9 @@ Each field is `{type, default?, fields?, env?}`:
 - `fields`: required for `object`, a nested field map; not allowed for other types.
 - `env` (settings only): an environment variable name. Allowed only on a top-level field
   of type `str`, `int`, `float` or `bool` (not inside an `object`). When the resolved value
-  is set, the orchestrator exports it into new containers (Scalr's `hostname` →
-  `SCALR_HOSTNAME`).
+  is set, the agent exports it into each shell command and exec run (Scalr's `hostname` →
+  `SCALR_HOSTNAME`). `archie auth login <id>` prompts for a scalar setting that has no
+  default and no configured value, and writes the answer to `config.yaml`.
 
 Field names follow `[a-z][a-z0-9_]*` and may not be Python keywords. The field map is
 compiled to a msgspec struct with unknown fields forbidden, so the host validates config
@@ -147,7 +148,7 @@ settings:
 Each plugin is configured under `plugins.<id>` in `~/.nexus/config.yaml`:
 
 - `enabled` (default `true`): `false` removes the plugin's tools and skills and stops its
-  credentials and settings being exported into new containers.
+  credentials and settings being exported into agent commands.
 - `policy`: `read` and `write` blocks, each `{enabled, scope}`, validated against the
   manifest's `policy`.
 - `auth`: overrides for the credential provider, such as an OAuth `client_id`.

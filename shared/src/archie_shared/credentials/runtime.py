@@ -28,7 +28,7 @@ def _claim(owners: dict[str, str], env_name: str, owner: str) -> None:
 
 
 def runtime_environment(config: NexusConfig) -> dict[str, str]:
-    """Return env vars for a new agent container.
+    """Return env vars for an agent shell command or exec run (see ``_runtime_env``).
 
     Static credentials are projected for providers with ``set_env`` enabled;
     missing or partial credentials are skipped (field validation is the API's
