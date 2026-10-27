@@ -24,14 +24,18 @@ from archie_shared.types import TextBlock
 # --- Fixtures ---
 
 
-def _session_model(*, cache_ttl: int | None = None, context: int = 200_000) -> ModelEntry:
+def _session_model(
+    *, cache_ttl: int | None = None, context: int = 200_000, cache_write: float = 6.25
+) -> ModelEntry:
     return ModelEntry(
         name="Session",
         context=context,
         provider=BedrockProvider(model_id="session"),
         can_cache=cache_ttl is not None,
         cache_ttl_seconds=cache_ttl,
-        cost=CostConfig(rates=[Rate(input=5, output=25, cache_read=0.5, cache_write=6.25)]),
+        cost=CostConfig(
+            rates=[Rate(input=5, output=25, cache_read=0.5, cache_write=cache_write)]
+        ),
         max_output_tokens=1000,
     )
 
@@ -174,6 +178,20 @@ async def test_manual_compaction_priced_at_compaction_model_rates(tmp_path):
     # Compactor rates: 100 input × $0.1/M + 20 output × $0.5/M.
     assert request.cost_usd == pytest.approx(100 * 0.1 / 1e6 + 20 * 0.5 / 1e6)
     assert harness.turn_active is False
+
+
+@pytest.mark.parametrize(("cache_write", "price"), [(6.25, 6.25), (0.0, 5)])
+async def test_cost_saved_prices_avoided_cache_write(tmp_path, cache_write, price):
+    model = _session_model(cache_write=cache_write)
+    harness, _, _ = _harness(tmp_path, [], [_summary()], model=model)
+    harness.session.add_turn("user", "x" * 40_000)
+
+    await harness.run_manual_compaction()
+
+    complete = _of(_events(harness), CompactionComplete)[0]
+    removed = complete.tokens_before - complete.tokens_after
+    assert removed > 0
+    assert complete.cost_saved_usd == pytest.approx(removed * price / 1e6)
 
 
 async def test_manual_empty_transcript_does_not_call_provider(tmp_path):

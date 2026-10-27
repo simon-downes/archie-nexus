@@ -167,11 +167,11 @@ event field.
 - **Verify:** `uv run pytest tests/test_compaction.py tests/test_compaction_harness.py -q` passes; `rg "session log" docs/architecture.md` matches.
 - **Outcome:** `build_replacement` takes `log_path` and appends `LOG_POINTER` after the summary; `_compact` passes `self.log_path`; `docs/architecture.md` describes the block. `tests/test_compaction.py tests/test_compaction_harness.py`: 69 passed. Two existing harness tests asserted exact block counts or that a word was absent from all blocks; they now account for the pointer block, whose path contains the pytest test name.
 
-### [ ] M3 — cost_saved_usd prices the avoided cache write
+### [x] M3 — cost_saved_usd prices the avoided cache write
 
 - **Approach:** In `harness._compact`, replace `.input` with `rate.cache_write or rate.input`,
   matching how `_before_request` prices the next request. Add a `cache_write` parameter
-  (default 6.25, `None` for a non-caching rate) to `_session_model` in
+  (default 6.25, `0.0` for a non-caching rate; `Rate.cache_write` defaults to `0.0`) to `_session_model` in
   `tests/test_compaction_harness.py`. Update the `cost_saved_usd` sentence in
   `docs/event-spec.md`: an estimate of the cache write the next request avoids, assuming a
   cold cache.
@@ -179,7 +179,7 @@ event field.
 - **Edge cases:** `tokens_after > tokens_before` → 0 (unchanged `max`); no cache_write → input rate.
 - **Deliverable:** `cost_saved_usd` reflects the cache-write price.
 - **Verify:** `uv run pytest tests/test_compaction_harness.py -q` passes; `rg "cache write" docs/event-spec.md` matches.
-- **Outcome:**
+- **Outcome:** `_compact` prices the saving at `cache_write or input`. `test_cost_saved_prices_avoided_cache_write[6.25-6.25]` failed against the old formula and passes now; `[0.0-5]` covers the input fallback. `tests/test_compaction_harness.py`: 40 passed. `docs/event-spec.md` states the cold-cache assumption.
 
 ### [ ] M4 — compaction_complete records skills_loaded
 

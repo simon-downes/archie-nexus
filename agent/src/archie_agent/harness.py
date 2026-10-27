@@ -485,8 +485,10 @@ class AgentHarness:
                 f"rounds_dropped={stats.rounds_dropped}",
             ]
         )
-        saved_rate = self.session.model.cost.get_rate(tokens_before, 0).input
-        cost_saved_usd = max(0.0, (tokens_before - tokens_after) * saved_rate / 1_000_000)
+        # The next request would otherwise write the removed tokens to a cold cache.
+        saved_rate = self.session.model.cost.get_rate(tokens_before, 0)
+        saved_price = saved_rate.cache_write or saved_rate.input
+        cost_saved_usd = max(0.0, (tokens_before - tokens_after) * saved_price / 1_000_000)
         await self._event_bus.emit(
             CompactionComplete(
                 id=str(ULID()),
