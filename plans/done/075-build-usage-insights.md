@@ -286,7 +286,7 @@ Evidence:
 Not verified: the orchestrator running under `archie serve` with Docker (this container has no Docker; Docker lookups were patched to return no sessions for the browser checks), and the upgrade path on the user's live `~/.nexus/metrics.db` (tested on copies and on fixtures only).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/16
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
