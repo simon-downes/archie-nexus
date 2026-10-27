@@ -291,3 +291,44 @@ def build_system_prompt(
         catalog=catalog,
         agents_context=agents_context,
     ).flatten()
+
+
+# ---------------------------------------------------------------------------
+# Kiro backend (077)
+# ---------------------------------------------------------------------------
+
+KIRO_RESULT_CAP_TEXT = "29,000 characters"
+
+
+def _build_kiro_tools() -> str:
+    """Tools section for Kiro: no ``task`` guidance, and Kiro's result cap."""
+    return _build_tools(delegation=False).replace("32,000 characters", KIRO_RESULT_CAP_TEXT)
+
+
+def build_kiro_prompt(workspace_dir: str = str(WORKSPACE)) -> str:
+    """Root prompt for the Kiro ``archie`` agent.
+
+    Kiro injects ``AGENTS.md`` and lists skills itself, so neither the skills catalog
+    nor ``<agents.md>`` is included; Kiro's subagent tool replaces ``task``.
+    """
+    sections = [
+        _build_identity(),
+        _build_soul(),
+        _build_environment("", workspace_dir),
+        _build_kiro_tools(),
+        _build_brain_guidance(),
+        _load_prompt("kiro.md"),
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+def build_kiro_worker_prompt(body: str, workspace_dir: str = str(WORKSPACE)) -> str:
+    """Prompt for the Kiro ``archie-worker`` subagent (no identity or soul)."""
+    sections = [
+        body.strip(),
+        _build_environment("", workspace_dir),
+        _build_kiro_tools(),
+        _build_brain_guidance(),
+        _load_prompt("kiro.md"),
+    ]
+    return "\n\n".join(section for section in sections if section)

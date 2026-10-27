@@ -445,7 +445,20 @@ dead, Kiro killed, active turn `turn_error`.
   `--interrupt-after <s>`) with "run `echo KIRO-OK` with the shell tool". Pass: the session
   log has `tool_call name shell`, a `tool_result` containing `KIRO-OK`, and `llm_request` with
   `credits > 0` and `model_key kiro/gpt-5.6-luna`.
-- **Outcome:**
+- **Outcome:** Built `kiro/acp.py`, `agent_files.py`, `mcp_server.py`, `translate.py`,
+  `harness.py`, the Kiro prompt builders, `persona/prompts/kiro.md`, the `truncate_result`
+  limit, and `app.py` backend selection (`_kiro_lifespan`, Kiro model switch). Some M3/M5
+  surface landed early because it was small and the fake made it cheap to test: the
+  missing-key check and startup-error file, `switch_model` and effort, `/compact` notice,
+  permission answer, interrupt, Kiro-death handling and shutdown kill. M3/M5 still own the
+  remaining D17 checks and the live interrupt check. Tests: `tests/fake_kiro.py` (real MCP
+  calls back to the harness), spike frames in `tests/fixtures/kiro/`,
+  `test_kiro_{translate,agent_files,mcp,harness}.py`. Evidence: full `uv run pytest`
+  2,511 passed; `ruff check .` clean. Live smoke (real `kiro-cli` 2.34.2): set-config
+  responses showed `contentCollection disabled`, `autopilot on`, `model gpt-5.6-luna`;
+  advertised tags were `read` plus `@archie/*` only; the log had `tool_call shell`,
+  `tool_result` `[exit: 0]\nKIRO-OK`, and `llm_request` `credits 0.12071`, `cost_usd 0.002414`,
+  `model_key kiro/gpt-5.6-luna`. On SIGINT the agent killed Kiro (exit -15).
 
 ### [ ] M3 — startup checks and failure reporting
 
@@ -501,6 +514,17 @@ dead, Kiro killed, active turn `turn_error`.
 - **Outcome:**
 
 ## Deviations
+
+- M2: when Kiro reports one parallel call's result before the next call's `tool_call`, the
+  next call opens a new iteration (D12 as written). The spike's parallel shell turn yields
+  four iterations, not three; the TUI streams every segment.
+- M2: Kiro writes routine `[INFO]`/`[DEBUG]` lines to stderr (dozens per turn). These go to
+  DEBUG; other stderr lines stay at WARNING as planned.
+- M2: `ArchieMcpServer.cancel_all()` also kills tool processes that start before the next
+  turn's `reset()`; without it a call reaching the MCP server just after an interrupt ran
+  to completion and blocked Kiro's cancel.
+- M2: Kiro logs `acp.content_collection.resolved {"enabled":true}` at process start, before
+  the session exists; the per-session set and its verified response are what apply.
 
 ## Risks
 
