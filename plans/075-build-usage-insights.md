@@ -1,6 +1,6 @@
 # 075 — Usage insights: metrics index, `archie stats` and web dashboard
 
-Status: planning
+Status: building
 Branch: build-it/075-usage-insights (base: improve-tool-strategy @ b074cff)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/075-usage-insights
 
@@ -65,7 +65,7 @@ Codebase facts found during discovery:
 | D5  | When the index syncs | An orchestrator background task every 15 s, plus a sync at the start of every dashboard request and every `archie stats` run | Sync only on query; only background | Queries never show stale data; the background task keeps the per-request sync to a few changed files | self |
 | D6  | The proxy metrics feed | Removed (`_METRICS_MARKERS` enqueue and `MetricsWriter`) | Keep as a second writer | Two writers of the same rows add a conflict path and no data | self |
 | D7  | What the index stores | Metadata only: IDs, timestamps, counts, sizes, statuses, names, model keys, skill and agent names, truncated error text. The only content kept: the session title (D25, ≤120 chars of the first user message) and the first line of an error tool result (≤200 chars). No other message content, tool inputs or tool output | Full text; no content at all | Keeps `metrics.db` small; the transcript viewer already serves content. A title is what makes a session recognisable in a table | self |
-| D8  | Schema change | Schema v4; a non-v4 DB is archived by the existing `.legacy.<UTC>` mechanism and rebuilt from logs on first sync. The schema check, archive and every sync run while holding an exclusive `fcntl.flock` on `metrics.db.lock` | In-place `ALTER TABLE` migration; archive only at orchestrator startup | The DB is a derived index; the archive path already exists. The CLI, the background loop and page requests can all sync, so one lock is the single owner of archive and writes | self |
+| D8  | Schema change | Schema v4; a non-v4 DB is archived by the existing `.legacy.<UTC>` mechanism and rebuilt from logs on first sync. The schema check, archive and every sync run while holding an exclusive `fcntl.flock` on `metrics.db.lock`; `reset_and_backfill` holds it across archive and rebuild. Archiving checkpoints the WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) and moves any `-wal`/`-shm` files alongside | In-place `ALTER TABLE` migration; archive only at orchestrator startup | The DB is a derived index; the archive path already exists. The CLI, the background loop and page requests can all sync, so one lock is the single owner of archive and writes | self |
 | D9  | Log rewritten (e.g. by `migrate-sessions`) | If the file is shorter than the stored offset, or the SHA-256 of its first line changed, delete that session's rows and re-ingest from byte 0 | Ignore; full rebuild | Offsets are meaningless after a rewrite; per-session reset is cheap | self |
 | D10 | Log file deleted | Keep its rows | Delete them | Deleting a log shouldn't erase cost history; the index is still rebuildable from the logs that remain | self |
 | D11 | Partial last line | Consume only through the last `\n`; the rest is read next sync | Parse it | The agent may be mid-append | self |
@@ -82,12 +82,12 @@ Codebase facts found during discovery:
 | D22 | Row caps | Sessions list 200 rows ("Showing 200 of N"), top error lists 20, tool table unlimited | Pagination | Same cap and wording as the log viewer (`MAX_ROWS`) | self |
 | D23 | Invalid web filter values | Ignore that filter and show a notice naming it | HTTP 400 | Same behaviour as the log viewer's bad dates | self |
 | D24 | Existing `GET /metrics` API | Keep; `requests` keeps its v3 columns so `_query_metrics` works unchanged | Remove | No caller found, but it's a documented route; keeping it costs nothing | self |
+| D25 | Session title | First line of the first root `user_message`, ≤120 characters | No title | Sessions are unrecognisable by ID alone; one line is metadata-sized | self |
 | D26 | Status vocabulary | Request "errors" = `status='error'`; `interrupted` and `no_usage` are counted and shown separately; error rate = errors / all requests | Count all non-completed as errors | 585 `no_usage` rows are mostly stream-accounting gaps, not failures; folding them in would bury real errors | self |
 | D27 | Tool `duration_ms = 0` | Stored as NULL (not recorded); percentiles use non-NULL values | Keep 0 | `ToolResult.duration_ms` defaults to 0 and 3,842 older results never recorded it; zeros would skew p50 down | self |
 | D28 | Duplicate event IDs within a log | First occurrence wins (`INSERT OR IGNORE`); a duplicate `llm_request` whose material columns differ is logged at error level (current `_process_batch` behaviour) | Raise `EventIdConflict` and skip the file | The tailer decodes lines itself, bypassing `SessionLog`'s conflict check; keeping the first wins keeps the rest of the session indexed | self |
 | D29 | Subagent turn outcomes | Child `turn_complete`/`turn_error`/`turn_interrupted` set `status` and `error` on the `subagents` row (`scope`, `subagent_index`); `turns` stays root-only | Store child turns in `turns` | A child run is one turn; the errors view lists root turn errors (116) and subagent errors (22) separately | self |
-| D30 | Page request during a running sync | Try the lock without blocking; if held, skip the sync and render from the current index with the notice "Index is updating; figures may be incomplete". The CLI blocks on the lock, printing "Waiting for index sync…" to stderr after 1 s | Block page requests | A cold rebuild takes seconds to tens of seconds; the page should not hang | self |
-| D25 | Session title | First line of the first root `user_message`, ≤120 characters | No title | Sessions are unrecognisable by ID alone; one line is metadata-sized | self |
+| D30 | Page request during a running sync | Try the lock without blocking; if held, skip the sync and render from the current index with the notice "Index is updating; figures may be incomplete"; if `metrics.db` is missing or not v4, render the page's empty state with that notice. The CLI blocks on the lock, printing "Waiting for index sync…" to stderr after 1 s | Block page requests | A cold rebuild takes seconds to tens of seconds; the page should not hang | self |
 
 ## Requirements
 
@@ -112,7 +112,7 @@ Codebase facts found during discovery:
 - R9 MUST keep `archie migrate-sessions` rebuilding the index: `reset_and_backfill(db_path, paths)` archives the existing DB, syncs exactly those paths in strict mode, and raises on any file or SQLite error so the command reports failure.
   - AC: after `reset_and_backfill`, the old DB exists as `metrics.db.legacy.*` and the new DB's `requests` match the given logs; with a sync step patched to raise `sqlite3.OperationalError`, `reset_and_backfill` raises it; `archie migrate-sessions` on that failure exits 1 and does not print "rebuilt metrics".
 - R10 MUST rebuild the local data (303 logs, 212 MB) cold in under 30 s, and run a no-change sync in under 0.5 s.
-  - AC: with `ARCHIE_HOME_DIR=/tmp/075-home` holding a copy of `~/.nexus/sessions`, `time uv run archie stats --since all` with no `metrics.db` (cold) and again (warm) meet the bounds; timings recorded in M1's Outcome.
+  - AC: with `ARCHIE_HOME_DIR=/tmp/075-home` holding a copy of `~/.nexus/sessions`, a script timing `MetricsIndex(...).sync()` in-process with no `metrics.db` (cold, < 30 s) and again (warm, < 0.5 s) meets the bounds; timings recorded in M1's Outcome.
 
 **Queries (shared by CLI and web)**
 
@@ -198,7 +198,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 ### Data flow and error handling
 
 - **Sync:** acquire `metrics.db.lock` (D8, D30) → ensure schema (archive non-v4) → list `*.jsonl` in the sessions dir, or use the explicit path list from `reset_and_backfill` → per file: stat; skip if unchanged; `BEGIN IMMEDIATE`; read `ingest_files`; rewrite check (D9) → delete the session's rows in every table; read bytes from `offset` to the last `\n`; decode each line with `decode_event(..., persisted=True)`; fold; update `ingest_files`; `COMMIT`.
-- Invalid line → count in `invalid_lines`, log at debug, continue. Undecodable bytes / `OSError` → set `ingest_files.error`, log a warning, roll back that file, continue with the next. `sqlite3.Error` → log a warning, abandon this sync (the next one retries). In strict mode (`reset_and_backfill`), file and SQLite errors raise instead.
+- Invalid line → count in `invalid_lines`, log at debug, continue. Undecodable bytes / `OSError` → set `ingest_files.error`, log a warning, roll back that file, continue with the next. `sqlite3.Error` → log a warning, abandon this sync (the next one retries). In strict mode (`reset_and_backfill`), file and SQLite errors raise instead; invalid lines are still counted, not raised, and conflicting duplicates are still logged per D28.
 - Duplicate event IDs: D28.
 - `task` call whose input has no `tasks` list (or JSON-string list) → no `subagents` rows; children's requests still count under their scope.
 - **Query:** web handler → `asyncio.to_thread(sync)` → parse filters (notices for invalid) → `asyncio.to_thread(query)` → render. A sync failure on a page request is logged and the page renders from the existing index with a notice "Index sync failed: <reason>".
@@ -216,7 +216,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Test seam:** `MetricsIndex.sync()` against `session_logs` fixture logs; `insights.overview()`; `archie stats` via `CliRunner`.
 - **Edge cases:** partial last line → deferred; rewritten log → reset; v3 DB → archived; locked DB → warning, no crash.
 - **Deliverable:** `archie stats` prints cost, requests, tokens, cache hit % and per-model cost for the last 30 days from an index built from the logs.
-- **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py tests/test_orchestrator_metrics_api.py tests/test_proxy_metrics_integration.py tests/test_canonical_session_events.py tests/test_cli_migrate_sessions.py` passes (if that file doesn't exist, the migrate test goes in `tests/test_orchestrator_metrics.py`); with `ARCHIE_HOME_DIR=/tmp/075-home` (copy of `~/.nexus/sessions`), `archie stats --since all --json` total cost is within $0.01 of the sum of `session_accounting(path)["total_cost"]` over the copied logs, and the R10 timings meet their bounds.
+- **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py tests/test_orchestrator_metrics_api.py tests/test_proxy_metrics_integration.py tests/test_canonical_session_events.py tests/test_session_migration.py` passes (R9's CLI exit-1 AC lives in `tests/test_session_migration.py`); with `ARCHIE_HOME_DIR=/tmp/075-home` (copy of `~/.nexus/sessions`), `archie stats --since all --json` total cost is within $0.01 of the sum of `session_accounting(path)["total_cost"]` over the copied logs, and the R10 timings meet their bounds.
 - **Outcome:**
 
 ### [ ] M2 — Full index and the remaining `archie stats` views
@@ -254,7 +254,7 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 
 ## Review
 
-- Plan review: 1 pass; 3 ❌, 9 ⚠️, 7 ℹ️. All accepted. R9 now names the carried-over behaviours and a strict `reset_and_backfill`; R7/D7 allow the title explicitly; strict mode added to the error design; M1 Verify compares against `session_accounting` sums; D16 defines date filtering for turns/compactions/sessions; D26–D30 added (status vocabulary, zero durations, duplicates, subagent outcomes, lock and page-during-sync); `subagents` gains status/error; missing `tasks` handled; sync takes explicit paths; stale counts in D12/D13/Context updated; R10 and M3 Verify name commands. Second pass run for the ❌ fixes.
+- Plan review: 1 pass; 3 ❌, 9 ⚠️, 7 ℹ️. All accepted. R9 now names the carried-over behaviours and a strict `reset_and_backfill`; R7/D7 allow the title explicitly; strict mode added to the error design; M1 Verify compares against `session_accounting` sums; D16 defines date filtering for turns/compactions/sessions; D26–D30 added (status vocabulary, zero durations, duplicates, subagent outcomes, lock and page-during-sync); `subagents` gains status/error; missing `tasks` handled; sync takes explicit paths; stale counts in D12/D13/Context updated; R10 and M3 Verify name commands. Second pass: blockers confirmed resolved; 4 ⚠️, 3 ℹ️ accepted (migrate test file named, R10 timed in-process, WAL files moved on archive, empty state when schema not v4, lock held across `reset_and_backfill`, strict-mode line handling, D25 reordered).
 
 ## Outcome
 
