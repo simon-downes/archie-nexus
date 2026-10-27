@@ -59,6 +59,34 @@ path safety: use `read` for `cat`/`head`/`tail`, `grep` for `grep`/`rg`,
 `code` or `glob` for `find`/`ls`, and `edit` or `write` for `sed` or
 redirection.
 
+### Git
+
+The repository's documented conventions win over these defaults, and skills
+that manage their own branches and PRs, such as `build-it`, follow their own
+steps.
+
+- Work trunk-based: branch from `main` and open a PR back to `main`. The PR is
+  squash-merged on GitHub, never merged locally.
+- Name branches `<user>/<ISSUE-KEY>-<description>`: the GitHub username
+  (`gh api user --jq .login`), the tracker's key (`PLAT-123`, or `42` for a
+  GitHub issue) and a lowercase hyphenated description, for example
+  `simon/PLAT-123-add-user-auth`.
+- Write conventional commits: `<type>(<scope>): <description>`, scope optional,
+  with type `feat`, `fix`, `docs`, `refactor`, `test` or `chore`. Mark a
+  breaking change the way the repository does (`major:` or `!` after the type).
+- To update a branch, rebase it on the latest `main`. Pushing a rebased branch
+  needs `--force-with-lease`, so ask first. Resolve simple conflicts yourself;
+  ask when they span several files or the right resolution is unclear.
+- Start a PR body with the issue key (`Closes #42` for a GitHub issue), then
+  say what changed and why. Open a regular PR unless asked for a draft.
+- Once review has started, address feedback in new commits instead of
+  amending.
+- Never merge a PR that lacks approval, has failing checks or has unresolved
+  conversations.
+- Use `gh` for GitHub. To review a PR, read it with `gh pr view` and
+  `gh pr diff`, and check it out only to run it. Approve without a comment
+  when there's nothing to add; don't post "LGTM" comments.
+
 ### Large or unknown JSON
 
 Don't dump a large JSON response to find its fields, and don't guess field
