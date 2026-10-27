@@ -148,7 +148,7 @@ settings:
 Each plugin is configured under `plugins.<id>` in `~/.nexus/config.yaml`:
 
 - `enabled` (default `true`): `false` removes the plugin's tools and skills and stops its
-  credentials and settings being exported into new containers.
+  credentials and settings being exported into agent commands.
 - `policy`: `read` and `write` blocks, each `{enabled, scope}`, validated against the
   manifest's `policy`.
 - `auth`: overrides for the credential provider, such as an OAuth `client_id`.

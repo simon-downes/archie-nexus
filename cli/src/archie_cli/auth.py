@@ -156,15 +156,21 @@ def _prompt_settings(service: str) -> None:
     )
     values = {}
     for name, type_name in missing.items():
-        value = click.prompt(
-            f"{service} setting {name}",
-            default="",
-            show_default=False,
-            type=click.STRING,
-            err=True,
-        ).strip()
-        if value:
-            values[name] = _PROMPT_TYPES[type_name].convert(value, None, None)
+        while True:
+            value = click.prompt(
+                f"{service} setting {name}",
+                default="",
+                show_default=False,
+                type=click.STRING,
+                err=True,
+            ).strip()
+            if not value:
+                break
+            try:
+                values[name] = _PROMPT_TYPES[type_name].convert(value, None, None)
+                break
+            except click.BadParameter as exc:  # re-prompt rather than lose earlier answers
+                click.echo(f"Error: {exc.message}", err=True)
     if not values:
         return
     path = home_dir() / "config.yaml"

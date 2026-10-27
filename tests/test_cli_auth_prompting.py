@@ -145,6 +145,40 @@ def test_set_plugin_settings_leaves_untouched_lines_byte_identical():
     assert path.read_text() == original + "      account: acct\n"
 
 
+def test_set_plugin_settings_quotes_strings_yaml11_would_misread():
+    path = home_dir() / "config.yaml"
+    set_plugin_settings(path, "scalr", {"hostname": "yes", "account": "1:20"})
+    assert yaml.safe_load(path.read_text())["plugins"]["scalr"]["settings"] == {
+        "hostname": "yes",
+        "account": "1:20",
+    }
+
+
+def test_set_plugin_settings_writes_through_symlink(tmp_path):
+    real = tmp_path / "real.yaml"
+    real.write_text(COMMENTED)
+    link = home_dir() / "config.yaml"
+    link.symlink_to(real)
+    set_plugin_settings(link, "scalr", {"account": "acct"})
+    assert link.is_symlink()
+    assert yaml.safe_load(real.read_text())["plugins"]["scalr"]["settings"]["account"] == "acct"
+
+
+def test_prompt_settings_reprompts_on_invalid_typed_value(monkeypatch):
+    from archie_cli import auth
+
+    _tty(monkeypatch)
+    monkeypatch.setattr(auth, "_missing_settings", lambda service, config: {"port": "int"})
+    answers = iter(["not-a-number", "8080"])
+    with (
+        patch("archie_cli.auth.click.prompt", side_effect=lambda *a, **k: next(answers)),
+        patch("archie_cli.config_edit.set_plugin_settings") as write,
+    ):
+        _prompt_settings("scalr")
+    write.assert_called_once()
+    assert write.call_args.args[1:] == ("scalr", {"port": 8080})
+
+
 def test_set_plugin_settings_rejects_invalid_result_and_keeps_file():
     path = home_dir() / "config.yaml"
     path.write_text(COMMENTED)

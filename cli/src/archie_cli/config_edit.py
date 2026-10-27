@@ -1,7 +1,8 @@
 """Comment-preserving edits to ``config.yaml``.
 
-``ruamel.yaml`` round-trips the file, so hand-written comments and formatting
-outside the changed keys survive. The result is validated with
+``ruamel.yaml`` round-trips the file, so hand-written comments survive. It
+re-emits with its default indentation, so a file with unusual indentation
+may be re-indented. The result is validated with
 ``load_nexus_config`` before it replaces the original.
 """
 
@@ -14,8 +15,10 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+import yaml as pyyaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 
 class ConfigEditError(Exception):
@@ -29,6 +32,22 @@ def _child_map(parent: CommentedMap, key: str, where: str) -> CommentedMap:
         parent[key] = value
     if not isinstance(value, dict):
         raise ConfigEditError(f"{where}.{key} is not a mapping")
+    return value
+
+
+def _yaml_value(value: Any) -> Any:
+    """Quote a string that PyYAML (YAML 1.1, used by ``load_config``) would read differently.
+
+    ruamel writes YAML 1.2, so ``yes`` or ``1:20`` would be left plain and then
+    load as a bool or an int.
+    """
+    if isinstance(value, str):
+        try:
+            same = pyyaml.safe_load(value) == value
+        except pyyaml.YAMLError:
+            same = False
+        if not same:
+            return DoubleQuotedScalarString(value)
     return value
 
 
@@ -60,11 +79,12 @@ def set_plugin_settings(path: Path, plugin_id: str, values: dict[str, Any]) -> N
         f"plugins.{plugin_id}",
     )
     for name, value in values.items():
-        settings[name] = value
+        settings[name] = _yaml_value(value)
 
     out = StringIO()
     yaml.dump(data, out)
 
+    path = path.resolve()  # replace a symlink's target, not the link
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".config.", suffix=".yaml")
