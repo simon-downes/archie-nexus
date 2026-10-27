@@ -24,14 +24,16 @@ from archie_shared.types import TextBlock
 # --- Fixtures ---
 
 
-def _session_model(*, cache_ttl: int | None = None, context: int = 200_000) -> ModelEntry:
+def _session_model(
+    *, cache_ttl: int | None = None, context: int = 200_000, cache_write: float = 6.25
+) -> ModelEntry:
     return ModelEntry(
         name="Session",
         context=context,
         provider=BedrockProvider(model_id="session"),
         can_cache=cache_ttl is not None,
         cache_ttl_seconds=cache_ttl,
-        cost=CostConfig(rates=[Rate(input=5, output=25, cache_read=0.5, cache_write=6.25)]),
+        cost=CostConfig(rates=[Rate(input=5, output=25, cache_read=0.5, cache_write=cache_write)]),
         max_output_tokens=1000,
     )
 
@@ -155,9 +157,11 @@ async def test_manual_compaction_persists_order_and_replaces_transcript(tmp_path
     assert _of(events, CompactionComplete)[0].request_id == request.id
     assert _of(events, CompactionComplete)[0].status == "success"
     assert _of(events, CompactionComplete)[0].error is None
+    assert _of(events, CompactionComplete)[0].skills_loaded == ["build-it"]
     assert len(session.turns) == 1
     assert session.turns[0].compacted
     assert harness._loaded_content_keys == set()
+    assert any(str(harness.log_path) in text for text in _texts(session.turns[0]))
     assert session.total_cost > 0
     assert harness.turn_active is False
 
@@ -173,6 +177,72 @@ async def test_manual_compaction_priced_at_compaction_model_rates(tmp_path):
     # Compactor rates: 100 input × $0.1/M + 20 output × $0.5/M.
     assert request.cost_usd == pytest.approx(100 * 0.1 / 1e6 + 20 * 0.5 / 1e6)
     assert harness.turn_active is False
+
+
+@pytest.mark.parametrize(("cache_write", "price"), [(6.25, 6.25), (0.0, 5)])
+async def test_cost_saved_prices_avoided_cache_write(tmp_path, cache_write, price):
+    model = _session_model(cache_write=cache_write)
+    harness, _, _ = _harness(tmp_path, [], [_summary()], model=model)
+    harness.session.add_turn("user", "x" * 40_000)
+
+    await harness.run_manual_compaction()
+
+    complete = _of(_events(harness), CompactionComplete)[0]
+    removed = complete.tokens_before - complete.tokens_after
+    assert removed > 0
+    assert complete.cost_saved_usd == pytest.approx(removed * price / 1e6)
+    assert complete.skills_loaded == []
+
+
+async def test_compaction_records_loaded_skills(tmp_path):
+    harness, _, _ = _harness(tmp_path, [], [_summary()])
+    harness.session.add_turn("user", "hello")
+    harness._loaded_content_keys.update(
+        {
+            ("workflow-plan", "__body__"),
+            ("build-it", "__body__"),
+            ("build-it", "references/PLAN-FORMAT.md"),
+            ("research", "references/only.md"),
+        }
+    )
+
+    await harness.run_manual_compaction()
+
+    complete = _of(_events(harness), CompactionComplete)[0]
+    assert complete.status == "success"
+    assert complete.skills_loaded == ["build-it", "workflow-plan"]
+
+
+async def test_failed_compaction_records_loaded_skills(tmp_path):
+    class FailingClient:
+        model_id = "failing"
+
+        def stream(self, messages, system, tool_config=None, history_boundary=None):
+            yield Usage(10, 0)
+            raise RuntimeError("expired")
+
+    harness, _, _ = _harness(tmp_path, [])
+    harness._compaction_llm = FailingClient()
+    harness.session.add_turn("user", "hello")
+    harness._loaded_content_keys.add(("build-it", "__body__"))
+
+    await harness.run_manual_compaction()
+
+    complete = _of(_events(harness), CompactionComplete)[0]
+    assert complete.status == "failure"
+    assert complete.skills_loaded == ["build-it"]
+    assert harness._loaded_content_keys == {("build-it", "__body__")}
+
+
+def test_compaction_complete_without_skills_loaded_decodes():
+    line = (
+        b'{"type":"compaction_complete","id":"01J","turn":1,"iteration":0,"scope":null,'
+        b'"request_id":"r","reason":"manual","status":"success","tokens_before":10,'
+        b'"tokens_after":2,"cost_saved_usd":0.0,"duration_ms":1,"error":null,"summary":"s"}'
+    )
+    event = decode_event(line, persisted=True)
+    assert isinstance(event, CompactionComplete)
+    assert event.skills_loaded == []
 
 
 async def test_manual_empty_transcript_does_not_call_provider(tmp_path):
@@ -407,10 +477,11 @@ async def test_manual_then_auto_carries_only_new_message(tmp_path):
     # ... and carries only the new message, not the old framing or summary.
     sent = llm.calls[1]["messages"][0]
     texts = _texts(sent)
-    assert len(texts) == 3
+    assert len(texts) == 4
     assert "auto" in texts[1]
-    assert "manual" not in "".join(texts)
-    assert texts[2] == "turn two"
+    assert str(harness.log_path) in texts[2]
+    assert "manual" not in "".join(texts[:2] + texts[3:])
+    assert texts[3] == "turn two"
 
 
 async def test_unanswered_message_after_failed_turn_is_summarised(tmp_path):
@@ -441,7 +512,9 @@ async def test_unanswered_message_after_failed_turn_is_summarised(tmp_path):
     assert result is not None and result.messages is not None
     texts = _texts(result.messages[0])
     assert texts[-1] == "turn two"
-    assert "unanswered" not in "".join(texts)
+    # The log pointer names tmp_path, which contains the test name; check only
+    # the summary and pending blocks for the old message.
+    assert "unanswered" not in "".join(texts[:2] + texts[3:])
 
 
 async def test_still_over_limit_after_compaction_ends_turn_with_error(tmp_path):
@@ -710,6 +783,7 @@ async def test_interrupt_during_manual_compaction_keeps_transcript(tmp_path):
     client.harness = harness
     harness._compaction_llm = client
     harness.session.add_turn("user", "hello")
+    harness._loaded_content_keys.add(("build-it", "__body__"))
     harness._turn_active = True
     notices = []
     original = harness.event_bus.emit
@@ -727,6 +801,7 @@ async def test_interrupt_during_manual_compaction_keeps_transcript(tmp_path):
     (complete,) = _of(_events(harness), CompactionComplete)
     assert complete.status == "interrupted"
     assert complete.error == "Compaction interrupted"
+    assert complete.skills_loaded == ["build-it"]
     assert _texts(harness.session.turns[0]) == ["hello"]
     assert harness.turn_active is False
 

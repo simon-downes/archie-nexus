@@ -481,7 +481,7 @@ async def test_background_loop_indexes_appended_requests(session_logs, tmp_path,
     try:
         for _ in range(200):
             await asyncio.sleep(0.01)
-            if (tmp_path / "metrics.db").exists() and _count(tmp_path, "requests") == 1:
+            if metrics.is_current(tmp_path / "metrics.db") and _count(tmp_path, "requests") == 1:
                 break
         with path.open("a") as out:
             out.write(encode_event(w.llm(cost_usd=0.02)) + "\n")

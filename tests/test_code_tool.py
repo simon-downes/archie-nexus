@@ -512,6 +512,17 @@ class TestCodeIntegration:
         assert "… +5 more directories" in result
 
     @pytest.mark.asyncio
+    async def test_directory_mode_lists_key_files_first(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
+        for i in range(30):
+            (tmp_path / f"a{i:02}.py").write_text("x = 1\n")
+        for name in ("README.md", "pyproject.toml", "AGENTS.md"):
+            (tmp_path / name).write_text("x\n")
+        result = await code(path=".")
+        first = result.splitlines()[1].strip()
+        assert first.startswith("AGENTS.md, README.md, pyproject.toml, a00.py")
+
+    @pytest.mark.asyncio
     async def test_directory_mode_excludes_noise_dirs(self, tmp_path, monkeypatch):
         monkeypatch.setattr("archie_agent.exec.tools.code.WORKSPACE", tmp_path)
         (tmp_path / "app.py").write_text("x = 1\n")

@@ -28,7 +28,7 @@ not make the decision for you.
 # When Not to Use
 
 - Simple factual questions ("what's the default timeout?") — just search and answer
-- Questions about the current codebase — read the code (see `# Available Tools` → "Exploring a
+- Questions about the current codebase — read the code (see `## Available Tools` → "Exploring a
   codebase")
 - **Judgment / decision questions** ("which should *we* pick?") — research the options,
   then route the decision to `council` or the user. Research gathers evidence; it does
@@ -89,8 +89,8 @@ If genuinely ambiguous, ask one clarifying question; otherwise proceed.
 
 ## 2. Find primary sources
 
-If sources are provided, use them. Otherwise discover them with the configured search
-and fetch tools (refer to `# Available Tools`):
+If sources are provided, use them. Otherwise discover them with `web_search` and
+`web_fetch`:
 
 1. Search for the topic, targeting official docs, specs, source repos, and first-party
    posts

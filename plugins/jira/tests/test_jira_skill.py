@@ -32,3 +32,16 @@ def test_namespace_rule_is_not_duplicated():
     rules = _global_rules()
     assert rules.count("`jira.<function>`") == 1
     assert "Call Jira only through" not in rules
+
+
+def test_skill_documents_markdown_contract():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "Markdown" in text and "32,767" in text
+    assert "Re-saving such a description turns these into plain text" in text
+    assert "plain text, not ADF" not in text
+    assert '"description": "Plain text' not in text
+
+
+def test_readme_lists_adf_module():
+    readme = SKILL.parents[2] / "README.md"
+    assert "`adf.py`" in readme.read_text(encoding="utf-8")

@@ -67,7 +67,7 @@ If the plan is a local file, create a branch: `<user>/<plan-number>-<description
 
 **Post-start actions:** After creating the branch, update the issue status to
 "In Progress" (or nearest equivalent) if an issue tracker is configured for the project.
-Determine the project configuration and issue tracker provider (refer to `# Available Tools`).
+Identify the issue tracker from the project documentation (README, CONTRIBUTING, AGENTS.md).
 If no tracker is configured, skip silently — issue operations are supportive, not blocking.
 If the update fails, warn and continue.
 

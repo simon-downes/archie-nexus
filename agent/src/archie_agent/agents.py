@@ -70,7 +70,7 @@ class AgentEntry:
 
 DEFAULT_AGENT = AgentEntry(
     name="default",
-    description="General-purpose child agent for delegated tasks.",
+    description="General-purpose subagent for delegated tasks.",
     provider=None,
     model=None,
     skills=[],
@@ -306,8 +306,9 @@ def _task_description(agent_catalog: dict[str, AgentEntry], max_concurrent: int)
         for name in _agent_names(agent_catalog)
     )
     return (
-        "Delegate one or more tasks to child agents. Tasks in one call run in parallel, "
-        f"{max_concurrent} at a time; put independent tasks in one call. Each child starts "
+        "Delegate one or more tasks to subagents. Tasks in one call run in parallel, "
+        f"up to {max_concurrent} at a time; put independent tasks in one call. Subagents "
+        "cannot delegate further. Each subagent starts "
         "with no conversation history, so the prompt must state the goal, the relevant "
         "paths and what is already known, and the shape and length of the report. "
         f"Agents: {agents}."
@@ -329,7 +330,7 @@ def create_task_tool(
     exec_run_root: Path | None = None,
     runner_context: RunnerContextSource = None,
     turn_cost_limit: float = 50.0,
-    max_concurrent: int = 3,
+    max_concurrent: int = 5,
     live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
     | None = None,
 ) -> ToolSpec:

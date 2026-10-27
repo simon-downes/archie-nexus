@@ -57,7 +57,7 @@ from archie_agent.loop_events import (
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
 from archie_agent.session import DisplayEntry, Session, Turn
 from archie_agent.session_bus import SessionEventBus
-from archie_agent.skills import create_skill_tool, discover_skills
+from archie_agent.skills import BODY_KEY, create_skill_tool, discover_skills
 from archie_agent.tool_policy_live import LiveToolPolicy
 
 if TYPE_CHECKING:
@@ -219,7 +219,7 @@ class AgentHarness:
 
         return ToolSpec(
             name="task",
-            description="Delegate one or more tasks to specialised child agents.",
+            description="Delegate one or more tasks to subagents.",
             schema={
                 "type": "object",
                 "properties": {
@@ -416,6 +416,8 @@ class AgentHarness:
         """
         request_id = str(ULID())
         started_at = now_utc()
+        # Measured before the compactor runs: a successful compaction clears them.
+        skills_loaded = sorted({name for name, key in self._loaded_content_keys if key == BODY_KEY})
         await self._event_bus.emit(
             CompactionStart(
                 id=str(ULID()),
@@ -469,10 +471,11 @@ class AgentHarness:
                     summary=None,
                     debug="",
                     estimated_next_request_cost_usd=estimated_next_request_cost_usd,
+                    skills_loaded=skills_loaded,
                 )
             )
             return None
-        replacement = build_replacement(outcome.summary, mode, pending)
+        replacement = build_replacement(outcome.summary, mode, pending, self.log_path)
         tokens_after = self._estimate_context([replacement], use_baseline=False)
         stats = outcome.stats
         debug = ";".join(
@@ -485,8 +488,10 @@ class AgentHarness:
                 f"rounds_dropped={stats.rounds_dropped}",
             ]
         )
-        saved_rate = self.session.model.cost.get_rate(tokens_before, 0).input
-        cost_saved_usd = max(0.0, (tokens_before - tokens_after) * saved_rate / 1_000_000)
+        # The next request would otherwise write the removed tokens to a cold cache.
+        saved_rate = self.session.model.cost.get_rate(tokens_before, 0)
+        saved_price = saved_rate.cache_write or saved_rate.input
+        cost_saved_usd = max(0.0, (tokens_before - tokens_after) * saved_price / 1_000_000)
         await self._event_bus.emit(
             CompactionComplete(
                 id=str(ULID()),
@@ -504,6 +509,7 @@ class AgentHarness:
                 summary=outcome.summary,
                 debug=debug,
                 estimated_next_request_cost_usd=estimated_next_request_cost_usd,
+                skills_loaded=skills_loaded,
             )
         )
         self.session.turns = [replacement]

@@ -56,13 +56,13 @@ An issue summary plus:
 
 ```json
 {
-  "description": "Plain text or null",
+  "description": "Markdown or null",
   "reported_by": "Name or null",
   "comments": [
     {
       "id": "10001",
       "author": "Name or null",
-      "body": "Plain text",
+      "body": "Markdown",
       "created": "2025-01-01T12:00:00Z"
     }
   ],
@@ -72,7 +72,11 @@ An issue summary plus:
 }
 ```
 
-At most 50 comments are returned. Description and comment bodies are plain text, not ADF.
+At most 50 comments are returned. Description and comment bodies are Markdown in the same dialect writes accept (see "Formatting descriptions and comments"), so text you read can be edited and saved back with its formatting intact.
+
+Jira content with no Markdown form is shown as readable text: an expand section as its bold title followed by its contents, a mention as `@Name`, a status as `[STATUS]`, a date as `YYYY-MM-DD`, an attachment as `[attachment: name]`, a smart link as `<url>`, and task items as `- [ ]` / `- [x]`. Underline and colour are dropped. **Re-saving such a description turns these into plain text**: mentions stop notifying, expands open, task boxes stop being checkable, and embedded attachments become text. Before re-saving a description that contains any of them, tell the user what will change, or edit with a comment instead.
+
+Read-back Markdown escapes literal Markdown characters (`\*`, `\[`, `\_`), so it can be longer than the visible text. A description close to Jira's 32,767-character limit may exceed it when read and saved back; shorten it or attach the full text with `attach_file`.
 
 ## Read functions
 
@@ -124,11 +128,20 @@ Returns up to `limit` candidate objects without selecting one:
 
 All writes require enabled write policy and an in-scope project. Internal assignee lookup, transition discovery, and verification reads are also write-scoped.
 
+### Formatting descriptions and comments
+
+Descriptions and comment bodies are Markdown (CommonMark with GFM tables and strikethrough), converted to Jira's rich text. Write readable structure: short sections with headings, lists, and tables rather than long paragraphs.
+
+- Supported: headings `#`–`######`, paragraphs, line breaks (a single newline is kept as a line break), `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, `[links](https://…)`, bullet and numbered lists (nested; a numbered list may start at any number), fenced code blocks with a language, `>` quotes, `---` rules, and tables with a header row.
+- Panels: a quote whose first line is exactly `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, or `> [!CAUTION]` becomes an info, success, note, warning, or error panel.
+- Not supported: raw HTML (sent as literal text), @mentions (sent as plain text; no one is notified), images (sent as a link), task checkboxes, expand sections, status lozenges, colours.
+- Jira cannot nest some blocks. A heading inside a list or panel becomes bold text, a table inside a list becomes one line per row, a quote inside a quote is flattened, and a code block inside a panel becomes code-formatted lines. Content is kept.
+
 ### `jira.create_issue(project, summary, type="Task", description=None, labels=None, status=None, assignee=None, parent=None, priority=None)`
 
 - `summary`: required, non-empty, at most 8,000 characters.
 - `type`: required, non-empty issue-type name.
-- `description`: optional plain text, at most 8,000 characters; converted to ADF.
+- `description`: optional Markdown, at most 32,767 characters (Jira's limit); converted to ADF. Blank or whitespace-only text is omitted.
 - `labels`: optional list of replacement labels.
 - `assignee`: optional value that must resolve uniquely.
 - `parent`: optional issue key.
@@ -146,7 +159,7 @@ At least one argument must be supplied. `None` leaves a field unchanged:
 | Field | Empty value | Non-empty value |
 |---|---|---|
 | `summary` | invalid | replaces summary; 1–8,000 characters |
-| `description` | clears description | replaces description; at most 8,000 characters |
+| `description` | clears description (also whitespace-only) | replaces description; Markdown, at most 32,767 characters |
 | `labels` | `[]` clears all labels | replaces all labels |
 | `status` | invalid | exact, case-insensitive target status |
 | `assignee` | `""` clears assignee | resolves uniquely and replaces assignee |
@@ -161,13 +174,13 @@ Returns the resulting issue detail. All local validation, including status valid
 
 ### `jira.add_comment(issue_key, body)`
 
-`body` must be plain text of 1–8,000 characters. Returns:
+`body` must be Markdown of 1–32,767 characters and not blank. Returns:
 
 ```json
 {
   "id": "10001",
   "author": "Alex Smith",
-  "body": "Plain text",
+  "body": "Markdown",
   "created": "2025-01-01T12:00:00Z"
 }
 ```

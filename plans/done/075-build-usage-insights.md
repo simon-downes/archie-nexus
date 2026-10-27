@@ -253,6 +253,8 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 
 ## Risks
 
+- Rebased onto main after #14 merged: merged origin/main (52a130d) into the branch. The 7 conflicts were all in files from b074cff, which #14 squash-merged in revised form; resolved to main. No file this build changed conflicted. The merge exposed a race in test_background_loop_indexes_appended_requests (it polled metrics.db before its schema existed); fixed the test to wait on is_current. Full suite after the merge: 2304 passed, only the 39 baseline failures.
+
 - PR base: the PR targets `main` but the branch was cut from `improve-tool-strategy`, so it includes unreviewed commit b074cff (pr.py warning; file-list mismatch lists that commit's 12 files). Noted in the PR body.
 
 - Chart.js under `style-src 'self'`: confirmed in M4; no CSP violations logged.

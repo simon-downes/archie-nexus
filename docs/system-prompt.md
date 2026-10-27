@@ -20,7 +20,7 @@ The main agent's prompt has these sections, in this order. Sections are joined w
 | 1 | Identity and core rules | `persona/prompts/identity.md` | Who Archie is and the rules that override everything else |
 | 2 | Soul | `persona/prompts/soul.md` + the brain's `SOUL.md` | The user's voice and style; left out when `SOUL.md` is missing or empty |
 | 3 | Environment | `persona/prompts/environment.md`, filled by `environment.py` | Facts about the container the agent would otherwise guess at |
-| 4 | Available tools | `persona/prompts/tools-strategy.md` + tool guidelines | How to choose between native tools and `exec` |
+| 4 | Available tools | `persona/prompts/tools-strategy.md` + `persona/prompts/delegation.md` + tool guidelines | How to choose between native tools and `exec`, and when to delegate with `task`. Child prompts omit `delegation.md` because children have no `task` tool |
 | 5 | Brain | `persona/prompts/brain.md` + the brain's `BRAIN.md` | How to use the curated knowledge store |
 | 6 | Skills catalog | discovered skills | One line per skill, so the agent knows what it can load |
 | 7 | Project context | the workspace's `AGENTS.md` | Rules for the repository being worked on |

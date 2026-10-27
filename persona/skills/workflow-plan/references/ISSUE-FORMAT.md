@@ -15,8 +15,8 @@ the plan's Objective section.
 
 ## Operations
 
-Determine the project configuration to identify the issue tracker provider
-(refer to `# Available Tools`). The key operations are:
+Identify the issue tracker from the project documentation (README, CONTRIBUTING,
+AGENTS.md), then load the matching skill (for example `jira`). The key operations are:
 - **Create issue** with title and description (plan content)
 - **Update issue description** (to revise the plan)
 - **Read issue** (to load the plan for implementation)
