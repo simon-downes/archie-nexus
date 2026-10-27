@@ -23,13 +23,6 @@ from archie_orchestrator.docker import list_sessions
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Metrics frame inspection markers
-# ---------------------------------------------------------------------------
-
-# Cheap string checks match actual json.dumps output (space after colon).
-_METRICS_MARKERS = ('"type":"llm_request"', '"type": "llm_request"')
-
-# ---------------------------------------------------------------------------
 # Active WebSocket connection counter (used by app.py shutdown log)
 # ---------------------------------------------------------------------------
 
@@ -166,12 +159,6 @@ async def proxy_stream(websocket: WebSocket) -> None:
     target_url = f"ws://127.0.0.1:{session.port}/stream"
     await websocket.accept()
 
-    # Grab the metrics queue from app state (None if writer not wired).
-    # websocket.app and .app.state always exist in Starlette, so only the
-    # final attribute (metrics_writer) needs a guard.
-    _writer = getattr(websocket.app.state, "metrics_writer", None)
-    metrics_queue = _writer.queue if _writer is not None else None
-
     log.info("Client connected: %s", session_id)
 
     global _active_ws_connections
@@ -189,14 +176,6 @@ async def proxy_stream(websocket: WebSocket) -> None:
             async def backend_to_client() -> None:
                 async for msg in backend:
                     if isinstance(msg, str):
-                        # Cheap marker check — enqueue metrics events without blocking relay
-                        if metrics_queue is not None and any(
-                            marker in msg for marker in _METRICS_MARKERS
-                        ):
-                            try:
-                                metrics_queue.put_nowait((session_id, msg))
-                            except Exception:  # noqa: BLE001 — metrics must never affect relay
-                                pass
                         await websocket.send_text(msg)
                     else:
                         await websocket.send_bytes(msg)

@@ -210,14 +210,14 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 
 ## Milestones
 
-### [ ] M1 — Log-tailing index and `archie stats` overview (tracer bullet)
+### [x] M1 — Log-tailing index and `archie stats` overview (tracer bullet)
 
 - **Approach:** Rewrite `metrics.py` as `MetricsIndex` with the full v4 schema but folding only `session_started`, `user_message` (title), and `llm_request` (sessions + requests). Keep `reset_and_backfill` as archive + sync. Replace the lifespan writer task with `_metrics_sync_loop`; remove the proxy enqueue. Add `insights.parse_filters` and `insights.overview` (totals, daily cost, top workspaces/models; turn and error counts from `requests` only until M2). Add `cli/stats.py` with `overview` only, `--json` and the filter options. Rewrite `tests/test_orchestrator_metrics.py`; update the proxy and canonical-event tests. ⚠️ `tests/test_orchestrator_metrics_api.py` seeds its own v3 table and calls `_query_metrics`; it must still pass.
 - **Test seam:** `MetricsIndex.sync()` against `session_logs` fixture logs; `insights.overview()`; `archie stats` via `CliRunner`.
 - **Edge cases:** partial last line → deferred; rewritten log → reset; v3 DB → archived; locked DB → warning, no crash.
 - **Deliverable:** `archie stats` prints cost, requests, tokens, cache hit % and per-model cost for the last 30 days from an index built from the logs.
 - **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py tests/test_orchestrator_metrics_api.py tests/test_proxy_metrics_integration.py tests/test_canonical_session_events.py tests/test_session_migration.py` passes (R9's CLI exit-1 AC lives in `tests/test_session_migration.py`); with `ARCHIE_HOME_DIR=/tmp/075-home` (copy of `~/.nexus/sessions`), `archie stats --since all --json` total cost is within $0.01 of the sum of `session_accounting(path)["total_cost"]` over the copied logs, and the R10 timings meet their bounds.
-- **Outcome:**
+- **Outcome:** `MetricsIndex` (full v4 schema; all event types folded already, since the fold code was small enough to land with the schema) replaces `MetricsWriter`; the lifespan runs `_metrics_sync_loop`; the proxy no longer inspects frames. `insights.parse_filters`/`overview` and `archie stats` (all subcommands present; M2 tests them). Verify: the listed pytest files pass (24 + 18 new tests, plus migration/API/proxy/canonical suites); full suite shows no new failures against the 39-test baseline; ruff check/format clean. Real data copy (303 logs, 212 MB): cold sync 1.65 s, warm 0.007 s (R10); `archie stats --since all --json` cost 1068.407323 vs `session_accounting` sum 1068.4073 (diff 0.0).
 
 ### [ ] M2 — Full index and the remaining `archie stats` views
 
@@ -245,6 +245,8 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Outcome:**
 
 ## Deviations
+
+- M1: the fold code for every event type and all seven query functions and CLI subcommands landed in M1 instead of M2; M2 now adds their tests, rendering fixes and any corrections. No scope change.
 
 ## Risks
 

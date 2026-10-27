@@ -13,10 +13,16 @@ from collections.abc import Callable
 import pytest
 from archie_shared.events import (
     AssistantMessage,
+    CompactionComplete,
+    CompactionStart,
     IterationStart,
     LLMRequest,
+    SessionStarted,
     ToolCall,
     ToolResult,
+    TurnComplete,
+    TurnError,
+    TurnInterrupted,
     UserMessage,
 )
 
@@ -212,22 +218,31 @@ class SessionLogWriter:
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
         cost_usd: float = 0.0,
+        status: str = "completed",
+        error: str | None = None,
+        sent_at: str = "2026-07-01T10:00:00+00:00",
+        duration_ms: int = 100,
+        context_tokens: int = 100,
+        event_id: str | None = None,
+        stop_reason: str | None = None,
     ) -> LLMRequest:
         return LLMRequest(
-            id=self._id("lr"),
+            id=event_id or self._id("lr"),
             scope=scope,
             turn=turn,
             iteration=iteration,
             model_key=model_key,
-            sent_at="2026-07-01T10:00:00+00:00",
-            duration_ms=100,
-            status="completed",
+            sent_at=sent_at,
+            duration_ms=duration_ms,
+            status=status,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
-            context_tokens=100,
+            context_tokens=context_tokens,
             cost_usd=cost_usd,
+            stop_reason=stop_reason,
+            error=error,
             subagent_index=index,
             purpose=purpose,
         )
@@ -242,13 +257,14 @@ class SessionLogWriter:
         iteration: int = 1,
         scope=None,
         index=None,
+        request_id: str = "r1",
     ) -> ToolCall:
         return ToolCall(
             id=self._id("tc"),
             turn=turn,
             iteration=iteration,
             scope=scope,
-            request_id="r1",
+            request_id=request_id,
             tool_use_id=tool_use_id,
             name=name,
             input=tool_input,
@@ -281,6 +297,64 @@ class SessionLogWriter:
             result_bytes=len(content.encode()),
             subagent_index=index,
         )
+
+    def session_started(self, *, model_key: str = "m1", sent_at: str = "2026-07-01T09:59:00+00:00"):
+        return SessionStarted(
+            id=self._id("ss"), schema_version=2, sent_at=sent_at, model_key=model_key
+        )
+
+    def turn_complete(self, *, turn: int = 1, scope=None, index=None, stop_reason="end_turn"):
+        return TurnComplete(
+            id=self._id("tk"), turn=turn, scope=scope, stop_reason=stop_reason, subagent_index=index
+        )
+
+    def turn_error(self, message: str, *, turn: int = 1, scope=None, index=None):
+        return TurnError(
+            id=self._id("te"), turn=turn, scope=scope, message=message, subagent_index=index
+        )
+
+    def turn_interrupted(self, *, turn: int = 1, scope=None, index=None):
+        return TurnInterrupted(id=self._id("ti"), turn=turn, scope=scope, subagent_index=index)
+
+    def compaction(
+        self,
+        *,
+        turn: int = 1,
+        request_id: str = "cmp1",
+        tokens_before=1000,
+        tokens_after=100,
+        status="success",
+        sent_at="2026-07-01T10:05:00+00:00",
+    ):
+        """A compaction_start / compaction_complete pair."""
+        start = CompactionStart(
+            id=self._id("cs"),
+            turn=turn,
+            iteration=1,
+            scope=None,
+            request_id=request_id,
+            reason="threshold",
+            tokens_before=tokens_before,
+            estimated_next_request_cost_usd=0.5,
+            model_key="m1",
+            sent_at=sent_at,
+        )
+        done = CompactionComplete(
+            id=self._id("cc"),
+            turn=turn,
+            iteration=1,
+            scope=None,
+            request_id=request_id,
+            reason="threshold",
+            status=status,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            cost_saved_usd=0.25,
+            duration_ms=900,
+            error=None if status == "success" else "boom",
+            summary=None,
+        )
+        return [start, done]
 
 
 @pytest.fixture

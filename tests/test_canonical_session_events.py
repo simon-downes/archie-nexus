@@ -1,7 +1,7 @@
 import sqlite3
 
 import pytest
-from archie_orchestrator.metrics import MetricsWriter
+from archie_orchestrator.metrics import MetricsIndex
 from archie_shared.events import (
     LLMRequest,
     SessionStarted,
@@ -73,12 +73,14 @@ def test_duplicate_events_are_idempotent_and_conflicts_rejected(tmp_path):
 
 
 def test_canonical_metrics_are_idempotent(tmp_path):
-    path = tmp_path / "metrics.db"
-    writer = MetricsWriter(path)
-    conn = sqlite3.connect(path)
-    writer._ensure_schema(conn)
-    raw = encode_event(request())
-    writer._process_batch(conn, [("s", raw), ("s", raw)])
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    log = SessionLog(sessions / "s-01k0000000.jsonl")
+    log.append(request())
+    index = MetricsIndex(tmp_path / "metrics.db", sessions)
+    index.sync()
+    index.sync()
+    conn = sqlite3.connect(tmp_path / "metrics.db")
     assert conn.execute("select count(*) from requests").fetchone()[0] == 1
     conn.close()
 
