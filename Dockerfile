@@ -216,9 +216,15 @@ members = ["agent", "shared"]
 archie-agent = { workspace = true }
 archie-shared = { workspace = true }
 EOF
-ENV UV_PROJECT_ENVIRONMENT=/opt/archie/venv
-RUN cd /opt/archie && uv sync --package archie-agent --no-dev --no-install-project
+RUN cd /opt/archie && UV_PROJECT_ENVIRONMENT=/opt/archie/venv \
+    uv sync --package archie-agent --no-dev --no-install-project
 ENV PATH="/opt/archie/venv/bin:$PATH"
+
+# Projects synced inside the container get their own venv at <project>/.venv-archie.
+# uv resolves a relative path against the project root. This keeps `uv sync` in
+# /workspace away from both the agent's venv (/opt/archie/venv, which only the build
+# step above and entrypoint.sh target) and the host's macOS `.venv` in the bind mount.
+ENV UV_PROJECT_ENVIRONMENT=.venv-archie
 
 # --- Entrypoint script and gh wrapper ---
 COPY entrypoint.sh /opt/archie/entrypoint.sh

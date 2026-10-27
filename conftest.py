@@ -1,11 +1,20 @@
 """Repo-root pytest setup: install ``archie_plugins`` and isolate the Nexus home."""
 
+import os
 from pathlib import Path
 
 import pytest
 from archie_agent.exec.plugin_loader import install_package
 
-REPO_PLUGINS_DIR = Path(__file__).resolve().parent / "plugins"
+REPO_ROOT = Path(__file__).resolve().parent
+REPO_PLUGINS_DIR = REPO_ROOT / "plugins"
+
+# Pin plugin and persona lookups to this checkout. An Archie session container exports
+# both variables pointing at the live agent's mounts; without this, runner and server
+# subprocesses load plugins from there and clash with the package installed below.
+# Set in os.environ (not monkeypatch) so subprocesses spawned by tests inherit it.
+os.environ["ARCHIE_PLUGINS_DIR"] = str(REPO_PLUGINS_DIR)
+os.environ["ARCHIE_PERSONA_DIR"] = str(REPO_ROOT / "persona")
 
 # Make ``archie_plugins.<id>`` importable for plugin tests (D2, D16).
 install_package(REPO_PLUGINS_DIR)

@@ -6,8 +6,9 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
+# Virtual environments (.venv-archie is the in-container venv; see Dockerfile)
 .venv
+.venv-archie/
 
 # Ruff cache
 .ruff_cache/
