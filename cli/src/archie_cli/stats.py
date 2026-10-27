@@ -70,11 +70,26 @@ class _Table(Table):
         super().add_row(*(escape(c) if isinstance(c, str) else c for c in cells), **kwargs)
 
 
+def _one_line(text: str | None, width: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
 def _table(title: str, columns: list[tuple[str, str]]) -> Table:
+    """Columns are ``(name, justify)``; ``"wrap"`` is a left-aligned column that wraps.
+
+    Every other column stays on one line (text truncates with an ellipsis), so a
+    row is one terminal line except where an error message needs the space.
+    """
     table = _Table(title=title, title_justify="left", title_style="bold")
-    for position, (name, justify) in enumerate(columns):
-        # Numbers and the first (identifying) column never wrap; free text wraps.
-        table.add_column(name, justify=justify, no_wrap=justify == "right" or position == 0)
+    for name, justify in columns:
+        if justify == "wrap":
+            table.add_column(name, justify="left", ratio=1)
+
+        elif justify == "right":
+            table.add_column(name, justify="right", no_wrap=True)
+        else:
+            table.add_column(name, justify="left", no_wrap=True, overflow="ellipsis")
     return table
 
 
@@ -213,34 +228,49 @@ def render_overview(data: dict, console: Console) -> None:
     console.print(workspaces)
 
 
+_TITLE_MAX = 60
+_TITLE_MIN = 12
+
+
 def render_sessions(data: dict, console: Console) -> None:
     console.print(_filters_line(data))
     shown = len(data["sessions"])
-    title = f"Sessions ({shown} of {data['total']}, by {data['sort']})"
-    table = _table(
-        title,
+    columns = [
+        ("Started (UTC)", "left"),
+        ("Session", "left"),
+        ("Turns", "right"),
+        ("Requests", "right"),
+        ("Cost", "right"),
+        ("Errors", "right"),
+        ("Duration", "right"),
+    ]
+    rows = [
         [
-            ("Started (UTC)", "left"),
-            ("Session", "left"),
-            ("Title", "left"),
-            ("Turns", "right"),
-            ("Requests", "right"),
-            ("Cost", "right"),
-            ("Errors", "right"),
-            ("Duration", "right"),
-        ],
-    )
-    for s in data["sessions"]:
-        table.add_row(
             (s["started_at"] or "—")[:16].replace("T", " "),
             s["session_id"],
-            (s["title"] or "")[:60],
             _num(s["turns"]),
             _num(s["requests"]),
             _money(s["cost"]),
             _num(s["errors"]),
             _duration(s["duration_s"]),
-        )
+        ]
+        for s in data["sessions"]
+    ]
+    # The title gets whatever width the fixed columns leave, or is dropped.
+    probe = _table("", columns)
+    for row in rows:
+        probe.add_row(*row)
+    # Each extra column costs its width plus a 3-character separator.
+    spare = console.width - console.measure(probe).maximum - 3
+    title_width = min(_TITLE_MAX, spare)
+    title = f"Sessions ({shown} of {data['total']}, by {data['sort']})"
+    if title_width >= _TITLE_MIN:
+        columns.insert(2, ("Title", "left"))
+        for row, s in zip(rows, data["sessions"], strict=True):
+            row.insert(2, _one_line(s["title"], title_width))
+    table = _table(title, columns)
+    for row in rows:
+        table.add_row(*row)
     console.print(table)
 
 
@@ -360,7 +390,7 @@ def render_tools(data: dict, console: Console) -> None:
     _print_tools(data["tools"], console, "Tools")
     if data["top_errors"]:
         errors = _table(
-            "Commonest tool errors", [("Tool", "left"), ("Count", "right"), ("Error", "left")]
+            "Commonest tool errors", [("Tool", "left"), ("Count", "right"), ("Error", "wrap")]
         )
         for e in data["top_errors"]:
             errors.add_row(e["name"], _num(e["count"]), e["error"] or "")
@@ -405,14 +435,14 @@ def render_errors(data: dict, console: Console) -> None:
         f"turn errors {_num(t['turn_errors'])} · subagent errors {_num(t['subagent_errors'])}"
     )
     if data["top_messages"]:
-        table = _table("Request errors", [("Model", "left"), ("Count", "right"), ("Error", "left")])
+        table = _table("Request errors", [("Model", "left"), ("Count", "right"), ("Error", "wrap")])
         for e in data["top_messages"]:
             table.add_row(e["model"], _num(e["count"]), (e["error"] or "")[:120])
         console.print(table)
     if data["turn_errors"]:
         table = _table(
             "Turn errors",
-            [("When", "left"), ("Session", "left"), ("Turn", "right"), ("Error", "left")],
+            [("When", "left"), ("Session", "left"), ("Turn", "right"), ("Error", "wrap")],
         )
         for e in data["turn_errors"]:
             table.add_row(
@@ -425,7 +455,7 @@ def render_errors(data: dict, console: Console) -> None:
     if data["subagent_errors"]:
         table = _table(
             "Subagent errors",
-            [("When", "left"), ("Session", "left"), ("Agent", "left"), ("Error", "left")],
+            [("When", "left"), ("Session", "left"), ("Agent", "left"), ("Error", "wrap")],
         )
         for e in data["subagent_errors"]:
             table.add_row(

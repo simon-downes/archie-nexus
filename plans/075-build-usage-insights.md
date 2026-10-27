@@ -219,14 +219,14 @@ Lifecycle: derived; rebuilt from logs whenever archived. Timestamps are ISO-8601
 - **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py tests/test_orchestrator_metrics_api.py tests/test_proxy_metrics_integration.py tests/test_canonical_session_events.py tests/test_session_migration.py` passes (R9's CLI exit-1 AC lives in `tests/test_session_migration.py`); with `ARCHIE_HOME_DIR=/tmp/075-home` (copy of `~/.nexus/sessions`), `archie stats --since all --json` total cost is within $0.01 of the sum of `session_accounting(path)["total_cost"]` over the copied logs, and the R10 timings meet their bounds.
 - **Outcome:** `MetricsIndex` (full v4 schema; all event types folded already, since the fold code was small enough to land with the schema) replaces `MetricsWriter`; the lifespan runs `_metrics_sync_loop`; the proxy no longer inspects frames. `insights.parse_filters`/`overview` and `archie stats` (all subcommands present; M2 tests them). Verify: the listed pytest files pass (24 + 18 new tests, plus migration/API/proxy/canonical suites); full suite shows no new failures against the 39-test baseline; ruff check/format clean. Real data copy (303 logs, 212 MB): cold sync 1.65 s, warm 0.007 s (R10); `archie stats --since all --json` cost 1068.407323 vs `session_accounting` sum 1068.4073 (diff 0.0).
 
-### [ ] M2 — Full index and the remaining `archie stats` views
+### [x] M2 — Full index and the remaining `archie stats` views
 
 - **Approach:** Fold `tool_call`/`tool_result`, `turn_complete`/`turn_error`/`turn_interrupted`, `compaction_*`/`context_compacted` and `task` launches into their tables. Add `insights.sessions`, `session_detail`, `models`, `tools`, `subagents`, `errors` and `percentile`; extend `overview` with turn counts, turn errors and interruptions. Add the six CLI subcommands with `rich` tables. Extend `SessionLogWriter` in `tests/conftest.py`.
 - **Test seam:** `insights.*` over a synced fixture DB; CLI via `CliRunner`.
 - **Edge cases:** `task` input `tasks` as a JSON string → parsed; tool result with no matching call → ignored; tool call whose request isn't indexed → `timestamp`/`model_key` NULL.
 - **Deliverable:** all seven `archie stats` views work against real data.
 - **Verify:** `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py` passes (covering R1, R5–R7, R11–R19); on the data copy each subcommand runs and `stats tools` lists `shell` and `read`.
-- **Outcome:**
+- **Outcome:** Added 31 insights tests (filters, all seven views, percentiles, date fallback, 200-row cap) and 15 more CLI tests (every subcommand in table and JSON form, literal `[exit: N]`, bad sort). CLI rendering: cells are escaped (Rich would otherwise eat `[exit: 2]`); error text wraps; the sessions title column takes only the width left over and is dropped below 12 characters. Verify: `uv run pytest tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_cli_stats.py` passes (75); full suite 2161 passed with only the 39 baseline failures; ruff clean. Real data copy: every subcommand exits 0; `stats tools --since all` lists `shell` (5,886 calls) and `read` (10.3k).
 
 ### [ ] M3 — Web dashboard pages with tables and filters
 

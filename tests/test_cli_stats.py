@@ -29,7 +29,8 @@ def home(session_logs, tmp_path):
 
 
 def _invoke(*args):
-    return CliRunner().invoke(main, ["stats", *args])
+    # A wide terminal so table cells aren't truncated in assertions.
+    return CliRunner(env={"COLUMNS": "200"}).invoke(main, ["stats", *args])
 
 
 def test_stats_json_prints_overview(home):
@@ -70,3 +71,43 @@ def test_stats_works_without_orchestrator(home, monkeypatch):
     monkeypatch.setattr(httpx, "get", refuse)
     monkeypatch.setattr(httpx.Client, "send", refuse)
     assert _invoke("--since", "all", "--json").exit_code == 0
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["sessions", "--since", "all"], "Fix the parser"),
+        (["sessions", "--since", "all", "--sort", "cost", "--limit", "1"], "proj-01k0000000"),
+        (["session", "proj-01k0000000"], "Turns"),
+        (["models", "--since", "all"], "m1"),
+        (["tools", "--since", "all"], "shell"),
+        (["subagents", "--since", "all"], "Skills"),
+        (["errors", "--since", "all"], "Request errors"),
+    ],
+)
+def test_stats_subcommands_render(home, args, expected):
+    result = _invoke(*args)
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
+
+
+def test_stats_tools_shows_exit_header_literally(home):
+    result = _invoke("tools", "--since", "all")
+    assert "[exit: 2] ls: nope" in result.output
+
+
+@pytest.mark.parametrize("view", ["sessions", "models", "tools", "subagents", "errors"])
+def test_stats_subcommands_json(home, view):
+    result = _invoke(view, "--since", "all", "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["filters"]["since"] is None
+
+
+def test_stats_session_json(home):
+    result = _invoke("session", "proj-01k0000000", "--json")
+    assert json.loads(result.output)["session"]["title"] == "Fix the parser"
+
+
+def test_stats_bad_sort_rejected(home):
+    result = _invoke("sessions", "--sort", "nope")
+    assert result.exit_code == 2
