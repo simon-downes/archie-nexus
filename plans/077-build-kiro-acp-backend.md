@@ -539,12 +539,12 @@ dead, Kiro killed, active turn `turn_error`.
   `-e ARCHIE_BACKEND=kiro`, waits 45 s, and on a Kiro `DockerError` stops the container and
   appends the startup-error file's text. The TUI status bar shows `<id> (Kiro)`, and
   `ModelProvider` lists the host's `kiro.models` for `kiro/` sessions. Added `docs/kiro.md`
-  and updated `architecture.md`. The `Dockerfile` installs the latest stable `kiro-cli`
-  headless build, checked against the manifest SHA-256. Kiro 2.35.0 was released during the
+  and updated `architecture.md`. The image's existing Kiro install is used (see
+  Deviations). Kiro 2.35.0 was released during the
   build, and its live check found that the `model` option now arrives after `session/new`.
   The harness now waits for it (see Deviations). Evidence: full `uv run pytest` 2,543 passed;
-  `ruff check .` clean. Live with 2.35.0 alone on `PATH` (the two binaries the Dockerfile
-  installs): startup verified all settings, and a shell turn logged `credits 0.119739`. Not
+  `ruff check .` clean. Live with 2.35.0's `kiro-cli` and `kiro-cli-chat` alone on `PATH`:
+  startup verified all settings, and a shell turn logged `credits 0.119739`. Not
   verified: `archie build` and a real `archie start --kiro`, because this container has no
   Docker.
 
@@ -561,8 +561,13 @@ dead, Kiro killed, active turn `turn_error`.
 - M6: Kiro 2.35.0 no longer includes the `model` option in the `session/new` result; it
   arrives in a later `config_option_update`. The harness waits for it (within the startup
   deadline) before checking `default_model`, and `tests/fake_kiro.py` now behaves the same way.
-- M6: added a Kiro install step to the `Dockerfile` (the plan only noted the image gap);
-  `kiro-cli` and `kiro-cli-chat` are the only binaries needed for ACP.
+- M6 (review): the image already installs the latest stable Kiro CLI (zip build into
+  `~/.local/bin`, checked against the manifest SHA-256). The extra Dockerfile step M6 added
+  was removed; no image change is needed.
+- Review: `archie start --kiro` checks the new session's `/status` model key. If an older
+  orchestrator ignored `backend` and started a native session, the CLI stops it and fails.
+- Review: after startup, a `config_option_update` that re-enables `contentCollection`
+  (including one that follows a model switch) kills the backend, as a late built-in tag does.
 - M3: the agent process exits with code 3, not 1: uvicorn turns a `SystemExit` raised in
   the lifespan into exit 3, as it already does for native startup failures. The
   orchestrator only needs the container to exit and reads the reason from the file.
@@ -621,6 +626,43 @@ dead, Kiro killed, active turn `turn_error`.
   ⚠️ D20 event type → live `error_notice`. ℹ️ D13 reason, iteration 0 `iteration_start`, and
   `tool_load` segment split → D13, D12 and ACs updated. Two passes done; no review left.
 
+- Code review (build-it-reviewer, `general` and `risk` in parallel; the first spawn failed
+  with a transport error, and the retry succeeded). Resolutions:
+  - ⚠️ general: `close()` could cancel the stdout reader during its EOF wait, skipping the
+    pending-future failure, so a turn hung after a post-startup kill (the reviewer reproduced
+    it 1 time in 80). Fixed: `AcpClient._finalize()` runs once, from the reader's `finally`
+    and from `close()`. New test `test_close_during_exit_still_fails_pending_request`; the
+    race tests passed 40/40 repeat runs.
+  - ⚠️ risk: duplicate Kiro install in the Dockerfile; the harness would run the existing
+    `~/.local/bin` build anyway. Fixed: removed the new step and corrected `docs/kiro.md`.
+  - ⚠️ risk: an older orchestrator ignores `backend` and starts a native session. Fixed:
+    the CLI verifies the `kiro/` model key from `/status`, and otherwise stops the session
+    and fails. New test `test_start_kiro_on_old_orchestrator_stops_native_session`.
+  - ❓ risk (content collection only checked at startup): answered by fixing it.
+    `_agent_problem` now fails on `contentCollection` other than `disabled` after startup,
+    checked on every `config_option_update` and after a model switch. New test
+    `test_content_collection_reenabled_after_startup_kills_backend`.
+  - ❓ general (effort not verified): effort is a preference, not a safety setting, so a
+    mismatch logs a warning rather than failing the session.
+  - ℹ️ general: non-`KiroStartupError` startup failures skipped the error file. Fixed: the
+    lifespan reports any exception. Test `test_lifespan_reports_unexpected_startup_error`.
+  - ℹ️ risk: startup reasons could echo the key. Fixed: the reason is redacted before the
+    log line and the file (same test).
+  - ℹ️ general: dead `clients`, `current_model`, `tool_names`. Removed.
+  - ℹ️ general: stale 30 s docstring in `start_session`. Fixed.
+  - ℹ️ risk: the metrics backfill ran for native requests too. Fixed: limited to `kiro/`
+    model keys.
+  - ℹ️ general: the TUI streaming test is in `tests/test_kiro_translate.py`, not
+    `tests/test_tui_canonical.py`. Rejected: it drives the real `ArchieApp._apply_event` on
+    translator output. Moving it would only move the fixture loader, so the plan's AC is met
+    in a different file.
+  - ℹ️ risk: `kiro-cli` inherits the whole agent environment. Rejected for this change:
+    Kiro's built-in tools are disabled (fail closed), and the native agent's own tools see
+    the same environment. Added under Follow-ups as an env allowlist.
+  - ℹ️ risk: the frame log is unbounded. Accepted as designed (D24: same sensitivity and
+    lifetime as session logs). Rotation is a Follow-up.
+  No ❌ was raised, so no second round.
+
 ## Outcome
 
 PR: pending
@@ -631,3 +673,5 @@ CI: pending
 - Show credits in insights and `archie stats`.
 - Context % for Kiro sessions from `context_usage.usagePercentage`.
 - Copy `~/.kiro/logs` into `~/.nexus/logs/kiro/` at shutdown.
+- Pass `kiro-cli` an allowlisted environment instead of the whole agent environment.
+- Rotate or cap `~/.nexus/logs/kiro/<session>.acp.jsonl`.

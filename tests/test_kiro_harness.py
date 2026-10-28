@@ -492,3 +492,67 @@ async def test_app_model_switch_routes_to_kiro(harness, monkeypatch):
     )
     assert seen[-1].__class__ is SessionStatus
     assert seen[-1].model_key == "kiro/claude-sonnet-5.5"
+
+
+async def test_content_collection_reenabled_after_startup_kills_backend(
+    home, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_KIRO_SCENARIO", "late_collection")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await asyncio.wait_for(h.handle_message("run it"), 10)
+        assert h.dead
+        assert isinstance(_log(home)[-1], TurnError)
+    finally:
+        await h.close()
+
+
+async def test_close_during_exit_still_fails_pending_request(home, tmp_path):
+    """close() racing the reader's EOF handling must still fail outstanding requests."""
+    h = _harness(home, tmp_path)
+    await h.start()
+    pending = asyncio.ensure_future(
+        h._acp.request(
+            "session/prompt",
+            {"sessionId": "sess_fake", "prompt": [{"type": "text", "text": "hang"}]},
+        )
+    )
+    await asyncio.sleep(0.05)
+    await h._acp.close()
+    with pytest.raises(Exception, match="Kiro backend stopped"):
+        await asyncio.wait_for(pending, 2)
+    assert h.dead
+    await h.close()
+
+
+async def test_lifespan_reports_unexpected_startup_error(home, tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from archie_agent import app as app_module
+
+    monkeypatch.setenv("ARCHIE_BACKEND", "kiro")
+    monkeypatch.setenv("ARCHIE_SESSION_ID", "kirotest-01")
+    real = app_module.KiroHarness
+
+    def make(config, **kwargs):
+        kwargs.update(kiro_home=tmp_path / "kiro", command=[sys.executable, str(FAKE)])
+        harness = real(config, **kwargs)
+
+        async def boom():
+            harness._api_key = SECRET
+            raise OSError(f"disk full near {SECRET}")
+
+        harness.start = boom
+        return harness
+
+    with (
+        patch.object(app_module, "run_startup_hooks", lambda *a, **k: None),
+        patch.object(app_module, "KiroHarness", make),
+        pytest.raises(SystemExit),
+    ):
+        async with app_module.lifespan(app_module.app):
+            pass
+    reason = (home / "logs" / "kiro" / "kirotest-01.startup-error").read_text()
+    assert reason.startswith("OSError: disk full near [redacted]")
+    assert SECRET not in reason

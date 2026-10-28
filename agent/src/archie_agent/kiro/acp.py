@@ -63,6 +63,7 @@ class AcpClient:
         self._pending: dict[int, asyncio.Future] = {}
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task] = []
+        self._finalized = False
         self.permission_requests: list[dict] = []
 
     @property
@@ -141,15 +142,28 @@ class AcpClient:
                 except Exception:  # noqa: BLE001 — a bad frame must not stop the reader
                     log.exception("Failed to handle Kiro frame")
         finally:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._proc.wait(), 5)
-            code = self._proc.returncode
-            for fut in self._pending.values():
-                if not fut.done():
-                    fut.set_exception(AcpError(f"Kiro backend stopped (exit code {code})"))
-            self._pending.clear()
-            if self._on_exit is not None:
+            try:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._proc.wait(), 5)
+            finally:
+                # Runs even when close() cancels this task mid-wait.
+                self._finalize()
+
+    def _finalize(self) -> None:
+        """Fail outstanding requests and report the exit, once."""
+        if self._finalized:
+            return
+        self._finalized = True
+        code = self._proc.returncode if self._proc else None
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(AcpError(f"Kiro backend stopped (exit code {code})"))
+        self._pending.clear()
+        if self._on_exit is not None:
+            try:
                 self._on_exit(code)
+            except Exception:  # noqa: BLE001 — exit reporting must not break shutdown
+                log.exception("Kiro exit callback failed")
 
     async def _dispatch(self, msg: dict, received: float) -> None:
         if "id" in msg and "method" not in msg:
@@ -211,6 +225,12 @@ class AcpClient:
 
     # -- API ------------------------------------------------------------------
 
+    def redact(self, text: str) -> str:
+        """``text`` with every secret replaced by ``[redacted]``."""
+        for secret in self._redact:
+            text = text.replace(secret, "[redacted]")
+        return text
+
     async def request(self, method: str, params: dict, timeout: float | None = None) -> Any:
         self._next_id += 1
         rid = self._next_id
@@ -256,6 +276,8 @@ class AcpClient:
         for task in self._tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        if proc is not None:
+            self._finalize()
         if self._frame_log is not None:
             with contextlib.suppress(Exception):
                 self._frame_log.close()

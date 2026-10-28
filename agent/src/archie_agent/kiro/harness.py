@@ -178,10 +178,6 @@ class KiroHarness:
         return self._event_bus
 
     @property
-    def clients(self):
-        return self._event_bus.clients
-
-    @property
     def turn_active(self) -> bool:
         return self._turn_active
 
@@ -216,6 +212,7 @@ class KiroHarness:
             return left
 
         api_key = resolve_api_key()
+        self._api_key = api_key
         if not api_key:
             raise KiroStartupError(
                 "No Kiro API key: set kiro.api_key in credentials.yaml (archie auth login kiro)"
@@ -329,6 +326,11 @@ class KiroHarness:
 
     def _agent_problem(self) -> str | None:
         """Reason the archie agent config is unusable, or None."""
+        if self._started:
+            # Startup set and verified it; Kiro must never turn content collection back on.
+            collection = config_value(self.config_options, "contentCollection")
+            if collection not in (None, "disabled"):
+                return f"Kiro contentCollection changed to {collection!r}"
         if self.config_errors:
             err = self.config_errors[0]
             return f"Kiro agent config error in {err.get('path', '?')}: {err.get('error', err)}"
@@ -392,6 +394,9 @@ class KiroHarness:
         )
         if isinstance(result, dict) and result.get("configOptions"):
             self.config_options = result["configOptions"]
+        actual = config_value(self.config_options, "effortLevel")
+        if actual != effort:
+            log.warning("Kiro effortLevel is %r after setting %r", actual, effort)
 
     async def switch_model(self, model_key: str) -> str | None:
         """Switch to an allowlisted ``kiro/<id>`` model; return error text or None."""
@@ -415,6 +420,10 @@ class KiroHarness:
             await self._apply_effort(model_id)
         except (AcpError, TimeoutError) as exc:
             return f"Cannot switch Kiro model to {model_id}: {exc}"
+        problem = self._agent_problem()
+        if problem:
+            self._fail(problem)
+            return DEAD_MESSAGE
         self.session.model_id = kiro_model_key(model_id)
         return None
 
@@ -428,6 +437,10 @@ class KiroHarness:
             if update.get("sessionUpdate") == "config_option_update":
                 self.config_options = update.get("configOptions") or self.config_options
                 self._changed.set()
+                if self._started and not self._dead:
+                    problem = self._agent_problem()
+                    if problem:
+                        self._fail(problem)
             translator = self._translator
             if translator is not None:
                 for event in translator.feed(update, received):
@@ -593,6 +606,11 @@ class KiroHarness:
                 await self._event_bus.emit(notice)
         return self._tool_policy.runner_context(snapshot)
 
+    def redact(self, text: str) -> str:
+        """``text`` without the API key (for startup-error text and logs)."""
+        key = getattr(self, "_api_key", None)
+        return text.replace(key, "[redacted]") if key else text
+
     async def close(self) -> None:
         """Kill Kiro's process group and stop the MCP server."""
         self._closing = True
@@ -605,6 +623,3 @@ class KiroHarness:
     def model_options(self) -> list[str]:
         option = config_option(self.config_options, "model") or {}
         return [o.get("value") for o in option.get("options") or () if isinstance(o, dict)]
-
-    def current_model(self) -> str | None:
-        return kiro_model_id(self.session.model_id)

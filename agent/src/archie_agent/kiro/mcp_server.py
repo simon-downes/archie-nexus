@@ -75,9 +75,6 @@ class ArchieMcpServer:
 
     # -- MCP handlers ----------------------------------------------------------
 
-    def tool_names(self) -> list[str]:
-        return [t["name"] for t in self._registry.to_tool_config() if t["name"] not in _EXCLUDED]
-
     def _register(self) -> None:
         @self._mcp.list_tools()
         async def list_tools() -> list[types.Tool]:

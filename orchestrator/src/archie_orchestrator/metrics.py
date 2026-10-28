@@ -42,6 +42,7 @@ from archie_shared.events import (
     UserMessage,
     decode_event,
 )
+from archie_shared.kiro import KIRO_MODEL_PREFIX
 from archie_shared.session import split_id
 
 from archie_orchestrator.session_index import session_start
@@ -420,7 +421,11 @@ class _Folder:
             (end, sid),
         )
         self._touch_turn(event.turn, event.sent_at)
-        if event.scope is None and event.purpose == "conversation":
+        if (
+            event.scope is None
+            and event.purpose == "conversation"
+            and event.model_key.startswith(KIRO_MODEL_PREFIX)
+        ):
             # Kiro writes one llm_request per turn after the turn's tool calls, whose
             # segment request ids never match it; give those rows the turn's request
             # time and model. Native rows already resolved at insert and are untouched.

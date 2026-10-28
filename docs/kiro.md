@@ -7,9 +7,12 @@ unchanged. The backend is chosen per session.
 
 ## Requirements
 
-- The session image includes `kiro-cli`. The `Dockerfile` installs the latest stable headless
-  build and checks it against the SHA-256 in Kiro's release manifest. Rebuild with
-  `archie build` to pick up a newer Kiro.
+- The session image includes `kiro-cli`. The `Dockerfile` installs the latest stable build
+  into `~/.local/bin` and checks it against the SHA-256 in Kiro's release manifest. Rebuild
+  with `archie build` to pick up a newer Kiro.
+- An orchestrator that supports `backend` (restart `archie serve` after updating). If an
+  older orchestrator starts a native session instead, `archie start --kiro` stops it and
+  fails.
 - A Kiro API key at `kiro.api_key` in `credentials.yaml`. Store it with
   `KIRO_API_KEY=... archie auth login kiro` (see `plugins/kiro/README.md`). The agent passes the
   key only to the `kiro-cli` process, never into the agent environment, tool commands or logs.

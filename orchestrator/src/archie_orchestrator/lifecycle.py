@@ -74,7 +74,7 @@ def start_session(
 ) -> SessionDescriptor:
     """Start a new agent container session for the given workspace.
 
-    Synchronous — blocks until the container's agent is ready (up to 30s).
+    Synchronous — blocks until the container's agent is ready (up to 30 s; 45 s for Kiro).
     Use asyncio.to_thread() when calling from an async handler.
 
     Args:

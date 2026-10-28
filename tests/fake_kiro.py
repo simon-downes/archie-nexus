@@ -7,7 +7,8 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
 - ``FAKE_KIRO_HOME``: Kiro home holding ``agents/archie.json`` (for the MCP URL).
 - ``FAKE_KIRO_SCENARIO``: startup variant: ``ok`` (default), ``config_error``,
   ``wrong_mode``, ``builtin_tag``, ``sticky_collection``, ``autopilot_off``, ``no_model``,
-  ``mcp_failed``, ``exit_on_start``, ``hang``, ``late_builtin`` (bad tag after startup).
+  ``mcp_failed``, ``exit_on_start``, ``hang``, ``late_builtin`` (bad tag after startup),
+  ``late_collection`` (content collection re-enabled during a turn).
 - The prompt text picks the turn: ``error`` → JSON-RPC error; ``exit`` → exit 3
   mid-turn; ``sleep`` → MCP ``shell sleep 30`` until ``session/cancel``;
   ``permission`` → ask permission; anything else → text, ``tool_load``, MCP
@@ -224,6 +225,8 @@ async def ask_permission() -> dict:
 async def prompt(rid: int, params: dict) -> None:
     text = params["prompt"][0]["text"]
     cancelled.clear()
+    if text == "hang":
+        await asyncio.Event().wait()
     if text == "error":
         send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": "model exploded"}})
         return
@@ -336,6 +339,9 @@ async def handle(msg: dict) -> None:
     elif method == "session/prompt":
         if SCENARIO == "late_builtin":
             tags("read", "web_search")
+        if SCENARIO == "late_collection":
+            state["contentCollection"] = "enabled"
+            update({"sessionUpdate": "config_option_update", "configOptions": options()})
         asyncio.create_task(prompt(rid, params))
     elif method == "session/cancel":
         cancelled.set()

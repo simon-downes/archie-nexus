@@ -208,9 +208,11 @@ async def _kiro_lifespan(config: "NexusConfig"):
     )
     try:
         await harness.start()
-    except KiroStartupError as exc:
-        log.error("Kiro startup failed: %s", exc)
-        write_startup_error(session_id, str(exc))
+    except Exception as exc:  # noqa: BLE001 — every startup failure is reported (D17)
+        reason = str(exc) if isinstance(exc, KiroStartupError) else f"{type(exc).__name__}: {exc}"
+        reason = harness.redact(reason)
+        log.error("Kiro startup failed: %s", reason)
+        write_startup_error(session_id, reason)
         await harness.close()
         sys.exit(1)
     _agent = harness
