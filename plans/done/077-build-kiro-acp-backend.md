@@ -676,7 +676,7 @@ are small (`app.py` branch, Kiro-only metrics backfill, palette refactor) and co
 the existing suite.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/20
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
