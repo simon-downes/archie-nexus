@@ -1,6 +1,6 @@
 # 077 — Kiro ACP backend
 
-Status: building
+Status: reviewing
 Branch: build-it/077-kiro-acp-backend (base: main @ 4ee641d)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/077-kiro-acp-backend
 
