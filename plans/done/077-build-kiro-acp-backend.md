@@ -675,7 +675,7 @@ stop that Kiro session, because the backend is opt-in per session. The native pa
 are small (`app.py` branch, Kiro-only metrics backfill, palette refactor) and covered by
 the existing suite.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/20
 CI: pending
 
 ## Follow-ups
