@@ -44,8 +44,8 @@ AWS Bedrock / OpenAI API / Ollama / local workspace
 
 1. `archie build` builds `archie:latest` from `Dockerfile`.
 2. `archie serve` runs the host orchestrator; the default profile is `127.0.0.1:7600`.
-3. `archie start <workspace>` asks `POST /sessions` for a workspace directory below `global.workspace_root` (default `~/dev`).
-4. The orchestrator validates the single directory name, creates a session ID, runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for `/status` to succeed (up to 30 seconds).
+3. `archie start <workspace>` asks `POST /sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)).
+4. The orchestrator validates the single directory name, creates a session ID, runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`).
 5. The CLI connects through the orchestrator’s session routes. The orchestrator resolves the session by Docker container name and proxies to the mapped agent port.
 6. `archie stop` calls `DELETE /sessions/{session_id}` and stops the container. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
 
@@ -90,7 +90,7 @@ The orchestrator exposes these application routes:
 | `GET` | `/ui/insights/errors` | insights: request, turn and subagent errors |
 | `GET` | `/health` | orchestrator liveness (`{"status":"ok"}`) |
 | `GET` | `/sessions` | list running sessions |
-| `POST` | `/sessions` | start a session; body `{"workspace":"name"}` |
+| `POST` | `/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` |
 | `DELETE` | `/sessions/{id}` | stop a session |
 | `GET` | `/sessions/{id}/status` | proxy agent status |
 | `GET` | `/sessions/{id}/events?after=<id>` | proxy session history read |
@@ -135,6 +135,10 @@ A user message follows this path:
 5. The orchestrator's metrics sync (every 15 s, plus on each insights page and `archie stats`
    run) tails the session logs into the SQLite metrics index. It never touches the relay.
 6. The TUI applies live and stored events through one imperative `_apply_event(event, historical=...)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.
+
+On a Kiro session (`ARCHIE_BACKEND=kiro`), step 4 runs in `KiroHarness` instead: Kiro CLI calls
+the model over ACP, Archie's tools run in an in-process MCP server, and the ACP stream is
+translated into the same canonical events. See [kiro.md](kiro.md).
 
 The orchestrator WebSocket proxy is intended to be transparent: it forwards client text to the agent and agent text/binary frames back to the client without inspecting them.
 

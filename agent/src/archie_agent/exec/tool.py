@@ -28,12 +28,12 @@ PYTHON = "/opt/archie/venv/bin/python"
 _MAX_RESULT_CHARS = 32_000
 
 
-def truncate_result(text: str) -> str:
-    """Cap a model-facing result at _MAX_RESULT_CHARS with a marker that says how to get the rest."""
-    if len(text) <= _MAX_RESULT_CHARS:
+def truncate_result(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
+    """Cap a model-facing result at ``limit`` characters with a marker that says how to get the rest."""
+    if len(text) <= limit:
         return text
-    return text[:_MAX_RESULT_CHARS] + (
-        f"\n[…truncated: showed {_MAX_RESULT_CHARS:,} of {len(text):,} characters. "
+    return text[:limit] + (
+        f"\n[…truncated: showed {limit:,} of {len(text):,} characters. "
         "See the exec guidance on large results.]"
     )
 

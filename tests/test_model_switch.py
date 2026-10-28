@@ -347,6 +347,7 @@ class TestModelProvider:
         provider = ModelProvider.__new__(ModelProvider)
         provider.matcher = lambda _q: FakeMatcher()
         object.__setattr__(provider, "_app", FakeApp())
+        provider._Provider__screen = type("FakeScreen", (), {"app": FakeApp()})()
 
         hits = [h async for h in provider.search("haiku")]
         assert len(hits) == 1
@@ -380,6 +381,7 @@ class TestModelProvider:
         provider = ModelProvider.__new__(ModelProvider)
         provider.matcher = lambda _q: FakeMatcher()
         object.__setattr__(provider, "_app", FakeApp())
+        provider._Provider__screen = type("FakeScreen", (), {"app": FakeApp()})()
 
         hits = [h async for h in provider.search("xyz")]
         assert hits == []

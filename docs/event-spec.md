@@ -47,7 +47,7 @@ fields or targets a child with both `scope` and `subagent_index`; partial target
 | `user_message` | persisted | `turn: int`, `scope: string?`, `content: string`, `subagent_index: int?` |
 | `iteration_start` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `subagent_index: int?` |
 | `text_delta` | live-only | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `text: string`, `subagent_index: int?` |
-| `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?`, `purpose: conversation \| compaction` |
+| `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?`, `purpose: conversation \| compaction`, `credits: float` (Kiro only; absent otherwise) |
 | `compaction_start` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `tokens_before: int`, `estimated_next_request_cost_usd: float?`, `model_key: string`, `sent_at: string`, `subagent_index: int?` |
 | `compaction_complete` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `status: success \| failure \| interrupted`, `tokens_before: int`, `tokens_after: int?`, `cost_saved_usd: float`, `duration_ms: int`, `error: string?`, `summary: string?`, `debug: string`, `subagent_index: int?`, `estimated_next_request_cost_usd: float?`, `skills_loaded: list[string]` |
 | `context_compacted` | persisted (legacy, no longer emitted) | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `summary: string`, `model_key: string`, `tokens_before: int`, `tokens_after: int`, `duration_ms: int`, `debug: string`, `subagent_index: int?` |
@@ -115,3 +115,10 @@ forbidden, so a client built before the field existed drops every new `compactio
 as malformed; update the CLI with the agent. Before this change, `cost_saved_usd` priced the
 removed tokens at the input rate, so older records are about 20% lower for the same saving
 on models whose cache write costs 1.25× input.
+
+`llm_request.credits` was added without a protocol version change. Only Kiro-backed sessions
+(`archie start --kiro`) write it: one root `llm_request` per Kiro turn, written after the
+turn's tool calls, with `credits` summed from Kiro's turn summary, zero token counts and
+`cost_usd` derived from the credits (see [kiro.md](kiro.md)). Native requests omit the field,
+so their lines are unchanged. A client built before the field existed drops Kiro
+`llm_request` lines as malformed; update the CLI with the agent.

@@ -122,3 +122,32 @@ async def test_delete_session_not_found(http_client):
 
     assert response.status_code == 404
     assert "myproject-01abc12345" in response.json()["error"]
+
+
+async def test_post_sessions_kiro_backend(http_client):
+    """POST /sessions {"backend": "kiro"} passes the backend to start_session."""
+    fake = SessionDescriptor(
+        session_id="p-01", container_name="archie-p-01", port=1, raw_docker_status=""
+    )
+    with patch("archie_orchestrator.app.start_session", return_value=fake) as mock_start:
+        async with http_client as client:
+            response = await client.post("/sessions", json={"workspace": "p", "backend": "kiro"})
+    assert response.status_code == 200
+    assert mock_start.call_args.kwargs == {"backend": "kiro"}
+
+
+async def test_post_sessions_default_backend_is_native(http_client):
+    fake = SessionDescriptor(
+        session_id="p-01", container_name="archie-p-01", port=1, raw_docker_status=""
+    )
+    with patch("archie_orchestrator.app.start_session", return_value=fake) as mock_start:
+        async with http_client as client:
+            await client.post("/sessions", json={"workspace": "p"})
+    assert mock_start.call_args.kwargs == {"backend": "native"}
+
+
+async def test_post_sessions_invalid_backend(http_client):
+    async with http_client as client:
+        response = await client.post("/sessions", json={"workspace": "p", "backend": "x"})
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid backend 'x': expected 'native' or 'kiro'"}

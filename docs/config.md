@@ -146,6 +146,29 @@ To deploy this change: running containers bind-mount the host `agent/` directory
 all sessions and the orchestrator **before** merging or pulling. Then run
 `archie config migrate`, then `archie serve`.
 
+## Kiro backend
+
+The `kiro` section configures sessions started with `archie start --kiro` (see
+[kiro.md](kiro.md)). These are the defaults:
+
+```yaml
+kiro:
+  default_model: gpt-5.6-luna
+  models: [claude-opus-5.5, claude-sonnet-5.5, claude-haiku-5.5,
+           gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna]
+  effort: null          # none | low | medium | high | xhigh | max; null = model default
+  credits:
+    included: 2000      # credits in the subscription per period
+    resets_on: 1        # day of month the period starts (00:00 UTC; clamped to month length)
+    rate_usd: 0.02      # USD per included credit
+    overage_rate_usd: 0.04
+```
+
+`models` is the allowlist of Kiro model ids the session may switch to; `default_model`
+must be one of them. Archie model keys for these are `kiro/<id>`. Each Kiro turn's credits are
+priced at `rate_usd` until the period's total reaches `included`, and at `overage_rate_usd`
+after that. The agent reads this section when a Kiro session starts.
+
 ## Host mounts
 
 Use the top-level `mounts` list to add host bind mounts to every agent container. Each

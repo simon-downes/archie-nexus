@@ -224,3 +224,48 @@ def test_stop_orchestrator_unreachable(monkeypatch, tmp_path):
 
     assert result.exit_code != 0
     assert "archie serve" in result.output
+
+
+def test_start_kiro_posts_backend(monkeypatch, tmp_path):
+    """archie start --kiro posts backend kiro; plain start posts none (077)."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+
+    import httpx as real_httpx
+
+    with patch("archie_cli.cli.httpx") as mock_httpx:
+        mock_httpx.post.return_value = _session_response()
+        mock_httpx.get.return_value = _status_response("kiro/gpt-5.6-luna")
+        mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
+        mock_httpx.HTTPError = real_httpx.HTTPError
+        result = CliRunner().invoke(main, ["start", "--detach", "--kiro", "my-app"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_httpx.post.call_args.kwargs["json"] == {"workspace": "my-app", "backend": "kiro"}
+    mock_httpx.delete.assert_not_called()
+
+
+def _status_response(model: str) -> MagicMock:
+    mock = MagicMock()
+    mock.status_code = 200
+    mock.json.return_value = {"status": "ok", "model": model}
+    return mock
+
+
+def test_start_kiro_on_old_orchestrator_stops_native_session(monkeypatch, tmp_path):
+    """An orchestrator that ignores backend starts a native session; --kiro must not keep it."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+
+    import httpx as real_httpx
+
+    with patch("archie_cli.cli.httpx") as mock_httpx:
+        mock_httpx.post.return_value = _session_response()
+        mock_httpx.get.return_value = _status_response("bedrock-openai-gpt-5-6-luna")
+        mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
+        mock_httpx.HTTPError = real_httpx.HTTPError
+        result = CliRunner().invoke(main, ["start", "--detach", "--kiro", "my-app"])
+
+    assert result.exit_code != 0
+    assert "did not start on Kiro" in result.output
+    assert mock_httpx.delete.call_args.args[0].endswith("/sessions/myproject-01abc12345")

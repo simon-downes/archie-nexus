@@ -43,6 +43,7 @@ from ulid import ULID
 from archie_agent.compaction import is_compact_command
 from archie_agent.exec.plugin_loader import PluginLoadError, run_startup_hooks
 from archie_agent.harness import AgentHarness
+from archie_agent.kiro.harness import KiroHarness, KiroStartupError, write_startup_error
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
 from archie_agent.tool_policy_live import LiveToolPolicy, startup_runner_state
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # Module-level agent reference, set during lifespan
-_agent: AgentHarness | None = None
+_agent: "AgentHarness | KiroHarness | None" = None
 _catalog: dict[str, "ModelEntry"] | None = None
 _config: "NexusConfig | None" = None
 
@@ -89,13 +90,27 @@ def _read_git_branch() -> str:
     return content[:8]
 
 
+def _backend() -> str:
+    """The session backend from ``ARCHIE_BACKEND`` (``native`` when unset)."""
+    backend = os.environ.get("ARCHIE_BACKEND", "").strip() or "native"
+    if backend not in ("native", "kiro"):
+        log.error("Unknown ARCHIE_BACKEND %r: expected 'native' or 'kiro'", backend)
+        sys.exit(1)
+    return backend
+
+
 @asynccontextmanager
 async def lifespan(app):
     """Initialize the agent loop on startup."""
     global _agent, _catalog, _config
 
+    backend = _backend()
     _config = load_nexus_config()
     _catalog = load_models()
+    if backend == "kiro":
+        async with _kiro_lifespan(_config):
+            yield
+        return
     model = get_model(_catalog, _config.global_.model)
     if _config.agent.compaction.model not in _catalog:
         log.error("Unknown compaction model: %s", _config.agent.compaction.model)
@@ -163,6 +178,65 @@ async def lifespan(app):
     log.info("Agent shutting down")
 
 
+@asynccontextmanager
+async def _kiro_lifespan(config: "NexusConfig"):
+    """Start a Kiro-backed session (077 D19): no native model or LLM client setup."""
+    global _agent
+
+    session_id = os.environ.get("ARCHIE_SESSION_ID")
+    if not session_id:
+        log.error(
+            "ARCHIE_SESSION_ID is not set. "
+            "This variable is injected by the host CLI at container start."
+        )
+        sys.exit(1)
+
+    manifests = load_manifests()
+    settings, enabled = startup_runner_state(config, manifests)
+    try:
+        run_startup_hooks(manifests, enabled=enabled, settings=settings)
+    except PluginLoadError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+    harness = KiroHarness(
+        config,
+        session_id=session_id,
+        log_dir=home_dir() / "sessions",
+        tool_policy=LiveToolPolicy(
+            policy_snapshot(config.plugins, manifests), settings=settings, enabled=enabled
+        ),
+    )
+    try:
+        await harness.start()
+    except Exception as exc:  # noqa: BLE001 — every startup failure is reported (D17)
+        reason = str(exc) if isinstance(exc, KiroStartupError) else f"{type(exc).__name__}: {exc}"
+        reason = harness.redact(reason)
+        log.error("Kiro startup failed: %s", reason)
+        write_startup_error(session_id, reason)
+        await harness.close()
+        sys.exit(1)
+    _agent = harness
+
+    try:
+        if not harness.event_bus.log.read():
+            await harness.event_bus.emit(
+                SessionStarted(
+                    id=str(ULID()),
+                    schema_version=2,
+                    sent_at=datetime.now(UTC).isoformat(),
+                    model_key=harness.session.model_id,
+                )
+            )
+        log.info(
+            "Agent started",
+            extra={"backend": "kiro", "model": harness.session.model_id, "session": session_id},
+        )
+        yield
+    finally:
+        log.info("Agent shutting down")
+        await harness.close()
+
+
 async def status(request: Request) -> JSONResponse:
     """Health check + session metadata."""
     if _agent is None:
@@ -200,6 +274,10 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
     assert _catalog is not None
     assert _config is not None
 
+    if isinstance(_agent, KiroHarness):
+        await _handle_kiro_model_switch(_agent, command, websocket)
+        return
+
     if _agent.turn_active:
         await _agent.event_bus.emit(
             ErrorNotice(
@@ -234,6 +312,33 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
         )
     )
     log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
+
+
+async def _handle_kiro_model_switch(
+    agent: KiroHarness, command: SwitchModelCommand, websocket: WebSocket
+) -> None:
+    if agent.turn_active:
+        await agent.event_bus.emit(
+            ErrorNotice(
+                id=str(ULID()),
+                kind="switch_during_turn",
+                message="Cannot switch model during active turn",
+            ),
+            target=websocket,
+        )
+        return
+    error = await agent.switch_model(command.model_key)
+    if error is not None:
+        await agent.event_bus.emit(
+            ErrorNotice(id=str(ULID()), kind="unknown_model", message=error), target=websocket
+        )
+        return
+    await agent.event_bus.emit(
+        SessionStatus(
+            id=str(ULID()), model_key=agent.session.model_id, git_branch=_read_git_branch()
+        )
+    )
+    log.info("Model switched", extra={"model_key": command.model_key, "backend": "kiro"})
 
 
 async def stream(websocket: WebSocket) -> None:

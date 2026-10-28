@@ -137,7 +137,7 @@ async def test_post_sessions_uses_config_as_of_the_request():
         session_id="ws-01", container_name="archie-ws-01", port=1, raw_docker_status="Up"
     )
 
-    def fake_start(workspace, config):
+    def fake_start(workspace, config, *, backend="native"):
         seen.append(config.plugins["scalr"].settings["hostname"])
         return descriptor
 

@@ -75,6 +75,8 @@ class LLMRequest(PersistedEvent, tag="llm_request", tag_field="type", forbid_unk
     error: str | None = None
     subagent_index: int | None = None
     purpose: Literal["conversation", "compaction"] = "conversation"
+    # Kiro-backed turns only; absent (and not encoded) for native requests.
+    credits: float | msgspec.UnsetType = msgspec.UNSET
 
 
 class CompactionStart(
