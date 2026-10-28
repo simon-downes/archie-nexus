@@ -31,6 +31,8 @@ if SCENARIO == "no_model":
     MODELS = ["auto", "claude-sonnet-5.5"]
 
 state = {"contentCollection": "enabled", "autopilot": "on", "model": "auto", "mode": "archie"}
+# Like real Kiro, the model option appears shortly after session/new (config_option_update).
+models_ready = {"value": False}
 cancelled = asyncio.Event()
 pending: dict[int, asyncio.Future] = {}
 next_id = 1000
@@ -58,6 +60,13 @@ def update(payload: dict) -> None:
 
 
 def options() -> list[dict]:
+    opts = _all_options()
+    if not models_ready["value"]:
+        opts = [o for o in opts if o["id"] != "model"]
+    return opts
+
+
+def _all_options() -> list[dict]:
     model_opts = [
         {
             "value": m,
@@ -302,6 +311,13 @@ async def session_new(rid: int, params: dict) -> None:
     send(
         {"jsonrpc": "2.0", "id": rid, "result": {"sessionId": SESSION, "configOptions": options()}}
     )
+    asyncio.create_task(advertise_models())
+
+
+async def advertise_models() -> None:
+    await asyncio.sleep(0.05)
+    models_ready["value"] = True
+    update({"sessionUpdate": "config_option_update", "configOptions": options()})
 
 
 async def handle(msg: dict) -> None:

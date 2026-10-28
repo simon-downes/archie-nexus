@@ -100,8 +100,9 @@ def build(no_cache: bool):
 
 @main.command()
 @click.option("-d", "--detach", is_flag=True, help="Start without attaching TUI")
+@click.option("--kiro", is_flag=True, help="Run the session on the Kiro CLI backend")
 @click.argument("workspace", required=False, default=None)
-def start(detach: bool, workspace: str | None):
+def start(detach: bool, kiro: bool, workspace: str | None):
     """Start a new agent session.
 
     WORKSPACE may be a plain workspace name ('myproject') or prefixed with a
@@ -109,6 +110,7 @@ def start(detach: bool, workspace: str | None):
 
     By default, attaches an interactive TUI after the container is ready.
     Use -d/--detach to start headless (print connection info and exit).
+    Use --kiro to run the session on Kiro CLI instead of Archie's own loop.
     """
     from archie_shared.schemas import expand_workspace_root, get_profile, load_nexus_config
 
@@ -137,7 +139,7 @@ def start(detach: bool, workspace: str | None):
     try:
         response = httpx.post(
             f"{url}/sessions",
-            json={"workspace": ws_name},
+            json={"workspace": ws_name, **({"backend": "kiro"} if kiro else {})},
             timeout=60.0,
         )
     except httpx.HTTPError as exc:

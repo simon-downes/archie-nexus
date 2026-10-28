@@ -34,6 +34,7 @@ from archie_shared.events import (
     TurnInterrupted,
     decode_event,
 )
+from archie_shared.kiro import kiro_model_id
 from archie_shared.models import load_models
 from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.tool_summaries import (
@@ -375,8 +376,12 @@ class ArchieApp(App):
         elif isinstance(event, ce.SessionStatus):
             self._session_model_key = event.model_key
             status = self.query_one("#status", StatusBar)
+            kiro_id = kiro_model_id(event.model_key)
             model = load_models().get(event.model_key)
-            if model is not None:
+            if kiro_id is not None:
+                status.model_name = f"{kiro_id} (Kiro)"
+                status.supports_cache = False
+            elif model is not None:
                 status.model_name = model.name
                 status.supports_cache = model.can_cache
             status.git_branch = event.git_branch

@@ -297,3 +297,86 @@ def test_stop_session_docker_failure_propagates():
     ):
         with pytest.raises(RuntimeError, match="docker stop failed"):
             stop_session("myproject-01abc12345")
+
+
+# ---------------------------------------------------------------------------
+# Kiro backend (077)
+# ---------------------------------------------------------------------------
+
+
+def _start_capturing(config, ws_name, tmp_path, **kwargs):
+    captured: list[str] = []
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.run_container", side_effect=captured.extend),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="9999") as mock_wait,
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        start_session(ws_name, config, **kwargs)
+    return captured, mock_wait
+
+
+def test_start_session_kiro_sets_backend_env_and_timeout(config, workspace, tmp_path):
+    cmd, mock_wait = _start_capturing(config, workspace[0], tmp_path, backend="kiro")
+    i = cmd.index("ARCHIE_BACKEND=kiro")
+    assert cmd[i - 1] == "-e"
+    assert mock_wait.call_args.kwargs["timeout"] == 45.0
+
+
+def test_start_session_native_adds_no_backend_env(config, workspace, tmp_path):
+    cmd, mock_wait = _start_capturing(config, workspace[0], tmp_path)
+    assert not any(arg.startswith("ARCHIE_BACKEND") for arg in cmd)
+    assert mock_wait.call_args.kwargs["timeout"] == 30.0
+
+
+def test_start_session_invalid_backend(config, workspace):
+    with pytest.raises(ValueError, match="Invalid backend 'x'"):
+        start_session(workspace[0], config, backend="x")
+
+
+def _fail_ready(config, ws_name, tmp_path, *, backend, write_reason: bool):
+    from archie_orchestrator.docker import DockerError
+
+    def fail(name, cmd, timeout):
+        session_id = name.removeprefix("archie-")
+        if write_reason:
+            path = tmp_path / ".nexus" / "logs" / "kiro" / f"{session_id}.startup-error"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("Kiro contentCollection is 'enabled' after setting 'disabled'\n")
+        raise DockerError(command=["docker", "inspect", name], stderr="exited", returncode=1)
+
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.run_container"),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", side_effect=fail),
+        patch("archie_orchestrator.lifecycle.stop_container") as mock_stop,
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+        pytest.raises(Exception) as exc,
+    ):
+        start_session(ws_name, config, backend=backend)
+    return exc.value, mock_stop
+
+
+def test_start_session_kiro_failure_includes_startup_error(config, workspace, tmp_path):
+    error, mock_stop = _fail_ready(
+        config, workspace[0], tmp_path, backend="kiro", write_reason=True
+    )
+    assert "Kiro startup failed: Kiro contentCollection is 'enabled'" in str(error)
+    mock_stop.assert_called_once()
+
+
+def test_start_session_kiro_failure_without_file_reraises(config, workspace, tmp_path):
+    error, mock_stop = _fail_ready(
+        config, workspace[0], tmp_path, backend="kiro", write_reason=False
+    )
+    assert "Kiro startup failed" not in str(error)
+    assert "exited" in str(error)
+    mock_stop.assert_called_once()
+
+
+def test_start_session_native_docker_error_unchanged(config, workspace, tmp_path):
+    error, mock_stop = _fail_ready(
+        config, workspace[0], tmp_path, backend="native", write_reason=True
+    )
+    assert "Kiro startup failed" not in str(error)
+    mock_stop.assert_not_called()

@@ -284,12 +284,13 @@ class KiroHarness:
                     f"Kiro mode is {mode!r}, not {agent_files.ROOT_AGENT!r}: "
                     "the archie agent did not load"
                 )
+            await self._set_config("contentCollection", "disabled", remaining)
+            await self._set_config("autopilot", "on", remaining)
+            await self._wait_for_models(remaining)
             if self._kiro.default_model not in self.model_options():
                 raise KiroStartupError(
                     f"Kiro does not offer kiro.default_model {self._kiro.default_model!r}"
                 )
-            await self._set_config("contentCollection", "disabled", remaining)
-            await self._set_config("autopilot", "on", remaining)
             await self._set_config("model", self._kiro.default_model, remaining)
             await self._apply_effort(self._kiro.default_model, remaining)
             await self._wait_for_tools(remaining)
@@ -316,6 +317,15 @@ class KiroHarness:
         actual = config_value(self.config_options, config_id)
         if actual != value:
             raise KiroStartupError(f"Kiro {config_id} is {actual!r} after setting {value!r}")
+
+    async def _wait_for_models(self, remaining) -> None:
+        """Wait for the ``model`` option: Kiro advertises it after ``session/new``."""
+        while not self.model_options():
+            self._changed.clear()
+            try:
+                await asyncio.wait_for(self._changed.wait(), remaining("the model list"))
+            except TimeoutError:
+                raise KiroStartupError("Kiro did not advertise its models") from None
 
     def _agent_problem(self) -> str | None:
         """Reason the archie agent config is unusable, or None."""
@@ -417,6 +427,7 @@ class KiroHarness:
             update = params.get("update") or {}
             if update.get("sessionUpdate") == "config_option_update":
                 self.config_options = update.get("configOptions") or self.config_options
+                self._changed.set()
             translator = self._translator
             if translator is not None:
                 for event in translator.feed(update, received):

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from archie_shared.config import home_dir
 from archie_shared.events import UserMessage
+from archie_shared.kiro import startup_error_path
 from archie_shared.schemas import NexusConfig, expand_workspace_root
 from archie_shared.session import (
     SessionDescriptor,
@@ -30,6 +31,7 @@ from archie_orchestrator.docker import (
     CONTAINER_SHARED_DIR,
     CONTAINER_WORKSPACE_DIR,
     IMAGE_TAG,
+    DockerError,
     check_image,
     list_sessions,
     run_container,
@@ -42,6 +44,10 @@ from archie_orchestrator.mounts import resolve_mounts
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 log = logging.getLogger(__name__)
+
+BACKENDS = ("native", "kiro")
+# Kiro startup has its own 30 s deadline inside the agent (077 D18); leave room for it.
+READY_TIMEOUT_S = {"native": 30.0, "kiro": 45.0}
 
 
 def _remove_empty_session_log(session_id: str) -> None:
@@ -63,7 +69,9 @@ def _remove_empty_session_log(session_id: str) -> None:
         log.warning("Could not remove empty session log %s", path, exc_info=True)
 
 
-def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
+def start_session(
+    workspace: str, config: NexusConfig, *, backend: str = "native"
+) -> SessionDescriptor:
     """Start a new agent container session for the given workspace.
 
     Synchronous — blocks until the container's agent is ready (up to 30s).
@@ -72,6 +80,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     Args:
         workspace: Workspace directory name (resolved under workspace_root).
         config: Loaded NexusConfig (provides workspace_root and other settings).
+        backend: ``native`` (Archie's own loop) or ``kiro`` (``ARCHIE_BACKEND=kiro``).
 
     Returns:
         A SessionDescriptor with session_id, container_name, port, and status.
@@ -82,6 +91,8 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         DockerError: If docker run fails or the container does not become ready
             within the timeout.
     """
+    if backend not in BACKENDS:
+        raise ValueError(f"Invalid backend {backend!r}: expected 'native' or 'kiro'")
     # 1. Resolve and validate workspace path
     # Reject names with path separators or traversal sequences to prevent
     # a user-supplied value from escaping workspace_root.
@@ -145,6 +156,7 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         f"ARCHIE_PLUGINS_DIR={CONTAINER_PLUGINS_DIR}",
         "-e",
         f"ARCHIE_SESSION_ID={session_id}",
+        *(["-e", "ARCHIE_BACKEND=kiro"] if backend == "kiro" else []),
         *(["-e", f"ARCHIE_BRAIN_DIR={configured_brain}"] if configured_brain else []),
         "-v",
         f"{agent_dir}:{CONTAINER_AGENT_DIR}:rw",
@@ -176,13 +188,23 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
     #    On failure, tear down the container we started so a stuck/timed-out
     #    container is not left running (--rm only covers exit/crash).
     try:
-        port_str = wait_for_ready(cname, docker_cmd)
+        port_str = wait_for_ready(cname, docker_cmd, timeout=READY_TIMEOUT_S[backend])
     except RuntimeError:
-        try:
-            stop_container(cname)
-        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
-            log.warning("Cleanup after failed start failed for %s: %s", cname, exc)
+        _cleanup_failed_start(cname)
         raise
+    except DockerError as exc:
+        if backend != "kiro":
+            raise
+        # The container runs with --rm, so the agent leaves the reason on the host mount.
+        _cleanup_failed_start(cname)
+        reason = _kiro_startup_error(nexus_home, session_id)
+        if reason is None:
+            raise
+        raise DockerError(
+            command=exc.command,
+            stderr=f"{exc.stderr}\nKiro startup failed: {reason}",
+            returncode=exc.returncode,
+        ) from exc
 
     log.info("Session started: %s (workspace: %s)", session_id, workspace)
     return SessionDescriptor(
@@ -191,6 +213,23 @@ def start_session(workspace: str, config: NexusConfig) -> SessionDescriptor:
         port=int(port_str),
         raw_docker_status="",  # freshly started; real status available via GET /sessions
     )
+
+
+def _cleanup_failed_start(cname: str) -> None:
+    try:
+        stop_container(cname)
+    except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+        log.warning("Cleanup after failed start failed for %s: %s", cname, exc)
+
+
+def _kiro_startup_error(nexus_home: Path, session_id: str) -> str | None:
+    """The reason a Kiro session failed to start, if the agent recorded one."""
+    path = startup_error_path(nexus_home, session_id)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def stop_session(session_id: str) -> None:

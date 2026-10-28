@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 
+from archie_shared.kiro import kiro_model_id, kiro_model_key
 from archie_shared.models import load_models
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
@@ -27,32 +28,55 @@ def _get_catalog() -> dict:
     return _catalog_cache
 
 
+def _kiro_models() -> tuple[str, ...]:
+    """``kiro.models`` from this host's config (defaults if the config is invalid)."""
+    from archie_shared.schemas import KiroConfig, load_nexus_config
+
+    try:
+        return load_nexus_config().kiro.models
+    except Exception:  # noqa: BLE001 — the palette must open even with a bad config
+        return KiroConfig().models
+
+
+def model_entries(session_model_key: str) -> list[tuple[str, str, str]]:
+    """``(model_key, label, help)`` palette entries for the session's backend (077 D25).
+
+    Kiro sessions (``kiro/`` keys) list the allowlisted Kiro models; other sessions list
+    the token-priced catalog.
+    """
+    if kiro_model_id(session_model_key) is not None:
+        return [
+            (kiro_model_key(m), f"Change Model → {m} (Kiro)", "Kiro credits")
+            for m in _kiro_models()
+        ]
+    catalog = _get_catalog()
+    return [
+        (key, f"Change Model → {catalog[key].name}", _cost_summary(catalog[key]))
+        for key in sorted(catalog)
+    ]
+
+
 class ModelProvider(Provider):
     """Textual command palette provider for model switching and app commands."""
 
+    def _entries(self) -> list[tuple[str, str, str]]:
+        return model_entries(getattr(self.app, "_session_model_key", "") or "")
+
     async def discover(self) -> Hits:
-        catalog = _get_catalog()
-        for key in sorted(catalog):
-            model = catalog[key]
-            help_text = _cost_summary(model)
-            yield DiscoveryHit(
-                f"Change Model → {model.name}", partial(self._switch, key), help=help_text
-            )
+        for key, label, help_text in self._entries():
+            yield DiscoveryHit(label, partial(self._switch, key), help=help_text)
         yield DiscoveryHit("Quit", self._quit, help="Exit Archie")
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
-        catalog = _get_catalog()
-        for key in sorted(catalog):
-            model = catalog[key]
-            label = f"Change Model → {model.name}"
+        for key, label, help_text in self._entries():
             score = matcher.match(label)
             if score > 0:
                 yield Hit(
                     score,
                     matcher.highlight(label),
                     partial(self._switch, key),
-                    help=_cost_summary(model),
+                    help=help_text,
                 )
         quit_score = matcher.match("Quit")
         if quit_score > 0:

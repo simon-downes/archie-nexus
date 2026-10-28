@@ -87,6 +87,24 @@ RUN set -eux; \
     /usr/local/go/bin/go version
 ENV PATH="/usr/local/go/bin:${PATH}"
 
+# --- Kiro CLI (backend for `archie start --kiro`) ---
+# Latest stable headless build; the archive is verified against the SHA-256 in Kiro's
+# release manifest. Only the binaries are installed (no shell integrations).
+RUN set -eux; \
+    case "${TARGETARCH}" in amd64) KIRO_ARCH=x86_64 ;; arm64) KIRO_ARCH=aarch64 ;; *) exit 1 ;; esac; \
+    KIRO_BASE=https://prod.download.cli.kiro.dev/stable; \
+    KIRO_PKG=$(curl -fsSL "${KIRO_BASE}/latest/manifest.json" \
+        | jq -r --arg a "${KIRO_ARCH}" \
+            '.packages[] | select(.os == "linux" and .architecture == $a and .fileType == "tarGz" and .variant == "headless" and (.targetTriple | endswith("-gnu"))) | "\(.download) \(.sha256)"'); \
+    KIRO_FILE=${KIRO_PKG% *}; KIRO_SHA=${KIRO_PKG#* }; \
+    test -n "${KIRO_FILE}" && test "${#KIRO_SHA}" -eq 64; \
+    curl -fsSL "${KIRO_BASE}/${KIRO_FILE}" -o /tmp/kirocli.tar.gz; \
+    echo "${KIRO_SHA}  /tmp/kirocli.tar.gz" | sha256sum -c -; \
+    tar -C /tmp -xzf /tmp/kirocli.tar.gz; \
+    install -m 755 /tmp/kirocli/bin/kiro-cli /tmp/kirocli/bin/kiro-cli-chat /usr/local/bin/; \
+    rm -rf /tmp/kirocli /tmp/kirocli.tar.gz; \
+    kiro-cli --version
+
 # --- yq (YAML processor, like jq for YAML) ---
 RUN curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TARGETARCH}" \
     -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq

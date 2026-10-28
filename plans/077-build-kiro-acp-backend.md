@@ -534,7 +534,19 @@ dead, Kiro killed, active turn `turn_error`.
   tests/test_orchestrator_app.py tests/test_tui_models_provider.py` passes; full
   `uv run pytest` and `uv run ruff check .` pass. A real `archie start --kiro` needs the host
   orchestrator and Docker, which this container lacks: not verified here.
-- **Outcome:**
+- **Outcome:** `archie start --kiro` posts `"backend": "kiro"`. `sessions_post` validates
+  `backend`, with 400 for an unknown value. `start_session(..., backend=)` adds
+  `-e ARCHIE_BACKEND=kiro`, waits 45 s, and on a Kiro `DockerError` stops the container and
+  appends the startup-error file's text. The TUI status bar shows `<id> (Kiro)`, and
+  `ModelProvider` lists the host's `kiro.models` for `kiro/` sessions. Added `docs/kiro.md`
+  and updated `architecture.md`. The `Dockerfile` installs the latest stable `kiro-cli`
+  headless build, checked against the manifest SHA-256. Kiro 2.35.0 was released during the
+  build, and its live check found that the `model` option now arrives after `session/new`.
+  The harness now waits for it (see Deviations). Evidence: full `uv run pytest` 2,543 passed;
+  `ruff check .` clean. Live with 2.35.0 alone on `PATH` (the two binaries the Dockerfile
+  installs): startup verified all settings, and a shell turn logged `credits 0.119739`. Not
+  verified: `archie build` and a real `archie start --kiro`, because this container has no
+  Docker.
 
 ## Deviations
 
@@ -546,6 +558,11 @@ dead, Kiro killed, active turn `turn_error`.
 - M2: `ArchieMcpServer.cancel_all()` also kills tool processes that start before the next
   turn's `reset()`; without it a call reaching the MCP server just after an interrupt ran
   to completion and blocked Kiro's cancel.
+- M6: Kiro 2.35.0 no longer includes the `model` option in the `session/new` result; it
+  arrives in a later `config_option_update`. The harness waits for it (within the startup
+  deadline) before checking `default_model`, and `tests/fake_kiro.py` now behaves the same way.
+- M6: added a Kiro install step to the `Dockerfile` (the plan only noted the image gap);
+  `kiro-cli` and `kiro-cli-chat` are the only binaries needed for ACP.
 - M3: the agent process exits with code 3, not 1: uvicorn turns a `SystemExit` raised in
   the lifespan into exit 3, as it already does for native startup failures. The
   orchestrator only needs the container to exit and reads the reason from the file.

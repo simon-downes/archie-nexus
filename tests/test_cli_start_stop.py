@@ -224,3 +224,19 @@ def test_stop_orchestrator_unreachable(monkeypatch, tmp_path):
 
     assert result.exit_code != 0
     assert "archie serve" in result.output
+
+
+def test_start_kiro_posts_backend(monkeypatch, tmp_path):
+    """archie start --kiro posts backend kiro; plain start posts none (077)."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+
+    import httpx as real_httpx
+
+    with patch("archie_cli.cli.httpx") as mock_httpx:
+        mock_httpx.post.return_value = _session_response()
+        mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
+        result = CliRunner().invoke(main, ["start", "--detach", "--kiro", "my-app"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_httpx.post.call_args.kwargs["json"] == {"workspace": "my-app", "backend": "kiro"}

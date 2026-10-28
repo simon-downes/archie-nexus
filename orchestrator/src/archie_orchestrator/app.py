@@ -37,7 +37,7 @@ from archie_orchestrator.auth import AuthError, AuthService
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.credential_refresh import credential_refresh_loop
 from archie_orchestrator.docker import DockerError, list_sessions
-from archie_orchestrator.lifecycle import start_session, stop_session
+from archie_orchestrator.lifecycle import BACKENDS, start_session, stop_session
 from archie_orchestrator.metrics import MetricsIndex, default_index
 from archie_orchestrator.proxy import (
     get_active_ws_connections,
@@ -150,7 +150,7 @@ async def sessions_get(request: Request) -> Response:
 async def sessions_post(request: Request) -> Response:
     """Start a new agent session.
 
-    Request body: {"workspace": "<name>"}
+    Request body: {"workspace": "<name>", "backend": "native" | "kiro"} (backend optional)
 
     Returns:
         200 + SessionDescriptor on success.
@@ -170,13 +170,20 @@ async def sessions_post(request: Request) -> Response:
             status_code=400,
         )
 
+    backend = data.get("backend", "native")
+    if backend not in BACKENDS:
+        return JSONResponse(
+            {"error": f"Invalid backend {backend!r}: expected 'native' or 'kiro'"},
+            status_code=400,
+        )
+
     try:
         config = config_source.get()
     except ConfigError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     try:
-        descriptor = await asyncio.to_thread(start_session, workspace, config)
+        descriptor = await asyncio.to_thread(start_session, workspace, config, backend=backend)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except (DockerError, RuntimeError) as exc:
