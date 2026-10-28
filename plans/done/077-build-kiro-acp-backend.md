@@ -1,6 +1,6 @@
 # 077 — Kiro ACP backend
 
-Status: reviewing
+Status: done
 Branch: build-it/077-kiro-acp-backend (base: main @ 4ee641d)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/077-kiro-acp-backend
 
@@ -664,6 +664,16 @@ dead, Kiro killed, active turn `turn_error`.
   No ❌ was raised, so no second round.
 
 ## Outcome
+
+`archie start --kiro` runs a session on Kiro CLI over ACP V3, and plain `archie start` is
+unchanged. Archie's prompt and tools reach Kiro through an in-process loopback MCP server.
+Skills come from enabled plugins, and `archie-worker` is the one subagent. The ACP stream
+becomes canonical events, with one credit-priced `llm_request` per turn. Startup fails
+closed and writes a named reason. Content collection is set to disabled and verified at
+startup, and it is watched after startup. Merge risk: Medium. A Kiro-side failure can only
+stop that Kiro session, because the backend is opt-in per session. The native path changes
+are small (`app.py` branch, Kiro-only metrics backfill, palette refactor) and covered by
+the existing suite.
 
 PR: pending
 CI: pending
