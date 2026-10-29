@@ -2,6 +2,25 @@
 # Contains system tools for development work. Agent and shared source are mounted at
 # runtime for fast iteration — only dependencies are baked into the image.
 
+FROM debian:trixie-slim AS vbnet-wheel-builder
+
+# Build the VB.NET grammar wheel separately so the runtime image does not need
+# a compiler toolchain. The package has no Linux ARM64 wheel and is built from source.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv python install 3.13
+RUN mkdir -p /src /wheels && \
+    curl -fsSL https://files.pythonhosted.org/packages/04/a1/95f99d291163cab128f86e6303268f50c37856bcf7dc361435f752549a48/tree_sitter_vb_dotnet-0.3.0.tar.gz \
+        -o /tmp/tree-sitter-vb-dotnet.tar.gz && \
+    echo "6e7178a8cf7c34b8ba07aa3914bef5475f4eafd348cdd393ff3ebfc7cb41ae61  /tmp/tree-sitter-vb-dotnet.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/tree-sitter-vb-dotnet.tar.gz -C /src --strip-components=1 && \
+    uv build --wheel --python 3.13 /src --out-dir /wheels && \
+    rm -rf /src /tmp/tree-sitter-vb-dotnet.tar.gz
+
 FROM debian:trixie-slim
 
 # Build args for matching host user identity (avoids file permission issues)
@@ -201,6 +220,7 @@ RUN groupadd ${USERNAME} \
 # the workspace when the cli/ directory is missing.
 # .python-version was already copied above. UV_PYTHON_INSTALL_DIR (/opt/python) is
 # inherited from the ENV set earlier, so the venv reuses the shared Python install.
+COPY --from=vbnet-wheel-builder /wheels/tree_sitter_vb_dotnet-0.3.0-*.whl /opt/archie/wheels/
 COPY shared/ /opt/archie/shared/
 COPY agent/pyproject.toml /opt/archie/agent/
 RUN cat > /opt/archie/pyproject.toml <<'EOF'
@@ -217,8 +237,10 @@ archie-agent = { workspace = true }
 archie-shared = { workspace = true }
 EOF
 RUN cd /opt/archie && UV_PROJECT_ENVIRONMENT=/opt/archie/venv \
-    uv sync --package archie-agent --no-dev --no-install-project
+    UV_FIND_LINKS=/opt/archie/wheels uv sync --package archie-agent --no-dev --no-install-project
 ENV PATH="/opt/archie/venv/bin:$PATH"
+# Keep the source-built VB.NET grammar available for runtime uv sync operations.
+ENV UV_FIND_LINKS=/opt/archie/wheels
 
 # Projects synced inside the container get their own venv at <project>/.venv-archie.
 # uv resolves a relative path against the project root. This keeps `uv sync` in

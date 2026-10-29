@@ -14,6 +14,7 @@ from archie_agent.exec.tools.code import (
     WORKSPACE,
     Symbol,
     _discover_files,
+    _extract_csharp,
     _extract_css,
     _extract_go,
     _extract_hcl,
@@ -21,6 +22,7 @@ from archie_agent.exec.tools.code import (
     _extract_php,
     _extract_python,
     _extract_rust,
+    _extract_vbnet,
     _filter_symbols,
     _parse_file,
     _resolve_path,
@@ -154,6 +156,12 @@ class TestDiscovery:
         files = await _discover_files(tmp_path, language="python")
         assert len(files) == 1
         assert files[0].suffix == ".py"
+
+    async def test_finds_csharp_and_vbnet_files(self, tmp_path):
+        (tmp_path / "a.cs").write_text("class A {}")
+        (tmp_path / "b.vb").write_text("Class B\nEnd Class\n")
+        files = await _discover_files(tmp_path)
+        assert {f.suffix for f in files} == {".cs", ".vb"}
 
     async def test_skips_large_files(self, tmp_path):
         (tmp_path / "big.py").write_bytes(b"x" * 600_000)
@@ -390,6 +398,57 @@ class TestExtractPHP:
         assert len(classes) == 1
         assert classes[0].name == "Foo"
         assert len(classes[0].children) >= 1
+
+
+# ---------------------------------------------------------------------------
+# C# and VB.NET extractors
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCSharp:
+    def _parse(self, source: str) -> list[Symbol]:
+        from archie_agent.exec.tools.code import _get_parser
+
+        parser = _get_parser("csharp")
+        tree = parser.parse(source.encode())
+        return _extract_csharp(tree.root_node, source.encode())
+
+    def test_types_and_members(self):
+        src = "namespace Demo { public delegate void Handler(); public class Greeter { private int x, y; public event EventHandler Changed; public int Count { get; set; } public void SayHello() {} } }\n"
+        syms = self._parse(src)
+        namespace = syms[0]
+        assert namespace.name == "Demo"
+        assert namespace.children[0].name == "Handler"
+        assert namespace.children[0].kind == "delegate"
+        greeter = namespace.children[1]
+        assert greeter.name == "Greeter"
+        assert {s.name for s in greeter.children} == {"x", "y", "Changed", "Count", "SayHello"}
+        assert next(s for s in greeter.children if s.name == "x").kind == "field"
+        assert next(s for s in greeter.children if s.name == "Changed").kind == "event"
+        assert next(s for s in greeter.children if s.name == "Count").kind == "property"
+        assert next(s for s in greeter.children if s.name == "SayHello").kind == "method"
+
+
+class TestExtractVBNet:
+    def _parse(self, source: str) -> list[Symbol]:
+        from archie_agent.exec.tools.code import _get_parser
+
+        parser = _get_parser("vbnet")
+        tree = parser.parse(source.encode())
+        return _extract_vbnet(tree.root_node, source.encode())
+
+    def test_types_and_members(self):
+        src = "Namespace Demo\nPublic Class Greeter\nPrivate x As Integer, y As String\nPublic Property Name As String\nPublic Sub New()\nEnd Sub\nPublic Sub SayHello()\nEnd Sub\nEnd Class\nEnd Namespace\n"
+        syms = self._parse(src)
+        namespace = syms[0]
+        assert namespace.name == "Demo"
+        greeter = namespace.children[0]
+        assert greeter.name == "Greeter"
+        assert {s.name for s in greeter.children} == {"x", "y", "Name", "New", "SayHello"}
+        assert next(s for s in greeter.children if s.name == "x").kind == "field"
+        assert next(s for s in greeter.children if s.name == "Name").kind == "property"
+        assert next(s for s in greeter.children if s.name == "New").kind == "constructor"
+        assert next(s for s in greeter.children if s.name == "SayHello").kind == "method"
 
 
 # ---------------------------------------------------------------------------

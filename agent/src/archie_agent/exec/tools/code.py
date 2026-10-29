@@ -1,7 +1,7 @@
 """Code intelligence tool — tree-sitter based structural code understanding.
 
 Extracts symbol definitions (functions, classes, methods, types) from source files.
-Supports 9 languages with lazy parser loading and ripgrep-based file discovery.
+Supports 11 languages with lazy parser loading and ripgrep-based file discovery.
 
 Imports are deferred (tree-sitter loaded on first use per language).
 """
@@ -91,6 +91,20 @@ def _get_parser(lang_name: str):
         raise UnsupportedLanguageError(f"Failed to load grammar for {lang_name}: {e}") from e
 
 
+def _load_csharp():
+    import tree_sitter
+    import tree_sitter_c_sharp
+
+    return tree_sitter.Language(tree_sitter_c_sharp.language())
+
+
+def _load_vbnet():
+    import tree_sitter
+    import tree_sitter_vb_dotnet
+
+    return tree_sitter.Language(tree_sitter_vb_dotnet.language())
+
+
 def _load_python():
     import tree_sitter
     import tree_sitter_python
@@ -155,6 +169,8 @@ def _load_hcl():
 
 
 _LANGUAGE_LOADERS: dict[str, Callable] = {
+    "csharp": _load_csharp,
+    "vbnet": _load_vbnet,
     "python": _load_python,
     "javascript": _load_javascript,
     "typescript": _load_typescript,
@@ -168,6 +184,8 @@ _LANGUAGE_LOADERS: dict[str, Callable] = {
 
 # Extension → language name
 _EXTENSION_MAP: dict[str, str] = {
+    ".cs": "csharp",
+    ".vb": "vbnet",
     ".py": "python",
     ".js": "javascript",
     ".mjs": "javascript",
@@ -349,7 +367,7 @@ async def code(
     Args:
         path: File or directory (relative to /workspace/, default: /workspace/).
         name: Filter symbols by name (case-insensitive substring match).
-        language: Filter by language (python, typescript, javascript, tsx, php, go, rust, css, hcl).
+        language: Filter by language (csharp, python, typescript, javascript, tsx, php, go, rust, css, hcl).
 
     Returns:
         A directory tree, a symbol outline with line ranges, or matching definitions.
@@ -1018,6 +1036,188 @@ def _extract_hcl_blocks(node, source: bytes, symbols: list[Symbol]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# C# and VB.NET extractors
+# ---------------------------------------------------------------------------
+
+
+def _declaration_symbol(node, source: bytes, kind: str) -> Symbol:
+    """Build a symbol from a declaration node with a name field."""
+    name_node = node.child_by_field_name("name")
+    name = _text(name_node, source) if name_node else "?"
+    return Symbol(
+        name=name,
+        kind=kind,
+        line=node.start_point.row + 1,
+        end_line=node.end_point.row + 1,
+        signature=_text(node, source).splitlines()[0].strip(),
+    )
+
+
+def _extract_csharp(root, source: bytes) -> list[Symbol]:
+    """Extract namespaces, types, methods, properties, and fields from C# AST."""
+    type_kinds = {
+        "class_declaration": "class",
+        "interface_declaration": "interface",
+        "struct_declaration": "struct",
+        "enum_declaration": "enum",
+        "record_declaration": "record",
+    }
+    member_kinds = {
+        "method_declaration": "method",
+        "constructor_declaration": "constructor",
+        "property_declaration": "property",
+        "event_declaration": "event",
+        "delegate_declaration": "delegate",
+    }
+
+    def field_symbols(node, kind="field") -> list[Symbol]:
+        declaration = node.child_by_field_name("declaration")
+        if not declaration:
+            declaration = next(
+                (child for child in node.children if child.type == "variable_declaration"), None
+            )
+        if not declaration:
+            return []
+        return [
+            Symbol(
+                name=_text(name_node, source),
+                kind=kind,
+                line=declarator.start_point.row + 1,
+                end_line=declarator.end_point.row + 1,
+                signature=_text(declarator, source),
+            )
+            for declarator in declaration.children
+            if declarator.type == "variable_declarator"
+            for name_node in [declarator.child_by_field_name("name")]
+            if name_node
+        ]
+
+    def visit(container) -> list[Symbol]:
+        symbols = []
+        for node in container.children:
+            if node.type == "namespace_declaration":
+                symbol = _declaration_symbol(node, source, "namespace")
+                body = node.child_by_field_name("body")
+                symbol.children = visit(body) if body else visit(node)
+                symbols.append(symbol)
+            elif node.type in type_kinds:
+                symbol = _declaration_symbol(node, source, type_kinds[node.type])
+                body = node.child_by_field_name("body")
+                if body:
+                    symbol.children = visit_members(body)
+                symbols.append(symbol)
+            elif node.type in member_kinds:
+                symbols.append(_declaration_symbol(node, source, member_kinds[node.type]))
+            elif node.type in ("compilation_unit", "declaration_list", "global_statement"):
+                symbols.extend(visit(node))
+        return symbols
+
+    def visit_members(container) -> list[Symbol]:
+        symbols = []
+        for node in container.children:
+            if node.type in type_kinds:
+                symbol = _declaration_symbol(node, source, type_kinds[node.type])
+                body = node.child_by_field_name("body")
+                symbol.children = visit_members(body) if body else []
+                symbols.append(symbol)
+            elif node.type in member_kinds:
+                symbols.append(_declaration_symbol(node, source, member_kinds[node.type]))
+            elif node.type in ("field_declaration", "event_field_declaration"):
+                kind = "event" if node.type == "event_field_declaration" else "field"
+                symbols.extend(field_symbols(node, kind))
+        return symbols
+
+    return visit(root)
+
+
+def _extract_vbnet(root, source: bytes) -> list[Symbol]:
+    """Extract namespaces, types, methods, properties, and fields from VB.NET AST."""
+    type_kinds = {
+        "class_block": "class",
+        "interface_block": "interface",
+        "structure_block": "struct",
+        "enum_block": "enum",
+        "module_block": "module",
+    }
+    member_kinds = {
+        "method_declaration": "method",
+        "constructor_declaration": "constructor",
+        "property_declaration": "property",
+    }
+
+    def name_node(node):
+        named = node.child_by_field_name("name")
+        if named:
+            return named
+        for child in node.children:
+            if child.type in ("identifier", "namespace_name"):
+                return child
+        return None
+
+    def symbol(node, kind):
+        name = (
+            _text(name_node(node), source)
+            if name_node(node)
+            else ("New" if kind == "constructor" else "?")
+        )
+        return Symbol(
+            name=name,
+            kind=kind,
+            line=node.start_point.row + 1,
+            end_line=node.end_point.row + 1,
+            signature=_text(node, source).splitlines()[0].strip(),
+        )
+
+    def visit(container):
+        symbols = []
+        for node in container.children:
+            if node.type == "namespace_block":
+                current = symbol(node, "namespace")
+                current.children = visit(node)
+                symbols.append(current)
+            elif node.type == "type_declaration":
+                block = next(
+                    (child for child in node.children if child.type.endswith("_block")), None
+                )
+                if block:
+                    kind = type_kinds.get(block.type)
+                    current = symbol(block, kind) if kind else None
+                    if current:
+                        current.children = visit_members(block)
+                        symbols.append(current)
+            elif node.type in type_kinds:
+                current = symbol(node, type_kinds[node.type])
+                current.children = visit_members(node)
+                symbols.append(current)
+        return symbols
+
+    def visit_members(container):
+        symbols = []
+        for node in container.children:
+            if node.type in member_kinds:
+                symbols.append(symbol(node, member_kinds[node.type]))
+            elif node.type == "field_declaration":
+                for declarator in node.children:
+                    if declarator.type == "variable_declarator":
+                        name = declarator.child_by_field_name("name")
+                        if name:
+                            symbols.append(
+                                Symbol(
+                                    name=_text(name, source),
+                                    kind="field",
+                                    line=declarator.start_point.row + 1,
+                                    end_line=declarator.end_point.row + 1,
+                                    signature=_text(declarator, source),
+                                )
+                            )
+            elif node.type == "type_declaration":
+                symbols.extend(visit([node]))
+        return symbols
+
+    return visit(root)
+
+
+# ---------------------------------------------------------------------------
 # Register all extractors
 # ---------------------------------------------------------------------------
 
@@ -1032,5 +1232,7 @@ _EXTRACTORS.update(
         "rust": _extract_rust,
         "css": _extract_css,
         "hcl": _extract_hcl,
+        "csharp": _extract_csharp,
+        "vbnet": _extract_vbnet,
     }
 )
