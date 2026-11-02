@@ -20,10 +20,11 @@ The main agent's prompt has these sections, in this order. Sections are joined w
 | 1 | Identity and core rules | `persona/prompts/identity.md` | Who Archie is and the rules that override everything else |
 | 2 | Soul | `persona/prompts/soul.md` + the brain's `SOUL.md` | The user's voice and style; left out when `SOUL.md` is missing or empty |
 | 3 | Environment | `persona/prompts/environment.md`, filled by `environment.py` | Facts about the container the agent would otherwise guess at |
-| 4 | Available tools | `persona/prompts/tools-strategy.md` + `persona/prompts/delegation.md` + tool guidelines | How to choose between native tools and `exec`, and when to delegate with `task`. Child prompts omit `delegation.md` because children have no `task` tool |
-| 5 | Brain | `persona/prompts/brain.md` + the brain's `BRAIN.md` | How to use the curated knowledge store |
-| 6 | Skills catalog | discovered skills | One line per skill, so the agent knows what it can load |
-| 7 | Project context | the workspace's `AGENTS.md` | Rules for the repository being worked on |
+| 4 | Available tools | `persona/prompts/tools-strategy.md` + `persona/prompts/delegation.md` + tool guidelines | How to choose between native tools and `exec`, git conventions, and when to delegate with `task`. Child prompts omit `delegation.md` because children have no `task` tool |
+| 5 | Coding standards | `persona/prompts/coding.md` | Default design, readability, error, security and test rules; language detail is in the `python` and `terraform` skills |
+| 6 | Brain | `persona/prompts/brain.md` + the brain's `BRAIN.md` | How to use the curated knowledge store |
+| 7 | Skills catalog | discovered skills | One line per skill, so the agent knows what it can load |
+| 8 | Project context | the workspace's `AGENTS.md` | Rules for the repository being worked on |
 
 The order runs from general to specific. Identity and the core rules come first, so they frame everything after them; `soul.md` says outright that the core rules win a conflict. Workspace-specific content comes last because it differs per workspace and is the least stable part of the prompt (see [Prompt caching](#prompt-caching)).
 
@@ -111,7 +112,7 @@ The paths list matches the fixed mounts in `orchestrator/src/archie_orchestrator
 | --- | --- | --- |
 | Identity and core rules | yes | replaced by the agent body (`persona/agents/<name>.md`, or the built-in `default` agent) |
 | Soul | yes | no: subagents report to the parent agent, not the user |
-| Environment, Tools, Brain | yes | yes |
+| Environment, Tools, Coding standards, Brain | yes | yes |
 | Skills catalog | all discovered skills | only the skills the agent definition lists in `skills:` |
 | Project context | yes | no: the parent passes what the task needs in the prompt |
 | `dynamic_system` | optional | never |

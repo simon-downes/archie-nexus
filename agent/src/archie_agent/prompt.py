@@ -142,6 +142,11 @@ def _build_tools(*, delegation: bool = True) -> str:
     return "".join(parts)
 
 
+def _build_coding() -> str:
+    """Load the coding standards shared by the root agent and its children."""
+    return _load_prompt("coding.md")
+
+
 # ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
@@ -207,7 +212,7 @@ def build_system_prompt_structured(
     explicit session snapshot instead.
 
     Order: identity (core rules) → soul (voice) → environment → tools →
-    brain → skills → AGENTS.md. Who Archie is and how it speaks lead the
+    coding standards → brain → skills → AGENTS.md. Who Archie is and how it speaks lead the
     prompt; workspace-specific project context comes last.
     """
     static_sections = [
@@ -215,6 +220,7 @@ def build_system_prompt_structured(
         _build_soul(),
         _build_environment(model_name, workspace_dir),
         _build_tools(),
+        _build_coding(),
         _build_brain_guidance(),
     ]
     static_sections = [section for section in static_sections if section]
@@ -260,6 +266,7 @@ def build_subagent_prompt(
         body.strip(),
         _build_environment(model_name, workspace_dir),
         _build_tools(delegation=False),
+        _build_coding(),
         _build_brain_guidance(),
     ]
     if catalog:

@@ -113,8 +113,8 @@ Based on how the skill was invoked:
 
 **Standalone / PR review:**
 - User specifies files → use those
-- PR number provided → use `tool-git` to retrieve PR context (load the source provider
-  reference for PR commands):
+- PR number provided → retrieve PR context with `gh` (see the Git section of the tools
+  guidance):
   - View PR description, metadata, and author intent
   - View the changeset (diff)
   - View commit messages for intent inference
@@ -176,7 +176,7 @@ axis its own verdict so one never masks the other.
 ## 6. Post-review actions
 
 If the verdict is APPROVE or APPROVE WITH SUGGESTIONS and the work is on a feature branch:
-- Create a pull request using `tool-git` (load the source provider reference)
+- Create a pull request following the Git section of the tools guidance
 - If the plan came from an issue tracker, include the issue identifier in the PR body
 - The issue should already be in "In Review" (set by workflow-implement) — no status
   change needed. PR merge handles the final transition.
@@ -272,9 +272,10 @@ project conventions and setup context.
 - Full content of changed files (not diff hunks)
 - Context files (entry points, config, shared types as needed)
 - Selected review dimensions
-- Coding standards: `policy-general-coding` content plus language-specific policy
-  (e.g., `policy-lang-python`) — the orchestrator determines which languages are in
-  the diff and includes all relevant policy content
+- Coding standards: the general standards are already in every subagent's system
+  prompt. The `default` agent can't load skills, so the orchestrator determines which
+  languages are in the diff and pastes the body of each matching language skill
+  (`python`, `terraform`) into the prompt
 - Plan context (milestone spec or design section, if applicable)
 
 **Output:** structured findings per dimension with severity, file references, and
