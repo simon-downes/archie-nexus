@@ -183,6 +183,12 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             query = input_dict.get("query", "")
             return f"Web search {_hi(query)}"
 
+        case "brain_search":
+            query = input_dict.get("query", "")
+            limit = input_dict.get("limit")
+            limit_text = str(limit) if limit is not None else "10"
+            return f"Brain search {_hi(query)} {_dim(f'(limit {limit_text})')}"
+
         case "exec":
             # For exec the TUI renders the raw source as a collapsible code block,
             # so the pending summary IS the source (not a Rich one-liner).
@@ -370,6 +376,16 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
             # Count result blocks (separated by double newlines)
             count = len([b for b in result.split("\n\n") if b.strip()])
             return f"Web search {_hi(query)} {_dim(f'({count} results)')}"
+
+        case "brain_search":
+            query = input_dict.get("query", "")
+            try:
+                import json
+
+                count = len(json.loads(result))
+            except (json.JSONDecodeError, TypeError):
+                count = 0
+            return f"Brain search {_hi(query)} {_dim(f'({count} results)')}"
 
         case "exec":
             # Exec completion is handled by ToolEntry's own complete() method

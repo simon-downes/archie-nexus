@@ -1,6 +1,10 @@
 """Tests for shared tool summary formatting."""
 
-from archie_shared.tool_summaries import format_tool_activity, format_tool_complete
+from archie_shared.tool_summaries import (
+    format_tool_activity,
+    format_tool_complete,
+    format_tool_pending,
+)
 
 
 def test_tool_activity_uses_shared_exec_line_count():
@@ -11,6 +15,24 @@ def test_tool_activity_uses_shared_exec_line_count():
 def test_tool_activity_reuses_non_exec_pending_summary():
     assert "Read" in format_tool_activity("read", {"path": "foo.py"})
     assert "foo.py" in format_tool_activity("read", {"path": "foo.py"})
+
+
+def test_brain_search_summary_shows_query_and_limit():
+    summary = format_tool_pending("brain_search", {"query": "deployment aws", "limit": 5})
+    assert "Brain search" in summary
+    assert "deployment aws" in summary
+    assert "limit 5" in summary
+
+
+def test_brain_search_completion_shows_query_and_result_count():
+    summary = format_tool_complete(
+        "brain_search",
+        {"query": "deployment aws", "limit": 5},
+        '[{"name": "one"}, {"name": "two"}]',
+        False,
+    )
+    assert "deployment aws" in summary
+    assert "(2 results)" in summary
 
 
 def test_tool_duration_is_added_to_existing_metadata_parentheses():
