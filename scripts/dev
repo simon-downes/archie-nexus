@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Run archie-nexus development commands in the project environment.
+#
+# Usage:
+#   scripts/dev sync [uv sync args...]
+#   scripts/dev test [pytest args...]
+#   scripts/dev ruff [ruff args...]     e.g. scripts/dev ruff check .
+#   scripts/dev run <command> [args...]
+#
+# Every command except `sync` syncs the environment first, like `uv run`.
+#
+# Why this exists: PyPI publishes no Linux ARM64 wheel for tree-sitter-vb-dotnet,
+# so on Linux ARM64 (an Archie session container) plain `uv sync`/`uv run` builds it
+# from source and fails without a C compiler. The image ships a prebuilt wheel in
+# /opt/archie/wheels. uv.lock pins the PyPI files, so find-links alone does not help.
+# When that wheel is present, this script syncs everything else from the lock,
+# installs the local wheel, and runs commands with `uv run --no-sync`. Elsewhere
+# it uses plain uv. Remove the workaround once upstream publishes an ARM64 wheel.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# Inside a session these point at the mounted agent copies under /opt/archie.
+# Development commands must use the worktree's persona and plugins.
+export ARCHIE_PERSONA_DIR="$repo_root/persona"
+export ARCHIE_PLUGINS_DIR="$repo_root/plugins"
+
+vb_package="tree-sitter-vb-dotnet"
+wheel_dir="${ARCHIE_WHEEL_DIR:-/opt/archie/wheels}"
+
+usage() {
+  sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+locked_version() {
+  awk -v pkg="$vb_package" '
+    $0 == "name = \"" pkg "\"" { found = 1; next }
+    found && /^version = / { gsub(/"/, "", $3); print $3; exit }
+  ' uv.lock
+}
+
+# Prints the local wheel path when the workaround applies; prints nothing otherwise.
+local_wheel() {
+  [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]] || return 0
+  [[ -d "$wheel_dir" ]] || return 0
+  local version
+  version="$(locked_version)"
+  if [[ -z "$version" ]]; then
+    echo "scripts/dev: cannot find $vb_package in uv.lock" >&2
+    exit 1
+  fi
+  local matches=("$wheel_dir"/tree_sitter_vb_dotnet-"$version"-*linux_aarch64.whl)
+  if [[ ! -f "${matches[0]}" ]]; then
+    echo "scripts/dev: uv.lock pins $vb_package $version, but $wheel_dir has no matching" >&2
+    echo "Linux ARM64 wheel. Rebuild the image (see the vbnet-wheel-builder stage" >&2
+    echo "in the Dockerfile) or install a C compiler and use plain uv." >&2
+    exit 1
+  fi
+  echo "${matches[0]}"
+}
+
+wheel="$(local_wheel)"
+
+sync() {
+  if [[ -z "$wheel" ]]; then
+    uv sync "$@"
+    return
+  fi
+  # --inexact keeps sync from removing the locally installed wheel.
+  uv sync --quiet --inexact --no-install-package "$vb_package" "$@"
+  local venv="${UV_PROJECT_ENVIRONMENT:-.venv}"
+  uv pip install --quiet --python "$venv/bin/python" --no-index --no-deps "$wheel"
+}
+
+run() {
+  if [[ -z "$wheel" ]]; then
+    uv run "$@"
+  else
+    sync
+    uv run --no-sync "$@"
+  fi
+}
+
+[[ $# -gt 0 ]] || usage 1
+command="$1"
+shift
+
+case "$command" in
+  sync) sync "$@" ;;
+  test) run pytest "$@" ;;
+  ruff) run ruff "$@" ;;
+  run)
+    [[ $# -gt 0 ]] || usage 1
+    run "$@"
+    ;;
+  -h | --help | help) usage ;;
+  *)
+    echo "scripts/dev: unknown command: $command" >&2
+    usage 1
+    ;;
+esac

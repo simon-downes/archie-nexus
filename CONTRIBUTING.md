@@ -7,8 +7,10 @@ See [README.md](README.md) for setup and the repository map. See [docs/architect
 archie-nexus is a `uv` workspace containing `cli`, `agent`, `shared`, and `orchestrator`; integrations under `plugins/` are imported as `archie_plugins.<id>` rather than installed as packages. It requires Python 3.13.
 
 ```bash
-uv sync
+scripts/dev sync
 ```
+
+`scripts/dev` wraps `uv` so the same commands work on the host and inside an Archie session container. On Linux ARM64 PyPI has no `tree-sitter-vb-dotnet` wheel, so the script installs the image's prebuilt wheel instead of compiling it. Elsewhere it calls plain `uv sync` and `uv run`.
 
 The CLI package installs the `archie` command. The agent package installs `archie-agent`; the orchestrator is normally started through `archie serve`.
 
@@ -17,9 +19,9 @@ The CLI package installs the `archie` command. The agent package installs `archi
 These are the authoritative completion checks:
 
 ```bash
-uv run pytest
-uv run ruff check .
-uv run ruff format .
+scripts/dev test
+scripts/dev ruff check .
+scripts/dev ruff format .
 ```
 
 Prefer scoping Ruff commands to files you touched to avoid unrelated churn.
@@ -55,4 +57,4 @@ Before submitting a change:
 - schema/protocol compatibility has been considered;
 - docs and examples match the current code;
 - secrets and generated artifacts are absent;
-- `uv run pytest` and `uv run ruff check .` pass (or failures are explained).
+- `scripts/dev test` and `scripts/dev ruff check .` pass (or failures are explained).

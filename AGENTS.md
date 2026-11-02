@@ -28,4 +28,6 @@ This file is the short session-start guide. Use the linked documents for detail 
 
 ## Environment note
 
-Nexus may be developed from a containerized agent runtime, but those mount and runtime details are environment-specific. They belong in the runtime/harness instructions, not in this repository-level guide. This file describes the repository itself and does not assume a particular agent execution environment.
+Run syncs and checks through `scripts/dev` (`scripts/dev sync`, `scripts/dev test`, `scripts/dev ruff check .`) instead of calling `uv sync` or `uv run` directly. Inside an Archie session container, plain `uv` tries to build `tree-sitter-vb-dotnet` from source and fails without a C compiler; the script installs the image's prebuilt wheel instead. It also points `ARCHIE_PERSONA_DIR` and `ARCHIE_PLUGINS_DIR` at this worktree rather than the session's `/opt/archie` copies.
+
+Inside a session, `/opt/archie/venv` is the running agent's environment. Do not sync into it or use it for worktree tests; the worktree uses `.venv-archie`.
