@@ -383,6 +383,19 @@ body.viewer {
 
 /* --- tools: interface chrome -------------------------------------------- */
 
+/* One provider response: its tools share a dim left rule, so parallel calls
+   read as one group and consecutive iterations as separate groups. */
+.viewer .iteration {
+    border-left: 3px solid var(--v-chrome-border);
+    padding-left: 0.6rem;
+}
+
+.viewer .iteration-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
 .viewer details.tool {
     border: 1px solid var(--v-chrome-border);
     border-radius: var(--nc-radius);

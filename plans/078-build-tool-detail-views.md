@@ -114,7 +114,7 @@ Rows
 Tool popups
 - MUST open a popup showing the tool's name, status, duration, input and result when a tool row is clicked, in the main view and inside a subagent view.
   - AC (TUI): clicking a `ToolRow` pushes `ToolDetailScreen`, whose text includes the full input and result. AC (web): each tool row is a button whose dialog contains the input and the result, each up to `PREVIEW_CHARS` with an omitted count (D17).
-- MUST syntax-highlight popup input and result where a language is known: exec source as Python, shell command as Bash, JSON-shaped input and results as JSON, `read` results and `write`/`edit` content by file extension.
+- MUST syntax-highlight popup input and result where a language is known: exec source as Python, shell command as Bash, JSON-shaped input and results as JSON, edit results as diffs, and `write`/`edit` content by file extension (`read` results stay plain; see Deviations).
   - AC: `tool_detail_sections` returns the expected language hints; the web dialog contains Pygments spans; the TUI section uses `rich.syntax.Syntax`.
 - MUST update an open tool popup when its result arrives.
   - AC (TUI): a popup opened on a pending tool shows the result after the `ToolResult` is applied. AC (web): with a tool dialog open, swapping in a replacement tool fragment through `htmx.swap` (as `live.js` does) leaves the new dialog open (browser check, M2).
@@ -204,14 +204,14 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 
 ## Milestones
 
-### [ ] M1 — prefactor: shared transcript model; web viewer groups iterations
+### [x] M1 — prefactor: shared transcript model; web viewer groups iterations
 
 - **Approach:** Move `TranscriptBuilder` and nodes from `orchestrator/src/archie_orchestrator/transcript.py` into new `shared/src/archie_shared/transcript.py`, removing HTML properties (`summary_html`, `detail_html`, `input_html`, `result_preview`, `TextNode.html`, `NoticeNode.body_html`). Add `IterationNode` (created by D19), `CompactionNode` (handles `CompactionStart`, `CompactionComplete`, `ContextCompacted`), subagent agent/status/cost/context tracking (from the parent `task` input and child `LLMRequest`, `TurnComplete`, `TurnError`, `TurnInterrupted`), `nodes`/`container_of`/`owner_of` indexes, content-filtered notices (D15), `source_preview`, `tool_detail_sections`. Web: register HTML helpers as Jinja globals in `web.py`; `_nodes.html` gets an iteration macro (`.iteration` with dim left border) and a compaction macro; tool rows stay `<details>` and subagents stay inline for now; `render_change` maps replace targets by node kind. Follow the test style in `tests/test_web_session_detail.py`.
 - **Test seam:** `TranscriptBuilder.apply` (new `tests/test_transcript_model.py`); HTTP routes via the existing web tests.
 - **Edge cases:** tool result without call → tool in its iteration group; child events before the task tool call → subagent at root (existing fallback); duplicate event ids → no changes; stream reconnect mid-reply → remove then append (existing).
 - **Deliverable:** the web viewer shows the tools of one iteration grouped in one dim-bordered block, rendered from the shared model.
 - **Verify:** `scripts/dev test tests/test_transcript_model.py tests/test_web_session_detail.py tests/test_web_session_live.py` passes; full `scripts/dev test` has no new failures.
-- **Outcome:**
+- **Outcome:** Built `shared/src/archie_shared/transcript.py` (builder, nodes, indexes, `IterationNode`, `CompactionNode` including `CompactionStart`, subagent agent/status/cost/activity, content-filtered notices, presentation helpers `tool_headline`/`tool_extra`/`tool_preview`/`tool_detail_sections`). `orchestrator/.../transcript.py` now holds only HTML helpers; `web.py` registers them as Jinja globals and maps replace targets by node type. Web groups tools in `.iteration` blocks with a dim left border. Evidence: `scripts/dev test` 2574 passed (baseline 2552 + 22 new); ruff check/format clean on touched files. Web render of the WAF log: 0.78–0.88 s, 10.2 MB (budget 1.0 s / 13.5 MB). Deviation: `read` results are not highlighted (see Deviations).
 
 ### [ ] M2 — Web tool and subagent overlays with breadcrumbs (tracer for the popups)
 
@@ -257,6 +257,8 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 - **Outcome:**
 
 ## Deviations
+
+- M1: `read` results are shown as plain text, not highlighted by file type. They carry a `File:` header and `N|` line-number prefixes, so a lexer misparses them, and highlighting them cost 0.4 s of the WAF page render (1.3 s total, over the 1.0 s budget). `write` content and `edit` old/new text are still highlighted by file type. Narrows the highlighting requirement for `read` only.
 
 ## Risks
 

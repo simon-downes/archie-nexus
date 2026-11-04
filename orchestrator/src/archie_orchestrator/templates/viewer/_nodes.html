@@ -4,8 +4,10 @@
 {%- if n.kind == "turn" %}{{ turn(n) }}
 {%- elif n.kind == "text" %}{{ text(n) }}
 {%- elif n.kind == "stream" %}{{ stream(n) }}
+{%- elif n.kind == "iteration" %}{{ iteration(n) }}
 {%- elif n.kind == "tool" %}{{ tool(n) }}
 {%- elif n.kind == "subagent" %}{{ subagent(n) }}
+{%- elif n.kind == "compaction" %}{{ compaction(n) }}
 {%- elif n.kind == "notice" %}{{ notice(n) }}
 {%- endif -%}
 {%- endmacro %}
@@ -40,7 +42,7 @@
 <div class="msg msg-{{ m.role }}" id="{{ m.id }}">
     <div class="chrome msg-role">{{ "You" if m.role == "user" else "Archie" }}{% if m.interrupted %} <span class="dim">(interrupted)</span>{% endif %}</div>
     {%- if m.content %}
-    <div class="md">{{ m.html }}</div>
+    <div class="md">{{ markdown(m.content) }}</div>
     {%- endif %}
 </div>
 {%- endmacro %}
@@ -52,23 +54,29 @@
 </div>
 {%- endmacro %}
 
+{% macro iteration(it) -%}
+<div class="iteration" id="{{ it.id }}">
+    <div class="iteration-tools" id="{{ it.tools_id }}">
+        {%- for t in it.tools %}{{ tool(t) }}{% endfor -%}
+    </div>
+</div>
+<!-- /iteration -->
+{%- endmacro %}
+
 {% macro tool(t) -%}
 <details class="tool is-{{ t.status }}" id="{{ t.id }}">
     <summary class="chrome tool-line">
         <span class="tool-status" title="{{ t.status }}"></span>
-        <span class="tool-summary">{{ t.summary_html }}</span>
+        <span class="tool-summary">{{ tool_summary(t) }}</span>
     </summary>
     <div class="chrome tool-body">
-        {%- set detail = t.detail_html %}
-        {%- if detail %}<pre class="tool-detail">{{ detail }}</pre>{% endif %}
-        <h4>Input <span class="dim">{{ t.name }}</span></h4>
-        {{ t.input_html }}
-        {%- if t.result is not none %}
-        {%- set shown, omitted = t.result_preview %}
-        <h4>Result{% if t.status == "error" %} <span class="err">error</span>{% endif %}</h4>
-        <pre class="tool-result">{{ shown }}</pre>
-        {%- if omitted %}<p class="omitted">… {{ omitted }} more characters</p>{% endif %}
-        {%- endif %}
+        {%- set extra = tool_extra(t) %}
+        {%- if extra %}<pre class="tool-detail">{{ extra }}</pre>{% endif %}
+        {%- for s in tool_sections(t) %}
+        <h4>{{ s.title }}{% if loop.first %} <span class="dim">{{ t.name }}</span>{% endif %}{% if not loop.first and t.status == "error" %} <span class="err">error</span>{% endif %}</h4>
+        {{ s.html }}
+        {%- if s.omitted %}<p class="omitted">… {{ s.omitted }} more characters</p>{% endif %}
+        {%- endfor %}
     </div>
     <div class="subagents" id="{{ t.children_id }}">
         {%- for child in t.children %}{{ subagent(child) }}{% endfor -%}
@@ -77,21 +85,36 @@
 <!-- /{{ t.id }} -->
 {%- endmacro %}
 
+{% macro subagent_row(s) -%}
+<div class="chrome sub-head is-{{ s.status }}" id="{{ s.row_id }}">
+    <span class="sub-label">Subagent {{ s.label }}</span>
+    <span class="sub-cost">{{ s.cost_usd|usd }}</span>
+    <span class="sub-status">{{ subagent_status(s) }}</span>
+</div>
+{%- endmacro %}
+
 {% macro subagent(s) -%}
 <section class="subagent" id="{{ s.id }}">
-    <div class="chrome sub-head">Subagent {{ s.index + 1 }}</div>
+    {{ subagent_row(s) }}
     <div class="sub-items" id="{{ s.items_id }}">
         {%- for item in s.items %}{{ node(item) }}{% endfor -%}
     </div>
 </section>
 {%- endmacro %}
 
+{% macro compaction(c) -%}
+{%- set title, detail = compaction_text(c) %}
+<aside class="notice-block compaction is-{{ c.status }}" id="{{ c.id }}">
+    <p class="chrome"><strong>{{ title }}</strong>{% if detail %} <span class="detail">{{ detail }}</span>{% endif %}</p>
+    {%- if c.summary %}
+    <details class="chrome"><summary>Summary</summary><div class="md">{{ markdown(c.summary) }}</div></details>
+    {%- endif %}
+</aside>
+{%- endmacro %}
+
 {% macro notice(n) -%}
 <aside class="notice-block {{ n.variant }}" id="{{ n.id }}">
     <p class="chrome"><strong>{{ n.title }}</strong>{% if n.detail %} <span class="detail">{{ n.detail }}</span>{% endif %}</p>
-    {%- if n.body_markdown %}
-    <details class="chrome"><summary>Summary</summary><div class="md">{{ n.body_html }}</div></details>
-    {%- endif %}
 </aside>
 {%- endmacro %}
 

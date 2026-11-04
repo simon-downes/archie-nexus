@@ -220,6 +220,27 @@ async def test_detail_tool_rows(session_logs):
 
 
 @pytest.mark.asyncio
+async def test_detail_groups_tools_by_iteration(session_logs):
+    w = session_logs
+    w.write(
+        SID,
+        [
+            w.user("go"),
+            w.tool_call("read", {"path": "a"}, tool_use_id="t1", iteration=1),
+            w.tool_call("read", {"path": "b"}, tool_use_id="t2", iteration=1),
+            w.tool_call("read", {"path": "c"}, tool_use_id="t3", iteration=2),
+        ],
+    )
+    html = (await _get(f"/ui/sessions/{SID}")).text
+    groups = re.findall(
+        r'<div class="iteration" id="(iter-[^"]+)">(.*?)<!-- /iteration -->', html, re.S
+    )
+    assert [g[0] for g in groups] == ["iter-1-1", "iter-1-2"]
+    assert 'id="tool-t1"' in groups[0][1] and 'id="tool-t2"' in groups[0][1]
+    assert 'id="tool-t3"' in groups[1][1]
+
+
+@pytest.mark.asyncio
 async def test_detail_orphan_tool_result(session_logs):
     w = session_logs
     w.write(SID, [w.user("x"), w.tool_result("orphan output", tool_use_id="t-x", is_error=True)])
@@ -270,7 +291,7 @@ async def test_detail_notices(session_logs):
         ],
     )
     html = (await _get(f"/ui/sessions/{SID}")).text
-    assert html.count('class="notice-block compaction"') == 2
+    assert html.count('class="notice-block compaction') == 2
     assert "9,000" in html and "900" in html and "<strong>work</strong>" in html
     assert "boom" in html
     assert 'class="notice-block turn-error"' in html and "provider exploded" in html
