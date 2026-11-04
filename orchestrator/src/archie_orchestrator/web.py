@@ -23,10 +23,12 @@ from archie_shared.session.accounting import UsageTotals
 from archie_shared.transcript import (
     Change,
     SubagentNode,
+    ToolNode,
     TranscriptBuilder,
     TurnNode,
     build,
     subagent_status_text,
+    tool_crumb,
     tool_preview,
 )
 from markupsafe import escape
@@ -57,6 +59,7 @@ templates.env.globals.update(
     tool_extra=transcript_html.tool_extra_html,
     tool_sections=transcript_html.tool_sections_html,
     tool_preview=tool_preview,
+    tool_crumb=tool_crumb,
     compaction_text=transcript_html.compaction_text,
     subagent_status=subagent_status_text,
 )
@@ -361,6 +364,10 @@ def render_change(change: Change) -> str:
             html = str(nodes.turn_footer(node))
         elif isinstance(node, SubagentNode):
             html = str(nodes.subagent_row(node))
+        elif isinstance(node, ToolNode):
+            # Only the row and its overlay: the subagents below stay in place.
+            html = str(nodes.tool_head(node))
+            return _with_oob(html, f"outerHTML:#{node.head_id}")
         else:
             html = str(nodes.node(node))
         # Explicit selector: a finished stream is replaced by a node with a new id.

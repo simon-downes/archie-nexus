@@ -2,7 +2,7 @@
 {% import "viewer/_nodes.html" as n %}
 {% block title %}{{ session_id }}{% endblock %}
 {% block styles %}<link rel="stylesheet" href="/static/viewer/pygments.css">{% endblock %}
-{% block scripts %}{% if active %}<script src="/static/viewer/live.js" defer></script>{% endif %}{% endblock %}
+{% block scripts %}<script src="/static/viewer/overlay.js" defer></script>{% if active %}<script src="/static/viewer/live.js" defer></script>{% endif %}{% endblock %}
 {% block content %}
 <section class="chrome session-head">
     <p class="crumbs"><a href="/ui/sessions">Session logs</a> /</p>

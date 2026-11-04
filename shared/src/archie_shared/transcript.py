@@ -293,6 +293,26 @@ def tool_headline(tool: ToolNode) -> str:
     return _first_line(_completed_summary(tool))
 
 
+_MARKUP_TAG = re.compile(r"(?<!\\)\[/?[^\]\[]*\]")
+
+
+def plain_text(markup: str) -> str:
+    """Strip Rich markup tags and unescape brackets."""
+    return _MARKUP_TAG.sub("", markup).replace(r"\[", "[").replace(r"\]", "]")
+
+
+def tool_crumb(tool: ToolNode, limit: int = 48) -> str:
+    """Short plain-text label naming a tool call, for breadcrumbs."""
+    if tool.name == "tool" and not tool.input:
+        return "Tool"
+    tool_input = tool.input
+    if tool.name == "shell" and isinstance(tool_input.get("command"), str):
+        tool_input = {**tool_input, "command": _first_line(tool_input["command"])}
+    text = plain_text(format_tool_activity(tool.name, tool_input))
+    text = _first_line(text).strip() or tool.name
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def tool_extra(tool: ToolNode) -> str:
     """Rich-markup lines shown under the headline: a diff or condensed error output."""
     if tool.result is None or tool.name == "exec":
