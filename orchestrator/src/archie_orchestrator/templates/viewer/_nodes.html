@@ -100,7 +100,6 @@
             <p class="chrome tool-meta">
                 <span class="tool-status" title="{{ t.status }}"></span>
                 <span class="tool-summary">{{ tool_summary(t) }}</span>
-                <span class="dim">{{ t.name }} · {{ t.status }}{% if t.duration_ms %} · {{ t.duration_ms }}ms{% endif %}</span>
             </p>
             {%- for s in tool_sections(t) %}
             <section class="tool-section">

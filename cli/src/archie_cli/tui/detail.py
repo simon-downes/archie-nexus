@@ -170,12 +170,8 @@ class ToolDetailScreen(DetailScreen):
         text = Text()
         text.append_text(_status_glyph(tool.status))
         text.append(" ")
+        # The headline names the tool and its duration; the glyph shows the status.
         text.append_text(_markup(tool_headline(tool)))
-        state = "running" if tool.result is None else tool.status
-        meta = f"  {tool.name} · {state}"
-        if tool.duration_ms:
-            meta += f" · {tool.duration_ms}ms"
-        text.append(meta)
         return text
 
     def update_state(self) -> None:
