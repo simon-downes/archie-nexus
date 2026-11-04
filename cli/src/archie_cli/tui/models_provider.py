@@ -93,14 +93,14 @@ class SubagentProvider(Provider):
     """Command-palette picker for currently known child scopes."""
 
     async def discover(self) -> Hits:
-        for key, child in sorted(self.app._child_activity.items()):
-            label = f"Subagent {child.agent} #{child.index} ({child.status})"
-            yield DiscoveryHit(label, partial(self._open, key), help=f"${child.cost:.4f}")
+        for key, child in sorted(self.app.transcript.subagents.items()):
+            label = f"Subagent {child.label} ({child.status})"
+            yield DiscoveryHit(label, partial(self._open, key), help=f"${child.cost_usd:.4f}")
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
-        for key, child in sorted(self.app._child_activity.items()):
-            label = f"Subagent {child.agent} #{child.index} ({child.status})"
+        for key, child in sorted(self.app.transcript.subagents.items()):
+            label = f"Subagent {child.label} ({child.status})"
             score = matcher.match(label)
             if score > 0:
                 yield Hit(score, matcher.highlight(label), partial(self._open, key))

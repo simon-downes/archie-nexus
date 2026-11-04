@@ -1,9 +1,19 @@
+"""TUI subagent display: shared model state, rows and the status screen."""
+
 from unittest.mock import MagicMock, patch
 
 from archie_cli.tui.app import ArchieApp
-from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
-from archie_shared.events import LLMRequest, TextDelta, ToolCall, ToolResult, TurnComplete
-from archie_shared.tool_summaries import format_tool_complete, format_tool_pending
+from archie_cli.tui.subagents import SubagentScreen
+from archie_cli.tui.transcript_view import render_subagent_row
+from archie_shared.events import (
+    AssistantMessage,
+    LLMRequest,
+    TextDelta,
+    ToolCall,
+    ToolResult,
+    TurnComplete,
+)
+from archie_shared.transcript import CHILD_CONTENT_FILTERED_MESSAGE, SubagentNode
 from rich.text import Text
 
 
@@ -13,6 +23,43 @@ def _app() -> ArchieApp:
         api_url="http://localhost",
         container_name="container",
     )
+
+
+def _child_tool_call(name="read", tool_input=None, tool_use_id="child-tool"):
+    return ToolCall(
+        id=f"c-{tool_use_id}",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="r1",
+        tool_use_id=tool_use_id,
+        name=name,
+        input=tool_input if tool_input is not None else {"path": "README.md"},
+    )
+
+
+def _child_tool_result(content, *, is_error=False, tool_use_id="child-tool"):
+    return ToolResult(
+        id=f"r-{tool_use_id}",
+        turn=1,
+        iteration=1,
+        scope="task-1",
+        subagent_index=0,
+        request_id="r1",
+        tool_use_id=tool_use_id,
+        content=content,
+        is_error=is_error,
+        duration_ms=5,
+        result_bytes=len(content),
+    )
+
+
+def _apply(app, *events):
+    with patch.object(app, "query_one", return_value=MagicMock()):
+        for event in events:
+            app._apply_event(event)
+    return app.transcript
 
 
 def test_live_scoped_llm_cost_is_included_in_status_accounting():
@@ -40,205 +87,123 @@ def test_live_scoped_llm_cost_is_included_in_status_accounting():
 
     assert app._cumulative_cost == 0.0085
     app._update_accounting_status.assert_called_once()
+    assert app.transcript.subagents[("task-1", 0)].cost_usd == 0.0085
 
 
-def test_child_activity_keeps_three_lines_and_renders_agent():
-    state = ChildActivityState(scope="task-1", index=1, agent="reviewer")
-    for line in ("one", "two", "three", "four"):
-        state.add_line(line)
-
-    widget = SubagentActivity(state)
-
-    assert state.lines == ["two", "three", "four"]
-    rendered = widget.render_text()
+def test_subagent_row_renders_agent_and_status_glyphs():
+    sub = SubagentNode("sub-x", "task-1", 1, agent="reviewer", activity="Read foo.py")
+    rendered = render_subagent_row(sub)
     assert isinstance(rendered, Text)
-    assert "reviewer #1" in rendered.plain
-    assert "one" not in rendered.plain
-
-
-def test_child_activity_status_icons_and_colours():
-    state = ChildActivityState(scope="task-1", index=0, agent="worker")
-    widget = SubagentActivity(state)
-    rendered = widget.render_text()
+    assert "reviewer #1" in rendered.plain and "Read foo.py" in rendered.plain
     assert "○" in rendered.plain
-    assert rendered.spans[0].style == "bold #6871ff"
+    assert any(span.style == "bold #6871ff" for span in rendered.spans)
 
-    state.status = "complete"
-    rendered = widget.render_text()
-    assert "●" in rendered.plain
-    assert rendered.spans[0].style == "bold #67c26d"
+    sub.status = "complete"
+    rendered = render_subagent_row(sub)
+    assert "●" in rendered.plain and "Completed" in rendered.plain
+    assert any(span.style == "bold #67c26d" for span in rendered.spans)
 
-    state.status = "error"
-    state.error = "Error: failed"
-    rendered = widget.render_text()
-    assert "●" in rendered.plain
-    assert rendered.spans[0].style == "bold #ff6d67"
-
-
-def test_child_activity_shows_current_tool():
-    state = ChildActivityState(scope="task-1", index=0, agent="worker")
-    state.set_activity("Read foo.py")
-    assert "Read foo.py" in SubagentActivity(state).render_text().plain
+    sub.status, sub.error = "error", "Error: failed"
+    rendered = render_subagent_row(sub)
+    assert "Error: failed" in rendered.plain
+    assert any(span.style == "bold #ff6d67" for span in rendered.spans)
 
 
 def test_tool_error_does_not_make_child_terminal():
     app = _app()
-    with patch.object(app, "_render_child"):
-        app._handle_scoped_event(
-            ToolCall(
-                id="c1",
-                turn=1,
-                iteration=1,
-                scope="task-1",
-                subagent_index=0,
-                request_id="r1",
-                tool_use_id="child-tool",
-                name="read",
-                input={"path": "missing.py"},
-            )
-        )
-        app._handle_scoped_event(
-            ToolResult(
-                id="r1e",
-                turn=1,
-                iteration=1,
-                scope="task-1",
-                subagent_index=0,
-                request_id="r1",
-                tool_use_id="child-tool",
-                content="not found",
-                is_error=True,
-                duration_ms=5,
-                result_bytes=9,
-            )
-        )
-
-    child = app._child_activity[("task-1", 0)]
+    model = _apply(
+        app,
+        _child_tool_call(tool_input={"path": "missing.py"}),
+        _child_tool_result("not found", is_error=True),
+    )
+    child = model.subagents[("task-1", 0)]
     assert child.status == "running"
     assert "Read" in child.activity
 
 
 def test_child_exec_activity_has_explicit_prefix():
     app = _app()
-    with patch.object(app, "_render_child"):
-        app._handle_scoped_event(
-            ToolCall(
-                id="c1",
-                turn=1,
-                iteration=1,
-                scope="task-1",
-                subagent_index=0,
-                request_id="r1",
-                tool_use_id="child-tool",
-                name="exec",
-                input={"source": "print('hello')"},
-            )
-        )
-
-    assert app._child_activity[("task-1", 0)].activity == "Exec (1 lines)"
+    model = _apply(app, _child_tool_call("exec", {"source": "print('hello')"}))
+    assert model.subagents[("task-1", 0)].activity == "Exec (1 lines)"
 
 
-def test_child_activity_uses_shared_tool_summaries():
-    pending = format_tool_pending("read", {"path": "README.md"})
-    complete = format_tool_complete(
-        "read", {"path": "README.md"}, "File: README.md (2 lines)", False
-    )
-    assert "Read" in pending
-    assert "README.md" in complete
-
-
-def test_child_reducer_uses_shared_summaries_and_status():
+def test_child_tools_are_kept_for_the_transcript():
     app = _app()
-    with patch.object(app, "_render_child"):
-        app._handle_scoped_event(
-            ToolCall(
-                id="c1",
-                turn=1,
-                iteration=1,
-                scope="task-1",
-                subagent_index=0,
-                request_id="r1",
-                tool_use_id="child-tool",
-                name="read",
-                input={"path": "README.md"},
-            )
-        )
-        app._handle_scoped_event(
-            ToolResult(
-                id="r1e",
-                turn=1,
-                iteration=1,
-                scope="task-1",
-                subagent_index=0,
-                request_id="r1",
-                tool_use_id="child-tool",
-                content="File: README.md (2 lines)",
-                is_error=False,
-                duration_ms=5,
-                result_bytes=10,
-            )
-        )
-        app._handle_scoped_event(
-            TurnComplete(
-                id="done",
-                turn=1,
-                scope="task-1",
-                subagent_index=0,
-                stop_reason="end_turn",
-            )
-        )
-
-    child = app._child_activity[("task-1", 0)]
+    model = _apply(
+        app,
+        _child_tool_call(),
+        _child_tool_result("File: README.md (2 lines)"),
+        TurnComplete(id="done", turn=1, scope="task-1", subagent_index=0, stop_reason="end_turn"),
+    )
+    child = model.subagents[("task-1", 0)]
     assert child.agent == "child"
-    assert "Read" in child.lines[0]
-    assert "README.md" in child.lines[1]
+    (group,) = child.items
+    assert group.tools[0].name == "read" and group.tools[0].status == "ok"
     assert child.status == "complete"
 
 
 def test_content_filtered_child_is_shown_as_error():
-    from archie_cli.tui.app import CHILD_CONTENT_FILTERED_MESSAGE
-
     app = _app()
-    with patch.object(app, "_render_child"):
-        app._handle_scoped_event(
-            TurnComplete(
-                id="done",
-                turn=1,
-                scope="task-1",
-                subagent_index=0,
-                stop_reason="content_filtered",
-            )
-        )
-
-    child = app._child_activity[("task-1", 0)]
+    model = _apply(
+        app,
+        TurnComplete(
+            id="done", turn=1, scope="task-1", subagent_index=0, stop_reason="content_filtered"
+        ),
+    )
+    child = model.subagents[("task-1", 0)]
     assert child.status == "error"
     assert child.error == CHILD_CONTENT_FILTERED_MESSAGE
 
 
-def test_modal_uses_mutable_state():
-    state = ChildActivityState(scope="task-1", index=0, agent="researcher")
-    modal = SubagentScreen(state)
-    state.add_line("new live output")
-    state.status = "complete"
-
-    assert modal.state is state
-    assert modal.state.lines == ["new live output"]
-    assert modal.state.status == "complete"
+def test_status_screen_reads_the_live_node():
+    sub = SubagentNode("sub-x", "task-1", 0, agent="researcher")
+    modal = SubagentScreen(sub)
+    sub.status = "complete"
+    assert modal.sub is sub and modal.sub.status == "complete"
 
 
-def test_replay_scoped_event_routes_to_child_state():
+def test_replay_scoped_delta_streams_into_child_transcript():
     app = _app()
-    event = TextDelta(
-        id="delta",
-        turn=1,
-        iteration=1,
-        scope="task-1",
-        subagent_index=1,
-        request_id="r1",
-        text="replayed output",
+    model = _apply(
+        app,
+        TextDelta(
+            id="delta",
+            turn=1,
+            iteration=1,
+            scope="task-1",
+            subagent_index=1,
+            request_id="r1",
+            text="replayed output",
+        ),
     )
-    with patch.object(app, "_render_child"):
-        app._apply_event(event)
+    child = model.subagents[("task-1", 1)]
+    assert child.activity == "Responding..."
+    assert child.items[0].text == "replayed output"
 
-    assert app._child_activity[("task-1", 1)].activity == "Responding..."
-    assert app._transient_assistant_text
+
+def test_child_assistant_replaces_its_stream():
+    app = _app()
+    model = _apply(
+        app,
+        TextDelta(
+            id="d",
+            turn=1,
+            iteration=1,
+            scope="task-1",
+            subagent_index=0,
+            request_id="r1",
+            text="partial ",
+        ),
+        AssistantMessage(
+            id="a",
+            turn=1,
+            iteration=1,
+            scope="task-1",
+            subagent_index=0,
+            request_id="r1",
+            content="partial response",
+            interrupted=False,
+        ),
+    )
+    (item,) = model.subagents[("task-1", 0)].items
+    assert item.kind == "text" and item.content == "partial response"

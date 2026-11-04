@@ -221,14 +221,14 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 - **Verify:** web tests pass. `/tmp/078-webbench.py` on the WAF log stays under 1.0 s and 13.5 MB. Browser check: copy the WAF log to `/tmp/078-home/sessions/`, run `ARCHIE_HOME_DIR=/tmp/078-home scripts/dev run uvicorn archie_orchestrator.app:app --port 8765`, open `http://127.0.0.1:8765/ui/sessions/tillo-platform-01m61zwmar` in `agent-browser`; click a shell tool → dialog shows highlighted input; open a subagent → click one of its tools → breadcrumb shows three levels; Esc closes one level; with a tool dialog open, run `htmx.swap` with a re-rendered copy of its fragment → the dialog is open afterwards. Screenshots saved for the PR.
 - **Outcome:** Tool rows are buttons (`.tool-line`) showing the summary, a 10-line exec/shell preview and `… +N lines`; each has a `<dialog>` with breadcrumb, metadata and Pygments-highlighted sections. Subagent rows (`.sub-row`: agent, index, cost, status) open a dialog holding the child transcript; its tool rows open nested dialogs. New `static/viewer/overlay.js` (open stack, crumbs, Escape closes one level, crumb clicks close levels above, reopen after live swaps via a `viewer:fragment` event from `live.js`). A live tool update now replaces only `#tool-…-head`, so nested subagents stay mounted. Evidence: `scripts/dev test` 2577 passed; WAF page render 0.87–0.98 s, 12.3 MB (budget 1.0 s / 13.5 MB). Browser check in Chromium (`agent-browser`, viewer routes served by `/tmp/078-serve.py`, because the full app's lifespan needs Docker): subagent → its Read tool gave breadcrumb `tillo-platform-01m61zwmar › build-it-reviewer #0 › Read …`; Escape closed one level, then the next; root crumb closed all; with both dialogs open, an `htmx.swap` of the tool head left both open and Escape still worked. Screenshots in `/tmp/078-shots/`. Deviation: Escape is handled in script, not by the native dialog cancel (see Deviations).
 
-### [ ] M3 — TUI renders from the shared model with cheap rows
+### [x] M3 — TUI renders from the shared model with cheap rows
 
 - **Approach:** New `cli/src/archie_cli/tui/transcript_view.py` with `TranscriptView` (unwindowed here; `suspend`/`resume` exist), a node→widget factory reusing message widgets from `conversation.py`, an `IterationBlock` container with `ToolRow`/`SubagentRow` `Static`s (D6, D18), the dim border in `archie.tcss` (D7), and 10-line exec/shell previews via `source_preview` (D8). Replace transcript handling in `app.py::_render_canonical`; delete `_handle_scoped_event`, `_iteration_block`, `_pending_tool_inputs`, `_pending_compactions`, `_child_*`, `_parent_task_*`, `_transient_assistant_text`, `_finalized_assistant_requests` and `subagents.py`'s `ChildActivityState`/`SubagentActivity`. The main view appends `TurnStatus` when a root turn ends, using the app's live wall time when known. `add_client_error` and `add_shell_output` append local rows. `SubagentProvider` and `ctrl+x` read `app.transcript.subagents` (the palette still opens the old status screen until M4). Rewrite assertions in `tests/test_tui_canonical.py` and `tests/test_tui_subagents.py` that touch removed internals, keeping each scenario.
 - **Test seam:** `ArchieApp._apply_event` against a mounted `Conversation` (`_ConversationHost`, `tests/test_tui_canonical.py:248`).
 - **Edge cases:** final assistant text differs from streamed text → stream row replaced; empty user message → no row; content-filtered → error row; interrupted assistant → "Cancelled" row.
 - **Deliverable:** the TUI shows the same transcript as before, with dim-bordered iteration blocks and single-widget tool rows.
 - **Verify:** `scripts/dev test tests/test_tui_canonical.py tests/test_tui_subagents.py tests/test_tui_models_provider.py tests/test_tui_shell.py` passes; full suite has no new failures.
-- **Outcome:**
+- **Outcome:** New `cli/src/archie_cli/tui/transcript_view.py` (`TranscriptView`/`Conversation`, `IterationBlock` with `ToolRow`/`SubagentRow` single-`Static` rows, `SubagentBlock`, node→widget factory, change application, `suspend`/`resume`). `ArchieApp._render_canonical` now dedups, updates accounting, applies `self.transcript` (shared builder) and dispatches changes; `_handle_scoped_event`, the child/pending-tool/transient-text state and `ToolEntry` are gone. Replay suspends the view and mounts once. Dim `IterationBlock` border in `archie.tcss`. Tests rewritten against the model and mounted rows (`test_tui_canonical.py`, `test_tui_subagents.py`, plus `test_kiro_translate.py` and `test_orchestrator_bounce.py`, which mocked the old `Conversation` API); new tests for pending/complete row summaries, parallel grouping, the dim border and 10-line exec/shell rows. Evidence: `scripts/dev test` 2578 passed; ruff clean. WAF benchmark (`/tmp/tui_bench_078.py`): replay 7.0 s (was 26.8–28.7 s), 7,451 widgets (was 8,905), keypress 202.5 ms (was 238.7 ms), relayout 284 ms. Screenshot `/tmp/078-shots/tui-m3.png`.
 
 ### [ ] M4 — TUI popups, subagent transcript, breadcrumbs
 
@@ -263,6 +263,8 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 - M2: Escape is handled by `overlay.js` (keydown) instead of only the native `<dialog>` cancel. Chromium did not deliver Escape to a dialog that a live swap had reopened with `showModal()` outside a user gesture. Behaviour is the same; the mechanism differs from D13's "native dialog gives Esc".
 - M2: the browser check served the viewer routes from `/tmp/078-serve.py` (a Starlette app built from `web.py`'s handlers) instead of `uvicorn archie_orchestrator.app:app`, because the orchestrator's lifespan calls Docker, which this container lacks.
 
+- M3: an interrupted assistant message with no text renders as a hidden row; the turn's `TurnInterrupted` notice supplies the single "Cancelled" row (previously the TUI could show two). `test_kiro_translate.py` and `test_orchestrator_bounce.py` were also rewritten (they mocked the removed `Conversation` methods).
+
 ## Risks
 
 - `tests/test_tui_canonical.py` (1,177 lines) asserts many removed internals; rewriting them risks dropping scenarios. Mitigation: keep each test's scenario and change only the assertion seam.
@@ -283,5 +285,7 @@ PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Long single-line shell commands still wrap in full in the row headline (the 10-line cap counts newlines). Consider truncating the headline by width.
 
 - Update the brain entry `projects/archie/nexus-tui-performance.md` with the delivered design and measurements.

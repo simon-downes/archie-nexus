@@ -1,0 +1,535 @@
+"""TUI view of the shared transcript model.
+
+``TranscriptView`` keeps an ordered list of top-level rows (messages, iteration
+blocks, compaction rows, client-only rows) and applies the ``Change`` records that
+``archie_shared.transcript.TranscriptBuilder.apply`` returns. Each row is built from
+its model node when it is mounted, so a row can be unmounted and rebuilt later.
+
+The main conversation shows the root transcript. A subagent screen shows one
+subagent's items with the same view class.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from archie_shared.session.accounting import UsageTotals
+from archie_shared.transcript import (
+    CompactionNode,
+    IterationNode,
+    NoticeNode,
+    StreamNode,
+    SubagentNode,
+    TextNode,
+    ToolNode,
+    TranscriptBuilder,
+    TurnNode,
+    plain_text,
+    subagent_status_text,
+    tool_extra,
+    tool_headline,
+    tool_preview,
+)
+from rich.text import Text
+from textual.containers import VerticalScroll
+from textual.widget import Widget
+from textual.widgets import Static
+
+from archie_cli.tui import theme
+from archie_cli.tui.conversation import (
+    AssistantMessage,
+    CancelledMessage,
+    ClientErrorMessage,
+    CompactionEntry,
+    CompactionMarker,
+    ErrorMessage,
+    ShellOutput,
+    StreamingMessage,
+    TurnStatus,
+    UserMessage,
+)
+
+# ---------------------------------------------------------------------------
+# Row widgets
+# ---------------------------------------------------------------------------
+
+
+def _markup(text: str) -> Text:
+    try:
+        return Text.from_markup(text)
+    except Exception:  # noqa: BLE001 — summaries may contain stray brackets
+        return Text(plain_text(text))
+
+
+def _status_glyph(status: str) -> Text:
+    if status in {"pending", "running"}:
+        return Text("○", style=f"bold {theme.PRIMARY}")
+    colour = theme.ERROR if status in {"error", "interrupted"} else theme.SUCCESS
+    return Text("●", style=f"bold {colour}")
+
+
+def render_tool_row(tool: ToolNode) -> Text:
+    """The tool row: status glyph, summary, 10-line exec/shell preview, extra lines."""
+    text = Text()
+    text.append_text(_status_glyph(tool.status))
+    text.append(" ")
+    text.append_text(_markup(tool_headline(tool)))
+    lines, more = tool_preview(tool)
+    for line in lines:
+        text.append("\n  ")
+        text.append(line, style="dim")
+    if more:
+        text.append(f"\n  … +{more} lines", style="dim italic")
+    extra = tool_extra(tool)
+    if extra:
+        text.append("\n")
+        text.append_text(_markup(extra))
+    return text
+
+
+_AGENT_COLUMN = 20
+_CONTEXT_COLUMN = 8
+_COST_COLUMN = 9
+
+
+def _fmt_tokens(tokens: int) -> str:
+    return f"{tokens / 1000:.1f}k" if tokens >= 1000 else str(tokens)
+
+
+def _fmt_column(value: str, width: int, *, align: str = "<") -> str:
+    if len(value) > width:
+        value = value[: max(1, width - 1)] + "…"
+    return f"{value:{align}{width}}"
+
+
+def render_subagent_row(sub: SubagentNode) -> Text:
+    """One line: glyph, agent #index, context tokens, cost and current status."""
+    agent = _fmt_column(sub.label, _AGENT_COLUMN)
+    context = _fmt_column(_fmt_tokens(sub.context_tokens), _CONTEXT_COLUMN, align=">")
+    cost = _fmt_column(f"${sub.cost_usd:.4f}", _COST_COLUMN, align=">")
+    text = Text("  ")
+    text.append_text(_status_glyph(sub.status))
+    text.append(f" {agent} {context} {cost} - ")
+    status = _markup(subagent_status_text(sub))
+    if sub.status == "error":
+        status.stylize(theme.ERROR)
+    text.append_text(status)
+    text.no_wrap = True
+    text.overflow = "ellipsis"
+    return text
+
+
+class ToolRow(Static):
+    """One tool call. Clicking it opens the tool detail screen."""
+
+    DEFAULT_CSS = """
+    ToolRow {
+        height: auto;
+    }
+    ToolRow:hover {
+        background: $boost;
+    }
+    """
+
+    def __init__(self, tool: ToolNode) -> None:
+        self.tool = tool
+        super().__init__(render_tool_row(tool))
+
+    def refresh_node(self) -> None:
+        self.update(render_tool_row(self.tool))
+
+    def get_copy_text(self) -> str:
+        source = self.tool.input.get("source") if self.tool.name == "exec" else None
+        if isinstance(source, str):
+            return source
+        command = self.tool.input.get("command") if self.tool.name == "shell" else None
+        if isinstance(command, str):
+            return command
+        return plain_text(tool_headline(self.tool))
+
+
+class SubagentRow(Static):
+    """One subagent under its task tool. Clicking it opens the subagent transcript."""
+
+    DEFAULT_CSS = """
+    SubagentRow {
+        height: 1;
+    }
+    SubagentRow:hover {
+        background: $boost;
+    }
+    """
+
+    def __init__(self, sub: SubagentNode) -> None:
+        self.sub = sub
+        super().__init__(render_subagent_row(sub))
+
+    def refresh_node(self) -> None:
+        self.update(render_subagent_row(self.sub))
+
+
+class IterationBlock(Widget):
+    """The tool calls of one provider response, under a dim left border.
+
+    Rows are a tool row per call, each followed by its subagent rows. The block
+    builds its rows from the ``IterationNode`` when mounted and on each ``sync``.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    IterationBlock {
+        margin: 0 0 1 0;
+        padding: 0 2;
+        height: auto;
+        border-left: thick transparent;
+    }
+    """
+
+    def __init__(self, node: IterationNode) -> None:
+        super().__init__(id=f"view-{node.id}")
+        self.node = node
+        self._rows: dict[str, ToolRow | SubagentRow] = {}
+        self._ready = False
+
+    def on_mount(self) -> None:
+        self._ready = True
+        self.sync()
+
+    def sync(self) -> None:
+        """Add rows for new tools and subagents and redraw the others."""
+        if not self._ready:
+            return  # on_mount builds every row from the node
+        previous: Widget | None = None
+        for tool in self.node.tools:
+            previous = self._ensure(tool.id, lambda t=tool: ToolRow(t), previous)
+            for sub in tool.children:
+                previous = self._ensure(sub.id, lambda s=sub: SubagentRow(s), previous)
+
+    def _ensure(self, key: str, factory: Callable[[], Widget], previous: Widget | None):
+        row = self._rows.get(key)
+        if row is None:
+            row = factory()
+            self._rows[key] = row
+            if previous is None:
+                self.mount(row, before=0) if self.children else self.mount(row)
+            else:
+                self.mount(row, after=previous)
+        else:
+            row.refresh_node()
+        return row
+
+    def get_copy_text(self) -> str:
+        return "\n\n".join(
+            row.get_copy_text() for row in self._rows.values() if isinstance(row, ToolRow)
+        )
+
+
+class SubagentBlock(Widget):
+    """A subagent shown at the top level (its launching task tool is unknown)."""
+
+    DEFAULT_CSS = """
+    SubagentBlock {
+        margin: 0 0 1 0;
+        padding: 0 1;
+        height: auto;
+    }
+    """
+
+    def __init__(self, sub: SubagentNode) -> None:
+        super().__init__()
+        self.sub = sub
+        self.row = SubagentRow(sub)
+
+    def compose(self):
+        yield self.row
+
+    def sync(self) -> None:
+        self.row.refresh_node()
+
+
+# ---------------------------------------------------------------------------
+# Node → widget
+# ---------------------------------------------------------------------------
+
+
+def _compaction_label(reason: str) -> str:
+    return {"threshold": "threshold tokens", "cold_cache": "threshold cold cache"}.get(
+        reason, reason
+    )
+
+
+def _complete_compaction(entry: CompactionEntry, node: CompactionNode) -> None:
+    error = node.error
+    if node.status != "success" and error is None:
+        error = f"Compaction {node.status}"
+    cost = (
+        node.estimated_next_request_cost_usd
+        if node.estimated_next_request_cost_usd is not None
+        else node.cost_saved_usd
+    )
+    entry.complete(node.tokens_after, cost, node.duration_ms, error)
+
+
+def widget_for(node) -> Widget:
+    """Build the row widget for one top-level transcript node."""
+    if isinstance(node, TextNode):
+        if node.role == "user":
+            return UserMessage(node.content)
+        if not node.content:
+            # An interrupted reply with no text; the turn's "Cancelled" row follows.
+            hidden = Static()
+            hidden.display = False
+            return hidden
+        return AssistantMessage(node.content.rstrip("\n"))
+    if isinstance(node, StreamNode):
+        return StreamingMessage(node.text)
+    if isinstance(node, IterationNode):
+        return IterationBlock(node)
+    if isinstance(node, SubagentNode):
+        return SubagentBlock(node)
+    if isinstance(node, CompactionNode):
+        if node.marker:
+            return CompactionMarker(
+                node.reason, node.tokens_before, node.tokens_after or 0, node.summary
+            )
+        entry = CompactionEntry(_compaction_label(node.reason), node.tokens_before)
+        if node.status != "pending":
+            _complete_compaction(entry, node)
+        return entry
+    if isinstance(node, NoticeNode):
+        if node.variant == "turn-interrupted":
+            return CancelledMessage()
+        return ErrorMessage(node.detail or node.title)
+    return Static(type(node).__name__)
+
+
+def refresh_widget(widget: Widget, node) -> None:
+    """Redraw a mounted row after its node changed."""
+    if isinstance(widget, (IterationBlock, SubagentBlock)):
+        widget.sync()
+    elif isinstance(widget, CompactionEntry) and isinstance(node, CompactionNode):
+        _complete_compaction(widget, node)
+
+
+# ---------------------------------------------------------------------------
+# The view
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Row:
+    key: str
+    node: object | None  # None for client-only rows
+    factory: Callable[[], Widget] | None = None  # client-only rows
+    widget: Widget | None = None
+
+    def build(self) -> Widget:
+        return self.factory() if self.factory is not None else widget_for(self.node)
+
+
+class TranscriptView(VerticalScroll):
+    """Scrollable list of transcript rows driven by model changes."""
+
+    DEFAULT_CSS = """
+    TranscriptView {
+        height: 1fr;
+        padding: 0;
+    }
+    """
+
+    _autoscroll = True
+
+    def __init__(self, *, root_slot: str | None = None, **kwargs) -> None:
+        """``root_slot`` is the model slot whose items are rows: ``None`` for the
+        root transcript (preamble and every turn), or a subagent's ``items_id``."""
+        super().__init__(**kwargs)
+        self._root_slot = root_slot
+        self._rows: list[_Row] = []
+        self._index: dict[str, _Row] = {}
+        self._local_ids = 0
+        self._suspended = False
+
+    # -- scrolling -------------------------------------------------------------
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        self._autoscroll = new_value >= self.max_scroll_y
+
+    def scroll_if_at_bottom(self) -> None:
+        if self._autoscroll and not self._suspended:
+            self.scroll_end(animate=False)
+
+    # -- rows ------------------------------------------------------------------
+
+    @property
+    def rows(self) -> list[_Row]:
+        return self._rows
+
+    def _add_row(self, row: _Row) -> None:
+        self._rows.append(row)
+        self._index[row.key] = row
+        if not self._suspended:
+            self._mount_row(row)
+
+    def _mount_row(self, row: _Row, **where) -> None:
+        row.widget = row.build()
+        self.mount(row.widget, **where)
+
+    def _remove_row(self, row: _Row) -> None:
+        self._rows.remove(row)
+        self._index.pop(row.key, None)
+        if row.widget is not None:
+            row.widget.remove()
+            row.widget = None
+
+    def _replace_row(self, row: _Row, node) -> None:
+        self._index.pop(row.key, None)
+        row.key = node.id
+        row.node = node
+        self._index[row.key] = row
+        old = row.widget
+        if old is None:
+            return
+        if (
+            isinstance(old, StreamingMessage)
+            and isinstance(node, TextNode)
+            and not node.interrupted
+            and old.text.rstrip("\n") == node.content.rstrip("\n")
+        ):
+            old.finish()  # same text: keep the rendered Markdown
+            return
+        row.widget = row.build()
+        self.mount(row.widget, after=old)
+        old.remove()
+
+    def add_local(self, factory: Callable[[], Widget]) -> None:
+        """Append a client-only row (not part of the session transcript)."""
+        self._local_ids += 1
+        self._add_row(_Row(key=f"local-{self._local_ids}", node=None, factory=factory))
+        self.scroll_if_at_bottom()
+
+    def _append_node(self, node) -> None:
+        if isinstance(node, TurnNode):
+            self._autoscroll = True
+            if node.user is not None and node.user.content:
+                self._add_row(_Row(node.user.id, node.user))
+            for item in node.items:
+                self._add_row(_Row(item.id, item))
+            if not self._suspended:
+                self.scroll_end(animate=False)
+            return
+        self._add_row(_Row(node.id, node))
+        self.scroll_if_at_bottom()
+
+    # -- model changes -----------------------------------------------------------
+
+    def _is_root_slot(self, builder: TranscriptBuilder, slot: str | None) -> bool:
+        if self._root_slot is not None:
+            return slot == self._root_slot
+        if slot is None:
+            return True
+        return isinstance(builder.nodes.get(builder.owner_of.get(slot, "")), TurnNode)
+
+    def _touch(self, builder: TranscriptBuilder, node_id: str) -> None:
+        """Redraw the mounted row that shows ``node_id``, if this view shows it.
+
+        Walks up the model from the node. Reaching a subagent other than the node
+        itself means the node is inside that subagent's transcript, which this view
+        shows only as the subagent's row.
+        """
+        current = node_id
+        for nid in (node_id, *builder.ancestors(node_id)):
+            row = self._index.get(nid)
+            if row is not None:
+                if row.widget is not None:
+                    refresh_widget(row.widget, row.node)
+                return
+            if nid != current and isinstance(builder.nodes.get(nid), SubagentNode):
+                return
+            if nid != node_id:
+                current = nid
+
+    def apply_changes(self, builder: TranscriptBuilder, changes) -> None:
+        for change in changes:
+            kind = change.kind
+            if kind == "append":
+                if self._is_root_slot(builder, change.parent_id):
+                    self._append_node(change.node)
+                else:
+                    self._touch(builder, change.node.id)
+            elif kind == "replace":
+                node = change.node
+                if isinstance(node, (UsageTotals, TurnNode)):
+                    continue
+                row = self._index.get(change.target_id)
+                if row is not None and change.target_id != node.id:
+                    self._replace_row(row, node)  # a stream became a message
+                elif row is not None:
+                    if row.widget is not None:
+                        refresh_widget(row.widget, node)
+                else:
+                    self._touch(builder, node.id)
+            elif kind == "append_text":
+                row = self._index.get(change.node.id)
+                if row is not None and isinstance(row.widget, StreamingMessage):
+                    row.widget.append(change.text)
+                    self.scroll_if_at_bottom()
+            elif kind == "remove":
+                row = self._index.get(change.target_id)
+                if row is not None:
+                    self._remove_row(row)
+
+    # -- replay ----------------------------------------------------------------
+
+    def suspend(self) -> None:
+        """Stop mounting rows; ``resume`` mounts them from final node state."""
+        self._suspended = True
+
+    def resume(self) -> None:
+        self._suspended = False
+        for row in self._rows:
+            if row.widget is None:
+                self._mount_row(row)
+        self.scroll_if_at_bottom()
+
+    async def reset(self) -> None:
+        """Drop every row (a full history reload follows)."""
+        self._rows.clear()
+        self._index.clear()
+        await self.remove_children()
+
+    def finish_streams(self) -> None:
+        """Stop the streaming indicator on any mounted stream rows."""
+        for row in self._rows:
+            if isinstance(row.widget, StreamingMessage):
+                row.widget.finish()
+
+
+class Conversation(TranscriptView):
+    """The main session transcript plus client-only rows."""
+
+    def add_turn_status(
+        self,
+        duration_s: float,
+        input_tokens: int,
+        cache_read: int,
+        cache_write: int,
+        output_tokens: int,
+        cost: float,
+    ) -> None:
+        """Add a client-only summary for a completed turn."""
+        self.add_local(
+            lambda: TurnStatus(
+                duration_s, input_tokens, cache_read, cache_write, output_tokens, cost
+            )
+        )
+
+    def add_client_error(self, content: str) -> None:
+        """Add a client/transport error, marked as local (not in session log)."""
+        self.add_local(lambda: ClientErrorMessage(content))
+
+    def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> None:
+        """Add direct shell command output (! prefix, no LLM involvement)."""
+        self.add_local(lambda: ShellOutput(command, output, exit_code))

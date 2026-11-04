@@ -203,14 +203,6 @@ def test_tui_streams_both_text_segments_live():
     )
     events = [e for e in _run("run1_parallel_shell") if e.scope is None]
     conv = MagicMock()
-    streams: list[MagicMock] = []
-
-    def begin_streaming():
-        stream = MagicMock()
-        streams.append(stream)
-        return stream
-
-    conv.begin_streaming.side_effect = begin_streaming
     status = MagicMock()
 
     def query_one(selector, _type=None):
@@ -222,7 +214,23 @@ def test_tui_streams_both_text_segments_live():
     ):
         for event in events:
             app._apply_event(event)
-    streamed = ["".join(c.args[0] for c in s.append.call_args_list) for s in streams]
+    # Each assistant segment streamed into its own row (one first-delta append per
+    # segment) and the final messages replaced those streams in the transcript.
+    texts = [
+        item.content
+        for item in [
+            *app.transcript.preamble,
+            *(i for turn in app.transcript.turns for i in turn.items),
+        ]
+        if getattr(item, "role", "") == "assistant"
+    ]
+    stream_ids = [
+        change.node.id
+        for call in conv.apply_changes.call_args_list
+        for change in call.args[1]
+        if change.kind == "append" and getattr(change.node, "kind", "") == "stream"
+    ]
     messages = [e.content for e in events if isinstance(e, AssistantMessage)]
-    assert streamed == messages
+    assert texts == messages
+    assert len(stream_ids) == len(messages)
     assert len(messages) == 3
