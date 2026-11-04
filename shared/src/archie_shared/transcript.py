@@ -371,6 +371,33 @@ def _looks_like_json(text: str) -> bool:
     return True
 
 
+_EXEC_RETURN_PREFIX = "return: "
+
+
+def _exec_result_sections(title: str, result: str) -> list[DetailSection] | None:
+    """Split an exec result into an indented JSON return value and the rest.
+
+    ``exec`` returns ``return: <compact JSON>`` followed by optional ``stdout:``
+    and ``stderr:`` blocks, or a returned string as-is (which may itself be JSON).
+    Returns None when there is no complete JSON value to format, for example when
+    the result was truncated.
+    """
+    text = result.strip()
+    if text.startswith(_EXEC_RETURN_PREFIX):
+        text = text[len(_EXEC_RETURN_PREFIX) :]
+    if not text or text[0] not in "[{":
+        return None
+    try:
+        value, end = json.JSONDecoder().raw_decode(text)
+    except ValueError:
+        return None
+    sections = [_section(title, _json_text(value), "json")]
+    rest = text[end:].strip()
+    if rest:
+        sections.append(_section("Output", rest))
+    return sections
+
+
 def tool_detail_sections(tool: ToolNode) -> list[DetailSection]:
     """Input and result blocks for a tool detail view, with highlighting hints."""
     tool_input = tool.input
@@ -399,7 +426,14 @@ def tool_detail_sections(tool: ToolNode) -> list[DetailSection]:
     if tool.result is not None:
         title = "Error" if tool.status == "error" else "Result"
         result = tool.result
-        if tool.name == "edit" and tool.status != "error":
+        exec_sections = (
+            _exec_result_sections(title, result)
+            if tool.name == "exec" and tool.status != "error"
+            else None
+        )
+        if exec_sections:
+            sections.extend(exec_sections)
+        elif tool.name == "edit" and tool.status != "error":
             sections.append(_section(title, result, "diff"))
         elif _looks_like_json(result):
             sections.append(_section(title, result, "json"))

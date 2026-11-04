@@ -26,6 +26,7 @@ from archie_shared.transcript import (
 from rich.console import Group
 from rich.syntax import Syntax
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -39,14 +40,20 @@ SYNTAX_THEME = "monokai"
 _SEPARATOR = " › "
 
 
+SESSION_STYLE = f"bold {theme.ERROR}"
+HEADING_STYLE = f"bold {theme.SECONDARY}"  # the theme's bright magenta
+
+
 def render_crumbs(crumbs: list[str]) -> Text:
-    """Breadcrumb line: earlier levels dim, the current level bold."""
+    """Breadcrumb line for the levels above a popup: the session, then any parents.
+
+    The popup's own level is left out because the status line under it names it.
+    """
     text = Text()
-    for n, crumb in enumerate(crumbs):
+    for n, crumb in enumerate(crumbs[:-1] or crumbs):
         if n:
             text.append(_SEPARATOR, style=theme.MUTED)
-        last = n == len(crumbs) - 1
-        text.append(crumb, style="bold" if last else theme.MUTED)
+        text.append(crumb, style=SESSION_STYLE if n == 0 else "bold")
     text.no_wrap = True
     text.overflow = "ellipsis"
     return text
@@ -63,11 +70,11 @@ def _lexer_for(section: DetailSection) -> str | None:
 
 def render_section(section: DetailSection):
     """One input/result block: a title, then highlighted (or plain) text."""
-    title = Text(section.title.upper(), style=f"bold {theme.MUTED}")
+    title = Text(section.title.upper(), style=HEADING_STYLE)
     lexer = _lexer_for(section)
     if lexer:
         body = Syntax(
-            section.text,
+            section.text.rstrip("\n"),
             lexer,
             theme=SYNTAX_THEME,
             word_wrap=True,
@@ -101,7 +108,7 @@ class DetailScreen(ModalScreen[None]):
     DetailScreen .detail-crumbs {
         height: 1;
         padding: 0 1;
-        background: $surface-lighten-1;
+        margin-bottom: 1;
     }
     DetailScreen .detail-status {
         height: auto;
@@ -125,6 +132,12 @@ class DetailScreen(ModalScreen[None]):
             yield Static(render_crumbs(self.crumbs), classes="detail-crumbs")
             yield Static("", classes="detail-status")
             yield from self.compose_body()
+
+    def on_click(self, event: events.Click) -> None:
+        # A click on the dimmed backdrop lands on the screen itself, not the frame.
+        if event.widget is self:
+            event.stop()
+            self.dismiss()
 
     _ready = False  # set in ``on_mount``; changes before that are drawn from state
 
@@ -162,7 +175,7 @@ class ToolDetailScreen(DetailScreen):
         meta = f"  {tool.name} · {state}"
         if tool.duration_ms:
             meta += f" · {tool.duration_ms}ms"
-        text.append(meta, style=theme.MUTED)
+        text.append(meta)
         return text
 
     def update_state(self) -> None:
@@ -204,9 +217,9 @@ class SubagentScreen(DetailScreen):
         text = Text()
         text.append_text(_status_glyph(sub.status))
         text.append(f" {sub.label}", style="bold")
-        text.append(f"  {sub.status} · ${sub.cost_usd:.4f}", style=theme.MUTED)
+        text.append(f"  {sub.status} · ${sub.cost_usd:.4f}")
         if sub.context_tokens:
-            text.append(f" · {sub.context_tokens:,} context tokens", style=theme.MUTED)
+            text.append(f" · {sub.context_tokens:,} context tokens")
         text.append("  ")
         text.append_text(_markup(subagent_status_text(sub)))
         self.query_one(".detail-status", Static).update(text)

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import archie_cli.tui.app as tui_app
 import pytest
+from archie_cli.tui import theme
 from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.detail import SubagentScreen, ToolDetailScreen, render_crumbs
 from archie_cli.tui.transcript_view import (
@@ -176,7 +177,7 @@ async def test_subagent_row_opens_live_transcript_with_clickable_tools():
         tool_screen = app.screen
         assert isinstance(tool_screen, ToolDetailScreen)
         assert tool_screen.crumbs == ["Session", "general #0", "Shell ls -la"]
-        assert "general #0 › Shell ls -la" in render_crumbs(tool_screen.crumbs).plain
+        assert render_crumbs(tool_screen.crumbs).plain == "Session › general #0"
 
         await pilot.press("escape")
         await pilot.pause()
@@ -264,10 +265,36 @@ async def test_long_results_are_capped_in_the_popup():
         assert "1,000 more characters" in _static_text(app.screen, "#tool-sections")
 
 
-def test_breadcrumbs_render_levels_in_order():
+def test_breadcrumbs_name_the_levels_above_the_popup():
     text = render_crumbs(["sess", "general #0", "Read a.py"])
-    assert text.plain == "sess › general #0 › Read a.py"
-    assert any(span.style == "bold" for span in text.spans)
+    # The popup's own level is on the status line, so the crumbs stop at its parent.
+    assert text.plain == "sess › general #0"
+    assert text.spans[0].style == f"bold {theme.ERROR}"
+    assert render_crumbs(["sess", "Read a.py"]).plain == "sess"
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_backdrop_closes_only_the_top_popup():
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _feed(app, pilot, USER, TASK, CHILD_SHELL)
+        app.open_child_detail(("tk", 0))
+        await pilot.pause()
+        sub_screen = app.screen
+        await pilot.click(sub_screen.view.query_one(ToolRow))
+        await pilot.pause()
+        assert isinstance(app.screen, ToolDetailScreen)
+        # Inside the frame: stays open.
+        await pilot.click("#tool-sections")
+        await pilot.pause()
+        assert isinstance(app.screen, ToolDetailScreen)
+        # The top-left corner is outside the 92% x 88% frame.
+        await pilot.click(offset=(0, 0))
+        await pilot.pause()
+        assert app.screen is sub_screen
+        await pilot.click(offset=(0, 0))
+        await pilot.pause()
+        assert not isinstance(app.screen, (SubagentScreen, ToolDetailScreen))
 
 
 def test_popup_escape_binding_is_screen_local():

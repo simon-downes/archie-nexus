@@ -306,6 +306,16 @@ def test_detail_sections_choose_languages():
     sections = tool_detail_sections(exec_tool)
     assert [(s.title, s.language) for s in sections] == [("Source", "python"), ("Result", "json")]
 
+    # exec's compact "return: {...}" is indented; trailing stdout gets its own block.
+    exec_tool.result = 'return: {"a": [1, 2]}\n\nstdout:\nhi'
+    sections = tool_detail_sections(exec_tool)
+    assert [(s.title, s.language) for s in sections[1:]] == [("Result", "json"), ("Output", None)]
+    assert sections[1].text == '{\n  "a": [\n    1,\n    2\n  ]\n}'
+    assert sections[2].text == "stdout:\nhi"
+    # A truncated return value is not valid JSON and stays as it was.
+    exec_tool.result = 'return: {"a": [1, 2\n[…truncated: showed 5 of 9 characters.]'
+    assert tool_detail_sections(exec_tool)[1].text == exec_tool.result
+
     shell = ToolNode("b", "b", "shell", {"command": "ls", "timeout": 5}, result="a\nb", status="ok")
     assert [(s.title, s.language) for s in tool_detail_sections(shell)] == [
         ("Command", "bash"),
