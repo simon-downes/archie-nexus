@@ -276,7 +276,15 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 
 - Plan review: 1 pass. Fixed: M1 labelled prefactor and milestones reordered so popups land in M2 (web) and M4 (TUI); exact Verify commands and thresholds for streaming (M6) and the browser check (M2, including how a live swap is exercised without a running session); streaming requirement restated as behaviour; added the return-to-latest AC; split the exec AC by milestone; Tau path made absolute; `/tmp/tui_bench_078.py` marked new; `CompactionStart` handling stated; decisions D16 (`ctrl+x` target), D17 (popup cap), D18 (subagent row placement), D19 (iteration creation); web page-size bound. Nothing rejected.
 - Plan review (detail):
-- Code review:
+- Code review, round 1 (`general`, `risk`; `risk` ran because the diff renders untrusted tool and subagent content as HTML and runs per event):
+  - ❌ fixed (both): a child event arriving between `push_screen(SubagentScreen)` and its mount raised `MountError` out of `_apply_event` (shown as "Connection lost" plus a reconnect) and duplicated the row. `SubagentScreen.node_changed` now ignores changes until `on_mount` has built the rows from node state. Test: `test_child_event_before_the_subagent_screen_mounts`.
+  - ⚠️ fixed: `ToolDetailScreen.update_state` recorded the drawn state before a failed draw on an unmounted screen, so the popup stayed blank. It now draws only after `on_mount` (`_ready`). Test: `test_event_before_the_tool_popup_mounts_still_draws_it`.
+  - ⚠️ fixed (risk): child `TurnError` text reached `ErrorMessage` as Textual markup (`[/]` crashed the popup, `list[str]` was mangled). `ErrorMessage` escapes its content. Test: `test_child_error_text_is_not_parsed_as_markup`.
+  - ⚠️ fixed (risk): `test_a_new_user_message_returns_to_the_latest_window` flaked. A trace showed the view reached the end one refresh after the assertion; the test now waits for it. Also, `jump_to_latest` now cancels a pending anchor restore (window generation), so a restore can't pull the view back up. 12/12 runs pass.
+  - ⚠️ fixed (general): the 1,000-turn AC had no test. Added `test_replaying_1000_turns_through_the_app_mounts_a_bounded_window` (replay through `ArchieApp._replay_events` into the main `Conversation` with default 200/80/40).
+  - ℹ️ fixed: stale `ToolEntry` comment in `tool_summaries.py`; dead `begin_streaming`/`begin_iteration` mocks in `test_tui_canonical.py`; `docs/architecture.md` and `README.md` now say `shared/` owns the transcript model.
+  - ❓ root crumb: the TUI uses the session id when known and `Session` otherwise, matching the web viewer's root crumb (the session id). Kept.
+  - ❓ web budget: recorded in M2 Outcome (0.87–0.98 s, 12.3 MB against 1.0 s / 13.5 MB). HTML escaping probe by `risk` found no raw tags.
 - Merge risk:
 
 ## Outcome

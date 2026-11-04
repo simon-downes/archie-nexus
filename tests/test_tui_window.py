@@ -158,8 +158,64 @@ async def test_a_new_user_message_returns_to_the_latest_window():
 
         event = UserMessage(id="u31", turn=31, scope=None, content="question 31")
         view.apply_changes(builder, builder.apply(event))
-        await pilot.pause()
+        for _ in range(3):  # scroll_end lands after the mount refresh
+            await pilot.pause()
         assert view.window_is_latest and view.window[1] == len(view.rows) == 61
         assert view.rows[-1].key == "msg-u31" and view.rows[-1].widget is not None
         assert view.is_vertical_scroll_end
         assert "later" not in _boundaries(view)
+
+
+@pytest.mark.asyncio
+async def test_replaying_1000_turns_through_the_app_mounts_a_bounded_window():
+    from unittest.mock import MagicMock, patch
+
+    from archie_cli.tui.transcript_view import WINDOW_OVERSCAN, WINDOW_ROWS, Conversation
+    from archie_shared.events import encode_event
+
+    from tests.test_tui_detail import _App
+
+    events = []
+    for turn in range(1, 1001):
+        events.append(UserMessage(id=f"u{turn}", turn=turn, scope=None, content=f"q {turn}"))
+        events.append(
+            AssistantMessage(
+                id=f"a{turn}",
+                turn=turn,
+                iteration=1,
+                scope=None,
+                request_id=f"r{turn}",
+                content=f"a {turn}",
+                interrupted=False,
+            )
+        )
+    body = "".join(encode_event(e) + "\n" for e in events)
+    http = MagicMock()
+    http.__aenter__.return_value = http
+    http.__aexit__.return_value = False
+
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        with (
+            patch("archie_cli.tui.app.httpx.AsyncClient", return_value=http),
+            patch.object(app, "_update_accounting_status"),
+        ):
+            http.get = _async_return(MagicMock(status_code=200, text=body))
+            assert await app._replay_events() is True
+        await pilot.pause()
+        conv = app.query_one(Conversation)
+        assert len(app.transcript.turns) == 1000
+        rows = [row for row in conv.rows if row.node is not None]  # minus local rows
+        assert len(rows) == 2000
+        mounted = [row for row in conv.rows if row.widget is not None]
+        assert len(mounted) <= WINDOW_ROWS + WINDOW_OVERSCAN
+        total = len(conv.rows)
+        assert conv.window == (total - WINDOW_ROWS, total)
+        assert _boundaries(conv) == {"earlier": total - WINDOW_ROWS}
+
+
+def _async_return(value):
+    async def get(*_args, **_kwargs):
+        return value
+
+    return get

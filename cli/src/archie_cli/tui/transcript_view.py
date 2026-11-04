@@ -426,6 +426,7 @@ class TranscriptView(VerticalScroll):
         self._start = 0
         self._end = 0
         self._shift_pending = False
+        self._window_generation = 0
         self._top: WindowBoundary | None = None
         self._bottom: WindowBoundary | None = None
 
@@ -492,9 +493,12 @@ class TranscriptView(VerticalScroll):
         if anchor is None:
             return
 
+        generation = self._window_generation
+
         def restore() -> None:
             try:
-                if anchor.is_attached:
+                # Skip if the window moved again first (``jump_to_latest``).
+                if anchor.is_attached and generation == self._window_generation:
                     self.scroll_to_widget(
                         anchor,
                         top=direction == "earlier",
@@ -510,6 +514,7 @@ class TranscriptView(VerticalScroll):
     def jump_to_latest(self) -> None:
         """Mount the newest rows and follow the end of the transcript."""
         total = len(self._rows)
+        self._window_generation += 1  # cancels a pending anchor restore
         self._set_window(max(0, total - self._window), total)
         self._autoscroll = True
         if not self._suspended:

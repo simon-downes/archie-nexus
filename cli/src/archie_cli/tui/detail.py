@@ -126,7 +126,10 @@ class DetailScreen(ModalScreen[None]):
             yield Static("", classes="detail-status")
             yield from self.compose_body()
 
+    _ready = False  # set in ``on_mount``; changes before that are drawn from state
+
     def on_mount(self) -> None:
+        self._ready = True
         self.update_state()
 
     def update_state(self) -> None:
@@ -165,17 +168,14 @@ class ToolDetailScreen(DetailScreen):
     def update_state(self) -> None:
         tool = self.tool
         key = (tool.status, tool.result is None, tool.duration_ms)
-        if key == self._shown:
-            return
+        if key == self._shown or not self._ready:
+            return  # unchanged, or not mounted yet (``on_mount`` draws it)
         self._shown = key
-        try:
-            self.query_one(".detail-status", Static).update(self._status_line())
-            sections = [render_section(s) for s in tool_detail_sections(tool)]
-            if tool.result is None:
-                sections.append(Text("Running…", style="dim italic"))
-            self.query_one("#tool-sections", Static).update(Group(*sections))
-        except Exception:  # noqa: BLE001 — not mounted yet; on_mount draws it
-            pass
+        self.query_one(".detail-status", Static).update(self._status_line())
+        sections = [render_section(s) for s in tool_detail_sections(tool)]
+        if tool.result is None:
+            sections.append(Text("Running…", style="dim italic"))
+        self.query_one("#tool-sections", Static).update(Group(*sections))
 
 
 class SubagentScreen(DetailScreen):
@@ -195,6 +195,7 @@ class SubagentScreen(DetailScreen):
         for item in self.sub.items:
             self.view.add_node(item)
         self.view.resume()
+        self._ready = True
         self.view.scroll_end(animate=False)
         self.update_state()
 
@@ -214,5 +215,7 @@ class SubagentScreen(DetailScreen):
             pass
 
     def node_changed(self, builder: TranscriptBuilder, changes) -> None:
+        if not self._ready:
+            return  # ``on_mount`` builds the rows from the node's latest state
         self.view.apply_changes(builder, changes)
         self.update_state()

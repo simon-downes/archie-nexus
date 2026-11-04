@@ -274,7 +274,7 @@ class ErrorMessage(Static):
     can_focus = True
 
     def __init__(self, content: str) -> None:
-        super().__init__(f"[bold {theme.ERROR}]✗ Error[/]\n{content}")
+        super().__init__(f"[bold {theme.ERROR}]✗ Error[/]\n{escape(content)}")
         self._content = content
 
     def get_copy_text(self) -> str:

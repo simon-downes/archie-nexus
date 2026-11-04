@@ -273,3 +273,54 @@ def test_breadcrumbs_render_levels_in_order():
 def test_popup_escape_binding_is_screen_local():
     bindings = {b.key: b.action for b in ToolDetailScreen.BINDINGS}
     assert bindings["escape"] == "dismiss"
+
+
+@pytest.mark.asyncio
+async def test_child_event_before_the_subagent_screen_mounts():
+    """A live event between push and mount must not raise or duplicate rows."""
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _feed(app, pilot, USER, TASK, CHILD_TEXT)
+        app.open_child_detail(("tk", 0))
+        with (
+            patch.object(app, "_update_accounting_status"),
+            patch.object(app, "_estimate_context_pct", return_value=1.0),
+        ):
+            app._apply_event(CHILD_SHELL)  # no pause: the screen is not mounted yet
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SubagentScreen)
+        assert [row.key for row in screen.view.rows] == [item.id for item in screen.sub.items]
+        assert len(screen.view.query(IterationBlock)) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_before_the_tool_popup_mounts_still_draws_it():
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _feed(app, pilot, USER, _call("t1", "read", {"path": "a.py"}), _result("t1", "ok"))
+        row = app.query_one(ToolRow)
+        app.on_tool_clicked(ToolClicked(row.tool))
+        await _feed(app, pilot, _call("t2", "read", {"path": "b.py"}))
+        screen = app.screen
+        assert isinstance(screen, ToolDetailScreen)
+        assert "a.py" in _static_text(screen, ".detail-status")
+        assert _section_renderables(screen)
+
+
+@pytest.mark.asyncio
+async def test_child_error_text_is_not_parsed_as_markup():
+    from archie_shared.events import TurnError
+
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        error = TurnError(
+            id="te", turn=1, scope="tk", subagent_index=0, message="bad [/] list[str]"
+        )
+        await _feed(app, pilot, USER, TASK, CHILD_TEXT, error)
+        app.open_child_detail(("tk", 0))
+        await pilot.pause()
+        await pilot.pause()
+        from archie_cli.tui.conversation import ErrorMessage
+
+        assert "bad [/] list[str]" in _text(app.screen.view.query_one(ErrorMessage))

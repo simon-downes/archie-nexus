@@ -388,7 +388,7 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
             return f"Brain search {_hi(query)} {_dim(f'({count} results)')}"
 
         case "exec":
-            # Exec completion is handled by ToolEntry's own complete() method
+            # Exec rows show their source preview from archie_shared.transcript.tool_headline
             return "Exec"
 
         case "task":

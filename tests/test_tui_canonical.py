@@ -154,8 +154,6 @@ def test_throbber_tracks_provider_request_lifecycle():
     app._turn_active = True
     throbber = MagicMock()
     conv = MagicMock()
-    conv.begin_streaming.return_value = MagicMock()
-    conv.begin_iteration.return_value = MagicMock()
     status = MagicMock()
 
     def query_one(selector, _type=None):

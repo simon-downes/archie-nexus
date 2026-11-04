@@ -21,7 +21,7 @@ Nexus has four Python workspace packages:
 - **CLI (`cli/`)** — host-side `archie` command, Textual TUI, authentication commands, and clients for the orchestrator.
 - **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, discovers sessions, proxies session HTTP/WebSocket traffic, serves the session page, log viewer and usage insights pages, and keeps the metrics index in step with the session logs.
 - **Agent (`agent/`)** — container-side Starlette application. It owns one session, the agent loop, model client, tools, skills, subagents, and session event log.
-- **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, and accounting.
+- **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, accounting, and the transcript model (`archie_shared.transcript`) that both the TUI and the web viewer render from.
 
 `persona/` is content rather than a package: prompts, agents, and procedure skills are mounted into the container and loaded by the agent.
 
