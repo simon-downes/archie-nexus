@@ -685,10 +685,11 @@ async def test_parallel_tools_share_one_block_and_iterations_split():
     assert [len(b) for b in blocks] == [2, 1]
 
 
-async def test_iteration_block_has_dim_border_when_unfocused():
+async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none():
     from pathlib import Path
 
     import archie_cli.tui.app as tui_app
+    from archie_cli.tui.conversation import AssistantMessage as AssistantRow
     from archie_cli.tui.transcript_view import Conversation, IterationBlock
     from textual.app import App
 
@@ -707,15 +708,21 @@ async def test_iteration_block_has_dim_border_when_unfocused():
     app = _make_app()
     async with host.run_test() as pilot:
         conv = host.query_one(Conversation)
-        app.transcript.apply(_user())
+        conv.apply_changes(app.transcript, app.transcript.apply(_user()))
+        reply = AssistantMessage(
+            id="a1", turn=1, scope=None, iteration=1, request_id="r1",
+            content="looking", interrupted=False,
+        )  # fmt: skip
+        conv.apply_changes(app.transcript, app.transcript.apply(reply))
         conv.apply_changes(
             app.transcript, app.transcript.apply(_tool_call("t1", "read", {"path": "a"}))
         )
         await pilot.pause()
+        kind, colour = conv.query_one(AssistantRow).styles.border_left
+        assert kind == "thick" and 0 < colour.a < 1
         block = conv.query_one(IterationBlock)
-        kind, colour = block.styles.border_left
-        assert kind == "thick" and colour.a > 0
-        assert not block.has_focus
+        assert block.styles.border_left[1].a == 0
+        assert not block.focusable
 
 
 async def test_exec_and_shell_rows_show_ten_lines_and_no_click_expand():

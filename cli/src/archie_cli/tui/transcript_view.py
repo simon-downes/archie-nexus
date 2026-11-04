@@ -195,13 +195,13 @@ class SubagentRow(Static):
 
 
 class IterationBlock(Widget):
-    """The tool calls of one provider response, under a dim left border.
+    """The tool calls of one provider response, separated from the next by a blank line.
 
     Rows are a tool row per call, each followed by its subagent rows. The block
     builds its rows from the ``IterationNode`` when mounted and on each ``sync``.
     """
 
-    can_focus = True
+    can_focus = False
 
     DEFAULT_CSS = """
     IterationBlock {
