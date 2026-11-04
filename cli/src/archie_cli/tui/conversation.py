@@ -11,17 +11,17 @@ its own styling:
 
 The streaming flow:
 1. When the model starts generating, a StreamingMessage row is mounted
-2. Text chunks are appended and the Markdown content re-renders live
+2. Text fragments are written to a MarkdownStream as they arrive
 3. When generation completes, the streaming indicator is removed
 """
+
+import asyncio
 
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.css.query import NoMatches
 from textual.markup import escape
-from textual.reactive import reactive
-from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
 
@@ -155,8 +155,9 @@ class AssistantMessage(Widget):
 class StreamingMessage(Widget):
     """A message that's actively being streamed from the model.
 
-    The Markdown widget is updated in place as text arrives. This keeps the
-    message mounted throughout streaming while still showing rich formatting.
+    Text fragments are written to a ``MarkdownStream``, which appends them to the
+    Markdown document and re-parses only its last block, so the cost of a tick
+    does not grow with the length of the reply.
     """
 
     DEFAULT_CSS = """
@@ -178,13 +179,12 @@ class StreamingMessage(Widget):
     }
     """
 
-    text: reactive[str] = reactive("")
-
     def __init__(self, text: str = "") -> None:
         super().__init__()
-        self._markdown_timer: Timer | None = None
-        self._markdown_dirty = False
-        self.set_reactive(StreamingMessage.text, text)
+        self.text = text
+        self._written = 0  # length of ``text`` already in the Markdown document
+        self._wake = asyncio.Event()
+        self._finished = False
 
     def compose(self) -> ComposeResult:
         """Build the streaming message widget with spinner and Markdown."""
@@ -192,41 +192,48 @@ class StreamingMessage(Widget):
             Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)), (" ⟳")),
             classes="header",
         )
-        yield Markdown(self.text, classes="content")
+        # Start empty and write the text so far through the stream: a Markdown
+        # built with text records its last parsed line past a trailing blank line,
+        # and the first ``append`` would then overwrite the last block.
+        yield Markdown("", classes="content")
 
-    def watch_text(self, value: str) -> None:
-        """Schedule a throttled Markdown refresh when streamed text changes."""
-        self._markdown_dirty = True
-        if self._markdown_timer is None:
-            self._markdown_timer = self.set_timer(0.1, self._refresh_markdown)
+    def on_mount(self) -> None:
+        self._wake.set()  # write the text so far
+        self.run_worker(self._feed(), group="markdown-stream", exit_on_error=False)
 
-    def _refresh_markdown(self) -> None:
-        """Render the latest text, at most once per throttle interval."""
-        self._markdown_timer = None
-        if not self._markdown_dirty:
-            return
-        self._markdown_dirty = False
+    async def _feed(self) -> None:
+        """Write new text to the Markdown stream until ``finish``."""
+        markdown = self.query_one(Markdown)
+        stream = Markdown.get_stream(markdown)
         try:
-            self.query_one(Markdown).update(self.text)
-        except Exception:  # noqa: BLE001 — widget may not be mounted yet
-            pass
+            while True:
+                await self._wake.wait()
+                self._wake.clear()
+                chunk = self.text[self._written :]
+                self._written = len(self.text)
+                await stream.write(chunk)
+                if self._finished:
+                    break
+        finally:
+            await stream.stop()
+        final = self.text.rstrip("\n")
+        if markdown.source.rstrip("\n") != final:
+            await markdown.update(final)
 
     def append(self, chunk: str) -> None:
-        """Append a text chunk and schedule a throttled Markdown update."""
+        """Append a text fragment; the stream renders it on its next pass."""
         self.text += chunk
+        self._wake.set()
 
     def finish(self) -> None:
-        """Flush Markdown and remove the streaming indicator."""
-        if self._markdown_timer is not None:
-            self._markdown_timer.stop()
-            self._markdown_timer = None
-        self._markdown_dirty = False
+        """Flush the stream and remove the streaming indicator."""
+        self._finished = True
+        self._wake.set()
         try:
-            self.query_one(Markdown).update(self.text.rstrip("\n"))
             self.query_one(".header", Static).update(
                 Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)))
             )
-        except Exception:  # noqa: BLE001 — widget may not be mounted yet
+        except NoMatches:  # not composed yet
             pass
 
 
