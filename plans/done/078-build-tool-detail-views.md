@@ -290,7 +290,7 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 
 ## Outcome
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/21
 CI: pending
 
 ## Follow-ups
