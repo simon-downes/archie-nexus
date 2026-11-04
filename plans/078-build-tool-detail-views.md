@@ -1,6 +1,6 @@
 # 078 — Tool and subagent detail views in the TUI and web viewer
 
-Status: planning
+Status: building
 Branch: build-it/078-tool-detail-views (base: main @ 245b73f)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/078-tool-detail-views
 
@@ -53,7 +53,7 @@ Codebase facts:
   empty app, 27 s full replay. Keeping only the last 200 `Conversation` children brought
   keypress cost to 69.9 ms. `MarkdownStream.write` cut the last-10-tick streaming cost of
   the longest reply (9,802 chars) from 163 ms to 68 ms. Tau
-  (`_research/tau/src/tau_coding/tui/widgets.py`) windows 200 items, page 80, overscan 40.
+  (`/workspace/_research/tau/src/tau_coding/tui/widgets.py`) windows 200 items, page 80, overscan 40.
 - Web viewer full-page render of the WAF log takes 0.52–0.61 s and produces a 9.0 MB page.
 - Textual 8.2.8 provides `Markdown.get_stream()` → `MarkdownStream` (async `write`, `stop`).
 - Viewer pages send `VIEWER_CSP` (`script-src 'self'`): scripts must be static files with
@@ -90,6 +90,10 @@ Codebase facts:
 | D12 | TUI popups | `ModalScreen` subclasses in new `cli/src/archie_cli/tui/detail.py`: `ToolDetailScreen` and a rewritten `SubagentScreen` sharing a `DetailScreen` base with a breadcrumb header and an `escape` binding that dismisses; the subagent screen hosts the same windowed transcript widget | One screen with internal navigation | Textual's screen stack gives Esc-backs-one-level and breadcrumb-from-stack for free | self |
 | D13 | Web overlays | Native `<dialog>` elements rendered in place: each tool has a row button and a dialog with its detail; each subagent has a row button and a dialog holding its items container. A static `static/viewer/overlay.js` opens them with `showModal()`, keeps the open stack, writes the breadcrumb, and reopens a dialog whose element a live swap replaced | Fetch detail fragments from new routes | Live SSE swaps target ids anywhere in the document, so subagent dialogs update live with no new route or cache; native dialog gives Esc and stacking; CSP allows a static script | self |
 | D14 | Syntax highlighting source | Shared `tool_detail_sections(tool)` in `archie_shared/transcript.py` returns sections (title, text, language hint, filename hint); the TUI renders with Rich `Syntax`, the web with the existing Pygments `highlight_code` | Per-client lexer choice | One rule for which text is Python, Bash, JSON or a file type | self |
+| D16 | `ctrl+x` stop-child target | The topmost open `SubagentScreen`'s subagent; dismissing it falls back to the next `SubagentScreen` below, else no target. Palette and row click open the same screen | Keep `_active_child_key` set only from the palette | Clicking is now the main way to open a subagent; the target must follow what the user is looking at | self |
+| D17 | Popup size cap | Both clients cap each detail section with `preview()` / `PREVIEW_CHARS` (8,000 chars) and show the omitted count | Uncapped in the TUI | A 32 KB `read` result through Rich `Syntax` would stall the TUI; matches the web cap | self |
+| D18 | Where subagent rows sit | Directly under their `task` tool row inside the iteration block (tool row, its subagent rows, next tool row) | At the end of the block | Mirrors the model (`ToolNode.children`) and today's TUI placement | self |
+| D19 | What creates an iteration node | The first `ToolCall` (or orphan `ToolResult`) for a group key; `IterationStart` creates nothing | Create on `IterationStart` | Text-only iterations must not leave empty blocks (today's `app.py:478` rule) | self |
 | D15 | Content-filtered turns | The model emits a turn-error notice for `stop_reason == "content_filtered"` (root and child); the message constants move to `archie_shared/transcript.py` | Keep the TUI-only local error row | Both clients then show it; the web currently shows nothing | self |
 
 ## Requirements
@@ -105,15 +109,15 @@ Rows
 - MUST show a permanent dim left border on every iteration block in both clients.
   - AC (TUI): an unfocused `IterationBlock` has a non-transparent left border. AC (web): tools of one iteration are inside one `.iteration` element styled with a left border.
 - MUST show exec source and shell commands as at most 10 lines in the row, followed by `… +N lines` when longer, with no click-to-expand.
-  - AC: a 25-line exec source renders 10 source lines and `+15 lines` in both clients; clicking the TUI row opens the popup instead of expanding.
+  - AC: a 25-line exec source renders 10 source lines and `+15 lines` in both clients (web: M2; TUI: M3). Clicking the TUI row opens the popup instead of expanding (M4).
 
 Tool popups
 - MUST open a popup showing the tool's name, status, duration, input and result when a tool row is clicked, in the main view and inside a subagent view.
-  - AC (TUI): clicking a `ToolRow` pushes `ToolDetailScreen`, whose text includes the full input and result. AC (web): each tool row is a button whose dialog contains the full input and result (result capped at the existing `PREVIEW_CHARS`).
+  - AC (TUI): clicking a `ToolRow` pushes `ToolDetailScreen`, whose text includes the full input and result. AC (web): each tool row is a button whose dialog contains the input and the result, each up to `PREVIEW_CHARS` with an omitted count (D17).
 - MUST syntax-highlight popup input and result where a language is known: exec source as Python, shell command as Bash, JSON-shaped input and results as JSON, `read` results and `write`/`edit` content by file extension.
   - AC: `tool_detail_sections` returns the expected language hints; the web dialog contains Pygments spans; the TUI section uses `rich.syntax.Syntax`.
 - MUST update an open tool popup when its result arrives.
-  - AC (TUI): a popup opened on a pending tool shows the result after the `ToolResult` is applied. AC (web): `overlay.js` reopens a dialog that a live swap replaced (checked in the browser).
+  - AC (TUI): a popup opened on a pending tool shows the result after the `ToolResult` is applied. AC (web): with a tool dialog open, swapping in a replacement tool fragment through `htmx.swap` (as `live.js` does) leaves the new dialog open (browser check, M2).
 
 Subagents
 - MUST show one clickable row per subagent under its `task` tool, with agent name, index, status and cost; clicking opens the subagent's transcript.
@@ -135,10 +139,12 @@ Performance (TUI)
   - AC: a test that replays 1,000 synthetic turns finds ≤ 240 rows mounted in the conversation and all turns in the model.
 - MUST let the user scroll back through the whole history: reaching the top boundary mounts the previous page and keeps the previously first visible row in place; reaching the bottom of a shifted window mounts the next page; sending a message returns to the latest window.
   - AC: tests drive `scroll_home`/`scroll_end` and assert the window start/end move by 80 and the anchor row is still mounted.
+  - AC: after scrolling back, applying a new root `UserMessage` leaves the window end at the last row and the view scrolled to the end.
 - MUST mount the window once at the end of a full replay rather than per event.
-  - AC: the WAF benchmark replay (`/tmp/tui_bench_078.py`) finishes in under 10 s (baseline 26.8–28.7 s) and leaves under 2,500 live widgets (baseline 8,905), with keypress cost under 110 ms (baseline 238.7 ms, empty app 69.7 ms). Manual check, recorded in M3 Outcome.
-- MUST stream assistant text through `MarkdownStream` fragments.
-  - AC: a test streams 50 deltas and finds the final rendered Markdown source equal to the joined text, and `Markdown.update` is not called during streaming.
+  - AC: the WAF benchmark replay (`/tmp/tui_bench_078.py`, new in M5, adapted from the brain entry's script) finishes in under 10 s (baseline 26.8–28.7 s) and leaves under 2,500 live widgets (baseline 8,905), with keypress cost under 110 ms (baseline 238.7 ms, empty app 69.7 ms). Manual check, recorded in M5 Outcome.
+- MUST keep the per-delta streaming cost from growing with reply length: render only the new fragment on each delta, not the whole reply (D10).
+  - AC: a test streams 50 deltas and finds the final rendered Markdown source equal to the joined text, with no full re-render (`Markdown.update`) during streaming.
+  - AC: `/tmp/078-stream-bench.py` (new in M6) streams the longest WAF reply (9,802 chars) in 80-char deltas; the average of the last 10 ticks is under 100 ms (baseline 163 ms; prototype 68 ms). Recorded in M6 Outcome.
 
 Compatibility
 - MUST keep existing behaviour not named above: turn status line, compaction rows, error and cancelled rows, client error rows, `!` shell output, model switching, `ctrl+s` subagent picker, `ctrl+x` stop child, reconnect with `?after=` cursor and 409 full reset, web live SSE resume.
@@ -186,6 +192,7 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 
 - Web page load: `build(events)` → template renders the tree (unchanged path).
 - Web live: `builder.apply(event)` → `render_change` per change → SSE fragment (unchanged path); replace targets now depend on node kind.
+- Web live, compaction: the shared builder handles `CompactionStart` (pending `CompactionNode`) and `CompactionComplete` replaces it, so the web viewer now shows pending compactions too.
 - TUI event: `ArchieApp._render_canonical` → `transcript.apply` → `_dispatch_changes` sends every change to the main `Conversation` and to each open `SubagentScreen`/`ToolDetailScreen`. A view handles `append` whose parent slot is one of its root slots (main: `None` and every turn's `items_id`; subagent screen: that subagent's `items_id`) by appending a row; any other change refreshes the nearest mounted widget registered for the node or an ancestor (`container_of`/`owner_of` walk). Rows not mounted are rendered from node state when they enter the window.
 - TUI replay: `view.suspend()` before history, `view.resume()` after → one window mount.
 - Failure paths: a change for an unknown node or unmounted widget is ignored; a popup for a tool that a 409 reset removed is dismissed by `_reset_replay_state` (pops all detail screens).
@@ -193,60 +200,60 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 ### Non-functional
 
 - TUI mounted rows ≤ 240; replay mounts once; streaming appends fragments.
-- Web page size is unchanged in kind (tool detail stays in the page inside dialogs).
+- Web: full-page render of the WAF log stays under 1.0 s and 13.5 MB (baseline 0.52–0.61 s, 9.0 MB), measured with `/tmp/078-webbench.py` (exists) in M2.
 
 ## Milestones
 
-### [ ] M1 — Shared transcript model; web viewer groups iterations
+### [ ] M1 — prefactor: shared transcript model; web viewer groups iterations
 
-- **Approach:** Move `TranscriptBuilder` and nodes from `orchestrator/src/archie_orchestrator/transcript.py` into new `shared/src/archie_shared/transcript.py`, removing HTML properties (`summary_html`, `detail_html`, `input_html`, `result_preview`, `TextNode.html`, `NoticeNode.body_html`). Add `IterationNode`, `CompactionNode`, subagent status/agent/cost tracking (from child `LLMRequest`, `TurnComplete`, `TurnError`, `TurnInterrupted`), `container_of`/`owner_of`, content-filtered notices (D15), `source_preview`, `tool_detail_sections`. Web: add the HTML helpers as Jinja globals in `web.py`, update `_nodes.html` (iteration macro with `.iteration` dim border; compaction node rendering; keep `<details>` tool rows and inline subagents for now), update `render_change` to map replace by node kind. Follow existing test style in `tests/test_web_session_detail.py`.
+- **Approach:** Move `TranscriptBuilder` and nodes from `orchestrator/src/archie_orchestrator/transcript.py` into new `shared/src/archie_shared/transcript.py`, removing HTML properties (`summary_html`, `detail_html`, `input_html`, `result_preview`, `TextNode.html`, `NoticeNode.body_html`). Add `IterationNode` (created by D19), `CompactionNode` (handles `CompactionStart`, `CompactionComplete`, `ContextCompacted`), subagent agent/status/cost/context tracking (from the parent `task` input and child `LLMRequest`, `TurnComplete`, `TurnError`, `TurnInterrupted`), `nodes`/`container_of`/`owner_of` indexes, content-filtered notices (D15), `source_preview`, `tool_detail_sections`. Web: register HTML helpers as Jinja globals in `web.py`; `_nodes.html` gets an iteration macro (`.iteration` with dim left border) and a compaction macro; tool rows stay `<details>` and subagents stay inline for now; `render_change` maps replace targets by node kind. Follow the test style in `tests/test_web_session_detail.py`.
 - **Test seam:** `TranscriptBuilder.apply` (new `tests/test_transcript_model.py`); HTTP routes via the existing web tests.
 - **Edge cases:** tool result without call → tool in its iteration group; child events before the task tool call → subagent at root (existing fallback); duplicate event ids → no changes; stream reconnect mid-reply → remove then append (existing).
-- **Deliverable:** web viewer shows tools of one iteration grouped in one bordered block, rendered from the shared model.
-- **Verify:** `scripts/dev test tests/test_transcript_model.py tests/test_web_session_detail.py tests/test_web_session_live.py` passes; full `scripts/dev test` no new failures.
+- **Deliverable:** the web viewer shows the tools of one iteration grouped in one dim-bordered block, rendered from the shared model.
+- **Verify:** `scripts/dev test tests/test_transcript_model.py tests/test_web_session_detail.py tests/test_web_session_live.py` passes; full `scripts/dev test` has no new failures.
 - **Outcome:**
 
-### [ ] M2 — TUI renders from the shared model with cheap rows
+### [ ] M2 — Web tool and subagent overlays with breadcrumbs (tracer for the popups)
 
-- **Approach:** New `transcript_view.py` with `TranscriptView` (unwindowed in this milestone: `suspend`/`resume` exist but window size is unlimited), node→widget factory reusing message widgets from `conversation.py`, `IterationBlock` container with `ToolRow`/`SubagentRow` `Static`s (D6), dim border in `archie.tcss` (D7), 10-line exec/shell preview via `source_preview` (D8). Replace transcript handling in `app.py::_render_canonical` and delete `_handle_scoped_event`, `_iteration_block`, `_pending_tool_inputs`, `_pending_compactions`, `_child_*`, `_parent_task_*`, `_transient_assistant_text`/`_finalized_assistant_requests` (now in the model). TurnStatus row appended by the main view when a root `TurnNode` gets `stop_reason`, using the app's live wall time when known. Client rows (`add_client_error`, `add_shell_output`) append local rows. `SubagentProvider` and `ctrl+x` use `app.transcript.subagents`. Rewrite assertions in `tests/test_tui_canonical.py` and `tests/test_tui_subagents.py` that touch removed internals, keeping the scenarios.
-- **Test seam:** `ArchieApp._apply_event` against a mounted `Conversation` (`_ConversationHost` pattern, `tests/test_tui_canonical.py:248`).
-- **Edge cases:** final assistant text differs from streamed text → stream row replaced by message row; empty user message → no row; content-filtered → error row; interrupted assistant → "Cancelled" still shown.
-- **Deliverable:** the TUI shows the same transcript as before, with iteration blocks bordered dim and tool rows as single widgets.
-- **Verify:** `scripts/dev test tests/test_tui_canonical.py tests/test_tui_subagents.py tests/test_tui_models_provider.py tests/test_tui_shell.py` passes; full suite no new failures.
-- **Outcome:**
-
-### [ ] M3 — TUI windowing
-
-- **Approach:** In `TranscriptView`: rows list, window `[start, end)`, constants 200/80/40 (D9), `WindowBoundary` rows at either end with hidden counts, `watch_scroll_y` triggers shifts at the top (earlier) and bottom (later), anchor restore via `call_after_refresh` + `scroll_to_widget(anchor, top=True)` (follow `_research/tau/src/tau_coding/tui/widgets.py:961` `_shift_window`). Live appends mount only when the window is at the latest; trim the top beyond overscan. `add_user_message` jumps to the latest window. Replay uses `suspend`/`resume`. Benchmark script `/tmp/tui_bench_078.py` adapted from the brain entry's script to drive the new app path.
-- **Test seam:** `TranscriptView` mounted in a test `App` fed through `ArchieApp._apply_event`.
-- **Edge cases:** shift while streaming → streaming row stays mounted at the latest window or is rendered from `StreamNode.text` when remounted; row updates for unmounted rows ignored.
-- **Deliverable:** long sessions mount a bounded window and scroll back through history.
-- **Verify:** new windowing tests pass; benchmark on the WAF log meets the Performance AC numbers, recorded here.
-- **Outcome:**
-
-### [ ] M4 — MarkdownStream streaming
-
-- **Approach:** `StreamingMessage` gets the stream from `Markdown.get_stream()` on mount, seeds it with the node's current text, writes each `append_text` fragment in order (tasks created in order), and `finish()` stops the stream and swaps the header; remove the 0.1 s throttle (D10).
-- **Test seam:** `StreamingMessage` via `ArchieApp._apply_event` with `TextDelta` events.
-- **Deliverable:** streaming appends fragments instead of re-parsing the whole reply.
-- **Verify:** streaming tests pass (final source equals joined deltas; no full `update` during streaming); `/tmp/tui_bench_stream.py`-style timing recorded.
-- **Outcome:**
-
-### [ ] M5 — TUI popups, subagent transcript, breadcrumbs
-
-- **Approach:** New `detail.py`: `DetailScreen(ModalScreen)` with a breadcrumb header (`crumbs` = parent crumbs + own) and `Binding("escape", "dismiss")` so the app's interrupt binding is not reached; `ToolDetailScreen(tool_node)` renders `tool_detail_sections` with `rich.syntax.Syntax` (lexer from language or `Syntax.guess_lexer(filename)`); `SubagentScreen(subagent_node)` hosts a `TranscriptView` over `subagent.items` plus a status line. `ToolRow.on_click` / `SubagentRow.on_click` post messages that the active screen handles by pushing the next screen with its crumbs. `app._dispatch_changes` forwards changes to open screens; tool screens refresh when their node changes. `_reset_replay_state` pops all detail screens.
-- **Test seam:** pilot clicks on mounted rows in a test app driven through `ArchieApp._apply_event`.
-- **Edge cases:** click on pending tool → popup shows "running" and fills in later; nested subagent → crumbs grow; Esc with no popup → existing interrupt behaviour.
-- **Deliverable:** clicking tools and subagents opens popups with highlighted content, breadcrumbs and Esc-to-back.
-- **Verify:** `scripts/dev test tests/test_tui_detail.py` (new) passes; full suite no new failures; a manual run in `textual` headless screenshot (`App.save_screenshot`) of a popup saved for the PR.
-- **Outcome:**
-
-### [ ] M6 — Web overlays and row previews
-
-- **Approach:** `_nodes.html`: tool = `<div class="tool" id>` with `<div id="{head_id}">` holding the row `<button class="tool-line" data-dialog>` (summary + 10-line preview for exec/shell) and `<dialog class="overlay">` (header with breadcrumb slot, metadata, highlighted sections from `tool_detail_sections`); children container after the head. Subagent = row button (`id=row_id`) + `<dialog>` holding `items_id`. New `static/viewer/overlay.js` (event delegation on `[data-dialog]`, open stack, breadcrumb text from `data-crumb`, crumb clicks close upper levels, reopen-after-swap via `htmx:oobAfterSwap` and after live fragments). Load it on every detail page. Update CSS. Update web tests for the new markup.
+- **Approach:** `_nodes.html`: a tool is `<div class="tool" id>` holding `<div id="{head_id}">` (row `<button class="tool-line" data-dialog>` with summary and the 10-line exec/shell preview, plus `<dialog class="overlay">` with breadcrumb slot, metadata and highlighted sections from `tool_detail_sections`), then the children container. A subagent is a row button (`id=row_id`: agent, index, status, cost) plus a `<dialog>` holding `items_id`. New `static/viewer/overlay.js`: delegated clicks on `[data-dialog]`, `showModal()`, an open stack, breadcrumb text from each level's `data-crumb`, crumb clicks close the levels above, and reopen-after-swap on `htmx:oobAfterSwap` and after `live.js` appends. Load it on every detail page. CSS for rows, dialogs and crumbs. Update the web tests for the new markup.
 - **Test seam:** HTTP routes (`tests/test_web_session_detail.py`, `tests/test_web_session_live.py`); browser check with `agent-browser`.
-- **Deliverable:** the web viewer opens tool and subagent overlays with breadcrumbs, Esc closes the top one, and live updates reach open overlays.
-- **Verify:** web tests pass; `agent-browser` on a served fixture log: click a tool → dialog visible with highlighted input; open a subagent → click its tool → breadcrumb shows three levels; Esc closes one level. Screenshots saved for the PR.
+- **Deliverable:** the web viewer opens tool and subagent overlays with highlighted content and breadcrumbs; Esc closes the top one.
+- **Verify:** web tests pass. `/tmp/078-webbench.py` on the WAF log stays under 1.0 s and 13.5 MB. Browser check: copy the WAF log to `/tmp/078-home/sessions/`, run `ARCHIE_HOME_DIR=/tmp/078-home scripts/dev run uvicorn archie_orchestrator.app:app --port 8765`, open `http://127.0.0.1:8765/ui/sessions/tillo-platform-01m61zwmar` in `agent-browser`; click a shell tool → dialog shows highlighted input; open a subagent → click one of its tools → breadcrumb shows three levels; Esc closes one level; with a tool dialog open, run `htmx.swap` with a re-rendered copy of its fragment → the dialog is open afterwards. Screenshots saved for the PR.
+- **Outcome:**
+
+### [ ] M3 — TUI renders from the shared model with cheap rows
+
+- **Approach:** New `cli/src/archie_cli/tui/transcript_view.py` with `TranscriptView` (unwindowed here; `suspend`/`resume` exist), a node→widget factory reusing message widgets from `conversation.py`, an `IterationBlock` container with `ToolRow`/`SubagentRow` `Static`s (D6, D18), the dim border in `archie.tcss` (D7), and 10-line exec/shell previews via `source_preview` (D8). Replace transcript handling in `app.py::_render_canonical`; delete `_handle_scoped_event`, `_iteration_block`, `_pending_tool_inputs`, `_pending_compactions`, `_child_*`, `_parent_task_*`, `_transient_assistant_text`, `_finalized_assistant_requests` and `subagents.py`'s `ChildActivityState`/`SubagentActivity`. The main view appends `TurnStatus` when a root turn ends, using the app's live wall time when known. `add_client_error` and `add_shell_output` append local rows. `SubagentProvider` and `ctrl+x` read `app.transcript.subagents` (the palette still opens the old status screen until M4). Rewrite assertions in `tests/test_tui_canonical.py` and `tests/test_tui_subagents.py` that touch removed internals, keeping each scenario.
+- **Test seam:** `ArchieApp._apply_event` against a mounted `Conversation` (`_ConversationHost`, `tests/test_tui_canonical.py:248`).
+- **Edge cases:** final assistant text differs from streamed text → stream row replaced; empty user message → no row; content-filtered → error row; interrupted assistant → "Cancelled" row.
+- **Deliverable:** the TUI shows the same transcript as before, with dim-bordered iteration blocks and single-widget tool rows.
+- **Verify:** `scripts/dev test tests/test_tui_canonical.py tests/test_tui_subagents.py tests/test_tui_models_provider.py tests/test_tui_shell.py` passes; full suite has no new failures.
+- **Outcome:**
+
+### [ ] M4 — TUI popups, subagent transcript, breadcrumbs
+
+- **Approach:** New `cli/src/archie_cli/tui/detail.py`: `DetailScreen(ModalScreen)` with a breadcrumb header (parent crumbs + own) and `Binding("escape", "dismiss")` so the app's interrupt binding is not reached; `ToolDetailScreen(tool_node)` renders `tool_detail_sections` capped by D17 with `rich.syntax.Syntax` (lexer from the language hint, else from the filename); `SubagentScreen(subagent_node)` hosts a `TranscriptView` over the subagent's items under a status line. `ToolRow.on_click`/`SubagentRow.on_click` post messages that the app handles by pushing the next screen with the current crumbs. `app._dispatch_changes` forwards changes to open screens. `ctrl+x` targets per D16. `_reset_replay_state` pops all detail screens. Palette opens the new `SubagentScreen`.
+- **Test seam:** pilot clicks on mounted rows in a test app driven through `ArchieApp._apply_event` (new `tests/test_tui_detail.py`).
+- **Edge cases:** click on a pending tool → popup shows "running" and fills in on result; nested subagent → crumbs grow; Esc with no popup → existing interrupt behaviour.
+- **Deliverable:** clicking tools and subagents opens popups with highlighted content, breadcrumbs and Esc-to-back.
+- **Verify:** `scripts/dev test tests/test_tui_detail.py` passes; full suite has no new failures; an SVG screenshot of a popup from `App.save_screenshot` is saved for the PR.
+- **Outcome:**
+
+### [ ] M5 — TUI windowing
+
+- **Approach:** In `TranscriptView`: a rows list, window `[start, end)`, constants 200/80/40 (D9), `WindowBoundary` rows with hidden counts, `watch_scroll_y` shifts at the top (earlier) and bottom (later), anchor restore via `call_after_refresh` + `scroll_to_widget(anchor, top=True)` (follow `/workspace/_research/tau/src/tau_coding/tui/widgets.py:961` `_shift_window`). Live appends mount only when the window is at the latest, trimming the top beyond overscan. A root `UserMessage` jumps to the latest window. Replay uses `suspend`/`resume`. Applies to the main view and `SubagentScreen`. Write `/tmp/tui_bench_078.py` from the brain entry's script, driving `ArchieApp._apply_event` with `historical=True` around `suspend`/`resume`.
+- **Test seam:** `TranscriptView` in a test `App` fed through `ArchieApp._apply_event`.
+- **Edge cases:** shift while streaming → the streaming row is rendered from `StreamNode.text` when remounted; updates for unmounted rows are ignored.
+- **Deliverable:** long sessions mount a bounded window and still scroll back through all history.
+- **Verify:** new windowing tests pass; `scripts/dev run python /tmp/tui_bench_078.py ~/.nexus/sessions/tillo-platform-01m61zwmar.jsonl` meets the Performance AC numbers, recorded here.
+- **Outcome:**
+
+### [ ] M6 — MarkdownStream streaming
+
+- **Approach:** `StreamingMessage` gets a stream from `Markdown.get_stream()` on mount, seeds it with the node's current text, writes each `append_text` fragment in order, and `finish()` stops the stream and swaps the header; remove the 0.1 s full-text throttle (D10).
+- **Test seam:** `StreamingMessage` via `ArchieApp._apply_event` with `TextDelta` events.
+- **Deliverable:** streaming renders only new fragments.
+- **Verify:** streaming tests pass; `scripts/dev run python /tmp/078-stream-bench.py ~/.nexus/sessions/tillo-platform-01m61zwmar.jsonl` reports a last-10-tick average under 100 ms, recorded here.
 - **Outcome:**
 
 ## Deviations
@@ -260,7 +267,8 @@ All nodes are dataclasses with `id: str` and `kind: str`.
 
 ## Review
 
-- Plan review:
+- Plan review: 1 pass. Fixed: M1 labelled prefactor and milestones reordered so popups land in M2 (web) and M4 (TUI); exact Verify commands and thresholds for streaming (M6) and the browser check (M2, including how a live swap is exercised without a running session); streaming requirement restated as behaviour; added the return-to-latest AC; split the exec AC by milestone; Tau path made absolute; `/tmp/tui_bench_078.py` marked new; `CompactionStart` handling stated; decisions D16 (`ctrl+x` target), D17 (popup cap), D18 (subagent row placement), D19 (iteration creation); web page-size bound. Nothing rejected.
+- Plan review (detail):
 - Code review:
 - Merge risk:
 
