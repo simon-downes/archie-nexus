@@ -354,8 +354,45 @@ class _Row:
         return self.factory() if self.factory is not None else widget_for(self.node)
 
 
+# Window parameters (plan 078 D9, from Tau): mount about WINDOW_ROWS rows, move the
+# window by WINDOW_PAGE rows at a time, and let live appends overshoot by
+# WINDOW_OVERSCAN rows before the oldest mounted rows are dropped.
+WINDOW_ROWS = 200
+WINDOW_PAGE = 80
+WINDOW_OVERSCAN = 40
+
+
+class WindowBoundary(Static):
+    """Marks rows above or below the mounted window; scrolling past it pages them in."""
+
+    DEFAULT_CSS = """
+    WindowBoundary {
+        height: 1;
+        padding: 0 2;
+    }
+    """
+
+    def __init__(self, direction: str) -> None:
+        super().__init__(classes=f"window-boundary window-{direction}")
+        self.direction = direction
+        self.hidden_count = 0
+
+    def set_count(self, count: int) -> None:
+        self.hidden_count = count
+        noun = "row" if count == 1 else "rows"
+        verb = "up" if self.direction == "earlier" else "down"
+        self.update(
+            Text(f"··· {count} {self.direction} {noun} · scroll {verb} to show", style="dim")
+        )
+
+
 class TranscriptView(VerticalScroll):
-    """Scrollable list of transcript rows driven by model changes."""
+    """Scrollable list of transcript rows driven by model changes.
+
+    Every row stays in ``rows``; only ``rows[start:end]`` (``window``) have mounted
+    widgets. Scrolling to the top or bottom edge pages the window, and boundary rows
+    show how many rows are outside it.
+    """
 
     DEFAULT_CSS = """
     TranscriptView {
@@ -366,7 +403,15 @@ class TranscriptView(VerticalScroll):
 
     _autoscroll = True
 
-    def __init__(self, *, root_slot: str | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        root_slot: str | None = None,
+        window: int = WINDOW_ROWS,
+        page: int = WINDOW_PAGE,
+        overscan: int = WINDOW_OVERSCAN,
+        **kwargs,
+    ) -> None:
         """``root_slot`` is the model slot whose items are rows: ``None`` for the
         root transcript (preamble and every turn), or a subagent's ``items_id``."""
         super().__init__(**kwargs)
@@ -375,16 +420,160 @@ class TranscriptView(VerticalScroll):
         self._index: dict[str, _Row] = {}
         self._local_ids = 0
         self._suspended = False
+        self._window = window
+        self._page = page
+        self._overscan = overscan
+        self._start = 0
+        self._end = 0
+        self._shift_pending = False
+        self._top: WindowBoundary | None = None
+        self._bottom: WindowBoundary | None = None
 
     # -- scrolling -------------------------------------------------------------
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        self._autoscroll = new_value >= self.max_scroll_y
+        self._autoscroll = new_value >= self.max_scroll_y and self.window_is_latest
+        if new_value <= 1 and new_value < old_value and self._start > 0:
+            self._schedule_shift("earlier")
+        elif (
+            new_value >= max(0, self.max_scroll_y - 1)
+            and new_value > old_value
+            and self._end < len(self._rows)
+        ):
+            self._schedule_shift("later")
 
     def scroll_if_at_bottom(self) -> None:
-        if self._autoscroll and not self._suspended:
+        if self._autoscroll and not self._suspended and self.window_is_latest:
             self.scroll_end(animate=False)
+
+    # -- window ----------------------------------------------------------------
+
+    @property
+    def window(self) -> tuple[int, int]:
+        """The mounted slice of ``rows`` as ``(start, end)``."""
+        return self._start, self._end
+
+    @property
+    def window_is_latest(self) -> bool:
+        return self._end >= len(self._rows)
+
+    def _schedule_shift(self, direction: str) -> None:
+        if self._shift_pending or self._suspended:
+            return
+        self._shift_pending = True
+        self.call_later(self.shift_window, direction)
+
+    def shift_window(self, direction: str) -> None:
+        """Page the window one step ``"earlier"`` or ``"later"``.
+
+        The row at the edge being paged stays mounted and is scrolled back to where
+        it was (top edge for earlier, bottom edge for later) after the next refresh.
+        """
+        anchor: Widget | None = None
+        try:
+            start, end, total = self._start, self._end, len(self._rows)
+            if direction == "earlier" and start > 0:
+                anchor = self._rows[start].widget if start < end else None
+                new_start = max(0, start - self._page)
+                new_end = min(total, max(new_start + self._window, start + 1))
+                self._set_window(new_start, new_end)
+            elif direction == "later" and end < total:
+                anchor = self._rows[end - 1].widget if end > start else None
+                new_end = min(total, end + self._page)
+                new_start = max(0, min(new_end - self._window, end - 1))
+                self._set_window(new_start, new_end)
+        finally:
+            if anchor is None:
+                self._shift_pending = False
+        if not self.window_is_latest:
+            self._autoscroll = False  # before the anchor restore lands
+
+        if anchor is None:
+            return
+
+        def restore() -> None:
+            try:
+                if anchor.is_attached:
+                    self.scroll_to_widget(
+                        anchor,
+                        top=direction == "earlier",
+                        animate=False,
+                        immediate=True,
+                        force=True,
+                    )
+            finally:
+                self._shift_pending = False
+
+        self.call_after_refresh(restore)
+
+    def jump_to_latest(self) -> None:
+        """Mount the newest rows and follow the end of the transcript."""
+        total = len(self._rows)
+        self._set_window(max(0, total - self._window), total)
+        self._autoscroll = True
+        if not self._suspended:
+            self.scroll_end(animate=False)
+
+    def _set_window(self, new_start: int, new_end: int) -> None:
+        """Mount exactly ``rows[new_start:new_end]``, keeping widgets already mounted."""
+        for i in range(self._start, self._end):
+            if not new_start <= i < new_end:
+                self._unmount(self._rows[i])
+        self._start, self._end = new_start, new_end
+        self._sync_boundaries()
+        self._mount_missing()
+
+    def _mount_missing(self) -> None:
+        """Mount the unmounted rows inside the window, in order, one batch per gap."""
+        i = self._start
+        while i < self._end:
+            if self._rows[i].widget is not None:
+                i += 1
+                continue
+            j = i
+            while j < self._end and self._rows[j].widget is None:
+                j += 1
+            widgets = []
+            for row in self._rows[i:j]:
+                row.widget = row.build()
+                widgets.append(row.widget)
+            following = self._rows[j].widget if j < self._end else self._bottom
+            if following is not None:
+                self.mount(*widgets, before=following)
+            else:
+                self.mount(*widgets)
+            i = j
+
+    @staticmethod
+    def _unmount(row: _Row) -> None:
+        if row.widget is not None:
+            row.widget.remove()
+            row.widget = None
+
+    def _sync_boundaries(self) -> None:
+        """Show, update or drop the boundary rows for the current window."""
+        above = self._start
+        below = len(self._rows) - self._end
+        if above and self._top is None:
+            self._top = WindowBoundary("earlier")
+            if self.children:
+                self.mount(self._top, before=0)
+            else:
+                self.mount(self._top)
+        elif not above and self._top is not None:
+            self._top.remove()
+            self._top = None
+        if self._top is not None:
+            self._top.set_count(above)
+        if below and self._bottom is None:
+            self._bottom = WindowBoundary("later")
+            self.mount(self._bottom)
+        elif not below and self._bottom is not None:
+            self._bottom.remove()
+            self._bottom = None
+        if self._bottom is not None:
+            self._bottom.set_count(below)
 
     # -- rows ------------------------------------------------------------------
 
@@ -393,21 +582,35 @@ class TranscriptView(VerticalScroll):
         return self._rows
 
     def _add_row(self, row: _Row) -> None:
+        was_latest = self.window_is_latest
         self._rows.append(row)
         self._index[row.key] = row
-        if not self._suspended:
-            self._mount_row(row)
-
-    def _mount_row(self, row: _Row, **where) -> None:
-        row.widget = row.build()
-        self.mount(row.widget, **where)
+        if self._suspended:
+            return  # ``resume`` mounts the window
+        mounted = self._end - self._start
+        if not was_latest:
+            self._sync_boundaries()  # reading earlier rows: count the new one below
+        elif mounted < self._window + self._overscan:
+            self._end += 1
+            self._mount_missing()
+        elif self._autoscroll:
+            # Following the end at the cap: drop the oldest rows beyond the window.
+            self._set_window(len(self._rows) - self._window, len(self._rows))
+        else:
+            self._sync_boundaries()  # scrolled up at the cap: leave the window alone
 
     def _remove_row(self, row: _Row) -> None:
-        self._rows.remove(row)
+        i = self._rows.index(row)
+        self._unmount(row)
+        del self._rows[i]
         self._index.pop(row.key, None)
-        if row.widget is not None:
-            row.widget.remove()
-            row.widget = None
+        if i < self._start:
+            self._start -= 1
+            self._end -= 1
+        elif i < self._end:
+            self._end -= 1
+        if not self._suspended:
+            self._sync_boundaries()
 
     def _replace_row(self, row: _Row, node) -> None:
         self._index.pop(row.key, None)
@@ -416,7 +619,7 @@ class TranscriptView(VerticalScroll):
         self._index[row.key] = row
         old = row.widget
         if old is None:
-            return
+            return  # built from the new node when it enters the window
         if (
             isinstance(old, StreamingMessage)
             and isinstance(node, TextNode)
@@ -441,6 +644,9 @@ class TranscriptView(VerticalScroll):
 
     def _append_node(self, node) -> None:
         if isinstance(node, TurnNode):
+            # A new user message: return to the latest rows and follow them.
+            if not self._suspended and not self.window_is_latest:
+                self.jump_to_latest()
             self._autoscroll = True
             if node.user is not None and node.user.content:
                 self._add_row(_Row(node.user.id, node.user))
@@ -466,7 +672,8 @@ class TranscriptView(VerticalScroll):
 
         Walks up the model from the node. Reaching a subagent other than the node
         itself means the node is inside that subagent's transcript, which this view
-        shows only as the subagent's row.
+        shows only as the subagent's row. A row outside the window has no widget;
+        it is built from current node state when it enters the window.
         """
         current = node_id
         for nid in (node_id, *builder.ancestors(node_id)):
@@ -513,25 +720,25 @@ class TranscriptView(VerticalScroll):
     # -- replay ----------------------------------------------------------------
 
     def suspend(self) -> None:
-        """Stop mounting rows; ``resume`` mounts them from final node state."""
+        """Stop mounting rows; ``resume`` mounts the latest window from final state."""
         self._suspended = True
 
     def resume(self) -> None:
         self._suspended = False
-        for row in self._rows:
-            if row.widget is None:
-                self._mount_row(row)
-        self.scroll_if_at_bottom()
+        self.jump_to_latest()
 
     async def reset(self) -> None:
         """Drop every row (a full history reload follows)."""
         self._rows.clear()
         self._index.clear()
+        self._start = self._end = 0
+        self._top = self._bottom = None
+        self._shift_pending = False
         await self.remove_children()
 
     def finish_streams(self) -> None:
         """Stop the streaming indicator on any mounted stream rows."""
-        for row in self._rows:
+        for row in self._rows[self._start : self._end]:
             if isinstance(row.widget, StreamingMessage):
                 row.widget.finish()
 
