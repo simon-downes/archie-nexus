@@ -33,6 +33,7 @@ from archie_shared.transcript import (
 )
 from rich.text import Text
 from textual.containers import VerticalScroll
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -120,6 +121,22 @@ def render_subagent_row(sub: SubagentNode) -> Text:
     return text
 
 
+class ToolClicked(Message):
+    """A tool row was clicked; the app opens its detail screen."""
+
+    def __init__(self, tool: ToolNode) -> None:
+        super().__init__()
+        self.tool = tool
+
+
+class SubagentClicked(Message):
+    """A subagent row was clicked; the app opens its transcript screen."""
+
+    def __init__(self, sub: SubagentNode) -> None:
+        super().__init__()
+        self.sub = sub
+
+
 class ToolRow(Static):
     """One tool call. Clicking it opens the tool detail screen."""
 
@@ -138,6 +155,10 @@ class ToolRow(Static):
 
     def refresh_node(self) -> None:
         self.update(render_tool_row(self.tool))
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self.post_message(ToolClicked(self.tool))
 
     def get_copy_text(self) -> str:
         source = self.tool.input.get("source") if self.tool.name == "exec" else None
@@ -167,6 +188,10 @@ class SubagentRow(Static):
 
     def refresh_node(self) -> None:
         self.update(render_subagent_row(self.sub))
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self.post_message(SubagentClicked(self.sub))
 
 
 class IterationBlock(Widget):
@@ -409,6 +434,10 @@ class TranscriptView(VerticalScroll):
         self._local_ids += 1
         self._add_row(_Row(key=f"local-{self._local_ids}", node=None, factory=factory))
         self.scroll_if_at_bottom()
+
+    def add_node(self, node) -> None:
+        """Append a row for a model node (used to build a view from existing state)."""
+        self._append_node(node)
 
     def _append_node(self, node) -> None:
         if isinstance(node, TurnNode):

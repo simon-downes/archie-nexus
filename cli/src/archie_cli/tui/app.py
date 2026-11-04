@@ -32,13 +32,13 @@ from textual.binding import Binding
 from textual.widgets import Footer
 
 from archie_cli.tui import theme
+from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.quit_screen import QuitScreen
 from archie_cli.tui.status import StatusBar
-from archie_cli.tui.subagents import SubagentScreen
 from archie_cli.tui.throbber import Throbber, ThrobberContainer
-from archie_cli.tui.transcript_view import Conversation
+from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
 from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
@@ -94,7 +94,6 @@ class ArchieApp(App):
         self._turn_active: bool = False
         self._throbber: Throbber | None = None
         self._last_esc_time: float = 0.0
-        self._active_child_key: tuple[str, int] | None = None
 
         # Session state for local accumulation. Seeded from Handshake.accounting
         # on connect, then updated live from broadcast llm_request ledger events.
@@ -247,13 +246,9 @@ class ArchieApp(App):
         self._estimated_output = 0
         self._reset_turn_metrics()
         self._turn_active = False
-        try:
-            screen = self.screen
-        except Exception:  # noqa: BLE001 — headless tests have no screen stack
-            screen = None
-        if isinstance(screen, SubagentScreen):
+        # Popups show nodes of the old model; close them before rebuilding.
+        while isinstance(self._top_screen(), DetailScreen):
             await self.pop_screen()
-        self._active_child_key = None
 
         conversation = self.query_one("#conversation", Conversation)
         removal = conversation.reset()
@@ -373,18 +368,40 @@ class ArchieApp(App):
             self._end_turn()
 
     def _dispatch_changes(self, changes) -> None:
-        """Send model changes to the main view and any open subagent screen."""
+        """Send model changes to the main view and every open popup."""
         if not changes:
             return
         view = self._conversation()
         if view is not None:
             view.apply_changes(self.transcript, changes)
+        for screen in self._detail_screens():
+            screen.node_changed(self.transcript, changes)
+
+    def _top_screen(self):
         try:
-            screen = self.screen
+            return self.screen
         except Exception:  # noqa: BLE001 — headless tests have no screen stack
-            return
-        if isinstance(screen, SubagentScreen):
-            screen.update_state()
+            return None
+
+    def _detail_screens(self) -> list[DetailScreen]:
+        try:
+            stack = self.screen_stack
+        except Exception:  # noqa: BLE001 — headless tests have no screen stack
+            return []
+        return [screen for screen in stack if isinstance(screen, DetailScreen)]
+
+    def _crumbs(self) -> list[str]:
+        """Breadcrumb levels for a popup opened from the current screen."""
+        top = self._top_screen()
+        if isinstance(top, DetailScreen):
+            return list(top.crumbs)
+        return [self._session_id or "Session"]
+
+    def on_tool_clicked(self, message: ToolClicked) -> None:
+        self.push_screen(ToolDetailScreen(message.tool, self._crumbs()))
+
+    def on_subagent_clicked(self, message: SubagentClicked) -> None:
+        self.push_screen(SubagentScreen(message.sub, self._crumbs()))
 
     def _accumulate_ledger(self, event: LLMRequest) -> None:
         """Fold an llm_request ledger event into cumulative accounting.
@@ -564,12 +581,19 @@ class ArchieApp(App):
         self._render_canonical(event, replay=historical)
 
     def open_child_detail(self, key: tuple[str, int]) -> None:
-        """Open a live detail modal for a known child."""
+        """Open the transcript popup for a known child (command palette)."""
         child = self.transcript.subagents.get(key)
         if child is None:
             return
-        self._active_child_key = key
-        self.push_screen(SubagentScreen(child))
+        self.push_screen(SubagentScreen(child, self._crumbs()))
+
+    @property
+    def _active_child_key(self) -> tuple[str, int] | None:
+        """The subagent ``ctrl+x`` stops: the topmost open subagent popup's."""
+        for screen in reversed(self._detail_screens()):
+            if isinstance(screen, SubagentScreen):
+                return (screen.sub.scope, screen.sub.index)
+        return None
 
     async def action_subagent_picker(self) -> None:
         """Open the command palette filtered to subagent entries."""

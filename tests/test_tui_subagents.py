@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from archie_cli.tui.app import ArchieApp
-from archie_cli.tui.subagents import SubagentScreen
+from archie_cli.tui.detail import SubagentScreen
 from archie_cli.tui.transcript_view import render_subagent_row
 from archie_shared.events import (
     AssistantMessage,
@@ -155,11 +155,12 @@ def test_content_filtered_child_is_shown_as_error():
     assert child.error == CHILD_CONTENT_FILTERED_MESSAGE
 
 
-def test_status_screen_reads_the_live_node():
+def test_subagent_screen_reads_the_live_node():
     sub = SubagentNode("sub-x", "task-1", 0, agent="researcher")
-    modal = SubagentScreen(sub)
+    modal = SubagentScreen(sub, ["session"])
     sub.status = "complete"
     assert modal.sub is sub and modal.sub.status == "complete"
+    assert modal.crumbs == ["session", "researcher #0"]
 
 
 def test_replay_scoped_delta_streams_into_child_transcript():
