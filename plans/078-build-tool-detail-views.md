@@ -1,6 +1,6 @@
 # 078 — Tool and subagent detail views in the TUI and web viewer
 
-Status: building
+Status: reviewing
 Branch: build-it/078-tool-detail-views (base: main @ 245b73f)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/078-tool-detail-views
 
