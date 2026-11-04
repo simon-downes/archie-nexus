@@ -292,6 +292,7 @@ async def test_child_event_before_the_subagent_screen_mounts():
         assert isinstance(screen, SubagentScreen)
         assert [row.key for row in screen.view.rows] == [item.id for item in screen.sub.items]
         assert len(screen.view.query(IterationBlock)) == 1
+        assert "ls -la" in _text(screen.view.query_one(ToolRow))
 
 
 @pytest.mark.asyncio

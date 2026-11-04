@@ -1,6 +1,6 @@
 # 078 — Tool and subagent detail views in the TUI and web viewer
 
-Status: reviewing
+Status: done
 Branch: build-it/078-tool-detail-views (base: main @ 245b73f)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/078-tool-detail-views
 
@@ -285,7 +285,8 @@ All nodes are dataclasses with `id: str` and `kind: str`.
   - ℹ️ fixed: stale `ToolEntry` comment in `tool_summaries.py`; dead `begin_streaming`/`begin_iteration` mocks in `test_tui_canonical.py`; `docs/architecture.md` and `README.md` now say `shared/` owns the transcript model.
   - ❓ root crumb: the TUI uses the session id when known and `Session` otherwise, matching the web viewer's root crumb (the session id). Kept.
   - ❓ web budget: recorded in M2 Outcome (0.87–0.98 s, 12.3 MB against 1.0 s / 13.5 MB). HTML escaping probe by `risk` found no raw tags.
-- Merge risk:
+- Code review, round 2 (`general`, on `542f909`): confirmed the ❌ fix. ℹ️ fixed: dropped the now-dead `try/except` in `SubagentScreen.update_state`; added `test_jumping_to_latest_cancels_a_pending_anchor_restore` (fails with the generation guard removed, 3/3); the pre-mount test now asserts the shell row is shown. Seen failing before the fix: with the `_ready` guard removed, the pre-mount test raises `MountError`. ℹ️ rejected: importing `_App` from `tests.test_tui_detail` mirrors the existing `tests.test_plugin_loader` import in `test_plugin_sdk.py`; a conftest move is churn outside this change.
+- Merge risk: Medium: the TUI conversation and both web viewer renderers now run on one new reducer and a windowed view, so a reducer or windowing bug shows wrong or missing rows in every session; 2,602 tests, the WAF replay and the browser check limit that, and it is display-only (no session data is written).
 
 ## Outcome
 
@@ -296,4 +297,4 @@ CI: pending
 
 - Long single-line shell commands still wrap in full in the row headline (the 10-line cap counts newlines). Consider truncating the headline by width.
 
-- Update the brain entry `projects/archie/nexus-tui-performance.md` with the delivered design and measurements.
+- Rich Markdown for assistant messages was deferred (D2, user Q2); revisit if windowed Markdown cost matters.

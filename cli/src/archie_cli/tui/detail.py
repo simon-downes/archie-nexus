@@ -209,10 +209,7 @@ class SubagentScreen(DetailScreen):
             text.append(f" · {sub.context_tokens:,} context tokens", style=theme.MUTED)
         text.append("  ")
         text.append_text(_markup(subagent_status_text(sub)))
-        try:
-            self.query_one(".detail-status", Static).update(text)
-        except Exception:  # noqa: BLE001 — not mounted yet
-            pass
+        self.query_one(".detail-status", Static).update(text)
 
     def node_changed(self, builder: TranscriptBuilder, changes) -> None:
         if not self._ready:

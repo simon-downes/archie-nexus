@@ -126,6 +126,21 @@ async def test_rows_added_while_reading_history_are_counted_not_mounted():
 
 
 @pytest.mark.asyncio
+async def test_jumping_to_latest_cancels_a_pending_anchor_restore():
+    app = _Host()
+    async with app.run_test(size=(80, 20)) as pilot:
+        view = app.query_one(TranscriptView)
+        await _filled(pilot, view, 100)
+        view.shift_window("later")  # no-op at the latest window
+        view.shift_window("earlier")  # schedules the anchor restore
+        view.jump_to_latest()  # before the restore runs
+        for _ in range(3):
+            await pilot.pause()
+        assert view.window == (80, 100)
+        assert view.is_vertical_scroll_end
+
+
+@pytest.mark.asyncio
 async def test_a_new_user_message_returns_to_the_latest_window():
     app = _Host()
     async with app.run_test(size=(80, 20)) as pilot:
