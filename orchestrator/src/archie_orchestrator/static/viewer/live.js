@@ -48,6 +48,8 @@
       marker.remove();
     });
     htmx.swap(transcript, parsed.innerHTML, { swapStyle: "beforeend" });
+    // overlay.js reopens any open dialog that this swap replaced.
+    document.dispatchEvent(new CustomEvent("viewer:fragment"));
   }
 
   function atBottom() {
@@ -108,13 +110,5 @@
   }
 
   setState("connecting");
-  // Keep an expanded tool row expanded when a live update replaces it.
-  document.body.addEventListener("htmx:oobBeforeSwap", function (event) {
-    var target = event.detail.target;
-    var incoming = event.detail.fragment && event.detail.fragment.firstElementChild;
-    if (target && target.tagName === "DETAILS" && target.open && incoming) {
-      incoming.setAttribute("open", "");
-    }
-  });
   connect();
 })();

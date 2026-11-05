@@ -3,7 +3,7 @@
  *
  * Structural layout (height, margin, padding, overflow) lives in each widget's
  * DEFAULT_CSS. This file contains only visual properties: colours, backgrounds,
- * borders, text styles, and :focus states.
+ * borders and text styles.
  *
  * Textual loads this via CSS_PATH on the App class — it takes higher specificity
  * than DEFAULT_CSS, so visual overrides here always win.
@@ -32,8 +32,9 @@ UserMessage {
     border-left: thick $primary;
 }
 
+/* A dim rule on assistant text; streaming matches so finalising doesn't shift it. */
 AssistantMessage {
-    border-left: thick transparent;
+    border-left: thick $primary 30%;
 }
 
 AssistantMessage > .header {
@@ -42,7 +43,7 @@ AssistantMessage > .header {
 }
 
 StreamingMessage {
-    border-left: thick transparent;
+    border-left: thick $primary 30%;
 }
 
 StreamingMessage > .header {
@@ -65,15 +66,8 @@ ShellOutput {
     background: $surface-darken-1;
 }
 
-/* --- Focus styling: left border accent --- */
-UserMessage:focus { border-left: thick $primary; }
-AssistantMessage:focus { border-left: thick $primary; }
-StreamingMessage:focus { border-left: thick $primary; }
-CancelledMessage:focus { border-left: thick $primary; }
-ErrorMessage:focus { border-left: thick $primary; }
-IterationBlock:focus { border-left: thick $primary; }
-ShellOutput:focus { border-left: thick $primary; }
-ClientErrorMessage:focus { border-left: thick $primary; }
+/* Iteration blocks keep the transparent border from DEFAULT_CSS, so their tool rows
+ * line up with message text; the blank line between blocks separates iterations. */
 
 /* --- Status bar colours --- */
 StatusBar {

@@ -21,7 +21,7 @@ Nexus has four Python workspace packages:
 - **CLI (`cli/`)** — host-side `archie` command, Textual TUI, authentication commands, and clients for the orchestrator.
 - **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, discovers sessions, proxies session HTTP/WebSocket traffic, serves the session page, log viewer and usage insights pages, and keeps the metrics index in step with the session logs.
 - **Agent (`agent/`)** — container-side Starlette application. It owns one session, the agent loop, model client, tools, skills, subagents, and session event log.
-- **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, and accounting.
+- **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, accounting, and the transcript model (`archie_shared.transcript`) that both the TUI and the web viewer render from.
 
 `persona/` is content rather than a package: prompts, agents, and procedure skills are mounted into the container and loaded by the agent.
 
@@ -134,7 +134,7 @@ A user message follows this path:
    "image omitted" note. Ollama is always text-only. Inside exec, `read` returns the caption text.
 5. The orchestrator's metrics sync (every 15 s, plus on each insights page and `archie stats`
    run) tails the session logs into the SQLite metrics index. It never touches the relay.
-6. The TUI applies live and stored events through one imperative `_apply_event(event, historical=...)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity.
+6. The TUI applies live and stored events through one `_apply_event(event)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity. Behind that path, the shared `TranscriptBuilder` (`archie_shared.transcript`), which the web viewer also uses, reduces events into the transcript model; see [How the TUI applies the events](session-protocol-walkthrough.md#10-how-the-tui-applies-the-events).
 
 On a Kiro session (`ARCHIE_BACKEND=kiro`), step 4 runs in `KiroHarness` instead: Kiro CLI calls
 the model over ACP, Archie's tools run in an in-process MCP server, and the ACP stream is
@@ -176,8 +176,8 @@ session totals without changing the active conversation context display.
 
 `GET /events` returns ordered persisted NDJSON. Its optional `after` parameter is the client's last
 applied persisted event ID; live-only frames never advance that cursor. The TUI applies history
-and live frames through `_apply_event(event, historical=...)`, using the historical flag to select
-reconciliation behavior; both paths deduplicate by event ID and request identity.
+and live frames through `_apply_event(event)`; both paths deduplicate by event ID,
+and the shared `TranscriptBuilder` reconciles streamed text by request identity.
 
 A connect sends one live-only `handshake` containing protocol and session identity, followed by
 one `session_status` frame carrying the current model and Git branch. There is no

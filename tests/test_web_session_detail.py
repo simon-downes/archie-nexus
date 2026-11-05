@@ -40,6 +40,15 @@ async def _get(path: str, *, running=()):
             return await client.get(path)
 
 
+def _tool(html: str, tool_use_id: str) -> str:
+    """Return the rendered tool (row, overlay and subagents) for ``tool_use_id``."""
+    return re.search(
+        rf'<div class="tool[^"]*" id="tool-{tool_use_id}">.*?<!-- /tool-{tool_use_id} -->',
+        html,
+        re.S,
+    ).group(0)
+
+
 def _block(html: str, element_id: str) -> str:
     """Return the HTML from the element with ``element_id`` to the end of the document."""
     start = html.index(f'id="{element_id}"')
@@ -205,18 +214,39 @@ async def test_detail_tool_rows(session_logs):
     )
     html = (await _get(f"/ui/sessions/{SID}")).text
 
-    err = re.search(r'<details[^>]*id="tool-t-err".*?</details>', html, re.S).group(0)
+    err = _tool(html, "t-err")
     assert 'class="tool is-error"' in err
     assert '<span class="b">ls /nope</span>' in err
     assert "1.5s" in err
     assert "ls: cannot access" in err
 
-    big = re.search(r'<details[^>]*id="tool-t-big".*?</details>', html, re.S).group(0)
+    big = _tool(html, "t-big")
     assert "x" * 8000 in big and "x" * 8001 not in big
     assert "… 2000 more characters" in big
 
-    pending = re.search(r'<details[^>]*id="tool-t-pending".*?</details>', html, re.S).group(0)
+    pending = _tool(html, "t-pending")
     assert 'class="tool is-pending"' in pending
+
+
+@pytest.mark.asyncio
+async def test_detail_groups_tools_by_iteration(session_logs):
+    w = session_logs
+    w.write(
+        SID,
+        [
+            w.user("go"),
+            w.tool_call("read", {"path": "a"}, tool_use_id="t1", iteration=1),
+            w.tool_call("read", {"path": "b"}, tool_use_id="t2", iteration=1),
+            w.tool_call("read", {"path": "c"}, tool_use_id="t3", iteration=2),
+        ],
+    )
+    html = (await _get(f"/ui/sessions/{SID}")).text
+    groups = re.findall(
+        r'<div class="iteration" id="(iter-[^"]+)">(.*?)<!-- /iteration -->', html, re.S
+    )
+    assert [g[0] for g in groups] == ["iter-1-1", "iter-1-2"]
+    assert 'id="tool-t1"' in groups[0][1] and 'id="tool-t2"' in groups[0][1]
+    assert 'id="tool-t3"' in groups[1][1]
 
 
 @pytest.mark.asyncio
@@ -224,7 +254,7 @@ async def test_detail_orphan_tool_result(session_logs):
     w = session_logs
     w.write(SID, [w.user("x"), w.tool_result("orphan output", tool_use_id="t-x", is_error=True)])
     html = (await _get(f"/ui/sessions/{SID}")).text
-    row = re.search(r'<details[^>]*id="tool-t-x".*?</details>', html, re.S).group(0)
+    row = _tool(html, "t-x")
     assert 'class="tool is-error"' in row and "orphan output" in row
 
 
@@ -270,7 +300,7 @@ async def test_detail_notices(session_logs):
         ],
     )
     html = (await _get(f"/ui/sessions/{SID}")).text
-    assert html.count('class="notice-block compaction"') == 2
+    assert html.count('class="notice-block compaction') == 2
     assert "9,000" in html and "900" in html and "<strong>work</strong>" in html
     assert "boom" in html
     assert 'class="notice-block turn-error"' in html and "provider exploded" in html
@@ -301,9 +331,7 @@ async def test_detail_subagents_nest_under_task(session_logs):
     )
     html = (await _get(f"/ui/sessions/{SID}")).text
 
-    task = re.search(r'<details[^>]*id="tool-tu-task".*?<!-- /tool-tu-task -->', html, re.S).group(
-        0
-    )
+    task = _tool(html, "tu-task")
     assert task.count('class="subagent"') == 2
     assert 'id="sub-tu-task-0"' in task and 'id="sub-tu-task-1"' in task
     assert "child zero says hi" in task and "child one says hi" in task
@@ -370,7 +398,7 @@ async def test_exec_source_is_capped(session_logs):
         SID, [w.user("x"), w.tool_call("exec", {"source": "a = 1\n" * 3000}, tool_use_id="t-exec")]
     )
     html = (await _get(f"/ui/sessions/{SID}")).text
-    row = re.search(r'<details[^>]*id="tool-t-exec".*?</details>', html, re.S).group(0)
+    row = _tool(html, "t-exec")
     assert "more characters" in row
     assert row.count("a</span>") <= 8000 // 6 + 1
 
@@ -395,6 +423,76 @@ async def test_detail_render_runs_off_the_event_loop(session_logs, monkeypatch):
     resp = await _get(f"/ui/sessions/{SID}")
     assert resp.status_code == 200
     assert threads and all(t is not main for t in threads)
+
+
+@pytest.mark.asyncio
+async def test_tool_row_opens_dialog_with_highlighted_detail(session_logs):
+    w = session_logs
+    source = "\n".join(f"x{i} = {i}" for i in range(25))
+    w.write(
+        SID,
+        [
+            w.user("x"),
+            w.tool_call("exec", {"source": source}, tool_use_id="t-exec"),
+            w.tool_result('{"ok": true}', tool_use_id="t-exec"),
+            w.tool_call("shell", {"command": "ls -la\npwd"}, tool_use_id="t-sh"),
+        ],
+    )
+    html = (await _get(f"/ui/sessions/{SID}")).text
+    assert '<script src="/static/viewer/overlay.js" defer></script>' in html
+    row = _tool(html, "t-exec")
+    button = re.search(r"<button[^>]*tool-line.*?</button>", row, re.S).group(0)
+    assert 'data-dialog="tool-t-exec-dialog"' in button
+    preview = re.search(r'<span class="tool-preview">(.*?)</span>', button, re.S).group(1)
+    assert preview.count("\n") == 10 and "x9 = 9" in preview and "x10" not in preview
+    assert "… +15 lines" in button
+    dialog = re.search(
+        r'<dialog class="overlay tool-dialog" id="tool-t-exec-dialog".*?</dialog>', row, re.S
+    ).group(0)
+    assert 'data-crumb="Exec (25 lines)"' in dialog
+    assert '<nav class="crumbs"' in dialog
+    assert "x24" in dialog  # the full source is in the overlay
+    assert '<span class="n">x0</span>' in dialog  # Python highlighting
+    assert '<span class="p">{</span>' in dialog  # JSON result highlighting
+
+    shell = _tool(html, "t-sh")
+    assert 'data-crumb="Shell ls -la"' in shell
+    assert '<span class="tool-preview">pwd' in shell
+    assert '<span class="nb">pwd</span>' in shell  # Bash highlighting in the overlay
+
+
+@pytest.mark.asyncio
+async def test_subagent_row_opens_dialog_holding_its_transcript(session_logs):
+    w = session_logs
+    w.write(
+        SID,
+        [
+            w.user("go"),
+            w.tool_call("task", {"tasks": [{"agent": "general"}]}, tool_use_id="tk"),
+            w.assistant("child text", scope="tk", index=0),
+            w.tool_call("read", {"path": "c"}, tool_use_id="c1", scope="tk", index=0),
+            w.llm(scope="tk", index=0, cost_usd=0.125),
+        ],
+    )
+    html = (await _get(f"/ui/sessions/{SID}")).text
+    row = re.search(r'<button[^>]*class="chrome sub-row[^"]*".*?</button>', html, re.S).group(0)
+    assert 'data-dialog="sub-tk-0-dialog"' in row and 'id="sub-tk-0-row"' in row
+    assert "general #0" in row and "$0.1250" in row
+    dialog = re.search(
+        r'<dialog class="overlay sub-dialog" id="sub-tk-0-dialog".*?</dialog>\s*</section>',
+        html,
+        re.S,
+    ).group(0)
+    assert 'data-crumb="general #0"' in dialog
+    assert 'id="sub-tk-0-items"' in dialog and "child text" in dialog
+    assert 'data-dialog="tool-c1-dialog"' in dialog  # its tools open the same overlay
+
+
+def test_overlay_script_handles_stack_and_live_swaps():
+    js = (STATIC / "overlay.js").read_text()
+    assert "showModal" in js and "data-dialog" in js and "data-crumb" in js
+    assert "viewer:fragment" in js
+    assert "viewer:fragment" in (STATIC / "live.js").read_text()
 
 
 def test_csp_blocks_framing_and_base():

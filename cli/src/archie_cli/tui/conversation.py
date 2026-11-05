@@ -1,7 +1,7 @@
-"""Conversation display widget with styled message blocks.
+"""Message widgets for the conversation transcript.
 
-The conversation is a vertical scroll container that holds individual
-message widgets. Each message type has its own styling:
+``transcript_view.TranscriptView`` mounts these as rows. Each message type has
+its own styling:
 - UserMessage: highlighted background so your messages stand out
 - AssistantMessage: rendered Markdown for rich formatting
 - StreamingMessage: Markdown that updates live during generation
@@ -10,19 +10,18 @@ message widgets. Each message type has its own styling:
   NOT recorded in the session log)
 
 The streaming flow:
-1. When the model starts generating, we mount a StreamingMessage
-2. Text chunks are appended and the Markdown content re-renders live
-3. When generation completes, we remove the streaming indicator
+1. When the model starts generating, a StreamingMessage row is mounted
+2. Text fragments are written to a MarkdownStream as they arrive
+3. When generation completes, the streaming indicator is removed
 """
+
+import asyncio
 
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.markup import escape
-from textual.reactive import reactive
-from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
 
@@ -156,8 +155,9 @@ class AssistantMessage(Widget):
 class StreamingMessage(Widget):
     """A message that's actively being streamed from the model.
 
-    The Markdown widget is updated in place as text arrives. This keeps the
-    message mounted throughout streaming while still showing rich formatting.
+    Text fragments are written to a ``MarkdownStream``, which appends them to the
+    Markdown document and re-parses only its last block, so the cost of a tick
+    does not grow with the length of the reply.
     """
 
     DEFAULT_CSS = """
@@ -179,12 +179,12 @@ class StreamingMessage(Widget):
     }
     """
 
-    text: reactive[str] = reactive("")
-
-    def __init__(self) -> None:
+    def __init__(self, text: str = "") -> None:
         super().__init__()
-        self._markdown_timer: Timer | None = None
-        self._markdown_dirty = False
+        self.text = text
+        self._written = 0  # length of ``text`` already in the Markdown document
+        self._wake = asyncio.Event()
+        self._finished = False
 
     def compose(self) -> ComposeResult:
         """Build the streaming message widget with spinner and Markdown."""
@@ -192,41 +192,48 @@ class StreamingMessage(Widget):
             Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)), (" ⟳")),
             classes="header",
         )
+        # Start empty and write the text so far through the stream: a Markdown
+        # built with text records its last parsed line past a trailing blank line,
+        # and the first ``append`` would then overwrite the last block.
         yield Markdown("", classes="content")
 
-    def watch_text(self, value: str) -> None:
-        """Schedule a throttled Markdown refresh when streamed text changes."""
-        self._markdown_dirty = True
-        if self._markdown_timer is None:
-            self._markdown_timer = self.set_timer(0.1, self._refresh_markdown)
+    def on_mount(self) -> None:
+        self._wake.set()  # write the text so far
+        self.run_worker(self._feed(), group="markdown-stream", exit_on_error=False)
 
-    def _refresh_markdown(self) -> None:
-        """Render the latest text, at most once per throttle interval."""
-        self._markdown_timer = None
-        if not self._markdown_dirty:
-            return
-        self._markdown_dirty = False
+    async def _feed(self) -> None:
+        """Write new text to the Markdown stream until ``finish``."""
+        markdown = self.query_one(Markdown)
+        stream = Markdown.get_stream(markdown)
         try:
-            self.query_one(Markdown).update(self.text)
-        except Exception:  # noqa: BLE001 — widget may not be mounted yet
-            pass
+            while True:
+                await self._wake.wait()
+                self._wake.clear()
+                chunk = self.text[self._written :]
+                self._written = len(self.text)
+                await stream.write(chunk)
+                if self._finished:
+                    break
+        finally:
+            await stream.stop()
+        final = self.text.rstrip("\n")
+        if markdown.source.rstrip("\n") != final:
+            await markdown.update(final)
 
     def append(self, chunk: str) -> None:
-        """Append a text chunk and schedule a throttled Markdown update."""
+        """Append a text fragment; the stream renders it on its next pass."""
         self.text += chunk
+        self._wake.set()
 
     def finish(self) -> None:
-        """Flush Markdown and remove the streaming indicator."""
-        if self._markdown_timer is not None:
-            self._markdown_timer.stop()
-            self._markdown_timer = None
-        self._markdown_dirty = False
+        """Flush the stream and remove the streaming indicator."""
+        self._finished = True
+        self._wake.set()
         try:
-            self.query_one(Markdown).update(self.text.rstrip("\n"))
             self.query_one(".header", Static).update(
                 Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)))
             )
-        except Exception:  # noqa: BLE001 — widget may not be mounted yet
+        except NoMatches:  # not composed yet
             pass
 
 
@@ -267,7 +274,7 @@ class ErrorMessage(Static):
     can_focus = True
 
     def __init__(self, content: str) -> None:
-        super().__init__(f"[bold {theme.ERROR}]✗ Error[/]\n{content}")
+        super().__init__(f"[bold {theme.ERROR}]✗ Error[/]\n{escape(content)}")
         self._content = content
 
     def get_copy_text(self) -> str:
@@ -364,197 +371,6 @@ def _esc(text: str) -> str:
     return text.replace("[", r"\[").replace("]", r"\]")
 
 
-class ToolEntry(Widget):
-    """A single tool call within an IterationBlock.
-
-    For exec: shows source code (collapsible) while pending, then completion metrics.
-    For native tools: shows a Rich-formatted one-liner that updates on completion.
-    """
-
-    can_focus = False
-
-    DEFAULT_CSS = """
-    ToolEntry {
-        height: auto;
-        margin: 0;
-        padding: 0;
-    }
-    ToolEntry > .tool-header {
-        height: auto;
-    }
-    ToolEntry > .tool-source {
-        height: auto;
-        margin: 0 0 0 2;
-    }
-    """
-
-    _MAX_COLLAPSED_LINES = 10
-
-    def __init__(self, tool_use_id: str, name: str, input_summary: str) -> None:
-        super().__init__()
-        self._tool_use_id = tool_use_id
-        self._name = name
-        self._input_summary = input_summary
-        self._is_exec = name == "exec"
-        self._expanded = False
-        self._completed = False
-
-    def compose(self) -> ComposeResult:
-        """Build the tool entry with header and optional source."""
-        if self._is_exec:
-            yield Static(
-                f"[bold {theme.PRIMARY}]○[/] [bold]Exec[/]",
-                classes="tool-header",
-                markup=True,
-            )
-            yield Static(self._render_source(), classes="tool-source", markup=True)
-        else:
-            # Native tool: show the Rich-formatted pending summary
-            yield Static(
-                f"[bold {theme.PRIMARY}]○[/] {self._input_summary}",
-                classes="tool-header",
-                markup=True,
-            )
-
-    def _render_source(self) -> str:
-        """Render exec source code with line limit and collapse indicator."""
-        if not self._input_summary:
-            return ""
-        lines = self._input_summary.split("\n")
-        if len(lines) <= self._MAX_COLLAPSED_LINES or self._expanded:
-            rendered = "\n".join(f"[dim]{_esc(line)}[/]" for line in lines)
-            if self._expanded and len(lines) > self._MAX_COLLAPSED_LINES:
-                rendered += "\n[dim italic]▲ click to collapse[/]"
-        else:
-            shown = lines[: self._MAX_COLLAPSED_LINES]
-            remaining = len(lines) - self._MAX_COLLAPSED_LINES
-            rendered = "\n".join(f"[dim]{_esc(line)}[/]" for line in shown)
-            rendered += f"\n[dim italic]▼ +{remaining} lines (click to expand)[/]"
-        return rendered
-
-    def add_child(self, child: Widget) -> None:
-        """Mount nested activity beneath this tool entry."""
-        self.mount(child)
-
-    def complete(
-        self,
-        is_error: bool,
-        duration_ms: int,
-        result_lines: int,
-        result_bytes: int,
-        summary: str = "",
-    ) -> None:
-        """Mark this tool entry as complete with metrics.
-
-        For exec: shows metrics (duration, bytes, tokens).
-        For native tools: replaces header with the Rich-formatted completion summary.
-        """
-        self._completed = True
-        colour = theme.ERROR if is_error else theme.SUCCESS
-
-        if self._is_exec:
-            if is_error:
-                error_msg = summary.split("\n")[0][:120] if summary else "error"
-                header = f"[bold {colour}]●[/] [bold]Exec[/] [dim red]{_esc(error_msg)}[/]"
-            else:
-                parts = []
-                if duration_ms:
-                    if duration_ms < 1000:
-                        parts.append(f"{duration_ms}ms")
-                    else:
-                        parts.append(f"{duration_ms / 1000:.1f}s")
-                if result_lines:
-                    parts.append(f"{result_lines} lines")
-                if result_bytes:
-                    parts.append(f"{result_bytes:,} bytes")
-                metrics = " · ".join(parts) if parts else "done"
-                header = f"[bold {colour}]●[/] [bold]Exec[/] [dim]{metrics}[/]"
-        else:
-            # Native tool: summary is the Rich-formatted completion string
-            if summary:
-                header = f"[bold {colour}]●[/] {summary}"
-            elif is_error:
-                header = f"[bold {colour}]●[/] {self._input_summary} — [red]error[/]"
-            else:
-                header = f"[bold {colour}]●[/] {self._input_summary}"
-
-        try:
-            self.query_one(".tool-header", Static).update(header)
-        except Exception:
-            pass
-
-    def on_click(self) -> None:
-        """Toggle source expansion on click (exec only)."""
-        if not self._is_exec:
-            return
-        lines = self._input_summary.split("\n")
-        if len(lines) <= self._MAX_COLLAPSED_LINES:
-            return
-        self._expanded = not self._expanded
-        try:
-            self.query_one(".tool-source", Static).update(self._render_source())
-        except Exception:
-            pass
-
-    def get_copy_text(self) -> str:
-        """Return source code (exec) or summary (native) for clipboard."""
-        return self._input_summary
-
-
-class IterationBlock(Widget):
-    """A block showing tool calls for one agentic iteration.
-
-    Groups multiple tool calls from a single LLM response.
-    """
-
-    can_focus = True
-
-    DEFAULT_CSS = """
-    IterationBlock {
-        margin: 0 0 1 0;
-        padding: 0 2;
-        height: auto;
-        border-left: thick transparent;
-    }
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._tool_entries: dict[str, ToolEntry] = {}
-
-    def add_pending(self, tool_use_id: str, name: str, source: str) -> ToolEntry:
-        """Add a pending tool entry showing the source code."""
-        entry = ToolEntry(tool_use_id, name, source)
-        self._tool_entries[tool_use_id] = entry
-        self.mount(entry)
-        return entry
-
-    def get_tool(self, tool_use_id: str) -> ToolEntry | None:
-        """Return a pending/completed tool entry by tool-use ID."""
-        return self._tool_entries.get(tool_use_id)
-
-    def complete_tool(
-        self,
-        tool_use_id: str,
-        is_error: bool,
-        duration_ms: int,
-        result_lines: int,
-        result_bytes: int,
-        summary: str = "",
-    ) -> None:
-        """Mark a tool entry as complete with metrics."""
-        entry = self._tool_entries.get(tool_use_id)
-        if entry:
-            entry.complete(is_error, duration_ms, result_lines, result_bytes, summary)
-
-    def get_copy_text(self) -> str:
-        """Return all source code for clipboard."""
-        parts = []
-        for entry in self._tool_entries.values():
-            parts.append(entry.get_copy_text())
-        return "\n\n".join(parts)
-
-
 class CompactionEntry(Widget):
     """A compaction operation with the same pending/terminal indicator as tools."""
 
@@ -621,108 +437,3 @@ class CompactionMarker(Widget):
     def compose(self) -> ComposeResult:
         yield Static(self._header)
         yield Markdown(self._summary)
-
-
-class Conversation(VerticalScroll):
-    """Scrollable container for message blocks."""
-
-    DEFAULT_CSS = """
-    Conversation {
-        height: 1fr;
-        padding: 0;
-    }
-    """
-
-    _autoscroll = True
-
-    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
-        """Keep Textual scroll behavior and track the viewport position."""
-        super().watch_scroll_y(old_value, new_value)
-        self._autoscroll = new_value >= self.max_scroll_y
-
-    def scroll_if_at_bottom(self) -> None:
-        """Scroll to the end while autoscroll is enabled."""
-        if self._autoscroll:
-            self.scroll_end(animate=False)
-
-    def add_compaction(self, reason: str, before: int, after: int, summary: str) -> None:
-        """Add a legacy compaction marker for historical logs."""
-        self.mount(CompactionMarker(reason, before, after, summary))
-        self.scroll_if_at_bottom()
-
-    def begin_compaction(self, reason: str, before: int) -> CompactionEntry:
-        """Add a pending compaction operation."""
-        entry = CompactionEntry(reason, before)
-        self.mount(entry)
-        self.scroll_if_at_bottom()
-        return entry
-
-    def add_user_message(self, content: str) -> None:
-        """Add a user message and scroll to show it."""
-        self._autoscroll = True
-        self.mount(UserMessage(content))
-        self.scroll_end(animate=False)
-
-    def add_turn_status(
-        self,
-        duration_s: float,
-        input_tokens: int,
-        cache_read: int,
-        cache_write: int,
-        output_tokens: int,
-        cost: float,
-    ) -> None:
-        """Add a client-only summary for a completed turn."""
-        self.mount(
-            TurnStatus(duration_s, input_tokens, cache_read, cache_write, output_tokens, cost)
-        )
-        self.scroll_if_at_bottom()
-
-    def add_error(self, content: str) -> None:
-        """Add an agent/server error message and scroll to show it."""
-        self.mount(ErrorMessage(content))
-        self.scroll_if_at_bottom()
-
-    def add_cancelled(self) -> None:
-        """Add a cancellation status message and scroll to show it."""
-        self.mount(CancelledMessage())
-        self.scroll_if_at_bottom()
-
-    def add_client_error(self, content: str) -> None:
-        """Add a client/transport error, marked as local (not in session log)."""
-        self.mount(ClientErrorMessage(content))
-        self.scroll_if_at_bottom()
-
-    def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> ShellOutput:
-        """Add direct shell command output (! prefix, no LLM involvement)."""
-        widget = ShellOutput(command, output, exit_code)
-        self.mount(widget)
-        self.scroll_if_at_bottom()
-        return widget
-
-    def begin_iteration(self) -> IterationBlock:
-        """Start a new iteration block for tool calls."""
-        block = IterationBlock()
-        self.mount(block)
-        self.scroll_if_at_bottom()
-        return block
-
-    def end_iteration(self) -> None:
-        """Mark the current iteration as done (no-op, kept for interface compat)."""
-
-    def add_assistant_message(self, content: str) -> None:
-        """Add a complete assistant message (used for history replay)."""
-        self.mount(AssistantMessage(content.rstrip("\n")))
-        self.scroll_if_at_bottom()
-
-    def begin_streaming(self) -> StreamingMessage:
-        """Start a streaming response. Returns the widget to append chunks to."""
-        msg = StreamingMessage()
-        self.mount(msg)
-        self.scroll_if_at_bottom()
-        return msg
-
-    def finalise_streaming(self, streaming: StreamingMessage) -> None:
-        """Mark the in-place Markdown message as complete."""
-        streaming.finish()
-        self.scroll_if_at_bottom()

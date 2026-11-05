@@ -19,7 +19,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 | `cli/` | `archie` command, Textual TUI, orchestrator client, auth commands |
 | `orchestrator/` | Host-side HTTP/WebSocket service, Docker lifecycle, session proxy, log viewer, metrics index and insights pages |
 | `agent/` | Container-side Starlette service, agent loop, providers, core tools, plugin SDK, subagents |
-| `shared/` | Configuration, models, public commands/events, session-log persistence, credentials, plugin manifests |
+| `shared/` | Configuration, models, public commands/events, session-log persistence, credentials, plugin manifests, the transcript model both clients render |
 | `plugins/` | One directory per integration: `plugin.yaml`, code, skills, tests ([Plugins](docs/plugins.md)) |
 | `persona/` | Repository-tracked prompts, agents, and procedure skills mounted into sessions |
 | `container/` | Files copied into the agent image, such as the `gh` wrapper |

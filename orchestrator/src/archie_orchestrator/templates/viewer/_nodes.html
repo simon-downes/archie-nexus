@@ -4,8 +4,10 @@
 {%- if n.kind == "turn" %}{{ turn(n) }}
 {%- elif n.kind == "text" %}{{ text(n) }}
 {%- elif n.kind == "stream" %}{{ stream(n) }}
+{%- elif n.kind == "iteration" %}{{ iteration(n) }}
 {%- elif n.kind == "tool" %}{{ tool(n) }}
 {%- elif n.kind == "subagent" %}{{ subagent(n) }}
+{%- elif n.kind == "compaction" %}{{ compaction(n) }}
 {%- elif n.kind == "notice" %}{{ notice(n) }}
 {%- endif -%}
 {%- endmacro %}
@@ -40,7 +42,7 @@
 <div class="msg msg-{{ m.role }}" id="{{ m.id }}">
     <div class="chrome msg-role">{{ "You" if m.role == "user" else "Archie" }}{% if m.interrupted %} <span class="dim">(interrupted)</span>{% endif %}</div>
     {%- if m.content %}
-    <div class="md">{{ m.html }}</div>
+    <div class="md">{{ markdown(m.content) }}</div>
     {%- endif %}
 </div>
 {%- endmacro %}
@@ -52,46 +54,102 @@
 </div>
 {%- endmacro %}
 
-{% macro tool(t) -%}
-<details class="tool is-{{ t.status }}" id="{{ t.id }}">
-    <summary class="chrome tool-line">
-        <span class="tool-status" title="{{ t.status }}"></span>
-        <span class="tool-summary">{{ t.summary_html }}</span>
-    </summary>
-    <div class="chrome tool-body">
-        {%- set detail = t.detail_html %}
-        {%- if detail %}<pre class="tool-detail">{{ detail }}</pre>{% endif %}
-        <h4>Input <span class="dim">{{ t.name }}</span></h4>
-        {{ t.input_html }}
-        {%- if t.result is not none %}
-        {%- set shown, omitted = t.result_preview %}
-        <h4>Result{% if t.status == "error" %} <span class="err">error</span>{% endif %}</h4>
-        <pre class="tool-result">{{ shown }}</pre>
-        {%- if omitted %}<p class="omitted">… {{ omitted }} more characters</p>{% endif %}
-        {%- endif %}
+{% macro iteration(it) -%}
+<div class="iteration" id="{{ it.id }}">
+    <div class="iteration-tools" id="{{ it.tools_id }}">
+        {%- for t in it.tools %}{{ tool(t) }}{% endfor -%}
     </div>
+</div>
+<!-- /iteration -->
+{%- endmacro %}
+
+{% macro tool(t) -%}
+<div class="tool is-{{ t.status }}" id="{{ t.id }}">
+    {{ tool_head(t) }}
     <div class="subagents" id="{{ t.children_id }}">
         {%- for child in t.children %}{{ subagent(child) }}{% endfor -%}
     </div>
-</details>
+</div>
 <!-- /{{ t.id }} -->
+{%- endmacro %}
+
+{#- The row and its overlay; a tool's live update replaces only this part, so its
+    subagents (and any overlay open inside them) are left in place. -#}
+{% macro tool_head(t) -%}
+<div class="tool-head is-{{ t.status }}" id="{{ t.head_id }}">
+    <button type="button" class="chrome tool-line" data-dialog="{{ t.id }}-dialog">
+        <span class="tool-status" title="{{ t.status }}"></span>
+        <span class="tool-text">
+            <span class="tool-summary">{{ tool_summary(t) }}</span>
+            {%- set lines, more = tool_preview(t) %}
+            {%- if lines %}
+            <span class="tool-preview">{% for line in lines %}{{ line }}
+{% endfor %}</span>
+            {%- endif %}
+            {%- if more %}<span class="tool-more">… +{{ more }} lines</span>{% endif %}
+            {%- set extra = tool_extra(t) %}
+            {%- if extra %}<span class="tool-extra">{{ extra }}</span>{% endif %}
+        </span>
+    </button>
+    <dialog class="overlay tool-dialog" id="{{ t.id }}-dialog" data-crumb="{{ tool_crumb(t) }}">
+        <header class="chrome overlay-head">
+            <nav class="crumbs" aria-label="Breadcrumb"></nav>
+            <button type="button" class="overlay-close" data-close aria-label="Close">✕</button>
+        </header>
+        <div class="overlay-body">
+            <p class="chrome tool-meta">
+                <span class="tool-status" title="{{ t.status }}"></span>
+                <span class="tool-summary">{{ tool_summary(t) }}</span>
+            </p>
+            {%- for s in tool_sections(t) %}
+            <section class="tool-section">
+                <h4 class="chrome">{{ s.title }}</h4>
+                {{ s.html }}
+                {%- if s.omitted %}<p class="omitted">… {{ s.omitted }} more characters</p>{% endif %}
+            </section>
+            {%- endfor %}
+        </div>
+    </dialog>
+</div>
+{%- endmacro %}
+
+{% macro subagent_row(s) -%}
+<button type="button" class="chrome sub-row is-{{ s.status }}" id="{{ s.row_id }}" data-dialog="{{ s.id }}-dialog">
+    <span class="tool-status" title="{{ s.status }}"></span>
+    <span class="sub-label">{{ s.label }}</span>
+    <span class="sub-cost">{{ s.cost_usd|usd }}</span>
+    <span class="sub-status">{{ subagent_status(s) }}</span>
+</button>
 {%- endmacro %}
 
 {% macro subagent(s) -%}
 <section class="subagent" id="{{ s.id }}">
-    <div class="chrome sub-head">Subagent {{ s.index + 1 }}</div>
-    <div class="sub-items" id="{{ s.items_id }}">
-        {%- for item in s.items %}{{ node(item) }}{% endfor -%}
-    </div>
+    {{ subagent_row(s) }}
+    <dialog class="overlay sub-dialog" id="{{ s.id }}-dialog" data-crumb="{{ s.label }}">
+        <header class="chrome overlay-head">
+            <nav class="crumbs" aria-label="Breadcrumb"></nav>
+            <button type="button" class="overlay-close" data-close aria-label="Close">✕</button>
+        </header>
+        <div class="overlay-body transcript sub-items" id="{{ s.items_id }}">
+            {%- for item in s.items %}{{ node(item) }}{% endfor -%}
+        </div>
+    </dialog>
 </section>
+{%- endmacro %}
+
+{% macro compaction(c) -%}
+{%- set title, detail = compaction_text(c) %}
+<aside class="notice-block compaction is-{{ c.status }}" id="{{ c.id }}">
+    <p class="chrome"><strong>{{ title }}</strong>{% if detail %} <span class="detail">{{ detail }}</span>{% endif %}</p>
+    {%- if c.summary %}
+    <details class="chrome"><summary>Summary</summary><div class="md">{{ markdown(c.summary) }}</div></details>
+    {%- endif %}
+</aside>
 {%- endmacro %}
 
 {% macro notice(n) -%}
 <aside class="notice-block {{ n.variant }}" id="{{ n.id }}">
     <p class="chrome"><strong>{{ n.title }}</strong>{% if n.detail %} <span class="detail">{{ n.detail }}</span>{% endif %}</p>
-    {%- if n.body_markdown %}
-    <details class="chrome"><summary>Summary</summary><div class="md">{{ n.body_html }}</div></details>
-    {%- endif %}
 </aside>
 {%- endmacro %}
 

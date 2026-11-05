@@ -115,10 +115,11 @@ def test_accumulate_ledger_resets_streaming_output_estimate():
     assert app._estimated_output == 0
 
 
-def test_live_assistant_message_finalizes_stream_without_duplicate():
+async def test_live_assistant_message_finalizes_stream_without_duplicate():
     """The persisted assistant record must reconcile the live text stream."""
-    app = _make_app()
-    conv = MagicMock()
+    from archie_cli.tui.conversation import AssistantMessage as AssistantRow
+    from archie_cli.tui.conversation import StreamingMessage
+
     text_delta = TextDelta(
         id="d1",
         turn=1,
@@ -136,13 +137,15 @@ def test_live_assistant_message_finalizes_stream_without_duplicate():
         content="hello",
         interrupted=False,
     )
-
-    with patch.object(app, "query_one", return_value=conv):
-        app._apply_event(text_delta)
-        app._apply_event(assistant)
-
-    conv.finalise_streaming.assert_called_once()
-    conv.add_assistant_message.assert_not_called()
+    host = _ConversationHost()
+    conv = await host.run([_user(), text_delta, assistant], inspect=_rows)
+    rows = conv[-1]
+    assert [type(r).__name__ for r in rows] == ["UserMessage", "StreamingMessage"]
+    stream = rows[1]
+    assert isinstance(stream, StreamingMessage) and not isinstance(stream, AssistantRow)
+    assert stream.text == "hello"
+    (item,) = host.app.transcript.turns[0].items
+    assert item.kind == "text" and item.content == "hello"
 
 
 def test_throbber_tracks_provider_request_lifecycle():
@@ -151,8 +154,6 @@ def test_throbber_tracks_provider_request_lifecycle():
     app._turn_active = True
     throbber = MagicMock()
     conv = MagicMock()
-    conv.begin_streaming.return_value = MagicMock()
-    conv.begin_iteration.return_value = MagicMock()
     status = MagicMock()
 
     def query_one(selector, _type=None):
@@ -245,11 +246,20 @@ def _compaction_complete(
     )
 
 
+def _user(content="go", event_id="u1"):
+    return UserMessage(id=event_id, turn=1, scope=None, content=content)
+
+
+def _rows(conv):
+    """Mounted top-level row widgets of a conversation, in order."""
+    return [row.widget for row in conv.rows if row.widget is not None]
+
+
 class _ConversationHost:
     """A mounted Conversation driven through the app reducer."""
 
     def __init__(self) -> None:
-        from archie_cli.tui.conversation import Conversation
+        from archie_cli.tui.transcript_view import Conversation
         from textual.app import App
 
         class Host(App):
@@ -259,8 +269,11 @@ class _ConversationHost:
         self.host = Host()
         self.app = _make_app()
 
-    async def run(self, events, *, turn_active=False):
-        from archie_cli.tui.conversation import CompactionEntry, Conversation
+    async def run(self, events, *, turn_active=False, inspect=None):
+        """Apply events one by one; return per-event compaction headers, the
+        status/input mock, or (with ``inspect``) per-event ``inspect(conv)``."""
+        from archie_cli.tui.conversation import CompactionEntry
+        from archie_cli.tui.transcript_view import Conversation
 
         async with self.host.run_test() as pilot:
             conv = self.host.query_one(Conversation)
@@ -281,7 +294,14 @@ class _ConversationHost:
                 for event in events:
                     self.app._apply_event(event)
                     await pilot.pause()
-                    headers.append([_header_text(entry) for entry in conv.query(CompactionEntry)])
+                    if inspect is not None:
+                        headers.append(inspect(conv))
+                    else:
+                        headers.append(
+                            [_header_text(entry) for entry in conv.query(CompactionEntry)]
+                        )
+            if inspect is not None:
+                return headers
             return headers, others
 
 
@@ -338,7 +358,8 @@ async def test_compaction_status_colours_match_tool_entries():
             "threshold", "interrupted", request_id="bad", tokens_after=None, error=None
         ),
     ]
-    from archie_cli.tui.conversation import CompactionEntry, Conversation
+    from archie_cli.tui.conversation import CompactionEntry
+    from archie_cli.tui.transcript_view import Conversation
     from textual.widgets import Static
 
     async with host.host.run_test() as pilot:
@@ -384,18 +405,20 @@ async def test_automatic_compaction_restores_throbber():
     assert host.app._turn_active is True
 
 
-async def test_replay_reset_clears_pending_compactions():
+async def test_replay_reset_replaces_the_transcript_model():
     app = _make_app()
-    app._pending_compactions["r1"] = MagicMock()
+    old = app.transcript
+    app._apply_event(_user())
     with patch.object(app, "query_one", return_value=MagicMock()):
         await app._reset_replay_state()
-    assert app._pending_compactions == {}
+    assert app.transcript is not old and app.transcript.turns == []
 
 
 def test_context_compaction_updates_display_and_ends_manual_turn():
     app = _make_app()
     app._turn_active = True
     conv = MagicMock()
+    app._apply_event(_user())
     with (
         patch.object(app, "query_one", return_value=conv),
         patch.object(app, "_update_accounting_status"),
@@ -416,7 +439,10 @@ def test_context_compaction_updates_display_and_ends_manual_turn():
                 debug="counts",
             )
         )
-    conv.add_compaction.assert_called_once_with("manual", 1000, 120, "## Goal\nKeep going")
+    (marker,) = app.transcript.turns[0].items
+    assert marker.kind == "compaction" and marker.marker
+    assert (marker.reason, marker.tokens_before, marker.tokens_after) == ("manual", 1000, 120)
+    assert marker.summary == "## Goal\nKeep going"
     assert app._latest_context_tokens == 120
     assert app._turn_active is False
 
@@ -464,8 +490,9 @@ async def test_replayed_compaction_renders_after_prior_entries_with_session_wind
     ):
         await app._replay_events()
 
-    calls = [call[0] for call in conv.method_calls]
-    assert calls.index("add_user_message") < calls.index("add_compaction")
+    (turn,) = app.transcript.turns
+    assert turn.user.content == "hi"
+    assert [item.kind for item in turn.items] == ["compaction"]
     assert app._latest_context_tokens == 50_000
     # Haiku's 200k window, not the compaction model's 1M window.
     assert app._latest_context_pct == pytest.approx(25.0)
@@ -542,9 +569,10 @@ def _root_turn_complete(stop_reason):
 
 def test_content_filtered_turn_shows_compact_and_rephrase_guidance():
     """A content-filtered root turn renders an error telling the user to /compact and rephrase."""
-    from archie_cli.tui.app import CONTENT_FILTERED_MESSAGE
+    from archie_shared.transcript import CONTENT_FILTERED_MESSAGE
 
     app = _make_app()
+    app._apply_event(_user())
     app._turn_active = True
     conv = MagicMock()
     input_widget = MagicMock()
@@ -558,7 +586,8 @@ def test_content_filtered_turn_shows_compact_and_rephrase_guidance():
     ):
         app._apply_event(_root_turn_complete("content_filtered"))
 
-    conv.add_error.assert_called_once_with(CONTENT_FILTERED_MESSAGE)
+    (notice,) = app.transcript.turns[0].items
+    assert notice.variant == "turn-error" and notice.detail == CONTENT_FILTERED_MESSAGE
     assert "/compact" in CONTENT_FILTERED_MESSAGE
     assert "Rephrase" in CONTENT_FILTERED_MESSAGE
     assert app._turn_active is False
@@ -574,73 +603,153 @@ def test_end_turn_does_not_show_error():
     ):
         app._apply_event(_root_turn_complete("end_turn"))
 
-    conv.add_error.assert_not_called()
+    assert not any(item.kind == "notice" for item in app.transcript.preamble)
 
 
 def test_render_canonical_does_not_create_empty_iteration_block():
     """Text-only replay iterations do not leave an empty visual block."""
     app = _make_app()
-    conv = MagicMock()
-    with patch.object(app, "query_one", return_value=conv):
+    with patch.object(app, "query_one", return_value=MagicMock()):
+        app._apply_event(_user())
         app._apply_event(IterationStart(id="i1", turn=1, iteration=1, scope=None))
 
-    conv.begin_iteration.assert_not_called()
+    assert app.transcript.turns[0].items == []
 
 
-def test_render_canonical_reconstructs_tool_summary_client_side():
-    """ToolCall input is cached so ToolResult renders a shared-formatter summary."""
+def _tool_call(tool_use_id, name, tool_input, iteration=1):
+    return ToolCall(
+        id=f"c-{tool_use_id}",
+        turn=1,
+        iteration=iteration,
+        scope=None,
+        request_id="r1",
+        tool_use_id=tool_use_id,
+        name=name,
+        input=tool_input,
+    )
+
+
+def _tool_result(tool_use_id, content, *, is_error=False, iteration=1, duration_ms=5):
+    return ToolResult(
+        id=f"r-{tool_use_id}",
+        turn=1,
+        iteration=iteration,
+        scope=None,
+        request_id="r1",
+        tool_use_id=tool_use_id,
+        content=content,
+        is_error=is_error,
+        duration_ms=duration_ms,
+        result_bytes=len(content),
+        result_lines=len(content.splitlines()),
+    )
+
+
+def _tool_rows(conv):
+    from archie_cli.tui.transcript_view import IterationBlock, ToolRow
+
+    return [
+        [str(row.render()) for row in block.query(ToolRow)] for block in conv.query(IterationBlock)
+    ]
+
+
+async def test_tool_rows_render_pending_then_complete_summaries():
+    """Rows use the shared formatter for the pending and completed summaries."""
+    host = _ConversationHost()
+    snapshots = await host.run(
+        [
+            _user(),
+            IterationStart(id="i1", turn=1, iteration=1, scope=None),
+            _tool_call("t1", "read", {"path": "/etc/hosts"}),
+            _tool_result("t1", "File: /etc/hosts (3 lines)\n"),
+        ],
+        inspect=_tool_rows,
+    )
+    assert snapshots[1] == []
+    assert snapshots[2] == [["○ Read /etc/hosts (all lines)"]]
+    assert snapshots[3] == [["● Read /etc/hosts (3 lines, 5ms)"]]
+
+
+async def test_parallel_tools_share_one_block_and_iterations_split():
+    host = _ConversationHost()
+    snapshots = await host.run(
+        [
+            _user(),
+            _tool_call("t1", "read", {"path": "a"}),
+            _tool_call("t2", "read", {"path": "b"}),
+            _tool_call("t3", "read", {"path": "c"}, iteration=2),
+        ],
+        inspect=_tool_rows,
+    )
+    blocks = snapshots[-1]
+    assert [len(b) for b in blocks] == [2, 1]
+
+
+async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none():
+    from pathlib import Path
+
+    import archie_cli.tui.app as tui_app
+    from archie_cli.tui.conversation import AssistantMessage as AssistantRow
+    from archie_cli.tui.transcript_view import Conversation, IterationBlock
+    from textual.app import App
+
+    class Host(App):
+        CSS_PATH = Path(tui_app.__file__).parent / "archie.tcss"
+
+        def __init__(self):
+            super().__init__()
+            self.register_theme(tui_app.theme.THEME)
+            self.theme = "archie"
+
+        def compose(self):
+            yield Conversation(id="conversation")
+
+    host = Host()
     app = _make_app()
-    block = MagicMock()
-    conv = MagicMock()
-    conv.begin_iteration.return_value = block
-    with patch.object(app, "query_one", return_value=conv):
-        app._apply_event(IterationStart(id="i1", turn=1, iteration=1, scope=None))
-        app._apply_event(
-            ToolCall(
-                id="c1",
-                turn=1,
-                iteration=1,
-                scope=None,
-                request_id="r1",
-                tool_use_id="t1",
-                name="read",
-                input={"path": "/etc/hosts"},
-            )
+    async with host.run_test() as pilot:
+        conv = host.query_one(Conversation)
+        conv.apply_changes(app.transcript, app.transcript.apply(_user()))
+        reply = AssistantMessage(
+            id="a1", turn=1, scope=None, iteration=1, request_id="r1",
+            content="looking", interrupted=False,
+        )  # fmt: skip
+        conv.apply_changes(app.transcript, app.transcript.apply(reply))
+        conv.apply_changes(
+            app.transcript, app.transcript.apply(_tool_call("t1", "read", {"path": "a"}))
         )
-        app._apply_event(
-            ToolResult(
-                id="r1e",
-                turn=1,
-                iteration=1,
-                scope=None,
-                request_id="r1",
-                tool_use_id="t1",
-                content="file contents",
-                is_error=False,
-                duration_ms=5,
-                result_bytes=13,
-            )
-        )
+        await pilot.pause()
+        kind, colour = conv.query_one(AssistantRow).styles.border_left
+        assert kind == "thick" and 0 < colour.a < 1
+        block = conv.query_one(IterationBlock)
+        assert block.styles.border_left[1].a == 0
+        assert not block.focusable
 
-    # pending input was cached then consumed
-    assert "t1" not in app._pending_tool_inputs
-    block.add_pending.assert_called_once()
-    pending_args = block.add_pending.call_args.args
-    assert pending_args[0] == "t1"
-    assert pending_args[1] == "read"
-    # summary derived from raw input, not empty
-    assert "/etc/hosts" in pending_args[2]
 
-    block.complete_tool.assert_called_once()
-    complete_args = block.complete_tool.call_args.args
-    assert complete_args[0] == "t1"
-    assert complete_args[1] is False  # is_error
-    # summary string is non-empty (reconstructed via shared formatter)
-    assert complete_args[4]
+async def test_exec_and_shell_rows_show_ten_lines_and_no_click_expand():
+    source = "\n".join(f"x{i} = {i}" for i in range(25))
+    command = "\n".join(f"echo {i}" for i in range(14))
+    host = _ConversationHost()
+    snapshots = await host.run(
+        [
+            _user(),
+            _tool_call("e1", "exec", {"source": source}),
+            _tool_call("s1", "shell", {"command": command}),
+        ],
+        inspect=_tool_rows,
+    )
+    exec_row, shell_row = snapshots[-1][0]
+    exec_lines = exec_row.split("\n")
+    assert exec_lines[0] == "○ Exec"
+    assert exec_lines[1:11] == [f"  x{i} = {i}" for i in range(10)]
+    assert exec_lines[11] == "  … +15 lines"
+    shell_lines = shell_row.split("\n")
+    assert shell_lines[0] == "○ Shell echo 0"
+    assert shell_lines[1:10] == [f"  echo {i}" for i in range(1, 10)]
+    assert shell_lines[10] == "  … +4 lines"
 
 
 @pytest.mark.asyncio
-async def test_replay_dispatches_through_apply_event_as_historical(tmp_path):
+async def test_replay_dispatches_through_apply_event(tmp_path):
     """Stored events use the same public application entry point as live events."""
     app = _make_app()
     event = UserMessage(id="u1", turn=1, scope=None, content="hi")
@@ -656,7 +765,7 @@ async def test_replay_dispatches_through_apply_event_as_historical(tmp_path):
     ):
         assert await app._replay_events() is True
 
-    apply_event.assert_called_once_with(event, historical=True)
+    apply_event.assert_called_once_with(event)
 
 
 @pytest.mark.asyncio
@@ -735,8 +844,8 @@ async def test_replay_events_409_falls_back_to_full_replay():
 
     assert "after=gone" in urls[0]
     assert urls[1].endswith("/events")  # full replay, no cursor
-    conv.add_user_message.assert_called_once_with("hi")
-    conv.remove_children.assert_called_once_with()
+    conv.reset.assert_called_once_with()
+    assert [turn.user.content for turn in app.transcript.turns] == ["hi"]
     assert app._last_event_id == "l1"
     assert app._seen_accounted_ids == {"l1"}
     assert app._cumulative_input == 200
@@ -905,9 +1014,14 @@ async def test_reconnect_retries_when_replay_fails():
     assert any(call.args == ("Reconnected to agent",) for call in notify.call_args_list)
 
 
+def _child_texts(app, index=0):
+    sub = app.transcript.subagents[("task-1", index)]
+    return [(item.kind, getattr(item, "content", getattr(item, "text", ""))) for item in sub.items]
+
+
 @pytest.mark.asyncio
 async def test_replay_child_assistant_message_reconstructs_child_output():
-    """Persisted child assistant messages rebuild child detail on replay."""
+    """Persisted child assistant messages rebuild the child transcript on replay."""
     app = _make_app()
     event = AssistantMessage(
         id="child-assistant",
@@ -919,11 +1033,9 @@ async def test_replay_child_assistant_message_reconstructs_child_output():
         content="persisted child response",
         interrupted=False,
     )
+    app._apply_event(event)
 
-    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._apply_event(event, historical=True)
-
-    assert "persisted child response" in app._child_activity[("task-1", 0)].lines
+    assert _child_texts(app) == [("text", "persisted child response")]
 
 
 @pytest.mark.asyncio
@@ -975,11 +1087,10 @@ async def test_child_replay_replaces_live_child_deltas():
         interrupted=False,
     )
 
-    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._apply_event(live_delta)
-        app._apply_event(durable, historical=True)
+    app._apply_event(live_delta)
+    app._apply_event(durable)
 
-    assert app._child_activity[("task-1", 0)].lines == ["partial response"]
+    assert _child_texts(app) == [("text", "partial response")]
 
 
 def test_child_replay_preserves_durable_lines_across_requests():
@@ -1015,13 +1126,11 @@ def test_child_replay_preserves_durable_lines_across_requests():
         interrupted=False,
     )
 
-    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._apply_event(first_assistant, historical=True)
-        app._apply_event(second_delta)
-        app._apply_event(second_assistant, historical=True)
+    app._apply_event(first_assistant)
+    app._apply_event(second_delta)
+    app._apply_event(second_assistant)
 
-    assert app._child_activity[("task-1", 0)].lines == ["first answer", "second answer"]
-    assert "second partial" not in app._child_activity[("task-1", 0)].lines
+    assert _child_texts(app) == [("text", "first answer"), ("text", "second answer")]
 
 
 def test_sibling_child_streams_finalize_independently():
@@ -1056,19 +1165,13 @@ def test_sibling_child_streams_finalize_independently():
         interrupted=False,
     )
 
-    with patch.object(app, "_render_child"), patch.object(app, "_update_child_modal"):
-        app._apply_event(child_zero_delta)
-        app._apply_event(child_one_delta)
-        app._apply_event(child_zero_assistant)
+    app._apply_event(child_zero_delta)
+    app._apply_event(child_one_delta)
+    app._apply_event(child_zero_assistant)
 
-    zero_key = app._request_key(child_zero_assistant)
-    one_key = app._request_key(child_one_delta)
-    assert zero_key in app._finalized_assistant_requests
-    assert zero_key not in app._transient_assistant_text
-    assert app._transient_assistant_text[one_key] == "one partial"
-    assert app._child_activity[("task-1", 0)].lines == ["zero answer"]
-    assert app._child_activity[("task-1", 1)].lines == []
-    assert app._child_activity[("task-1", 1)].activity == "Responding..."
+    assert _child_texts(app, 0) == [("text", "zero answer")]
+    assert _child_texts(app, 1) == [("stream", "one partial")]
+    assert app.transcript.subagents[("task-1", 1)].activity == "Responding..."
 
 
 @pytest.mark.parametrize("scope, subagent_index", [(None, None), ("task-1", 0)])
@@ -1095,17 +1198,18 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
         text="durable response",
     )
     app._event_buffer = [delta]
-    with (
-        patch.object(app, "query_one", return_value=MagicMock()),
-        patch.object(app, "_render_child"),
-        patch.object(app, "_update_child_modal"),
-    ):
-        app._apply_event(assistant, historical=True)
+    with patch.object(app, "query_one", return_value=MagicMock()):
+        if scope is None:
+            app._apply_event(_user())
+        app._apply_event(assistant)
         app._dispatch_buffered_events()
 
-    key = app._request_key(assistant)
-    assert key in app._finalized_assistant_requests
-    assert key not in app._transient_assistant_text
+    items = (
+        app.transcript.turns[0].items
+        if scope is None
+        else app.transcript.subagents[(scope, subagent_index)].items
+    )
+    assert [(i.kind, i.content) for i in items] == [("text", "durable response")]
 
 
 @pytest.mark.asyncio

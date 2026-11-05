@@ -383,34 +383,78 @@ body.viewer {
 
 /* --- tools: interface chrome -------------------------------------------- */
 
-.viewer details.tool {
-    border: 1px solid var(--v-chrome-border);
-    border-radius: var(--nc-radius);
-    background: var(--v-chrome-bg);
+/* One provider response: its tools share a dim left rule, so parallel calls
+   read as one group and consecutive iterations as separate groups. */
+.viewer .iteration {
+    border-left: 3px solid var(--v-chrome-border);
+    padding-left: 0.6rem;
+}
+
+.viewer .iteration-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.viewer .tool {
     margin: 0;
     padding: 0;
 }
 
-.viewer details.tool > summary.tool-line {
+.viewer .tool-line,
+.viewer .sub-row {
     display: flex;
     gap: 0.6rem;
     align-items: baseline;
-    padding: 0.3rem 0.6rem;
+    width: 100%;
     margin: 0;
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    background: var(--v-chrome-bg);
     font-family: var(--v-mono);
     font-size: 0.8rem;
     font-weight: 400;
+    line-height: 1.45;
     color: var(--nc-text);
+    text-align: left;
+    justify-content: flex-start;
     cursor: pointer;
-    list-style: none;
 }
 
-.viewer details.tool > summary::-webkit-details-marker {
-    display: none;
+.viewer .tool-line:hover,
+.viewer .sub-row:hover {
+    border-color: var(--v-tool);
+}
+
+.viewer .tool-line:focus-visible,
+.viewer .sub-row:focus-visible {
+    outline: 2px solid var(--v-user);
+    outline-offset: 1px;
+}
+
+.viewer .tool-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
 }
 
 .viewer .tool-summary {
     overflow-wrap: anywhere;
+}
+
+.viewer .tool-preview,
+.viewer .tool-extra {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--v-dim);
+}
+
+.viewer .tool-more {
+    color: var(--v-dim);
+    font-style: italic;
 }
 
 .viewer .tool-status::before {
@@ -418,46 +462,29 @@ body.viewer {
     color: var(--v-ok);
 }
 
-.viewer .tool.is-error > summary .tool-status::before {
+.viewer .tool-head.is-error .tool-status::before,
+.viewer .sub-row.is-error > .tool-status::before {
     content: "✗";
     color: var(--v-err);
 }
 
-.viewer .tool.is-pending > summary .tool-status::before {
+.viewer .tool-head.is-pending .tool-status::before,
+.viewer .sub-row.is-running > .tool-status::before {
     content: "…";
     color: var(--v-warn);
 }
 
-.viewer .tool .b { font-weight: 700; }
-.viewer .tool .i { font-style: italic; }
-.viewer .tool .default { color: var(--v-default); }
-
-.viewer .tool-body {
-    padding: 0.25rem 0.75rem 0.75rem;
-    border-top: 1px solid var(--v-chrome-border);
+.viewer .sub-row.is-interrupted > .tool-status::before {
+    content: "■";
+    color: var(--v-warn);
 }
 
-.viewer .tool-body h4 {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--v-dim);
-    margin-block: 0.6rem 0.25rem;
-}
-
-.viewer .tool-body pre {
-    font-size: 0.78rem;
-    line-height: 1.4;
-    max-height: 32rem;
-    overflow: auto;
-    margin: 0;
-    padding: 0.5rem 0.75rem;
-    border-radius: var(--nc-radius);
-    background: var(--nc-surface-1);
-    color: var(--nc-text);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
+.viewer .tool .b,
+.viewer .overlay .b { font-weight: 700; }
+.viewer .tool .i,
+.viewer .overlay .i { font-style: italic; }
+.viewer .tool .default,
+.viewer .overlay .default { color: var(--v-default); }
 
 .viewer .omitted {
     color: var(--v-dim);
@@ -466,6 +493,8 @@ body.viewer {
     margin: 0.25rem 0 0;
 }
 
+/* --- subagents ----------------------------------------------------------- */
+
 .viewer .subagents:empty {
     display: none;
 }
@@ -473,26 +502,155 @@ body.viewer {
 .viewer .subagents {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.5rem 0.6rem 0.6rem 1.25rem;
+    gap: 0.25rem;
+    padding: 0.25rem 0 0 1.25rem;
 }
 
-.viewer .subagent {
-    border-left: 2px dashed var(--v-tool);
-    padding-left: 0.75rem;
+.viewer .sub-row {
+    border-style: dashed;
 }
 
-.viewer .sub-head {
-    font-size: 0.7rem;
+.viewer .sub-label {
     font-weight: 700;
     color: var(--v-tool);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 0.35rem;
 }
 
-.viewer .subagent .msg .md {
-    font-size: 0.92rem;
+.viewer .sub-cost {
+    color: var(--v-dim);
+}
+
+.viewer .sub-status {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.viewer .sub-row.is-error .sub-status {
+    color: var(--v-err);
+}
+
+/* --- overlays ------------------------------------------------------------ */
+
+.viewer dialog.overlay {
+    width: min(70rem, 94vw);
+    max-width: none;
+    max-height: 88vh;
+    padding: 0;
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    background: var(--nc-background, var(--nc-surface-1));
+    color: var(--nc-text);
+    overflow: hidden;
+}
+
+.viewer dialog.overlay[open] {
+    display: flex;
+    flex-direction: column;
+}
+
+.viewer dialog.overlay::backdrop {
+    background: color-mix(in oklab, black 45%, transparent);
+}
+
+.viewer .overlay-head {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--v-chrome-border);
+    background: var(--v-chrome-bg);
+    font-size: 0.8rem;
+}
+
+.viewer .overlay-head .crumbs {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex: 1;
+    min-width: 0;
+    font-family: var(--v-mono);
+}
+
+.viewer .crumb {
+    flex-shrink: 0;
+    white-space: nowrap;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--v-user);
+    cursor: pointer;
+}
+
+.viewer .crumb.is-current {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--nc-text);
+    font-weight: 700;
+    cursor: default;
+}
+
+.viewer .crumb-sep {
+    color: var(--v-dim);
+}
+
+.viewer .overlay-close {
+    margin: 0;
+    padding: 0.1rem 0.5rem;
+    border: 1px solid var(--v-chrome-border);
+    border-radius: var(--nc-radius);
+    background: none;
+    color: var(--v-dim);
+    font: inherit;
+    cursor: pointer;
+}
+
+.viewer .overlay-body {
+    overflow: auto;
+    padding: 0.75rem 1rem 1rem;
+}
+
+.viewer .sub-dialog .overlay-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.viewer .tool-meta {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.6rem;
+    align-items: baseline;
+    margin: 0 0 0.5rem;
+    font-family: var(--v-mono);
+    font-size: 0.8rem;
+}
+
+.viewer .tool-section h4 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--v-dim);
+    margin-block: 0.75rem 0.25rem;
+}
+
+.viewer .tool-section pre {
+    font-size: 0.78rem;
+    line-height: 1.4;
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--nc-radius);
+    background: var(--nc-surface-1);
+    color: var(--nc-text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 /* --- notices ------------------------------------------------------------- */

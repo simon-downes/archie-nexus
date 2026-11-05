@@ -18,80 +18,30 @@ import os
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
 
 import httpx
 from archie_shared import events as ce
 from archie_shared.commands import InterruptCommand, SwitchModelCommand
-from archie_shared.events import (
-    IterationStart,
-    LLMRequest,
-    TextDelta,
-    ToolCall,
-    ToolResult,
-    TurnComplete,
-    TurnError,
-    TurnInterrupted,
-    decode_event,
-)
+from archie_shared.events import LLMRequest, decode_event
 from archie_shared.kiro import kiro_model_id
 from archie_shared.models import load_models
 from archie_shared.protocol import PROTOCOL_VERSION
-from archie_shared.tool_summaries import (
-    format_tool_activity,
-    format_tool_complete,
-    format_tool_pending,
-)
+from archie_shared.transcript import TranscriptBuilder
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
 
 from archie_cli.tui import theme
-from archie_cli.tui.conversation import (
-    CompactionEntry,
-    Conversation,
-    IterationBlock,
-    StreamingMessage,
-)
+from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.quit_screen import QuitScreen
 from archie_cli.tui.status import StatusBar
-from archie_cli.tui.subagents import ChildActivityState, SubagentActivity, SubagentScreen
 from archie_cli.tui.throbber import Throbber, ThrobberContainer
+from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
 from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
-
-# Provider stop reason when a safety filter blocks the response (Bedrock Converse).
-CONTENT_FILTERED = "content_filtered"
-
-CONTENT_FILTERED_MESSAGE = (
-    "The model provider's content filter blocked this response. Something in the "
-    "conversation, such as your message, a tool result or a file, triggered it.\n"
-    "That content is still in the session, so later requests will be blocked too.\n"
-    "To continue:\n"
-    "1. Run /compact to replace the conversation history with a summary.\n"
-    "2. Rephrase your request to avoid the content that triggered the filter."
-)
-
-CHILD_CONTENT_FILTERED_MESSAGE = "Blocked by the model provider's content filter"
-
-
-@dataclass(frozen=True, slots=True)
-class RequestKey:
-    """Exact identity for one root or child assistant request."""
-
-    scope: str | None
-    subagent_index: int | None
-    turn: int
-    iteration: int
-    request_id: str
-
-
-@dataclass
-class ChildActivity(ChildActivityState):
-    """Compatibility alias for the shared child view state."""
 
 
 class ArchieApp(App):
@@ -133,31 +83,17 @@ class ArchieApp(App):
         self._last_event_id: str | None = None
         # Ids of canonical events already rendered — dedup across replay + live.
         self._seen_event_ids: set[str] = set()
-        # Request-scoped assistant reconciliation. Durable assistant events mark
-        # a key finalized so late buffered deltas for that exact request are ignored.
-        self._transient_assistant_text: dict[RequestKey, str] = {}
-        self._finalized_assistant_requests: set[RequestKey] = set()
-        self._stream_request_key: RequestKey | None = None
+        # The session transcript, reduced from canonical events. It owns request
+        # reconciliation, tool grouping and subagent state; the views render it.
+        self.transcript = TranscriptBuilder()
         # Ids of llm_request ledger events already folded into accounting —
         # prevents double-counting across replay + live broadcast.
         self._seen_accounted_ids: set[str] = set()
 
         # UI state
-        self._streaming: StreamingMessage | None = None
-        self._stream_text: str = ""
         self._turn_active: bool = False
         self._throbber: Throbber | None = None
-        self._iteration_block: IterationBlock | None = None
         self._last_esc_time: float = 0.0
-        # tool_use_id -> (name, input) for client-side result formatting
-        self._pending_tool_inputs: dict[str, tuple[str, dict]] = {}
-        self._pending_compactions: dict[str, CompactionEntry] = {}
-        self._child_activity: dict[tuple[str, int], ChildActivity] = {}
-        self._child_pending_tools: dict[tuple[str, int, str], tuple[str, dict]] = {}
-        self._parent_task_inputs: dict[str, list[dict]] = {}
-        self._parent_task_entries: dict[str, object] = {}
-        self._child_widgets: dict[tuple[str, int], SubagentActivity] = {}
-        self._active_child_key: tuple[str, int] | None = None
 
         # Session state for local accumulation. Seeded from Handshake.accounting
         # on connect, then updated live from broadcast llm_request ledger events.
@@ -266,26 +202,39 @@ class ArchieApp(App):
             log.warning("Failed to replay events: %s", e)
             return False
 
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = decode_event(line, persisted=True)
-            except Exception as e:  # noqa: BLE001 — skip malformed replay lines
-                log.warning("Skipping malformed replay event: %s", e)
-                continue
-            self._apply_event(event, historical=True)
+        # Rows are mounted once, from final node state, after the whole batch.
+        view = self._conversation()
+        if view is not None:
+            view.suspend()
+        try:
+            for line in body.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = decode_event(line, persisted=True)
+                except Exception as e:  # noqa: BLE001 — skip malformed replay lines
+                    log.warning("Skipping malformed replay event: %s", e)
+                    continue
+                self._apply_event(event)
+        finally:
+            if view is not None:
+                view.resume()
 
         return True
+
+    def _conversation(self) -> Conversation | None:
+        """The main transcript view, or None before the app is mounted."""
+        try:
+            return self.query_one("#conversation", Conversation)
+        except Exception:  # noqa: BLE001 — no DOM yet (headless tests, early replay)
+            return None
 
     async def _reset_replay_state(self) -> None:
         """Clear all client state reconstructed from the persisted event stream."""
         self._last_event_id = None
         self._seen_event_ids.clear()
-        self._transient_assistant_text.clear()
-        self._finalized_assistant_requests.clear()
-        self._stream_request_key = None
+        self.transcript = TranscriptBuilder()
         self._seen_accounted_ids.clear()
         self._cumulative_input = 0
         self._cumulative_output = 0
@@ -297,45 +246,22 @@ class ArchieApp(App):
         self._estimated_output = 0
         self._reset_turn_metrics()
         self._turn_active = False
-        self._streaming = None
-        self._stream_text = ""
-        self._iteration_block = None
-        self._pending_tool_inputs.clear()
-        self._pending_compactions.clear()
-        self._child_activity.clear()
-        self._child_pending_tools.clear()
-        self._parent_task_inputs.clear()
-        self._parent_task_entries.clear()
-        self._child_widgets.clear()
-        try:
-            screen = self.screen
-        except Exception:  # noqa: BLE001 — headless tests have no screen stack
-            screen = None
-        if isinstance(screen, SubagentScreen):
+        # Popups show nodes of the old model; close them before rebuilding.
+        while isinstance(self._top_screen(), DetailScreen):
             await self.pop_screen()
-        self._active_child_key = None
 
         conversation = self.query_one("#conversation", Conversation)
-        removal = conversation.remove_children()
+        removal = conversation.reset()
         if hasattr(removal, "__await__"):
             await removal
         self._update_accounting_status()
 
-    def _request_key(self, event) -> RequestKey:
-        return RequestKey(
-            scope=getattr(event, "scope", None),
-            subagent_index=getattr(event, "subagent_index", None),
-            turn=event.turn,
-            iteration=event.iteration,
-            request_id=event.request_id,
-        )
+    def _render_canonical(self, event) -> None:
+        """Apply one event: deduplicate by id, update the transcript model and its
+        views, then run client-side effects (status bar, throbber, turn state).
 
-    def _render_canonical(self, event, *, replay: bool = False) -> None:
-        """Render one event after application-path dispatch and deduplicate by id.
-
-        Historical events arrive with ``replay=True`` so assistant text and tool
-        summaries are reconstructed without streamed deltas. Live events use the
-        same renderer after ``_apply_event`` dispatch.
+        History reads and live frames use the same path; the transcript model
+        reconciles them by request identity.
         """
         event_id = getattr(event, "id", None)
         if event_id is not None:
@@ -345,23 +271,21 @@ class ArchieApp(App):
             if event.persist:
                 self._last_event_id = event_id
 
+        if isinstance(event, LLMRequest):
+            self._accumulate_ledger(event)
+        changes = self.transcript.apply(event)
+        self._dispatch_changes(changes)
+
         if (
             getattr(event, "scope", None) is not None
             and getattr(event, "subagent_index", None) is not None
         ):
-            if isinstance(event, LLMRequest):
-                self._accumulate_ledger(event)
-            self._handle_scoped_event(event, replay=replay)
-            return
-
-        conv = self.query_one("#conversation", Conversation)
+            return  # child events only change the transcript
 
         if isinstance(event, ce.SessionStarted):
             self._session_model_key = event.model_key
         elif isinstance(event, ce.UserMessage):
             self._reset_turn_metrics()
-            if event.content:
-                conv.add_user_message(event.content)
         elif isinstance(event, ce.Handshake):
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
@@ -387,25 +311,7 @@ class ArchieApp(App):
             status.git_branch = event.git_branch
         elif isinstance(event, ce.CompactionStart):
             self._remove_throbber()
-            entry = conv.begin_compaction(
-                self._format_compaction_reason(event.reason), event.tokens_before
-            )
-            self._pending_compactions[event.request_id] = entry
         elif isinstance(event, ce.CompactionComplete):
-            entry = self._pending_compactions.pop(event.request_id, None)
-            if entry is None:
-                entry = conv.begin_compaction(
-                    self._format_compaction_reason(event.reason), event.tokens_before
-                )
-            error = event.error
-            if event.status != "success" and error is None:
-                error = f"Compaction {event.status}"
-            display_cost = (
-                event.estimated_next_request_cost_usd
-                if event.estimated_next_request_cost_usd is not None
-                else event.cost_saved_usd
-            )
-            entry.complete(event.tokens_after, display_cost, event.duration_ms, error)
             if event.tokens_after is not None:
                 self._latest_context_tokens = event.tokens_after
                 self._latest_context_pct = self._estimate_context_pct(
@@ -419,9 +325,6 @@ class ArchieApp(App):
                 self._show_throbber()
         elif isinstance(event, ce.ContextCompacted):
             self._remove_throbber()
-            conv.add_compaction(
-                event.reason, event.tokens_before, event.tokens_after, event.summary
-            )
             self._latest_context_tokens = event.tokens_after
             self._latest_context_pct = self._estimate_context_pct(
                 event.tokens_after, self._session_model_key
@@ -438,102 +341,68 @@ class ArchieApp(App):
             ):
                 self._end_turn()
         elif isinstance(event, ce.TextDelta):
-            key = self._request_key(event)
-            if key in self._finalized_assistant_requests:
-                return
+            if not changes:
+                return  # a late delta for a request that is already final
             self._remove_throbber()
-            self._transient_assistant_text[key] = (
-                self._transient_assistant_text.get(key, "") + event.text
-            )
-            if self._streaming is None:
-                self._streaming = conv.begin_streaming()
-                self._turn_active = True
-            self._stream_request_key = key
-            self._stream_text = self._transient_assistant_text[key]
-            self._streaming.append(event.text)
+            self._turn_active = True
             self._estimated_output += len(event.text) // 4
             status = self.query_one("#status", StatusBar)
             status.session_output = self._cumulative_output + self._estimated_output
-            conv.scroll_if_at_bottom()
-        elif isinstance(event, ce.AssistantMessage):
-            key = self._request_key(event)
-            transient = self._transient_assistant_text.pop(key, None)
-            self._finalized_assistant_requests.add(key)
-            if self._streaming is not None and self._stream_request_key == key:
-                if transient == event.content:
-                    self._finalise_streaming()
-                else:
-                    self._streaming.remove()
-                    self._streaming = None
-                    self._stream_text = ""
-                    self._stream_request_key = None
-                    if event.content:
-                        conv.add_assistant_message(event.content)
-            elif event.content:
-                conv.add_assistant_message(event.content)
-            if event.interrupted:
-                conv.add_cancelled()
         elif isinstance(event, ce.IterationStart):
-            # Create a visual block lazily when this iteration contains tools.
-            # Text-only iterations should not leave empty blocks in replay.
-            self._iteration_block = None
             # A new iteration means a new provider request is outstanding.
             self._show_throbber()
         elif isinstance(event, ce.ToolCall):
             # The provider has responded with a tool request; pending tool rows
             # represent execution while the next iteration owns the throbber.
             self._remove_throbber()
-            if self._iteration_block is None:
-                self._iteration_block = conv.begin_iteration()
-            input_summary = format_tool_pending(event.name, event.input)
-            self._pending_tool_inputs[event.tool_use_id] = (event.name, event.input)
-            entry = self._iteration_block.add_pending(event.tool_use_id, event.name, input_summary)
-            if event.name == "task":
-                tasks = event.input.get("tasks", [])
-                if isinstance(tasks, list):
-                    self._parent_task_inputs[event.tool_use_id] = tasks
-                    self._parent_task_entries[event.tool_use_id] = entry
-        elif isinstance(event, ce.ToolResult):
-            if self._iteration_block is not None:
-                pending = self._pending_tool_inputs.pop(event.tool_use_id, None)
-                if pending is not None:
-                    name, tool_input = pending
-                    summary = format_tool_complete(
-                        name, tool_input, event.content, event.is_error, event.duration_ms
-                    )
-                else:
-                    summary = event.content[:200] if event.content else ""
-                self._iteration_block.complete_tool(
-                    event.tool_use_id,
-                    event.is_error,
-                    event.duration_ms,
-                    event.result_lines,
-                    event.result_bytes,
-                    summary,
-                )
         elif isinstance(event, ce.LLMRequest):
-            self._accumulate_ledger(event)
-            if event.scope is None and event.subagent_index is None:
-                self._turn_input += event.input_tokens
-                self._turn_cache_read += event.cache_read_tokens
-                self._turn_cache_write += event.cache_write_tokens
-                self._turn_output += event.output_tokens
-                self._turn_cost += event.cost_usd
-                self._turn_duration_s += event.duration_ms / 1000
-        elif isinstance(event, ce.TurnError):
-            conv.add_error(event.message)
-            self._iteration_block = None
-            self._end_turn()
-        elif isinstance(event, ce.TurnInterrupted):
-            conv.add_cancelled()
-            self._iteration_block = None
+            self._turn_input += event.input_tokens
+            self._turn_cache_read += event.cache_read_tokens
+            self._turn_cache_write += event.cache_write_tokens
+            self._turn_output += event.output_tokens
+            self._turn_cost += event.cost_usd
+            self._turn_duration_s += event.duration_ms / 1000
+        elif isinstance(event, (ce.TurnError, ce.TurnInterrupted)):
             self._end_turn()
         elif isinstance(event, ce.TurnComplete):
             self._show_turn_status()
-            if event.stop_reason == CONTENT_FILTERED:
-                conv.add_error(CONTENT_FILTERED_MESSAGE)
-            self._iteration_block = None
             self._end_turn()
+
+    def _dispatch_changes(self, changes) -> None:
+        """Send model changes to the main view and every open popup."""
+        if not changes:
+            return
+        view = self._conversation()
+        if view is not None:
+            view.apply_changes(self.transcript, changes)
+        for screen in self._detail_screens():
+            screen.node_changed(self.transcript, changes)
+
+    def _top_screen(self):
+        try:
+            return self.screen
+        except Exception:  # noqa: BLE001 — headless tests have no screen stack
+            return None
+
+    def _detail_screens(self) -> list[DetailScreen]:
+        try:
+            stack = self.screen_stack
+        except Exception:  # noqa: BLE001 — headless tests have no screen stack
+            return []
+        return [screen for screen in stack if isinstance(screen, DetailScreen)]
+
+    def _crumbs(self) -> list[str]:
+        """Breadcrumb levels for a popup opened from the current screen."""
+        top = self._top_screen()
+        if isinstance(top, DetailScreen):
+            return list(top.crumbs)
+        return [self._session_id or "Session"]
+
+    def on_tool_clicked(self, message: ToolClicked) -> None:
+        self.push_screen(ToolDetailScreen(message.tool, self._crumbs()))
+
+    def on_subagent_clicked(self, message: SubagentClicked) -> None:
+        self.push_screen(SubagentScreen(message.sub, self._crumbs()))
 
     def _accumulate_ledger(self, event: LLMRequest) -> None:
         """Fold an llm_request ledger event into cumulative accounting.
@@ -560,13 +429,6 @@ class ArchieApp(App):
             )
         self._cumulative_cost += event.cost_usd
         self._update_accounting_status()
-
-    @staticmethod
-    def _format_compaction_reason(reason: str) -> str:
-        """Display label for a compaction trigger."""
-        return {"threshold": "threshold tokens", "cold_cache": "threshold cold cache"}.get(
-            reason, reason
-        )
 
     def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
         """Calculate context usage from a persisted request."""
@@ -715,106 +577,24 @@ class ArchieApp(App):
         for event in self._event_buffer:
             self._apply_event(event)
 
-    def _apply_event(self, event, *, historical: bool = False) -> None:
-        """Apply one live or historical event through the imperative UI path."""
-        self._render_canonical(event, replay=historical)
-
-    def _handle_scoped_event(self, event, *, replay: bool = False) -> bool:
-        """Reduce one canonical/live child event into shared child state."""
-        scope = getattr(event, "scope", None)
-        index = getattr(event, "subagent_index", None)
-        if scope is None or index is None:
-            return False
-        child = self._child(scope, index)
-        if isinstance(event, LLMRequest):
-            child.cost += event.cost_usd
-            child.context_tokens = event.context_tokens
-            child.set_activity("Thinking...")
-        elif isinstance(event, (IterationStart, ce.IterationStart)):
-            child.set_activity("Thinking...")
-        elif isinstance(event, (TextDelta, ce.TextDelta)):
-            key = self._request_key(event)
-            if key in self._finalized_assistant_requests:
-                return True
-            text = self._transient_assistant_text.get(key, "") + event.text
-            self._transient_assistant_text[key] = text
-            child.activity = "Responding..."
-        elif isinstance(event, ce.AssistantMessage):
-            key = self._request_key(event)
-            self._transient_assistant_text.pop(key, None)
-            self._finalized_assistant_requests.add(key)
-            if event.content:
-                child.add_line(event.content)
-            child.activity = "Responding..."
-        elif isinstance(event, (ToolCall, ce.ToolCall)):
-            summary = format_tool_activity(event.name, event.input)
-            self._child_pending_tools[(scope, index, event.tool_use_id)] = (
-                event.name,
-                event.input,
-            )
-            child.set_activity(summary)
-        elif isinstance(event, (ToolResult, ce.ToolResult)):
-            pending = self._child_pending_tools.pop((scope, index, event.tool_use_id), None)
-            name, tool_input = pending or ("tool", {})
-            result_summary = format_tool_complete(
-                name, tool_input, event.content, event.is_error, event.duration_ms
-            )
-            child.add_line(result_summary)
-            if event.is_error:
-                child.activity = result_summary
-            else:
-                child.activity = "Thinking..."
-        elif isinstance(event, (TurnComplete, ce.TurnComplete)) and (
-            event.stop_reason == CONTENT_FILTERED
-        ):
-            child.status = "error"
-            child.error = CHILD_CONTENT_FILTERED_MESSAGE
-            child.activity = child.error
-        elif isinstance(event, (TurnComplete, ce.TurnComplete)):
-            child.status = "complete"
-            child.activity = "Completed"
-        elif isinstance(event, (TurnInterrupted, ce.TurnInterrupted)):
-            child.status = "interrupted"
-            child.activity = "interrupted"
-        elif isinstance(event, (TurnError, ce.TurnError)):
-            child.status = "error"
-            child.error = getattr(event, "message", "error")
-            child.activity = child.error
-        self._render_child(child)
-        self._update_child_modal(child)
-        return True
-
-    def _render_child(self, child: ChildActivity) -> None:
-        """Mount or update the collapsed child activity widget."""
-        conv = self.query_one("#conversation", Conversation)
-        widget_id = f"child-{child.scope}-{child.index}".replace(" ", "-")
-        try:
-            widget = conv.query_one(f"#{widget_id}", SubagentActivity)
-            widget.update_state()
-        except Exception:
-            widget = SubagentActivity(child, key=widget_id)
-            parent = self._parent_task_entries.get(child.scope)
-            if parent is not None:
-                parent.add_child(widget)
-            else:
-                conv.mount(widget)
-        self._child_widgets[(child.scope, child.index)] = widget
-
-    def _update_child_modal(self, child: ChildActivity) -> None:
-        if self._active_child_key != (child.scope, child.index):
-            return
-        try:
-            self.screen.update_state()
-        except AttributeError:
-            pass
+    def _apply_event(self, event) -> None:
+        """Apply one live or history event; both are handled the same way."""
+        self._render_canonical(event)
 
     def open_child_detail(self, key: tuple[str, int]) -> None:
-        """Open a live detail modal for a known child."""
-        child = self._child_activity.get(key)
+        """Open the transcript popup for a known child (command palette)."""
+        child = self.transcript.subagents.get(key)
         if child is None:
             return
-        self._active_child_key = key
-        self.push_screen(SubagentScreen(child))
+        self.push_screen(SubagentScreen(child, self._crumbs()))
+
+    @property
+    def _active_child_key(self) -> tuple[str, int] | None:
+        """The subagent ``ctrl+x`` stops: the topmost open subagent popup's."""
+        for screen in reversed(self._detail_screens()):
+            if isinstance(screen, SubagentScreen):
+                return (screen.sub.scope, screen.sub.index)
+        return None
 
     async def action_subagent_picker(self) -> None:
         """Open the command palette filtered to subagent entries."""
@@ -830,19 +610,6 @@ class ArchieApp(App):
                     )
                 )
             )
-
-    def _child(self, scope: str, index: int) -> ChildActivity:
-        """Return or create live state for one scoped child."""
-        key = (scope, index)
-        child = self._child_activity.get(key)
-        if child is None:
-            child = ChildActivity(scope=scope, index=index)
-            tasks = self._parent_task_inputs.get(scope, [])
-            if index < len(tasks) and isinstance(tasks[index], dict):
-                child.agent = str(tasks[index].get("agent", "child"))
-            self._child_activity[key] = child
-        self._render_child(child)
-        return child
 
     # --- Message flow ---
 
@@ -878,8 +645,6 @@ class ArchieApp(App):
         self._show_throbber()
 
         self.query_one("#input", MessageInput).disabled = True
-        self._stream_text = ""
-        self._streaming = None
 
         # Send via WebSocket (fire-and-forget task)
         asyncio.create_task(self._send_message(content))
@@ -987,27 +752,12 @@ class ArchieApp(App):
     def _end_turn(self) -> None:
         """Single teardown path for every turn outcome."""
         self._remove_throbber()
-        self._finalise_streaming()
         conv = self.query_one("#conversation", Conversation)
-        conv.end_iteration()
-        self._iteration_block = None
+        conv.finish_streams()
         self._turn_active = False
         inp = self.query_one("#input", MessageInput)
         inp.disabled = False
         inp.focus()
-
-    def _finalise_streaming(self) -> None:
-        """Convert the active streaming message to a completed markdown block."""
-        if self._streaming is None:
-            return
-        conv = self.query_one("#conversation", Conversation)
-        if self._stream_text:
-            conv.finalise_streaming(self._streaming)
-        else:
-            self._streaming.remove()
-        self._streaming = None
-        self._stream_text = ""
-        self._stream_request_key = None
 
     def _show_throbber(self) -> None:
         """Show the fixed throbber while the agent is thinking."""
@@ -1023,11 +773,6 @@ class ArchieApp(App):
             self._throbber = None
         else:
             self.query_one("#throbber", Throbber).display = False
-
-    def _show_error(self, message: str) -> None:
-        """Display an agent/server error message in the conversation."""
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_error(message)
 
     def _show_client_error(self, message: str) -> None:
         """Display a client/transport error, marked as local to this client.

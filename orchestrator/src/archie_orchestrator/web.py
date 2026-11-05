@@ -20,11 +20,23 @@ from archie_shared import __version__
 from archie_shared.events import ErrorNotice, Handshake, SessionStatus, decode_event
 from archie_shared.session import split_id
 from archie_shared.session.accounting import UsageTotals
+from archie_shared.transcript import (
+    Change,
+    SubagentNode,
+    ToolNode,
+    TranscriptBuilder,
+    TurnNode,
+    build,
+    subagent_status_text,
+    tool_crumb,
+    tool_preview,
+)
 from markupsafe import escape
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, StreamingResponse
 from starlette.templating import Jinja2Templates
 
+from archie_orchestrator import transcript as transcript_html
 from archie_orchestrator.docker import list_sessions
 from archie_orchestrator.proxy import resolve_session
 from archie_orchestrator.session_index import (
@@ -35,12 +47,22 @@ from archie_orchestrator.session_index import (
     summarize_events,
 )
 from archie_orchestrator.session_search import matches, parse_query
-from archie_orchestrator.transcript import Change, TranscriptBuilder, build
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 templates.env.filters["tokens"] = lambda value: f"{value:,}"
 templates.env.filters["usd"] = lambda value: f"${value:.4f}"
+templates.env.globals.update(
+    # Looked up at call time so tests can patch the module's render_markdown.
+    markdown=lambda text: transcript_html.render_markdown(text),
+    tool_summary=transcript_html.tool_summary_html,
+    tool_extra=transcript_html.tool_extra_html,
+    tool_sections=transcript_html.tool_sections_html,
+    tool_preview=tool_preview,
+    tool_crumb=tool_crumb,
+    compaction_text=transcript_html.compaction_text,
+    subagent_status=subagent_status_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -338,8 +360,14 @@ def render_change(change: Change) -> str:
         node = change.node
         if isinstance(node, UsageTotals):
             html = str(nodes.usage(node))
-        elif node.kind == "turn":
+        elif isinstance(node, TurnNode):
             html = str(nodes.turn_footer(node))
+        elif isinstance(node, SubagentNode):
+            html = str(nodes.subagent_row(node))
+        elif isinstance(node, ToolNode):
+            # Only the row and its overlay: the subagents below stay in place.
+            html = str(nodes.tool_head(node))
+            return _with_oob(html, f"outerHTML:#{node.head_id}")
         else:
             html = str(nodes.node(node))
         # Explicit selector: a finished stream is replaced by a node with a new id.

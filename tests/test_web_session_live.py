@@ -261,9 +261,10 @@ async def test_tool_result_replaces_row_and_children_nest(session_logs):
     frags = [m["data"] for m in _fragments(messages)]
     sub = next(f for f in frags if 'id="sub-tu-task-0"' in f and 'class="subagent"' in f)
     assert 'hx-swap-oob="beforeend:#tool-tu-task-children"' in sub
-    row = next(f for f in frags if 'hx-swap-oob="outerHTML:#tool-tu-task"' in f)
-    assert 'class="tool is-ok"' in row
-    assert "child says" in row  # replacing the row keeps its nested children
+    row = next(f for f in frags if 'hx-swap-oob="outerHTML:#tool-tu-task-head"' in f)
+    assert 'class="tool-head is-ok"' in row
+    # Only the row and its overlay are replaced; nested subagents stay in place.
+    assert "child says" not in row
 
 
 @pytest.mark.asyncio
@@ -419,7 +420,7 @@ async def test_carriage_returns_cannot_inject_sse_fields(session_logs):
     assert "event: reload" not in fields
     assert not any(f.startswith(("id: bogus", "event: reload")) for f in fields)
     data = "\n".join(f[6:] for f in fields if f.startswith("data: "))
-    assert "done" in data and "</details>" in data
+    assert "done" in data and "</dialog>" in data
 
 
 @pytest.mark.asyncio

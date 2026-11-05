@@ -204,11 +204,7 @@ async def test_tui_reconnect_deduplicates_history():
     mock_resp.status_code = 200
     mock_resp.text = body
 
-    rendered = []
-
     mock_conv = MagicMock()
-    mock_conv.add_user_message = lambda msg: rendered.append(("user", msg))
-    mock_conv.add_assistant_message = lambda msg: rendered.append(("assistant", msg))
 
     captured_url = {}
 
@@ -230,8 +226,9 @@ async def test_tui_reconnect_deduplicates_history():
 
     # Requested incremental replay from the cursor.
     assert "after=e3" in captured_url["url"]
-    # Only the unseen event (e4) rendered; e3 deduplicated.
-    assert rendered == [("assistant", "new")]
+    # Only the unseen event (e4) reached the transcript; e3 was deduplicated.
+    assert app_instance.transcript.turns == []
+    assert [(i.role, i.content) for i in app_instance.transcript.preamble] == [("assistant", "new")]
     assert app_instance._last_event_id == "e4"
 
 
