@@ -216,7 +216,7 @@ class ArchieApp(App):
                 except Exception as e:  # noqa: BLE001 — skip malformed replay lines
                     log.warning("Skipping malformed replay event: %s", e)
                     continue
-                self._apply_event(event, historical=True)
+                self._apply_event(event)
         finally:
             if view is not None:
                 view.resume()
@@ -256,11 +256,12 @@ class ArchieApp(App):
             await removal
         self._update_accounting_status()
 
-    def _render_canonical(self, event, *, replay: bool = False) -> None:
+    def _render_canonical(self, event) -> None:
         """Apply one event: deduplicate by id, update the transcript model and its
         views, then run client-side effects (status bar, throbber, turn state).
 
-        Historical events arrive with ``replay=True``; live events use the same path.
+        History reads and live frames use the same path; the transcript model
+        reconciles them by request identity.
         """
         event_id = getattr(event, "id", None)
         if event_id is not None:
@@ -576,9 +577,9 @@ class ArchieApp(App):
         for event in self._event_buffer:
             self._apply_event(event)
 
-    def _apply_event(self, event, *, historical: bool = False) -> None:
-        """Apply one live or historical event through the imperative UI path."""
-        self._render_canonical(event, replay=historical)
+    def _apply_event(self, event) -> None:
+        """Apply one live or history event; both are handled the same way."""
+        self._render_canonical(event)
 
     def open_child_detail(self, key: tuple[str, int]) -> None:
         """Open the transcript popup for a known child (command palette)."""

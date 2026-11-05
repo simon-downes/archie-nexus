@@ -39,7 +39,7 @@ The TUI is the client the user sees. It:
 - sends strict flat client commands;
 - receives live events over a WebSocket;
 - reads persisted history over HTTP;
-- applies history through `_apply_event(event, historical=True)` and live events through `_apply_event(event)`;
+- applies history and live events through the same `_apply_event(event)`;
 - renders user messages, assistant text, tools, child agents, and errors;
 - keeps the last applied persisted event ID as its client replay cursor;
 - calculates displayed token and cost totals from `llm_request` events.
@@ -285,7 +285,7 @@ GET /sessions/<session-id>/events
 
 For a new session, the response normally contains only `session_started`. For an existing session,
 it contains the complete persisted history. Each NDJSON line is decoded through the same public
-event decoder used for live events and passed to `_apply_event(event, historical=True)`.
+event decoder used for live events and passed to `_apply_event(event)`.
 
 The TUI records every applied persisted event ID in a deduplication set. Its cursor advances only
 when `_apply_event()` accepts a persisted event; live-only events never advance it.
@@ -561,9 +561,8 @@ the turn's persisted event sequence.
 
 ## 10. How the TUI applies the events
 
-The TUI uses one `_apply_event(event, historical=...)` path for events received from both live
-WebSocket delivery and HTTP history reads. Both kinds of event are handled the same way. Each
-event goes through three steps:
+The TUI uses one `_apply_event(event)` path for events received from both live
+WebSocket delivery and HTTP history reads. Each event goes through three steps:
 
 1. **Deduplicate.** An event ID that has already been applied is dropped, so an event received
    once through a history read and once through live delivery is applied once. A persisted
@@ -755,7 +754,7 @@ After a lost connection, the TUI retries with backoff for up to roughly 30 secon
 2. Start buffering new live frames
 3. Receive a new handshake and session_status
 4. GET /events?after=<last-persisted-event-id>
-5. Apply missed persisted events in log order through _apply_event(event, historical=True)
+5. Apply missed persisted events in log order through _apply_event(event)
 6. Flush buffered live events through _apply_event(event), deduplicated by event ID and request identity
 7. Resume direct live processing
 ```
@@ -996,7 +995,7 @@ The following rules are useful when reading logs, debugging the TUI, or changing
    `(scope, subagent_index, turn, iteration, request_id)`; there is no cumulative request-ID list.
 6. **The client replay cursor names only persisted events.** Never use a handshake, status, delta, or
    error-notice ID as `after=`.
-7. **One `_apply_event(event, historical=...)` path handles live and history events.** Event-ID and
+7. **One `_apply_event(event)` path handles live and history events.** Event-ID and
    request-key deduplication makes overlap safe.
 8. **`llm_request` is the accounting ledger.** Sum it by unique event ID; do not derive historical
    cost from current prices.
@@ -1019,7 +1018,7 @@ CONNECT
 TUI ──WebSocket──▶ orchestrator ──WebSocket──▶ agent
 agent ──handshake, session_status (live-only)──▶ TUI buffer
 TUI ──GET /events──▶ orchestrator ──GET /events──▶ agent
-agent ──persisted NDJSON history──▶ TUI _apply_event(historical=true)
+agent ──persisted NDJSON history──▶ TUI _apply_event(event)
 TUI ──flush deduplicated live buffer──▶ rendered session
 
 PROMPT

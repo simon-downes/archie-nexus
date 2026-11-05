@@ -749,7 +749,7 @@ async def test_exec_and_shell_rows_show_ten_lines_and_no_click_expand():
 
 
 @pytest.mark.asyncio
-async def test_replay_dispatches_through_apply_event_as_historical(tmp_path):
+async def test_replay_dispatches_through_apply_event(tmp_path):
     """Stored events use the same public application entry point as live events."""
     app = _make_app()
     event = UserMessage(id="u1", turn=1, scope=None, content="hi")
@@ -765,7 +765,7 @@ async def test_replay_dispatches_through_apply_event_as_historical(tmp_path):
     ):
         assert await app._replay_events() is True
 
-    apply_event.assert_called_once_with(event, historical=True)
+    apply_event.assert_called_once_with(event)
 
 
 @pytest.mark.asyncio
@@ -1033,7 +1033,7 @@ async def test_replay_child_assistant_message_reconstructs_child_output():
         content="persisted child response",
         interrupted=False,
     )
-    app._apply_event(event, historical=True)
+    app._apply_event(event)
 
     assert _child_texts(app) == [("text", "persisted child response")]
 
@@ -1088,7 +1088,7 @@ async def test_child_replay_replaces_live_child_deltas():
     )
 
     app._apply_event(live_delta)
-    app._apply_event(durable, historical=True)
+    app._apply_event(durable)
 
     assert _child_texts(app) == [("text", "partial response")]
 
@@ -1126,9 +1126,9 @@ def test_child_replay_preserves_durable_lines_across_requests():
         interrupted=False,
     )
 
-    app._apply_event(first_assistant, historical=True)
+    app._apply_event(first_assistant)
     app._apply_event(second_delta)
-    app._apply_event(second_assistant, historical=True)
+    app._apply_event(second_assistant)
 
     assert _child_texts(app) == [("text", "first answer"), ("text", "second answer")]
 
@@ -1201,7 +1201,7 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
     with patch.object(app, "query_one", return_value=MagicMock()):
         if scope is None:
             app._apply_event(_user())
-        app._apply_event(assistant, historical=True)
+        app._apply_event(assistant)
         app._dispatch_buffered_events()
 
     items = (
