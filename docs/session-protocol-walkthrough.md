@@ -561,48 +561,87 @@ the turn's persisted event sequence.
 
 ## 10. How the TUI applies the events
 
-The TUI uses one imperative `_apply_event(event, historical=...)` path for events received from
-both live WebSocket delivery and HTTP history reads. The historical flag selects whether the
-presentation state reconciles stored assistant content or transient live text. The TUI does not
-maintain a second reducer or a separate replay schema.
+The TUI uses one `_apply_event(event, historical=...)` path for events received from both live
+WebSocket delivery and HTTP history reads. Both kinds of event are handled the same way. Each
+event goes through three steps:
+
+1. **Deduplicate.** An event ID that has already been applied is dropped, so an event received
+   once through a history read and once through live delivery is applied once. A persisted
+   event advances the replay cursor.
+2. **Reduce.** `TranscriptBuilder.apply(event)` in `archie_shared.transcript` updates the
+   transcript model and returns the `Change` records the event caused (`append`, `replace`,
+   `append_text`, `remove`).
+3. **Render.** The main conversation view and every open popup apply those changes to their
+   widgets. Then the app runs root-only client effects: the status bar, the throbber, and
+   turn state.
+
+The orchestrator's web viewer uses the same `TranscriptBuilder`, so the event rules below apply
+to both clients. There is no second reducer or separate replay schema. The model holds data only:
+turns, text, streams, iteration groups, tools, subagents, compactions and notices. Each client
+renders it in its own way.
 
 ### User messages
 
-`user_message` adds the canonical prompt to the conversation and resets per-turn display metrics.
+A root `user_message` starts a new turn node and resets per-turn display metrics. It also
+returns the conversation view to its latest rows (see [The model and its views](#the-model-and-its-views)).
 
 ### Streamed assistant text
 
-For a root `text_delta`, `_apply_event()`:
+For a `text_delta`, the builder:
 
-1. removes the waiting indicator;
-2. creates an in-progress assistant widget if necessary;
-3. appends the chunk;
-4. stores the temporary text by exact request identity.
+1. creates a stream node at the end of the turn, or of the subagent's transcript for child text,
+   if one doesn't exist yet;
+2. appends the chunk and emits an `append_text` change;
+3. keys the stream by exact request identity.
 
-For child text it does the same in the matching child view. The temporary record is keyed by
-`(scope, subagent_index, turn, iteration, request_id)`, so sibling streams and interleaved root/child
-streams cannot append to each other's widgets.
+The key is `(scope, subagent_index, turn, iteration, request_id)`, so sibling streams and
+interleaved root and child streams can't append to each other's text. The TUI's
+`StreamingMessage` writes each chunk through Textual's `MarkdownStream` rather than re-rendering
+the whole text.
 
 When an authoritative `assistant_message` arrives:
 
-- if its exact request identity has matching temporary text, `_apply_event()` finalizes that widget;
-- if the text differs, it removes the temporary widget and renders the persisted content;
-- if there was no temporary widget, as during ordinary history reads, it renders the persisted
-  content directly;
-- it records the identity in a finalized map, so later deltas for that request are suppressed.
+- if a stream with its exact request identity exists, the builder replaces the stream with the
+  persisted text in the same position. The TUI keeps the streamed widget when the text matches,
+  and re-renders it when the text differs;
+- if there is no stream, as during ordinary history reads, the builder adds the persisted text
+  directly;
+- the builder records the identity as finalized, so later deltas for that request are ignored.
 
-The persisted event always wins. `text_delta` exists for responsiveness, not durability. A cumulative
-whole-turn request-ID list is not used; each assistant record has one direct `request_id` and one
-integer `iteration`.
+The persisted event always wins. `text_delta` exists for responsiveness, not durability. A
+cumulative whole-turn request-ID list is not used; each assistant record has one direct
+`request_id` and one integer `iteration`.
 
 ### Tools
 
-`tool_call` creates a pending tool row and remembers structured input by `tool_use_id` within its
-scope. `tool_result` finds that row, derives a human-readable summary from the call and result, and
-marks it complete.
+`tool_call` adds a pending tool node. Tool calls are grouped into an iteration node by
+`(scope, subagent_index, turn, iteration)`, one group per provider response, so parallel calls
+from one response share a group. `tool_result` finds the tool by `tool_use_id`, records the
+result, status and duration, and emits a `replace` change. Rows derive their summary from the
+call and result. `exec` and `shell` rows show at most 10 lines of source or command.
 
-`iteration_start` does not immediately create a visible block. The TUI creates an iteration block
-lazily only if a tool call appears, avoiding empty blocks for text-only iterations.
+`iteration_start` does not create a group. The builder creates an iteration group lazily, on the
+first tool call (or an orphan result), so text-only iterations have no empty groups.
+
+### Subagents
+
+Child events, which have a non-null `scope` and `subagent_index`, belong to the `task` tool call
+whose `tool_use_id` is their scope. The builder keeps each child as a subagent node under that
+tool, with its own transcript items, status, activity and cost. The main view shows a child only
+as a subagent row under its `task` tool. The child's transcript appears in the subagent popup.
+
+### The model and its views
+
+The model keeps every row of the session. The TUI's `TranscriptView` mounts only a window of
+about 200 top-level rows. Scrolling to either edge pages earlier or later rows in, keeping the
+row at the edge in place, and boundary rows show how many rows are hidden. Live rows are mounted
+while the window shows the latest rows. While you read history, they only increase the hidden
+count below.
+
+Clicking a tool row opens a `ToolDetailScreen` with the call's full input and result. Clicking a
+subagent row opens a `SubagentScreen` with the child's transcript, in its own `TranscriptView`.
+Both are modal screens that read live model nodes, so they update as events arrive. A breadcrumb
+line names the levels above the popup. Escape, or a click outside the popup, closes one level.
 
 ### Accounting
 
@@ -615,10 +654,11 @@ by the agent in each request event.
 
 ### Turn and child completion
 
-`turn_complete`, `turn_error`, or `turn_interrupted` ends the local turn display, removes temporary
-widgets, and re-enables input for a root turn. Scoped terminal events close only the matching child
-view. Only one of these persisted terminal events should exist for an accepted scope and turn,
-except when the storage append path itself has failed.
+`turn_complete`, `turn_error`, or `turn_interrupted` for a root turn ends the local turn display,
+removes temporary widgets, and re-enables input. A scoped terminal event updates only the matching
+subagent node's status, which its row and any open popup show. Only one of these persisted terminal
+events should exist for an accepted scope and turn, except when the storage append path itself has
+failed.
 
 ## 11. The session event coordinator
 
