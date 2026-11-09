@@ -266,7 +266,7 @@ record.
 Delivered a root-only `question` tool that blocks until the user picks an option, types an answer or dismisses it. Live state rides on `session_status` (`state`, `question`) and `/status`. The TUI shows a docked panel with number and arrow keys, a free-text answer, and Esc that dismisses first and interrupts second. Rows read as question → answer, the identity rule points at the tool, and the protocol docs are updated. Evidence: full suite 4754 passed; `ruff check .` passed; `ruff format --check .` flags only the baseline file. Not verified: a live session against a real model and a real terminal (the tests use a mocked LLM, the Starlette TestClient and the Textual pilot).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/22
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
