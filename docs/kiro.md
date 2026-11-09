@@ -79,6 +79,11 @@ turn with `turn_error`.
 | any other tool | logged under its `toolId` or title, with a warning |
 | `turn_completion` + prompt result | one root `llm_request`, then `turn_complete` / `turn_interrupted` / `turn_error` |
 
+For current Kiro ACP frames, an Archie tool call uses `title: "@archie/<name>"` and places
+its arguments directly in `rawInput`, for example `{"path": "foo.py"}`. The translator treats
+that object as the canonical tool input; the older `{"tool_id": ..., "arguments": ...}` wrapper
+is not supported.
+
 Each text-then-tools segment is an `iteration` with its own `request_id`. The TUI therefore
 streams text that follows a tool call. Kiro reports credits, not tokens, so each turn has one
 `llm_request`. Its `credits` field holds the turn's credits, and `cost_usd` prices them per

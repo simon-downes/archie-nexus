@@ -156,7 +156,7 @@ def completion(credits: float, status: str = "success") -> None:
 
 
 async def archie_tool(call_id: str, name: str, arguments: dict) -> dict:
-    raw = {"tool_id": f"archie::{name}", "arguments": arguments}
+    raw = dict(arguments)
     meta = {"_meta": {"kiro": {"serverName": "archie", "toolOrigin": "default"}}}
     update(
         {

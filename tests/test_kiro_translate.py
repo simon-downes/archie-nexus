@@ -87,6 +87,23 @@ def test_parallel_shell_results_and_accounting():
     assert events[-2] is request
 
 
+def test_current_archie_tool_format_uses_direct_raw_input():
+    tr = TurnTranslator(Path("/tmp/x.jsonl"), MODEL_KEY, 1)
+    events = tr.feed(
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "r1",
+            "title": "@archie/read",
+            "status": "pending",
+            "rawInput": {"path": "foo.py"},
+        },
+        1.0,
+    )
+
+    call = next(e for e in events if isinstance(e, ToolCall))
+    assert (call.name, call.input) == ("read", {"path": "foo.py"})
+
+
 def test_skill_load_maps_to_skill_tool():
     events = _run("run2_skill")
     calls = [e for e in events if isinstance(e, ToolCall)]

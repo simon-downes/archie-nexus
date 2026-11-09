@@ -25,7 +25,6 @@ from archie_agent.event_factory import EventFactory
 
 log = logging.getLogger(__name__)
 
-ARCHIE_TOOL_PREFIX = "archie::"
 ARCHIE_TITLE_PREFIX = "@archie/"
 SKILL_TOOL_ID = "disclose_context"
 NO_COMPLETION_ERROR = "no turn_completion from Kiro"
@@ -171,7 +170,7 @@ class TurnTranslator:
         meta = _kiro_meta(update)
         title = update.get("title") or ""
         raw = update.get("rawInput") if isinstance(update.get("rawInput"), dict) else {}
-        tool_id = raw.get("tool_id") if isinstance(raw.get("tool_id"), str) else ""
+        scope = self._scope_of(update)
         if meta.get("kind") == "agent-subtask":
             # archie-worker has no subagent tool, so dispatches always come from the root.
             subtask = meta.get("agentSubtaskId")
@@ -179,17 +178,13 @@ class TurnTranslator:
                 self._subtasks[subtask] = update["toolCallId"]
             task = {"agent": raw.get("name", ""), "prompt": raw.get("prompt", "")}
             return _Tool("task", None, "task", {"tasks": [task]}, at)
-        scope = self._scope_of(update)
         if title in ("Tool Load", "Subagent Response") or "tool_ids" in raw:
             return _Tool("internal", scope)
         if meta.get("toolId") == SKILL_TOOL_ID:
             return _Tool("skill", scope, "skill", {"name": raw.get("name", "")}, at)
-        if tool_id.startswith(ARCHIE_TOOL_PREFIX) or title.startswith(ARCHIE_TITLE_PREFIX):
-            name = tool_id.removeprefix(ARCHIE_TOOL_PREFIX) or title.removeprefix(
-                ARCHIE_TITLE_PREFIX
-            )
-            args = raw.get("arguments")
-            return _Tool("archie", scope, name, args if isinstance(args, dict) else {}, at)
+        if title.startswith(ARCHIE_TITLE_PREFIX):
+            name = title.removeprefix(ARCHIE_TITLE_PREFIX)
+            return _Tool("archie", scope, name, dict(raw), at)
         name = meta.get("toolId") or title or "unknown"
         log.warning("Unmapped Kiro tool call %r (%s); logging it as is", name, update["toolCallId"])
         return _Tool("other", scope, str(name), dict(raw), at)
