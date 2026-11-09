@@ -17,6 +17,8 @@ _MAX_AGE = timedelta(days=365)
 _DASHBOARD = re.compile(DASHBOARD_ID)
 _METRIC = re.compile(METRIC)
 _KIND = re.compile(r"^[a-z0-9_.-]{1,64}$")
+_FACET = re.compile(r"^@?[A-Za-z0-9_][A-Za-z0-9_.\-]{0,199}$")
+_INTERVAL = re.compile(r"^[1-9][0-9]{0,5}[smhd]$")
 MAX_TAGS = 50
 _MAX_TAG = 200
 _MAX_TAG_FILTER = 500
@@ -130,6 +132,72 @@ def time_window(start: Any, end: Any, *, now: datetime | None = None) -> tuple[d
     if finish - begin > _MAX_WINDOW:
         raise DatadogInputError("time window must be at most 31 days")
     return begin, finish
+
+
+MAX_GROUP_LEVELS = 4
+MAX_BUCKETS = 10_000
+LOG_AGGREGATIONS = frozenset(
+    {"count", "cardinality", "sum", "min", "max", "pc75", "pc90", "pc95", "pc98", "pc99"}
+)
+
+
+def optional_facet(value: Any, name: str = "facet") -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _FACET.fullmatch(value.strip()):
+        raise DatadogInputError(
+            f"{name} must be a facet such as service or @http.useragent "
+            "(letters, digits, '@', '_', '.', '-'; at most 200)"
+        )
+    return value.strip()
+
+
+def log_group_by(value: Any) -> list[dict[str, Any]]:
+    """Group-by levels: facet strings or ``{"facet", "limit", "missing"}`` dicts.
+
+    Default limits are 100 for the first level and 10 for later ones; the product of the
+    limits must be at most 10,000 (Datadog's bucket cap).
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > MAX_GROUP_LEVELS:
+        raise DatadogInputError(f"group_by must be a list of at most {MAX_GROUP_LEVELS} facets")
+    groups: list[dict[str, Any]] = []
+    product = 1
+    for index, item in enumerate(value):
+        spec = {"facet": item} if isinstance(item, str) else item
+        if not isinstance(spec, dict) or set(spec) - {"facet", "limit", "missing"}:
+            raise DatadogInputError(
+                "each group_by item must be a facet string or a dict with facet, limit, missing"
+            )
+        facet = optional_facet(spec.get("facet"))
+        if facet is None:
+            raise DatadogInputError("each group_by item needs a facet")
+        count = limit(spec.get("limit", 100 if index == 0 else 10), MAX_BUCKETS, "group_by limit")
+        missing = spec.get("missing")
+        if missing is not None and (not isinstance(missing, str) or not 0 < len(missing) <= 100):
+            raise DatadogInputError("group_by missing must be a string of 1-100 characters")
+        product *= count
+        groups.append({"facet": facet, "limit": count, "missing": missing})
+    if product > MAX_BUCKETS:
+        raise DatadogInputError(f"the product of group_by limits must be at most {MAX_BUCKETS}")
+    return groups
+
+
+def log_aggregation(value: Any, metric: Any) -> str:
+    function = choice(value, "aggregation", LOG_AGGREGATIONS)
+    if function != "count" and metric is None:
+        raise DatadogInputError(f"aggregation {function} needs a metric (a facet or measure)")
+    return function
+
+
+def interval(value: Any) -> str | None:
+    """An optional timeseries bucket size such as ``30s``, ``10m``, ``1h`` or ``1d``."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _INTERVAL.fullmatch(value.strip()):
+        raise DatadogInputError("interval must be a duration such as 30s, 10m, 1h or 1d")
+    return value.strip()
 
 
 def monitor_id(value: Any) -> int:

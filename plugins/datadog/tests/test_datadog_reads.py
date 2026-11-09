@@ -446,6 +446,125 @@ async def test_search_logs_input_errors(dd_fake, kwargs):
     assert client.calls == []
 
 
+AGGREGATE = ("POST", "/api/v2/logs/analytics/aggregate")
+
+
+async def test_aggregate_logs_groups_by_several_facets(dd_fake):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    bucket = {
+        "by": {"@network.client.ip": "1.2.3.4", "@http.useragent": "curl"},
+        "computes": {"c0": 7},
+    }
+    client = dd_fake(
+        {AGGREGATE: {"data": {"buckets": [bucket]}, "meta": {"status": "done"}}}, "logs"
+    )
+    result = await aggregate_logs(
+        "service:api",
+        ["@network.client.ip", {"facet": "@http.useragent", "limit": 5, "missing": "none"}],
+        start="10m",
+    )
+    body = client.calls[0][3]
+    assert body["compute"] == [{"aggregation": "count", "type": "total"}]
+    sort = {"type": "measure", "aggregation": "count", "order": "desc"}
+    assert body["group_by"] == [
+        {"facet": "@network.client.ip", "limit": 100, "sort": sort},
+        {"facet": "@http.useragent", "limit": 5, "missing": "none", "sort": sort},
+    ]
+    assert body["filter"]["query"] == "service:api"
+    assert result["buckets"] == [{"by": bucket["by"], "value": 7}]
+    assert result["bucket_count"] == 1
+    assert result["group_by"] == ["@network.client.ip", "@http.useragent"]
+    assert result["partial"] is False
+
+
+async def test_aggregate_logs_timeseries_measure_and_paging(dd_fake):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    points = [{"time": "2026-05-01T11:00:00Z", "value": 3}]
+    client = dd_fake(
+        {
+            AGGREGATE: Seq(
+                [
+                    {
+                        "data": {"buckets": [{"by": {"service": "a"}, "computes": {"c0": points}}]},
+                        "meta": {
+                            "page": {"after": "p1"},
+                            "status": "timeout",
+                            "warnings": [{"title": "partial"}],
+                        },
+                    },
+                    {"data": {"buckets": [{"by": {"service": "b"}, "computes": {"c0": points}}]}},
+                ]
+            )
+        },
+        "logs",
+    )
+    result = await aggregate_logs(
+        "*", ["service"], aggregation="pc95", metric="@duration", interval="10m", order="asc"
+    )
+    first, second = client.calls[0][3], client.calls[1][3]
+    assert first["compute"] == [
+        {"aggregation": "pc95", "type": "timeseries", "metric": "@duration", "interval": "10m"}
+    ]
+    assert first["group_by"][0]["sort"] == {
+        "type": "measure",
+        "aggregation": "pc95",
+        "order": "asc",
+        "metric": "@duration",
+    }
+    assert "page" not in first and second["page"] == {"cursor": "p1"}
+    assert [b["by"]["service"] for b in result["buckets"]] == ["a", "b"]
+    assert result["buckets"][0]["points"] == [["2026-05-01T11:00:00Z", 3]]
+    assert result["partial"] is True and result["warnings"] == ["partial"]
+
+
+async def test_aggregate_logs_without_group_by_returns_total(dd_fake):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    client = dd_fake(
+        {AGGREGATE: {"data": {"buckets": [{"by": {}, "computes": {"c0": 42}}]}}}, "logs"
+    )
+    result = await aggregate_logs("service:api")
+    assert client.calls[0][3]["group_by"] == []
+    assert result["buckets"] == [{"by": {}, "value": 42}]
+
+
+async def test_aggregate_logs_malformed_response(dd_fake):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    dd_fake({AGGREGATE: {"data": []}}, "logs")
+    with pytest.raises(DatadogResponseError):
+        await aggregate_logs("*", ["service"])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"query": ""},
+        {"query": "*", "group_by": "service"},
+        {"query": "*", "group_by": ["a", "b", "c", "d", "e"]},
+        {"query": "*", "group_by": ["bad facet"]},
+        {"query": "*", "group_by": [{"facet": "a", "size": 3}]},
+        {"query": "*", "group_by": [{"limit": 3}]},
+        {"query": "*", "group_by": [{"facet": "a", "limit": 1000}, {"facet": "b", "limit": 11}]},
+        {"query": "*", "group_by": [{"facet": "a", "missing": 1}]},
+        {"query": "*", "aggregation": "avg"},
+        {"query": "*", "aggregation": "max"},
+        {"query": "*", "interval": "10 minutes"},
+        {"query": "*", "order": "newest"},
+        {"query": "*", "metric": "x y", "aggregation": "sum"},
+    ],
+)
+async def test_aggregate_logs_input_errors(dd_fake, kwargs):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    client = dd_fake({}, "logs")
+    with pytest.raises(DatadogInputError):
+        await aggregate_logs(**kwargs)
+    assert client.calls == []
+
+
 SPAN = {
     "id": "s",
     "type": "spans",
@@ -582,6 +701,7 @@ async def test_list_events_blank_query_is_no_filter(dd_fake):
 
 
 READS = {
+    "aggregate_logs",
     "describe_metric",
     "get_dashboard",
     "get_monitor",

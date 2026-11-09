@@ -47,6 +47,7 @@ description: >
 | Metrics that carry a tag (for example every metric with a `queue` tag), or that reported recently | `datadog.search_metrics(tag=..., active_within=...)` |
 | A metric's tag keys and values, and the dashboards and monitors that use it | `datadog.describe_metric` |
 | Error logs or log lines for a service | `datadog.search_logs` |
+| Log counts or measures grouped by facets (top IPs, IP × user agent, per-10-minute counts) | `datadog.aggregate_logs` |
 | Slow or failing requests (APM spans) | `datadog.search_spans` |
 | Deploys, Kubernetes changes, integration and alert events | `datadog.list_events` |
 | Which monitors are alerting, or monitors for a service | `datadog.search_monitors` |
@@ -92,10 +93,94 @@ Datadog limits each endpoint separately, and some limits are tight:
 
 - `search_spans`: 5 calls per minute. Make one well-filtered call, not a loop. `search(sources=[..., "spans"])` uses a span endpoint with a similarly tight limit, which is why spans are not searched by default.
 - `search_logs`: 10 calls per 10 seconds.
+- `aggregate_logs`: Datadog doesn't document this limit. Pace it like `search_logs`: no more than about one call per second in a loop.
 - `describe_metric` makes three requests per call. Describe the metrics you need, not every search result.
 - Other reads have higher limits, but don't call them in tight loops.
 
 Nothing retries automatically. On `DatadogRateLimitError`, wait `retry_after_seconds` before one retry.
+
+## Retrieving larger datasets
+
+Each `search_logs` call returns at most `limit` (100) records, and no function returns a cursor for the next page. Before fetching records, check whether a count answers the question:
+
+- **Counts, top values and per-window peaks:** use `aggregate_logs`. Datadog counts on the server, grouped by up to four facets, so one call covers millions of logs. Examples: the busiest IPs in a window, the user agents behind each IP, or counts per 10 minutes.
+- **Counts or rates from metrics:** if a metric exists (for example `trace.*` APM metrics, or a log-based metric found with `search`), `query_metrics` covers the whole window in one call.
+- **A sample:** if 100 recent records answer the question, make one `search_logs` call.
+- **A narrower query:** add `service`, `status`, `env` or an `@attribute` filter, or shorten the window, before paging through noise.
+
+### Aggregating over a long window
+
+`aggregate_logs` returns at most 10,000 buckets per call. Over a long window with many distinct values, such as client IPs, that isn't enough. Split the window into fixed slices instead and aggregate each one; a day in 10-minute slices takes 144 calls. Fixed slices undercount bursts that cross a slice boundary by up to half. To catch those, run a second pass with slices offset by half a slice, or leave headroom in any threshold you derive.
+
+```python
+from datetime import UTC, datetime, timedelta
+
+async def main():
+    query = "service:web env:production @http.status_code:404"
+    facet = "@http.x_forwarded_for"
+    end = datetime.now(UTC).replace(second=0, microsecond=0)
+    start = end - timedelta(hours=24)
+    peaks, step = {}, timedelta(minutes=10)
+    slice_start = start
+    while slice_start < end:
+        result = await datadog.aggregate_logs(
+            query, [facet], start=slice_start.isoformat(),
+            end=(slice_start + step).isoformat(),
+        )
+        for bucket in result["buckets"]:
+            key = bucket["by"][facet]
+            peaks[key] = max(peaks.get(key, 0), bucket["value"])
+        slice_start += step
+        await asyncio.sleep(1)
+    top = sorted(peaks.items(), key=lambda kv: -kv[1])[:20]
+    return {"keys": len(peaks), "top_10m_peaks": top}
+```
+
+Each slice returns the top 100 values by default, which is enough to find the busiest clients. Raise the first level's `limit` (up to 10,000) if you need every value.
+
+Before you trust grouped counts, check two things on a short window:
+
+1. **The facet holds what you think.** Behind a proxy or load balancer, `@network.client.ip` can be the proxy's internal address, and `@http.x_forwarded_for` can be the whole chain (`client, edge`). In that case the same client splits across buckets, one per edge address. Compare a few buckets with the raw `message` from `search_logs`.
+2. **The filter matches the same records as a free-text query.** A facet filter only matches records where the attribute was parsed. Compare `aggregate_logs(query)` totals for the facet filter and for a free-text equivalent. A large gap means some records aren't parsed, and grouped counts will miss them.
+
+### Paging through records
+
+If you need the records themselves, page by time. Sort newest first (the default), then call again with `end` set to the oldest `timestamp` you have so far. Dedupe on `id`: a record at the boundary timestamp can come back twice. Records that share the boundary timestamp beyond the 100 already returned can be missed, so treat a page in which every record has the same timestamp as a sign to narrow the query. Fix `start` as an absolute time before the loop, because a relative `start` such as `6h` moves on each call. Stop when a page is short, or when the next `end` would not be after `start` (that raises `DatadogInputError`).
+
+Keep the records in the script, and return a summary. To inspect raw records afterwards, write them to a file under `/tmp` and `read` it in chunks.
+
+```python
+from collections import Counter
+from datetime import UTC, datetime, timedelta
+
+async def main():
+    query = "service:api status:error"
+    start = datetime.now(UTC) - timedelta(hours=6)
+    seen, rows, end = set(), [], None
+    for page in range(10):  # at most 1,000 logs
+        if page:
+            await asyncio.sleep(1)  # stay under 10 calls per 10 seconds
+        batch = await datadog.search_logs(query, start=start.isoformat(), end=end, limit=100)
+        new = [r for r in batch if r["id"] not in seen]
+        seen.update(r["id"] for r in new)
+        rows += new
+        oldest = batch[-1]["timestamp"] if batch else None
+        if len(batch) < 100 or not new or datetime.fromisoformat(oldest) <= start:
+            break
+        end = oldest
+    with open("/tmp/api-errors.jsonl", "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    top = Counter(r["message"][:120] for r in rows).most_common(10)
+    return {"fetched": len(rows), "oldest": rows[-1]["timestamp"] if rows else None, "top": top}
+```
+
+If the loop stops at its page cap, `oldest` shows how far back the records go. Say so instead of presenting the result as the whole window.
+
+The same approach works for the other time-ordered reads, with these differences:
+
+- `list_events` is always newest first. Use each event's `timestamp` as the next `end`.
+- `search_spans` allows only 5 calls per minute. Use each span's `start` as the next `end`, and keep the loop to two or three pages. Spans have no `id`, so dedupe on `(trace_id, span_id)`. For more than a few hundred spans, use APM metrics with `query_metrics` instead.
+- The other list functions (`search_monitors`, `list_dashboards`, `list_catalog_entities`, `list_teams`) are not time-ordered and can't be paged. Narrow them with `query` (and `kind` for the catalog).
 
 ## Functions
 
@@ -225,6 +310,34 @@ Returns log records:
 ```
 
 `message` is at most 2,000 characters and `tags` at most 50. `attributes` has at most 30 top-level keys; strings are cut at 200 characters, and nested objects or lists show as `"…"`. To read a nested attribute, put it in the query (`@context.status:ERROR`) rather than expecting it in the output.
+
+### `datadog.aggregate_logs(query, group_by=None, start="1h", end=None, aggregation="count", metric=None, interval=None, order="desc")`
+
+Aggregates matching logs on the server and returns buckets, not log records:
+
+```json
+{
+  "from": "2026-10-01T10:00:00Z",
+  "to": "2026-10-01T10:10:00Z",
+  "group_by": ["@network.client.ip", "@http.useragent"],
+  "bucket_count": 2,
+  "buckets": [
+    {"by": {"@network.client.ip": "203.0.113.7", "@http.useragent": "PowerShell/7.4"}, "value": 412},
+    {"by": {"@network.client.ip": "198.51.100.2", "@http.useragent": "Mozilla/5.0 ..."}, "value": 38}
+  ],
+  "partial": false,
+  "warnings": []
+}
+```
+
+- `group_by`: up to four levels. Each level is a facet name (`"service"`, `"@http.useragent"`) or a dict `{"facet": ..., "limit": ..., "missing": ...}`. The default `limit` is 100 for the first level and 10 for later ones. The product of the limits must be at most 10,000. Each level keeps its top values by the aggregation, so `["@network.client.ip", "@http.useragent"]` means the top 100 IPs, then the top 10 user agents for each IP. Logs without a facet are left out unless you set `missing` to a placeholder such as `"none"`. With no `group_by`, one bucket holds the total for the whole query.
+- You can only group by facets. A query can filter on an attribute that has no facet, but grouping by it fails or returns nothing. If a grouped call returns no buckets while the same query has matches in `search`, check that the attribute is a facet.
+- `aggregation`: `count` (default), `cardinality`, `sum`, `min`, `max`, `pc75`, `pc90`, `pc95`, `pc98` or `pc99`. Every aggregation except `count` needs `metric`, which is the facet or measure to aggregate (`@duration`, `@network.client.ip` for `cardinality`).
+- `interval` (`30s`, `10m`, `1h`): returns a timeseries per bucket. Each bucket then has `points`, a list of `[time, value]` pairs, instead of `value`. Without it, each bucket has a single `value` for the whole window.
+- `order`: `desc` (default) keeps the largest values at each level; `asc` keeps the smallest.
+- `partial` is true when Datadog timed out and returned partial results, and `warnings` holds Datadog's warning titles. Treat partial results as a lower bound, and retry with a shorter window.
+- A request that would exceed the bucket cap is rejected before any call is made. The tool follows Datadog's cursor for up to five pages.
+- Counts are of log records. If one record bundles several lines, such as an access log that ships several requests in one event, the count undercounts requests.
 
 ### `datadog.search_spans(query, start="1h", end=None, limit=20, sort="newest")`
 

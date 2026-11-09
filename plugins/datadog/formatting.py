@@ -122,6 +122,21 @@ def log(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def aggregate_bucket(item: dict[str, Any]) -> dict[str, Any]:
+    """One aggregate bucket: its group values plus ``value`` (total) or ``points`` (timeseries)."""
+    by = item.get("by") if isinstance(item.get("by"), dict) else {}
+    computes = item.get("computes") if isinstance(item.get("computes"), dict) else {}
+    result = computes.get("c0")
+    bucket: dict[str, Any] = {"by": {str(key): value for key, value in by.items()}}
+    if isinstance(result, list):
+        bucket["points"] = [
+            [point.get("time"), point.get("value")] for point in result if isinstance(point, dict)
+        ]
+    else:
+        bucket["value"] = result
+    return bucket
+
+
 def span(item: dict[str, Any]) -> dict[str, Any]:
     attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
     custom = attrs.get("custom") if isinstance(attrs.get("custom"), dict) else {}

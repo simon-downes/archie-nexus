@@ -342,6 +342,7 @@ async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
 
 
 PUBLIC = {
+    "aggregate_logs",
     "create_monitor",
     "describe_metric",
     "get_dashboard",
@@ -416,6 +417,7 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
             sys.modules[f"archie_plugins.datadog.{module}"], "datadog_client", factory
         )
     calls = {
+        "aggregate_logs": ("*", ["service", "@http.useragent"]),
         "query_metrics": ("avg:x{*}",),
         "search_metrics": ("x",),
         "describe_metric": ("x",),
