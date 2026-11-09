@@ -222,7 +222,7 @@ record.
   tests/test_kiro_mcp.py -q` passes, then the full suite has no new failures.
 - **Outcome:** text/dismiss results, validation, single-pending, stale/out-of-range answers, interrupt clean-up, `working` at turn start, `/status`, Kiro `status_event`/`answer_question`, root-only assertions in `test_task_tool.py` and `test_kiro_mcp.py`. Targeted: 47 passed. Full suite 4736 passed; `ruff check .` passed.
 
-### [ ] M3 — TUI question panel
+### [x] M3 — TUI question panel
 
 - **Approach:** new `QuestionPanel` above the status bar; the `SessionStatus` handler shows and
   hides it and sets `_turn_active` per D14; the input stays enabled while the panel is shown;
@@ -232,7 +232,7 @@ record.
   `tests/test_tui_question.py`.
 - **Deliverable:** the D1 behaviour in the TUI.
 - **Verify:** `scripts/dev test tests/test_tui_question.py tests/test_tui_canonical.py -q` passes.
-- **Outcome:**
+- **Outcome:** `tui/question.py` `QuestionPanel`; `MessageInput.choice_handler`; `ArchieApp._apply_session_state` (panel, D14 turn state, idle ends a missed turn), `_send_answer` (hide after send, retry after failure), Esc dismiss-then-interrupt. `tests/test_tui_question.py` 9 passed; full suite 4745 passed.
 
 ### [ ] M4 — Row summaries, prompt and docs
 
