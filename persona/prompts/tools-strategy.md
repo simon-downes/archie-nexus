@@ -59,6 +59,9 @@ path safety: use `read` for `cat`/`head`/`tail`, `grep` for `grep`/`rg`,
 `code` or `glob` for `find`/`ls`, and `edit` or `write` for `sed` or
 redirection.
 
+Write commit messages as conventional commits
+(`<type>(<scope>): <description>`).
+
 ### Large or unknown JSON
 
 Don't dump a large JSON response to find its fields, and don't guess field
