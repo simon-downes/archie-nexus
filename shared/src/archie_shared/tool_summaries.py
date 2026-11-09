@@ -196,6 +196,9 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             count = len(tasks) if isinstance(tasks, list) else 0
             return f"Task · {count} agent{'s' if count != 1 else ''}"
 
+        case "question":
+            return f"Question {_hi(str(input_dict.get('question', '')))}"
+
         case "skill":
             skill_name = input_dict.get("name", "")
             file = input_dict.get("file")
@@ -205,6 +208,24 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
 
         case _:
             return _esc(name, tag_follows=False)
+
+
+# Result prefixes written by the agent's ``question`` tool (archie_agent.question).
+_QUESTION_SELECTED = "User selected option "
+_QUESTION_ANSWERED = "User answered: "
+_QUESTION_DISMISSED = "User dismissed the question"
+
+
+def _question_answer(result: str) -> str:
+    """The user's answer from a ``question`` tool result, as Rich markup."""
+    if result.startswith(_QUESTION_SELECTED):
+        _, _, label = result.partition(": ")
+        return f"→ {_hi(label)}"
+    if result.startswith(_QUESTION_ANSWERED):
+        return f"→ {_hi(result.removeprefix(_QUESTION_ANSWERED))}"
+    if result.startswith(_QUESTION_DISMISSED):
+        return _dim("(dismissed)")
+    return _dim(f"({len(result)} chars)")
 
 
 def format_tool_activity(name: str, input_dict: dict) -> str:
@@ -392,6 +413,9 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
             tasks = input_dict.get("tasks", [])
             count = len(tasks) if isinstance(tasks, list) else 0
             return f"Task · {count} agent{'s' if count != 1 else ''}"
+
+        case "question":
+            return f"Question {_hi(str(input_dict.get('question', '')))} {_question_answer(result)}"
 
         case "skill":
             skill_name = input_dict.get("name", "")

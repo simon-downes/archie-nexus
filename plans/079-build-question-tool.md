@@ -1,6 +1,6 @@
 # 079 — Question tool and session state
 
-Status: building
+Status: reviewing
 Branch: build-it/079-question-tool (base: main @ f7d3144)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/079-question-tool
 
@@ -234,7 +234,7 @@ record.
 - **Verify:** `scripts/dev test tests/test_tui_question.py tests/test_tui_canonical.py -q` passes.
 - **Outcome:** `tui/question.py` `QuestionPanel`; `MessageInput.choice_handler`; `ArchieApp._apply_session_state` (panel, D14 turn state, idle ends a missed turn), `_send_answer` (hide after send, retry after failure), Esc dismiss-then-interrupt. `tests/test_tui_question.py` 9 passed; full suite 4745 passed.
 
-### [ ] M4 — Row summaries, prompt and docs
+### [x] M4 — Row summaries, prompt and docs
 
 - **Approach:** D13 summary cases; D2 identity text; docs per Code structure.
 - **Test seam:** `format_tool_pending`/`format_tool_complete` in `tests/test_tool_summaries.py`;
@@ -242,7 +242,7 @@ record.
 - **Deliverable:** finished rows read as question → answer; the agent is told to use the tool.
 - **Verify:** `scripts/dev test tests/test_tool_summaries.py tests/test_prompt.py -q` passes,
   and `scripts/dev ruff check .` passes.
-- **Outcome:**
+- **Outcome:** `question` pending/complete summaries (`→ <answer>`, `(dismissed)`); identity rule; `event-spec.md`, `session-protocol-walkthrough.md`, `architecture.md` (also corrected its stale protocol version), `kiro.md`, `plugins.md`. Targeted 55 passed; full suite 4749 passed; `ruff check .` passed; `ruff format --check .` only the baseline file.
 
 ## Deviations
 

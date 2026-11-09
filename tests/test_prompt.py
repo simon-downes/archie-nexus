@@ -21,6 +21,7 @@ def test_identity_section_content():
     assert identity.startswith("You are Archie")
     assert "Investigate before answering" in identity
     assert "Progress updates" not in identity
+    assert "When you have the\n  `question` tool, use it for each question" in identity
 
 
 def test_soul_omitted_when_absent(monkeypatch, tmp_path):

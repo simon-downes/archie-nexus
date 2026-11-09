@@ -54,7 +54,7 @@ turn with `turn_error`.
 - **Prompt:** Archie's identity, soul, environment, tools and brain sections, plus
   `persona/prompts/kiro.md`. Kiro injects `AGENTS.md` and lists skills itself, so the Archie
   prompt leaves out `<agents.md>`, the skills catalog and the `task` guidance.
-- **Tools:** Archie's `exec` and native tools (not `skill` or `task`) come from the in-process
+- **Tools:** Archie's `exec` and native tools (not `skill`, `task` or `question`) come from the in-process
   MCP server (`kiro/mcp_server.py`) with their usual schemas, live tool policy and plugin
   runner context. Kiro defers MCP tools: the model loads them with `tool_load` and calls them
   as `archie::<name>`. Results are capped at 29,000 characters, because Kiro replaces
