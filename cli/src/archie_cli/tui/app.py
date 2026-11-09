@@ -797,13 +797,26 @@ class ArchieApp(App):
     # --- Actions ---
 
     def action_copy_block(self) -> None:
-        """Copy the currently focused message block to clipboard."""
+        """Copy the current text selection, or the focused message block."""
+        selected = self.screen.get_selected_text()
+        if selected is not None:
+            self.copy_to_clipboard(selected)
+            self.notify("Copied to clipboard")
+            return
+
         focused = self.focused
-        if focused is not None and hasattr(focused, "get_copy_text"):
-            text = focused.get_copy_text()
+        if focused is None:
+            return
+
+        for widget in focused.ancestors_with_self:
+            get_copy_text = getattr(widget, "get_copy_text", None)
+            if get_copy_text is None:
+                continue
+            text = get_copy_text()
             if text:
                 self.copy_to_clipboard(text)
                 self.notify("Copied to clipboard")
+                return
 
     def action_cancel(self) -> None:
         """Esc — signal the agent to interrupt, or kill running shell command.
