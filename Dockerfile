@@ -304,8 +304,8 @@ RUN set -eux; \
     unzip -q "${KIRO_TMP}/${KIRO_FILENAME}" -d "${KIRO_TMP}/extract"; \
     chmod +x "${KIRO_TMP}/extract/kirocli/install.sh"; \
     rm -f "/home/${USERNAME}/.local/bin/kiro-cli" "/home/${USERNAME}/.local/bin/kiro-cli-chat"; \
-    KIRO_CLI_SKIP_SETUP=1 "${KIRO_TMP}/extract/kirocli/install.sh"; \
-    chmod +x "/home/${USERNAME}/.local/bin/kiro-cli" "/home/${USERNAME}/.local/bin/kiro-cli-chat"; \
+    KIRO_CLI_SKIP_SETUP=1 KIRO_CLI_NO_MODIFY_PATH=1 "${KIRO_TMP}/extract/kirocli/install.sh"; \
+    chmod +x "/home/${USERNAME}/.local/bin/kiro-cli"; \
     chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.kiro" "/home/${USERNAME}/.local"
 
 # kiro-cli installs to ~/.local/bin; ensure it's on PATH for non-login exec
