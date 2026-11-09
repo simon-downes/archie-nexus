@@ -106,6 +106,72 @@ def test_accumulate_ledger_deduplicates_by_id():
     assert app._cumulative_input == 100
 
 
+def test_format_cost_adds_credits_only_when_reported():
+    from archie_cli.tui.conversation import format_cost
+
+    assert format_cost(0.0753) == "$0.0753"
+    assert format_cost(0.0753, 3.764829) == "$0.0753 · 3.76 credits"
+    assert format_cost(0.0, 0.0) == "$0.0000 · 0.00 credits"
+
+
+def test_accumulate_ledger_sums_kiro_credits_into_status_label():
+    import msgspec
+
+    app = _make_app()
+    status = MagicMock()
+    first = msgspec.structs.replace(_llm_request("k1", 0.0097), credits=0.4828)
+    second = msgspec.structs.replace(_llm_request("k2", 0.0753), credits=3.764829)
+    with patch.object(app, "query_one", return_value=status):
+        app._accumulate_ledger(first)
+        app._accumulate_ledger(second)
+        app._accumulate_ledger(second)  # duplicate id is not counted twice
+
+    assert app._cumulative_credits == pytest.approx(4.247629)
+    assert status.pricing_label == "$0.0850 · 4.25 credits"
+
+
+def test_accumulate_ledger_native_requests_show_no_credits():
+    app = _make_app()
+    status = MagicMock()
+    with patch.object(app, "query_one", return_value=status):
+        app._accumulate_ledger(_llm_request("e1", 0.10))
+
+    assert app._cumulative_credits is None
+    assert status.pricing_label == "$0.1000"
+
+
+@pytest.mark.parametrize(
+    ("credits", "expected"),
+    [(3.764829, pytest.approx(3.764829)), (None, None)],
+    ids=["kiro", "native"],
+)
+def test_turn_status_receives_turn_credits(credits, expected):
+    import msgspec
+
+    app = _make_app()
+    conv = MagicMock()
+    request = _llm_request("r1", 0.0753)
+    if credits is not None:
+        request = msgspec.structs.replace(request, credits=credits)
+    with (
+        patch.object(app, "query_one", return_value=conv),
+        patch.object(app, "_remove_throbber"),
+        patch.object(app, "_show_throbber"),
+    ):
+        app._apply_event(_user())
+        app._apply_event(request)
+        app._apply_event(_root_turn_complete("end_turn"))
+
+    conv.add_turn_status.assert_called_once()
+    args = conv.add_turn_status.call_args.args
+    assert args[5] == pytest.approx(0.0753)
+    assert args[6] == expected
+
+    with patch.object(app, "query_one", return_value=conv), patch.object(app, "_show_throbber"):
+        app._apply_event(_user("next", event_id="u2"))
+    assert app._turn_credits is None
+
+
 def test_accumulate_ledger_resets_streaming_output_estimate():
     app = _make_app()
     app._estimated_output = 25

@@ -46,6 +46,7 @@ class TurnStatus(Static):
         cache_write: int,
         output_tokens: int,
         cost: float,
+        credits: float | None = None,
     ) -> None:
         super().__init__()
         self._duration_s = duration_s
@@ -54,6 +55,7 @@ class TurnStatus(Static):
         self._cache_write = cache_write
         self._output_tokens = output_tokens
         self._cost = cost
+        self._credits = credits
 
     def compose(self) -> ComposeResult:
         duration = f"{self._duration_s:.0f}s"
@@ -61,11 +63,20 @@ class TurnStatus(Static):
             _fmt_tokens(n) for n in (self._input_tokens, self._cache_read, self._cache_write)
         )
         output_tokens = _fmt_tokens(self._output_tokens)
+        cost = format_cost(self._cost, self._credits)
         yield Static(
             Text.from_markup(
-                f"[{theme.MUTED}]▸ Time: {duration} | In: {input_tokens}  Out: {output_tokens} │ ${self._cost:.4f}[/]"
+                f"[{theme.MUTED}]▸ Time: {duration} | In: {input_tokens}  Out: {output_tokens} │ {cost}[/]"
             )
         )
+
+
+def format_cost(cost_usd: float, credits: float | None = None) -> str:
+    """Format a USD cost, followed by Kiro credits when the requests reported them."""
+    label = f"${cost_usd:.4f}"
+    if credits is not None:
+        label += f" · {credits:.2f} credits"
+    return label
 
 
 def _fmt_tokens(value: int) -> str:

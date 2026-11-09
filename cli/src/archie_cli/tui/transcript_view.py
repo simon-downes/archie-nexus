@@ -770,11 +770,12 @@ class Conversation(TranscriptView):
         cache_write: int,
         output_tokens: int,
         cost: float,
+        credits: float | None = None,
     ) -> None:
         """Add a client-only summary for a completed turn."""
         self.add_local(
             lambda: TurnStatus(
-                duration_s, input_tokens, cache_read, cache_write, output_tokens, cost
+                duration_s, input_tokens, cache_read, cache_write, output_tokens, cost, credits
             )
         )
 

@@ -32,6 +32,7 @@ from textual.binding import Binding
 from textual.widgets import Footer
 
 from archie_cli.tui import theme
+from archie_cli.tui.conversation import format_cost
 from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
@@ -106,12 +107,15 @@ class ArchieApp(App):
         self._latest_context_tokens: int = 0
         self._latest_context_pct: float = 0.0
         self._cumulative_cost: float = 0.0
+        # Kiro credits; None until a Kiro request reports them.
+        self._cumulative_credits: float | None = None
         self._turn_started_at: float | None = None
         self._turn_input = 0
         self._turn_cache_read = 0
         self._turn_cache_write = 0
         self._turn_output = 0
         self._turn_cost = 0.0
+        self._turn_credits: float | None = None
         self._turn_duration_s = 0.0
 
         # Live output estimation (chars/4, reconciled on LLMRequest)
@@ -243,6 +247,7 @@ class ArchieApp(App):
         self._latest_context_tokens = 0
         self._latest_context_pct = 0.0
         self._cumulative_cost = 0.0
+        self._cumulative_credits = None
         self._estimated_output = 0
         self._reset_turn_metrics()
         self._turn_active = False
@@ -361,6 +366,7 @@ class ArchieApp(App):
             self._turn_cache_write += event.cache_write_tokens
             self._turn_output += event.output_tokens
             self._turn_cost += event.cost_usd
+            self._turn_credits = _add_credits(self._turn_credits, event)
             self._turn_duration_s += event.duration_ms / 1000
         elif isinstance(event, (ce.TurnError, ce.TurnInterrupted)):
             self._end_turn()
@@ -428,6 +434,7 @@ class ArchieApp(App):
                 event.context_tokens, event.model_key
             )
         self._cumulative_cost += event.cost_usd
+        self._cumulative_credits = _add_credits(self._cumulative_credits, event)
         self._update_accounting_status()
 
     def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
@@ -446,7 +453,7 @@ class ArchieApp(App):
         status.cache_write = self._cumulative_cache_write
         status.context_tokens = self._latest_context_tokens
         status.context_pct = self._latest_context_pct
-        status.pricing_label = f"${self._cumulative_cost:.4f}"
+        status.pricing_label = format_cost(self._cumulative_cost, self._cumulative_credits)
 
     async def _receive_loop(self) -> None:
         """Consume events from the WebSocket and dispatch to widget updates.
@@ -640,6 +647,7 @@ class ArchieApp(App):
         self._turn_cache_write = 0
         self._turn_output = 0
         self._turn_cost = 0.0
+        self._turn_credits = None
         self._turn_duration_s = 0.0
         # Show throbber while waiting
         self._show_throbber()
@@ -719,6 +727,7 @@ class ArchieApp(App):
         self._turn_cache_write = 0
         self._turn_output = 0
         self._turn_cost = 0.0
+        self._turn_credits = None
         self._turn_duration_s = 0.0
 
     def _show_turn_status(self) -> None:
@@ -730,6 +739,7 @@ class ArchieApp(App):
                 self._turn_cache_write,
                 self._turn_output,
                 self._turn_cost,
+                self._turn_credits,
             )
         ):
             return
@@ -746,6 +756,7 @@ class ArchieApp(App):
             self._turn_cache_write,
             self._turn_output,
             self._turn_cost,
+            self._turn_credits,
         )
         self._turn_started_at = None
 
@@ -919,3 +930,11 @@ class ArchieApp(App):
             self.notify("Cannot switch model during active turn", severity="warning")
             return
         asyncio.create_task(self._ws.send_command(SwitchModelCommand(model_key=model_key)))
+
+
+def _add_credits(total: float | None, event: LLMRequest) -> float | None:
+    """Add a request's Kiro credits to ``total``; native requests leave it unchanged."""
+    credits = event.credits
+    if not isinstance(credits, int | float):  # msgspec.UNSET on native requests
+        return total
+    return (total or 0.0) + credits

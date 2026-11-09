@@ -84,7 +84,8 @@ streams text that follows a tool call. Kiro reports credits, not tokens, so each
 `llm_request`. Its `credits` field holds the turn's credits, and `cost_usd` prices them per
 `kiro.credits`. Its tokens are 0, and its `duration_ms` is Kiro's `elapsedTime`. Aborted
 turns are still charged. The period's credits so far come from the session logs when the
-harness starts.
+harness starts. The TUI shows each turn's credits after its cost in the turn summary, and the
+session's total after the cost in the status bar.
 
 ## Session control
 
