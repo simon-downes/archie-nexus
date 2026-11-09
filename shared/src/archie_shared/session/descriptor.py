@@ -11,6 +11,8 @@ SDK is introduced.
 
 import msgspec
 
+from archie_shared.events import PendingQuestion
+
 
 class SessionDescriptor(msgspec.Struct):
     """A running archie session (typed replacement for untyped docker ps dict).
@@ -39,3 +41,5 @@ class StatusPayload(msgspec.Struct):
     session_id: str | None = None
     turn_count: int | None = None
     turn_active: bool | None = None
+    state: str | None = None
+    question: PendingQuestion | None = None

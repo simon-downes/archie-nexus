@@ -192,7 +192,7 @@ record.
 
 ## Milestones
 
-### [ ] M1 — Agent answers a question by option over the WebSocket
+### [x] M1 — Agent answers a question by option over the WebSocket
 
 - **Approach:** shared `QuestionOption`/`PendingQuestion`, `SessionStatus.state`/`question`,
   `AnswerCommand` (option only at this point is not enough for decode tests, so add all three
@@ -204,7 +204,7 @@ record.
 - **Deliverable:** a WebSocket client sees `blocked` with the question, answers by option, and
   the turn completes with `User selected option N: <label>`.
 - **Verify:** `scripts/dev test tests/test_question_tool.py -q` passes.
-- **Outcome:**
+- **Outcome:** `question.py` (broker, tool), `AnswerCommand`, `SessionStatus.state`/`question`, protocol 4, `status_event()` in both harnesses at all six sites, `answer` routing, `/status` fields. `scripts/dev test tests/test_question_tool.py` 2 passed; full suite 4708 passed (one test updated for protocol 4).
 
 ### [ ] M2 — Text, dismissal, failure paths and `/status`
 

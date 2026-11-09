@@ -55,6 +55,7 @@ from archie_agent.loop_events import (
     Usage,
 )
 from archie_agent.prompt import SystemPrompt, build_system_prompt_structured, read_agents_context
+from archie_agent.question import Answer, QuestionBroker, QuestionError, create_question_tool
 from archie_agent.session import DisplayEntry, Session, Turn
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import BODY_KEY, create_skill_tool, discover_skills
@@ -196,6 +197,9 @@ class AgentHarness:
                 live_children=self._children,
             )
         )
+        # Root-only: children and Kiro build their own registries without it.
+        self._questions = QuestionBroker(on_change=self._emit_status)
+        self._registry.register(create_question_tool(self._questions))
         self._tool_config = self._registry.to_tool_config()
 
         # Active runner subprocess for cancellation
@@ -280,6 +284,48 @@ class AgentHarness:
     def turn_active(self) -> bool:
         return self._turn_active
 
+    @property
+    def pending_question(self):
+        """The question the root turn is waiting on, or ``None``."""
+        return self._questions.pending
+
+    def status_event(self) -> SessionStatus:
+        """Build the live ``session_status`` frame from current session state."""
+        from archie_agent.app import _read_git_branch
+
+        question = self._questions.pending
+        if question is not None:
+            state = "blocked"
+        elif self._turn_active:
+            state = "working"
+        else:
+            state = "idle"
+        return SessionStatus(
+            id=str(ULID()),
+            model_key=self.session.model_id,
+            git_branch=_read_git_branch(),
+            state=state,
+            question=question,
+        )
+
+    async def _emit_status(self) -> None:
+        """Broadcast the current status; failures are logged, never raised."""
+        try:
+            await self._event_bus.emit(self.status_event())
+        except Exception:  # noqa: BLE001 — status refresh is best effort
+            log.warning("Failed to broadcast session status", exc_info=True)
+
+    def answer_question(self, command) -> ErrorNotice | None:
+        """Route an ``answer`` command; return a targeted notice when it doesn't fit."""
+        try:
+            self._questions.answer(
+                command.question_id,
+                Answer(option=command.option, text=command.text, dismiss=command.dismiss),
+            )
+        except QuestionError as exc:
+            return ErrorNotice(id=str(ULID()), kind=exc.kind, message=str(exc))
+        return None
+
     def try_begin_turn(self) -> bool:
         """Atomically admit one root turn on the event-loop thread."""
         if self._turn_active:
@@ -315,18 +361,7 @@ class AgentHarness:
                 self._fallback_attempted = True
                 await self._publish_fallback_terminal("Turn ended without a terminal event")
             self._turn_active = False
-            from archie_agent.app import _read_git_branch
-
-            try:
-                await self._event_bus.emit(
-                    SessionStatus(
-                        id=str(ULID()),
-                        model_key=self.session.model_id,
-                        git_branch=_read_git_branch(),
-                    )
-                )
-            except Exception:  # noqa: BLE001 — status refresh is best effort
-                log.warning("Failed to broadcast final turn status", exc_info=True)
+            await self._emit_status()
 
     def _output_reserve(self) -> int:
         return min(self.session.model.max_output_tokens, 16_384)
@@ -529,6 +564,7 @@ class AgentHarness:
         self._interrupt.clear()
         self._loop = asyncio.get_running_loop()
         self._interrupt_async = asyncio.Event()
+        await self._emit_status()
         try:
             if not self.session.turns:
                 await self._event_bus.emit(
@@ -557,18 +593,7 @@ class AgentHarness:
             )
         finally:
             self._turn_active = False
-            try:
-                from archie_agent.app import _read_git_branch
-
-                await self._event_bus.emit(
-                    SessionStatus(
-                        id=str(ULID()),
-                        model_key=self.session.model_id,
-                        git_branch=_read_git_branch(),
-                    )
-                )
-            except Exception:  # noqa: BLE001 — status refresh is best effort
-                log.warning("Failed to broadcast final compaction status", exc_info=True)
+            await self._emit_status()
 
     async def _broadcast_storage_error(self, message: str) -> None:
         """Best-effort live notice when durable append fails."""
@@ -636,6 +661,7 @@ class AgentHarness:
                 content=content,
             )
         )
+        await self._emit_status()
 
         # Add user message to in-memory transcript
         merged = self.session.add_turn(role="user", content=content, turn_index=turn_index)
@@ -947,6 +973,11 @@ class AgentHarness:
                 kwargs["_parent_turn"] = self._current_turn_index
                 result = await spec.handler(**kwargs)
                 content = str(result)
+                is_error = content.startswith("Error:")
+            elif block.name == "question":
+                kwargs = dict(block.input)
+                kwargs["_tool_use_id"] = block.tool_use_id
+                content = str(await spec.handler(**kwargs))
                 is_error = content.startswith("Error:")
             elif block.name == "exec":
                 # exec tool: run via subprocess with on_start for cancellation

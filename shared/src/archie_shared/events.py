@@ -219,10 +219,40 @@ class Handshake(Event, tag="handshake", tag_field="type", forbid_unknown_fields=
     session_id: str
 
 
+class QuestionOption(msgspec.Struct, forbid_unknown_fields=True):
+    """One choice offered by a pending question."""
+
+    label: str
+    description: str = ""
+
+
+class PendingQuestion(msgspec.Struct, forbid_unknown_fields=True):
+    """The question a root ``question`` tool call is waiting on (live state only).
+
+    ``id`` is the tool call's ``tool_use_id``; ``recommended`` is a 0-based option index.
+    """
+
+    id: str
+    question: str
+    options: list[QuestionOption]
+    recommended: int | None = None
+
+
+type SessionState = Literal["idle", "working", "blocked", "done", "error"]
+
+
 class SessionStatus(Event, tag="session_status", tag_field="type", forbid_unknown_fields=True):
+    """Live session status.
+
+    ``state`` follows the OSC 7501 vocabulary. ``blocked`` currently always means a pending
+    question, carried in ``question``.
+    """
+
     id: str
     model_key: str
     git_branch: str
+    state: SessionState = "idle"
+    question: PendingQuestion | None = None
 
 
 class ErrorNotice(Event, tag="error_notice", tag_field="type", forbid_unknown_fields=True):
