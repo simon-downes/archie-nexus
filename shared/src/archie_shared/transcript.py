@@ -46,6 +46,8 @@ from archie_shared.events import (
     TurnInterrupted,
     UserMessage,
 )
+from archie_shared.markup import escape as _esc
+from archie_shared.markup import plain_text
 from archie_shared.session.accounting import UsageTotals
 from archie_shared.tool_summaries import format_tool_activity, format_tool_complete
 
@@ -245,10 +247,6 @@ class Change:
 # ---------------------------------------------------------------------------
 
 
-def _esc(text: str) -> str:
-    return text.replace("[", r"\[").replace("]", r"\]")
-
-
 def _first_line(text: str) -> str:
     return text.split("\n", 1)[0] if text else ""
 
@@ -291,14 +289,6 @@ def tool_headline(tool: ToolNode) -> str:
             tool_input = {**tool_input, "command": _first_line(tool_input["command"])}
         return format_tool_activity(tool.name, tool_input)
     return _first_line(_completed_summary(tool))
-
-
-_MARKUP_TAG = re.compile(r"(?<!\\)\[/?[^\]\[]*\]")
-
-
-def plain_text(markup: str) -> str:
-    """Strip Rich markup tags and unescape brackets."""
-    return _MARKUP_TAG.sub("", markup).replace(r"\[", "[").replace(r"\]", "]")
 
 
 def tool_crumb(tool: ToolNode, limit: int = 48) -> str:

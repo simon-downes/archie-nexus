@@ -311,6 +311,11 @@ def _header_text(entry) -> str:
     return str(entry.query_one(".tool-header", Static).render())
 
 
+def _span_styles(static) -> str:
+    """Lower-cased styles of a Static's Text content, joined for substring checks."""
+    return " ".join(str(span.style) for span in static.content.spans).lower()
+
+
 async def test_cold_cache_compaction_renders_pending_then_success():
     host = _ConversationHost()
     headers, _ = await host.run([_compaction_start(), _compaction_complete()])
@@ -378,13 +383,13 @@ async def test_compaction_status_colours_match_tool_entries():
             host.app._apply_event(events[0])
             await pilot.pause()
             pending = conv.query(CompactionEntry).first().query_one(".tool-header", Static)
-            assert theme.PRIMARY.lower() in str(pending.content).lower()
+            assert theme.PRIMARY.lower() in _span_styles(pending)
             for event in events[1:]:
                 host.app._apply_event(event)
             await pilot.pause()
             ok, bad = [e.query_one(".tool-header", Static) for e in conv.query(CompactionEntry)]
-            assert theme.SUCCESS.lower() in str(ok.content).lower()
-            assert theme.ERROR.lower() in str(bad.content).lower()
+            assert theme.SUCCESS.lower() in _span_styles(ok)
+            assert theme.ERROR.lower() in _span_styles(bad)
             assert str(bad.render()).endswith("Failed: Compaction interrupted")
 
 

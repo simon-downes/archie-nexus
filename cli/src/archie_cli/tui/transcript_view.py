@@ -31,6 +31,7 @@ from archie_shared.transcript import (
     tool_headline,
     tool_preview,
 )
+from rich.style import Style
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.message import Message
@@ -57,10 +58,20 @@ from archie_cli.tui.conversation import (
 
 
 def _markup(text: str) -> Text:
+    """Rich markup to ``Text``, or the plain text when the markup can't render.
+
+    ``Text.from_markup`` accepts any tag name and only fails when Textual renders the
+    span, which crashes the app. Every span style is parsed here instead, so text that
+    isn't really markup (a raw error, a stray ``[name]``) falls back to plain text.
+    """
     try:
-        return Text.from_markup(text)
+        rendered = Text.from_markup(text)
+        for span in rendered.spans:
+            if isinstance(span.style, str):
+                Style.parse(span.style)
     except Exception:  # noqa: BLE001 — summaries may contain stray brackets
         return Text(plain_text(text))
+    return rendered
 
 
 def _status_glyph(status: str) -> Text:

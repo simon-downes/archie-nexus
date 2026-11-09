@@ -63,13 +63,21 @@ def _block(html: str, element_id: str) -> str:
 def test_markup_to_html_maps_styles_and_escapes():
     html = str(
         markup_to_html(
-            r"Shell [bold]ls \[a\] <b>[/] — [#ff6d67]\[exit: 1][/] [dim italic](2 lines)[/]"
+            r"Shell [bold]ls \[a] <b>[/] — [#ff6d67]\[exit: 1][/] [dim italic](2 lines)[/]"
         )
     )
     assert '<span class="b">ls [a] &lt;b&gt;</span>' in html
     assert '<span class="err">[exit: 1]</span>' in html
     assert '<span class="dim i">(2 lines)</span>' in html
     assert "<b>" not in html
+
+
+def test_markup_to_html_shows_backslash_brackets_like_rich():
+    """Regression: `\\[slug\\]` in a shell command (tool_summaries escapes it as Rich does)."""
+    from archie_shared.tool_summaries import format_tool_pending
+
+    markup = format_tool_pending("shell", {"command": r"ls a/\[slug\]/b"})
+    assert str(markup_to_html(markup)) == r'Shell <span class="b">ls a/\[slug\]/b</span>'
 
 
 def test_markup_to_html_default_and_unknown_styles():

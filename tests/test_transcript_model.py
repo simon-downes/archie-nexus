@@ -298,7 +298,7 @@ def test_exec_headline_shows_metrics_or_error():
     tool.result, tool.status, tool.duration_ms, tool.result_lines = "ok", "ok", 1500, 3
     assert tool_headline(tool) == "[bold]Exec[/] [dim]1.5s · 3 lines[/]"
     tool.status, tool.result = "error", "Traceback [x]\nmore"
-    assert "Traceback \\[x\\]" in tool_headline(tool)
+    assert "Traceback \\[x]" in tool_headline(tool)
 
 
 def test_detail_sections_choose_languages():

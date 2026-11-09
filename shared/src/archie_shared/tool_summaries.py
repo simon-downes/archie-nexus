@@ -9,13 +9,10 @@ Shared so any presentation surface (TUI, web UI, session viewer) can derive
 summaries from canonical event data. The client renders the markup directly.
 """
 
+from archie_shared.markup import escape as _esc
+
 ERROR = "#ff6d67"
 SUCCESS = "#67c26d"
-
-
-def _esc(text: str) -> str:
-    """Escape Rich markup characters in arbitrary text."""
-    return text.replace("[", r"\[").replace("]", r"\]")
 
 
 def _hi(text: str) -> str:
@@ -207,7 +204,7 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             return f"Skill {_hi(skill_name)}"
 
         case _:
-            return _esc(name)
+            return _esc(name, tag_follows=False)
 
 
 def format_tool_activity(name: str, input_dict: dict) -> str:
@@ -409,7 +406,7 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
 
         case _:
             size = len(result)
-            return f"{_esc(name)} {_dim(f'({size} chars)')}"
+            return f"{_esc(name, tag_follows=False)} {_dim(f'({size} chars)')}"
 
 
 def format_tool_complete(

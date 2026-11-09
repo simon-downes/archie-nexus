@@ -11,6 +11,7 @@ import html
 import re
 import sys
 
+from archie_shared.markup import parse
 from archie_shared.transcript import (
     CompactionNode,
     ToolNode,
@@ -99,31 +100,29 @@ _STYLE_CLASSES = {
     "#67c26d": "ok",
     "#676767": "default",
 }
-_MARKUP_TOKEN = re.compile(r"\\\[|\\\]|\[/[^\]]*\]|\[[^\]\[]+\]")
 
 
 def markup_to_html(markup: str) -> Markup:
-    """Convert Rich-style summary markup to escaped HTML spans."""
+    """Convert Rich-style summary markup to escaped HTML spans.
+
+    Parsing follows Rich's own rules (:func:`archie_shared.markup.parse`), so the viewer
+    shows the same text as the TUI. Each styled run becomes one span carrying the classes
+    of every tag open around it.
+    """
     out: list[str] = []
-    depth = 0
-    pos = 0
-    for match in _MARKUP_TOKEN.finditer(markup):
-        out.append(html.escape(markup[pos : match.start()]))
-        token = match.group(0)
-        if token in ("\\[", "\\]"):
-            out.append(token[1])
-        elif token.startswith("[/"):
-            if depth:
-                out.append("</span>")
-                depth -= 1
-        else:
-            styles = token[1:-1].lower().split()
-            classes = [_STYLE_CLASSES[s] for s in styles if s in _STYLE_CLASSES]
-            out.append(f'<span class="{" ".join(classes)}">' if classes else "<span>")
-            depth += 1
-        pos = match.end()
-    out.append(html.escape(markup[pos:]))
-    out.append("</span>" * depth)
+    for text, styles in parse(markup):
+        escaped = html.escape(text)
+        if not styles:
+            out.append(escaped)
+            continue
+        classes: list[str] = []
+        for tag in styles:
+            for style in tag.lower().split():
+                css = _STYLE_CLASSES.get(style)
+                if css and css not in classes:
+                    classes.append(css)
+        attr = f' class="{" ".join(classes)}"' if classes else ""
+        out.append(f"<span{attr}>{escaped}</span>")
     return Markup("".join(out))
 
 

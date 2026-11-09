@@ -21,7 +21,6 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.css.query import NoMatches
-from textual.markup import escape
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
 
@@ -274,7 +273,8 @@ class ErrorMessage(Static):
     can_focus = True
 
     def __init__(self, content: str) -> None:
-        super().__init__(f"[bold {theme.ERROR}]✗ Error[/]\n{escape(content)}")
+        # Text, not markup: error text is arbitrary and must never be parsed.
+        super().__init__(Text.assemble(("✗ Error", f"bold {theme.ERROR}"), "\n", content))
         self._content = content
 
     def get_copy_text(self) -> str:
@@ -347,28 +347,22 @@ class ShellOutput(Widget):
         """Build the shell output with command header and output body."""
         # Header: status bullet, then $ command (exit N) if non-zero.
         status_colour = theme.ERROR if self._exit_code else theme.SUCCESS
-        exit_suffix = f" [dim red](exit {self._exit_code})[/]" if self._exit_code else ""
-        yield Static(
-            f"[bold {status_colour}]●[/] [bold {theme.MUTED}]$[/] "
-            f"[bold]{_esc(self._command)}[/]{exit_suffix}",
-            classes="shell-header",
-            markup=True,
+        header = Text.assemble(
+            ("●", f"bold {status_colour}"),
+            " ",
+            ("$", f"bold {theme.MUTED}"),
+            " ",
+            (self._command, "bold"),
         )
+        if self._exit_code:
+            header.append(f" (exit {self._exit_code})", style="dim red")
+        yield Static(header, classes="shell-header")
         if self._output:
-            yield Static(
-                f"[dim]{_esc(self._output)}[/]",
-                classes="shell-output",
-                markup=True,
-            )
+            yield Static(Text(self._output, style="dim"), classes="shell-output")
 
     def get_copy_text(self) -> str:
         """Return command + output for clipboard."""
         return f"$ {self._command}\n{self._output}"
-
-
-def _esc(text: str) -> str:
-    """Escape Rich markup characters in arbitrary text."""
-    return text.replace("[", r"\[").replace("]", r"\]")
 
 
 class CompactionEntry(Widget):
@@ -389,30 +383,33 @@ class CompactionEntry(Widget):
         super().__init__()
         self._reason = reason
         self._before = before
-        self._markup = f"[bold {theme.PRIMARY}]○[/] Compaction {escape(reason)} ({before} tokens)"
+        # Text, not markup: the reason and error are arbitrary and must never be parsed.
+        self._header = Text.assemble(
+            ("○", f"bold {theme.PRIMARY}"), f" Compaction {reason} ({before} tokens)"
+        )
 
     def compose(self) -> ComposeResult:
-        yield Static(self._markup, classes="tool-header", markup=True)
+        yield Static(self._header, classes="tool-header")
 
     def complete(
         self, after: int | None, display_cost: float, duration_ms: int, error: str | None
     ) -> None:
         """Replace the pending header with the terminal success or failure line.
 
-        The terminal markup is kept on the entry so a header composed after this
+        The terminal header is kept on the entry so a header composed after this
         call (an entry mounted and completed in the same tick) still shows it.
         """
         colour = theme.ERROR if error else theme.SUCCESS
-        reason = escape(self._reason)
+        reason = self._reason
         if error:
-            text = f"Compaction {reason} ({self._before} tokens, {duration_ms}ms) Failed: {escape(error)}"
+            text = f"Compaction {reason} ({self._before} tokens, {duration_ms}ms) Failed: {error}"
         else:
             text = f"Compaction {reason} ({self._before} → {after}, ${display_cost:.2f}, {duration_ms}ms)"
-        self._markup = f"[bold {colour}]●[/] {text}"
+        self._header = Text.assemble(("●", f"bold {colour}"), f" {text}")
         try:
-            self.query_one(".tool-header", Static).update(self._markup)
+            self.query_one(".tool-header", Static).update(self._header)
         except NoMatches:
-            pass  # compose() renders self._markup once mounted
+            pass  # compose() renders self._header once mounted
 
 
 class CompactionMarker(Widget):
