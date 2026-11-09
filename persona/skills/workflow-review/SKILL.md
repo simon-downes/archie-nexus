@@ -113,7 +113,7 @@ Based on how the skill was invoked:
 
 **Standalone / PR review:**
 - User specifies files → use those
-- PR number provided → retrieve PR context with `gh`:
+- PR number provided → retrieve PR context:
   - View PR description, metadata, and author intent
   - View the changeset (diff)
   - View commit messages for intent inference
@@ -175,7 +175,7 @@ axis its own verdict so one never masks the other.
 ## 6. Post-review actions
 
 If the verdict is APPROVE or APPROVE WITH SUGGESTIONS and the work is on a feature branch:
-- Create a pull request with `gh`
+- Create a pull request
 - If the plan came from an issue tracker, include the issue identifier in the PR body
 - The issue should already be in "In Review" (set by workflow-implement) — no status
   change needed. PR merge handles the final transition.
