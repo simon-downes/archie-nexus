@@ -206,7 +206,7 @@ record.
 - **Verify:** `scripts/dev test tests/test_question_tool.py -q` passes.
 - **Outcome:** `question.py` (broker, tool), `AnswerCommand`, `SessionStatus.state`/`question`, protocol 4, `status_event()` in both harnesses at all six sites, `answer` routing, `/status` fields. `scripts/dev test tests/test_question_tool.py` 2 passed; full suite 4708 passed (one test updated for protocol 4).
 
-### [ ] M2 — Text, dismissal, failure paths and `/status`
+### [x] M2 — Text, dismissal, failure paths and `/status`
 
 - **Approach:** text and dismiss results; input validation; single-pending rule; stale id and
   out-of-range answers; interrupt clean-up; `working` at turn and `/compact` start (D9); the
@@ -220,7 +220,7 @@ record.
 - **Deliverable:** every agent-side MUST holds.
 - **Verify:** `scripts/dev test tests/test_question_tool.py tests/test_ws_integration.py
   tests/test_kiro_mcp.py -q` passes, then the full suite has no new failures.
-- **Outcome:**
+- **Outcome:** text/dismiss results, validation, single-pending, stale/out-of-range answers, interrupt clean-up, `working` at turn start, `/status`, Kiro `status_event`/`answer_question`, root-only assertions in `test_task_tool.py` and `test_kiro_mcp.py`. Targeted: 47 passed. Full suite 4736 passed; `ruff check .` passed.
 
 ### [ ] M3 — TUI question panel
 

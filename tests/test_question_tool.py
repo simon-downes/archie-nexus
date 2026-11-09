@@ -1,12 +1,16 @@
 """The root-only ``question`` tool: broker, commands, harness wiring and WebSocket flow."""
 
+import asyncio
 import json
 import os
 from unittest.mock import MagicMock, patch
 
+import msgspec
 import pytest
 from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
-from archie_shared.commands import AnswerCommand, encode_command
+from archie_agent.question import Answer, QuestionBroker, QuestionError, create_question_tool
+from archie_shared.commands import AnswerCommand, decode_command, encode_command
+from archie_shared.events import PendingQuestion, QuestionOption, SessionStatus, decode_event
 from starlette.testclient import TestClient
 
 QUESTION_INPUT = {
@@ -160,3 +164,276 @@ def test_question_is_root_only(mock_env):
                 assert isinstance(harness, AgentHarness)
                 names = [tool["name"] for tool in harness._tool_config]
                 assert "question" in names
+
+
+# --- M2: text, dismissal, validation, failure paths and /status -----------------------
+
+
+def _ask_and_answer(client, command):
+    """Run one question turn, answer it with ``command``, return the tool_result event."""
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "go"}))
+        _receive_until(ws, _blocked)
+        ws.send_text(encode_command(command))
+        events = _receive_until(ws, lambda e: e["type"] == "turn_complete")
+        return next(e for e in events if e["type"] == "tool_result")
+
+
+def test_text_answer(question_client):
+    result = _ask_and_answer(question_client(), AnswerCommand(question_id="tu_q", text="MySQL"))
+    assert result["content"] == "User answered: MySQL"
+    assert result["is_error"] is False
+
+
+def test_dismiss_answer(question_client):
+    result = _ask_and_answer(question_client(), AnswerCommand(question_id="tu_q", dismiss=True))
+    assert result["content"] == (
+        "User dismissed the question without answering. Do not assume an answer."
+    )
+    assert result["is_error"] is False
+
+
+def test_turn_start_emits_working(question_client):
+    client = question_client()
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "go"}))
+        events = _receive_until(ws, lambda e: e["type"] == "session_status")
+        assert [e["type"] for e in events][0] == "user_message"
+        assert events[-1]["state"] == "working"
+        _receive_until(ws, _blocked)
+        ws.send_text(encode_command(AnswerCommand(question_id="tu_q", dismiss=True)))
+        _receive_until(ws, lambda e: e["type"] == "turn_complete")
+
+
+def test_reconnect_and_status_show_pending_question(question_client):
+    client = question_client()
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "go"}))
+        blocked = _receive_until(ws, _blocked)[-1]
+
+        with client.websocket_connect("/stream") as second:
+            second.receive_text()
+            status = json.loads(second.receive_text())
+            assert status["state"] == "blocked"
+            assert status["question"] == blocked["question"]
+
+        data = client.get("/status").json()
+        assert data["state"] == "blocked"
+        assert data["turn_active"] is True
+        assert data["question"] == blocked["question"]
+
+        ws.send_text(encode_command(AnswerCommand(question_id="tu_q", option=0)))
+        _receive_until(ws, lambda e: e["type"] == "turn_complete")
+        _receive_until(ws, lambda e: e["type"] == "session_status" and e["state"] == "idle")
+
+    data = client.get("/status").json()
+    assert data["state"] == "idle"
+    assert data["question"] is None
+
+
+def test_stale_or_out_of_range_answers_are_rejected(question_client):
+    client = question_client()
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "go"}))
+        _receive_until(ws, _blocked)
+
+        ws.send_text(encode_command(AnswerCommand(question_id="other", option=0)))
+        notice = _receive_until(ws, lambda e: e["type"] == "error_notice")[-1]
+        assert notice["kind"] == "question_not_pending"
+
+        ws.send_text(encode_command(AnswerCommand(question_id="tu_q", option=5)))
+        notice = _receive_until(ws, lambda e: e["type"] == "error_notice")[-1]
+        assert notice["kind"] == "invalid_answer"
+
+        assert client.get("/status").json()["state"] == "blocked"
+        ws.send_text(encode_command(AnswerCommand(question_id="tu_q", option=1)))
+        events = _receive_until(ws, lambda e: e["type"] == "turn_complete")
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["content"] == "User selected option 2: Postgres"
+
+
+def test_answer_without_pending_question_is_rejected(question_client):
+    client = question_client()
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(encode_command(AnswerCommand(question_id="tu_q", dismiss=True)))
+        notice = json.loads(ws.receive_text())
+        assert notice["type"] == "error_notice"
+        assert notice["kind"] == "question_not_pending"
+
+
+def test_interrupt_while_waiting_clears_question(question_client):
+    client = question_client()
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "go"}))
+        _receive_until(ws, _blocked)
+        ws.send_text(json.dumps({"type": "interrupt"}))
+        events = _receive_until(ws, lambda e: e["type"] == "turn_interrupted")
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["content"] == "cancelled"
+        assert result["is_error"] is True
+        final = _receive_until(
+            ws, lambda e: e["type"] == "session_status" and e["state"] == "idle"
+        )[-1]
+        assert final.get("question") is None
+
+    assert client.get("/status").json()["question"] is None
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "message"),
+    [
+        ({"question": " ", "options": QUESTION_INPUT["options"]}, "question must be"),
+        ({"question": "Q?", "options": [{"label": "only"}]}, "options must be a list of 2 to 4"),
+        ({"question": "Q?", "options": [{"label": str(i)} for i in range(5)]}, "2 to 4"),
+        ({"question": "Q?", "options": [{"label": "a"}, {"label": ""}]}, "options[1].label"),
+        ({"question": "Q?", "options": [{"label": "a"}, "b"]}, "options[1] must be an object"),
+        (
+            {"question": "Q?", "options": [{"label": "a"}, {"label": "b"}], "recommended": 2},
+            "recommended must be",
+        ),
+        (
+            {"question": "Q?", "options": [{"label": "a"}, {"label": "b"}], "recommended": True},
+            "recommended must be",
+        ),
+    ],
+)
+async def test_invalid_input_returns_error_without_blocking(tool_input, message):
+    changes: list = []
+
+    async def on_change():
+        changes.append(broker.pending)
+
+    broker = QuestionBroker(on_change=on_change)
+    spec = create_question_tool(broker)
+    result = await spec.handler(**tool_input, _tool_use_id="tu")
+    assert result.startswith("Error: ")
+    assert message in result
+    assert changes == []
+    assert broker.pending is None
+
+
+def _question(question_id="q1"):
+    return PendingQuestion(
+        id=question_id,
+        question="Q?",
+        options=[QuestionOption(label="a"), QuestionOption(label="b")],
+    )
+
+
+async def test_broker_allows_one_pending_question():
+    broker = QuestionBroker()
+    first = asyncio.create_task(broker.ask(_question("q1")))
+    await asyncio.sleep(0)
+    assert broker.pending is not None and broker.pending.id == "q1"
+
+    spec = create_question_tool(broker)
+    second = await spec.handler(
+        question="Other?", options=[{"label": "x"}, {"label": "y"}], _tool_use_id="q2"
+    )
+    assert second == "Error: another question is already waiting"
+    assert broker.pending.id == "q1"
+
+    broker.answer("q1", Answer(text="done"))
+    assert (await first).text == "done"
+    assert broker.pending is None
+
+
+async def test_broker_cancellation_clears_pending_and_notifies():
+    states: list = []
+
+    async def on_change():
+        states.append(broker.pending)
+
+    broker = QuestionBroker(on_change=on_change)
+    task = asyncio.create_task(broker.ask(_question()))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert broker.pending is None
+    assert [s.id if s else None for s in states] == ["q1", None]
+    with pytest.raises(QuestionError) as exc:
+        broker.answer("q1", Answer(dismiss=True))
+    assert exc.value.kind == "question_not_pending"
+
+
+async def test_broker_status_failure_does_not_block_answer():
+    async def on_change():
+        raise RuntimeError("bus down")
+
+    broker = QuestionBroker(on_change=on_change)
+    task = asyncio.create_task(broker.ask(_question()))
+    await asyncio.sleep(0)
+    broker.answer("q1", Answer(option=0))
+    assert (await task).option == 0
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"type":"answer","question_id":"q"}',
+        '{"type":"answer","question_id":"q","option":0,"text":"x"}',
+        '{"type":"answer","question_id":"q","option":0,"dismiss":true}',
+        '{"type":"answer","question_id":"q","text":"  "}',
+        '{"type":"answer","question_id":"q","option":true}',
+        '{"type":"answer","question_id":"q","dismiss":true,"extra":1}',
+    ],
+)
+def test_answer_command_rejects_malformed(raw):
+    with pytest.raises((ValueError, TypeError, msgspec.ValidationError)):
+        decode_command(raw)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        AnswerCommand(question_id="q", option=0),
+        AnswerCommand(question_id="q", text="hello"),
+        AnswerCommand(question_id="q", dismiss=True),
+    ],
+)
+def test_answer_command_round_trip(command):
+    raw = encode_command(command)
+    assert json.loads(raw)["type"] == "answer"
+    assert decode_command(raw) == command
+
+
+def test_session_status_defaults_and_round_trip():
+    status = SessionStatus(id="s", model_key="m", git_branch="main")
+    assert status.state == "idle"
+    assert status.question is None
+    blocked = SessionStatus(
+        id="s2", model_key="m", git_branch="main", state="blocked", question=_question()
+    )
+    decoded = decode_event(msgspec.json.encode(blocked))
+    assert decoded == blocked
+    assert not decoded.persist
+
+
+async def test_kiro_status_and_answer_have_no_question():
+    from archie_agent.kiro.harness import KiroHarness
+
+    harness = KiroHarness.__new__(KiroHarness)
+    harness._turn_active = False
+    harness.session = MagicMock(model_id="kiro/claude")
+    with patch("archie_agent.app._read_git_branch", return_value="main"):
+        status = harness.status_event()
+    assert (status.state, status.question) == ("idle", None)
+    harness._turn_active = True
+    with patch("archie_agent.app._read_git_branch", return_value="main"):
+        assert harness.status_event().state == "working"
+    notice = harness.answer_question(AnswerCommand(question_id="q", dismiss=True))
+    assert notice.kind == "question_not_pending"
+    assert harness.pending_question is None
