@@ -69,6 +69,29 @@ def _credential() -> Any:
     return CREDENTIAL_TYPES["jira"](email=email, token=token, cloud_id=cloud_id)
 
 
+_MAX_ERROR_ITEM = 200
+_MAX_ERROR = 500
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """Jira's ``errorMessages`` and per-field ``errors``, flattened and bounded."""
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    parts: list[str] = []
+    messages = body.get("errorMessages")
+    if isinstance(messages, list):
+        parts.extend(str(item) for item in messages if item)
+    errors = body.get("errors")
+    if isinstance(errors, dict):
+        parts.extend(f"{field}: {message}" for field, message in errors.items() if message)
+    cleaned = [" ".join(part.split())[:_MAX_ERROR_ITEM] for part in parts]
+    return "; ".join(part for part in cleaned if part)[:_MAX_ERROR]
+
+
 class JiraClient:
     def __init__(self, credential: Any):
         self.base_url = f"https://api.atlassian.com/ex/jira/{credential.cloud_id}/rest/api/3"
@@ -102,7 +125,10 @@ class JiraClient:
         if response.status_code == 429:
             raise JiraRateLimitError("Jira rate limit exceeded")
         if response.status_code in {400, 422}:
-            raise JiraValidationError("Jira rejected the request fields")
+            detail = _error_detail(response)
+            raise JiraValidationError(
+                "Jira rejected the request fields" + (f": {detail}" if detail else "")
+            )
         if response.status_code >= 400:
             raise JiraResponseError("Jira rejected the request")
         if response.status_code == 204 or not response.content:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import urlencode
 
@@ -93,52 +94,87 @@ async def get_issue(issue_key: str) -> dict:
     )
 
 
+_PAGE = 50
+# Jira Cloud user searches only look at the first 1,000 users.
+_USER_WINDOW = 1000
+# Atlassian account IDs: 24 hex characters (older accounts) or ``<digits>:<uuid>``.
+_ACCOUNT_ID = re.compile(
+    r"^(?:[0-9a-f]{24}|[0-9]{1,10}:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$"
+)
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _human_users(data: Any, what: str) -> list[dict]:
+    if not isinstance(data, list):
+        raise JiraResponseError(f"Jira returned malformed {what}")
+    return [x for x in data if isinstance(x, dict) and x.get("accountType") != "app"]
+
+
 @tool(namespace="jira")
-async def search_users(query: str, limit: int = 20) -> list[dict]:
-    """Find bounded active Jira user candidates without choosing one."""
+async def search_users(query: str, limit: int = 20, project: str | None = None) -> list[dict]:
+    """Find bounded active Jira user candidates without choosing one.
+
+    With ``project``, only users who can be assigned issues in that project are returned.
+    """
     if not isinstance(query, str) or not 1 <= len(query) <= 200:
         raise JiraInputError("query must be 1-200 characters")
     _ensure_limit(limit, 50)
-    require_read()
-    result, start = [], 0
+    key = project_key(project) if project is not None else None
+    require_read(key)
+    result: list[dict] = []
+    start = 0
     async with jira_client() as client:
-        while len(result) < limit:
-            params = {"query": query, "startAt": start, "maxResults": min(50, limit - len(result))}
-            data = await client.request("GET", f"/user/assignable/search?{urlencode(params)}")
-            if not isinstance(data, list):
-                raise JiraResponseError("Jira returned malformed users")
-            candidates = [x for x in data if isinstance(x, dict) and x.get("accountType") != "app"]
+        while len(result) < limit and start < _USER_WINDOW:
+            params: dict[str, Any] = {"query": query, "startAt": start, "maxResults": _PAGE}
+            if key:
+                # The assignable search pages before filtering, so a short page is not the end;
+                # an empty page is the only stop signal it gives.
+                params["project"] = key
+                path = f"/user/assignable/search?{urlencode(params)}"
+            else:
+                path = f"/user/search?{urlencode(params)}"
+            data = await client.request("GET", path)
+            users = _human_users(data, "users")
             result.extend(
                 {
                     "account_id": x.get("accountId"),
                     "display_name": str(x.get("displayName", ""))[:200],
                     "email": str(x.get("emailAddress", ""))[:320],
                 }
-                for x in candidates
+                for x in users
+                if x.get("active", True) is not False
             )
-            if len(data) < params["maxResults"]:
+            if not data or (not key and len(data) < _PAGE):
                 break
-            start += len(data)
+            start += _PAGE
     return result[:limit]
 
 
-async def _resolve_assignee(client: Any, value: str | None, project: str) -> dict | None:
+async def _resolve_assignee(
+    client: Any, value: str | None, project: str, issue_key: str | None = None
+) -> dict | None:
+    """Resolve ``value`` to exactly one user assignable in ``project`` (or on ``issue_key``)."""
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip() or len(value) > 200:
         raise JiraInputError("assignee must be 1-200 characters")
+    value = value.strip()
     require_write(project)
-    params = urlencode({"query": value, "maxResults": 50})
-    data = await client.request("GET", f"/user/assignable/search?{params}")
-    if not isinstance(data, list):
-        raise JiraResponseError("Jira returned malformed assignee candidates")
+    params: dict[str, Any] = {"maxResults": _PAGE}
+    params.update({"issueKey": issue_key} if issue_key else {"project": project})
+    by_account = bool(_ACCOUNT_ID.fullmatch(value))
+    params["accountId" if by_account else "query"] = value
+    data = await client.request("GET", f"/user/assignable/search?{urlencode(params)}")
     candidates = [
-        item for item in data if isinstance(item, dict) and item.get("accountType") != "app"
+        item
+        for item in _human_users(data, "assignee candidates")
+        if item.get("active", True) is not False
     ]
+    needle = value.casefold()
     exact = [
         item
         for item in candidates
-        if value.casefold()
+        if needle
         in {
             str(item.get("accountId", "")).casefold(),
             str(item.get("displayName", "")).casefold(),
@@ -147,8 +183,17 @@ async def _resolve_assignee(client: Any, value: str | None, project: str) -> dic
             str(item.get("emailAddress", "")).casefold(),
         }
     ]
+    if not exact and _EMAIL.fullmatch(value) and len(candidates) == 1:
+        # Jira matches the query against email server-side even when profile privacy hides
+        # ``emailAddress`` from the response; accept a single such match.
+        if not candidates[0].get("emailAddress"):
+            exact = candidates
     if len(exact) != 1:
-        raise JiraInputError("assignee is unavailable or ambiguous")
+        found = "several users match" if exact else "no assignable user matches"
+        raise JiraInputError(
+            f"assignee is unavailable or ambiguous ({found}); "
+            "use jira.search_users and pass the account_id"
+        )
     if not exact[0].get("accountId"):
         raise JiraResponseError("Jira returned malformed assignee candidate")
     return {"accountId": exact[0]["accountId"]}
@@ -305,7 +350,9 @@ async def update_issue(
     if assignee is not None:
         if assignee:
             async with jira_client() as client:
-                fields["assignee"] = await _resolve_assignee(client, assignee, _issue_project(key))
+                fields["assignee"] = await _resolve_assignee(
+                    client, assignee, _issue_project(key), issue_key=key
+                )
         else:
             fields["assignee"] = None
     if parent is not None:

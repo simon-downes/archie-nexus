@@ -87,12 +87,15 @@ async def get_project(project: str) -> dict:
         for item in values
         if isinstance(item, dict) and item.get("id")
     ]
-    normalized_statuses = []
+    # Jira lists the statuses once per issue type; keep each status once, in first-seen order.
+    normalized_statuses: list[dict] = []
+    seen: set[str] = set()
     for group in statuses:
         if not isinstance(group, dict):
             continue
         for item in group.get("statuses", []):
-            if isinstance(item, dict) and item.get("id"):
+            if isinstance(item, dict) and item.get("id") and str(item["id"]) not in seen:
+                seen.add(str(item["id"]))
                 normalized_statuses.append(
                     {"id": str(item["id"]), "name": _text(item.get("name", ""))}
                 )

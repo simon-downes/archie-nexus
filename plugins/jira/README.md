@@ -70,9 +70,13 @@ block fails every call closed. `enabled: false` removes the namespace and skill.
 Safety rules enforced in code:
 
 - `list_projects` drops projects outside the read scope; `search_users` is read-gated but not
-  project-scoped.
+  project-scoped (`/user/search`) unless `project` is given, which uses
+  `/user/assignable/search?project=` and checks that project against the read scope.
 - Internal lookups done for a write (assignee resolution, transition discovery) are gated by
-  the write scope.
+  the write scope. Assignee resolution always sends `project` (create) or `issueKey` (update):
+  Jira Cloud rejects `/user/assignable/search` without one.
+- A 400/422 raises `JiraValidationError` with Jira's `errorMessages` and field `errors`
+  appended, each cut to 200 characters and 500 in total.
 - `attach_file` is confined to the workspace (`context().workspace`): the path must resolve
   inside it, every component is opened with `O_NOFOLLOW` (no symlinks), the extension must be
   one of `.png .jpg .jpeg .gif .pdf .txt .csv .json .zip`, and the file is at most 10 MiB.

@@ -27,7 +27,7 @@ description: >
 - **Limit:** integer in the documented range; `bool` is not a valid integer limit.
 - **Text:** limits below count characters. Empty text is invalid unless explicitly documented as a clear operation.
 - **Dates:** non-empty Jira-compatible date/time strings. No local date parsing is performed.
-- **Assignee:** account ID, username, email, or display name. A write proceeds only when it resolves to exactly one active, assignable, non-app user.
+- **Assignee:** account ID, username, email, or display name. A write proceeds only when it resolves to exactly one active, non-app user who can be assigned in the issue's project (`create_issue`) or on the issue itself (`update_issue`). An account ID from `jira.search_users` is the most reliable form. Jira often hides email addresses, so an email resolves only when Jira matches it to exactly one assignable user.
 
 ## Shared output schemas
 
@@ -114,7 +114,7 @@ Returns a list of issue summaries. A configured read scope is added to generated
 
 Returns an issue detail object, including up to 50 most-recent comments and attachment metadata. A blocked issue is a policy error before provider access; an in-scope provider 404 is not-found.
 
-### `jira.search_users(query, limit=20)`
+### `jira.search_users(query, limit=20, project=None)`
 
 Returns up to `limit` candidate objects without selecting one:
 
@@ -122,7 +122,7 @@ Returns up to `limit` candidate objects without selecting one:
 {"account_id": "acct-1", "display_name": "Alex Smith", "email": "alex@example.com"}
 ```
 
-`query` must be 1–200 characters. `limit` must be `1..50`. Ambiguous candidates are returned; this function never silently selects an assignee. User search is read-gated but not project-scoped.
+`query` must be 1–200 characters and matches display name or email. `limit` must be `1..50`. Ambiguous candidates are returned; this function never silently selects an assignee. Without `project`, it searches all active users and is read-gated but not project-scoped. With `project`, it returns only users who can be assigned issues in that project, and the project must be in the read scope. `email` is an empty string when the user's profile hides it. To assign someone, pass their `account_id` as `assignee`.
 
 ## Write functions
 
@@ -150,7 +150,7 @@ Descriptions and comment bodies are Markdown (CommonMark with GFM tables and str
 
 Without `status`, returns `{"key": "PLAT-123", "id": "10001"}`. With `status`, performs creation, transition discovery, transition, and verification, then returns issue detail.
 
-An ambiguous/unavailable assignee prevents creation. If creation succeeds but a requested follow-up status or verification fails, the result is indeterminate and includes the created key in the error; do not create again without verification.
+An ambiguous/unavailable assignee prevents creation; the error says whether no user or several users matched. If creation succeeds but a requested follow-up status or verification fails, the result is indeterminate and includes the created key in the error; do not create again without verification.
 
 ### `jira.update_issue(issue_key, summary=None, description=None, labels=None, status=None, assignee=None, parent=None, priority=None)`
 
