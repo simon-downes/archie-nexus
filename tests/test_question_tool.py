@@ -33,11 +33,13 @@ def mock_env(tmp_path):
     return {"ARCHIE_HOME_DIR": str(home_dir), "ARCHIE_SESSION_ID": "test-session"}
 
 
-def _question_llm(tool_input=QUESTION_INPUT, seen: list | None = None):
+def _question_llm(tool_input=QUESTION_INPUT, seen: list | None = None, configs=None):
     """A mock LLM that asks one question, then ends the turn with text."""
     calls = [0]
 
     def stream(messages, system, tool_config=None):
+        if configs is not None:
+            configs.append(tool_config)
         if calls[0] == 0:
             calls[0] += 1
             yield ToolUseStart(tool_use_id="tu_q", name="question")
@@ -149,21 +151,18 @@ def test_option_answer_round_trip(question_client):
     assert tool_results[0].content == "User selected option 2: Postgres"
 
 
-def test_question_is_root_only(mock_env):
-    from archie_agent.harness import AgentHarness
-
-    with patch.dict(os.environ, mock_env):
+def test_root_llm_is_offered_the_question_tool(mock_env):
+    configs: list = []
+    llm = _question_llm(configs=configs)
+    with (
+        patch.dict(os.environ, mock_env),
+        patch("archie_agent.app.create_llm_client", return_value=llm),
+    ):
         from archie_agent.app import app
 
-        llm = _question_llm()
-        with patch("archie_agent.app.create_llm_client", return_value=llm):
-            with TestClient(app):
-                from archie_agent import app as app_module
-
-                harness = app_module._agent
-                assert isinstance(harness, AgentHarness)
-                names = [tool["name"] for tool in harness._tool_config]
-                assert "question" in names
+        with TestClient(app) as client:
+            _ask_and_answer(client, AnswerCommand(question_id="tu_q", dismiss=True))
+    assert "question" in [tool["name"] for tool in configs[0]]
 
 
 # --- M2: text, dismissal, validation, failure paths and /status -----------------------
@@ -437,3 +436,31 @@ async def test_kiro_status_and_answer_have_no_question():
     notice = harness.answer_question(AnswerCommand(question_id="q", dismiss=True))
     assert notice.kind == "question_not_pending"
     assert harness.pending_question is None
+
+
+def test_manual_compaction_emits_working(question_client):
+    client = question_client()
+    with client.websocket_connect("/stream") as ws:
+        ws.receive_text()
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "message", "content": "/compact"}))
+        first = _receive_until(ws, lambda e: e["type"] == "session_status")[-1]
+        assert first["state"] == "working"
+        last = _receive_until(ws, lambda e: e["type"] == "session_status")[-1]
+        assert last["state"] == "idle"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [Answer(option=1), Answer(text="MySQL"), Answer(dismiss=True)],
+)
+def test_result_text_round_trips_through_row_summary(answer):
+    from archie_agent.question import format_answer
+    from archie_shared.tool_summaries import format_tool_complete
+
+    question = _question()
+    summary = format_tool_complete(
+        "question", {"question": "Q?"}, format_answer(question, answer), False
+    )
+    assert "chars)" not in summary
+    assert ("→" in summary) or ("(dismissed)" in summary)

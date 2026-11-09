@@ -1,6 +1,6 @@
 # 079 — Question tool and session state
 
-Status: reviewing
+Status: done
 Branch: build-it/079-question-tool (base: main @ f7d3144)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/079-question-tool
 
@@ -248,6 +248,8 @@ record.
 
 ## Risks
 
+- A new CLI attached to a protocol-3 agent keeps its old client-derived turn state (no
+  question support, no state from `session_status`).
 - Old CLIs (protocol 3) reject the extended `session_status` and lose model and branch display
   until upgraded; the handshake mismatch warning tells them.
 - Tool duration includes user wait time and inflates insights for `question` (accepted).
@@ -256,8 +258,12 @@ record.
 ## Review
 
 - Plan review: 1 pass, 3 ⚠️ and 9 ℹ️. All accepted: M3 seam now follows `tests/test_tui_canonical.py`; new test files marked; M4 seam matches `tests/test_prompt.py`; M1 split into a thinner tracer (M1) and failure paths (M2); submit routing order, `!` handling, history and digit trade-offs added to D12; D14 (turn state from `SessionStatus`), D15 (empty text), D16 (hide after send) added; D9 covers `/compact`; D8 lists all six sites and the `/status` shape; line references corrected. No ❌, so no second pass.
+- Code review: `general` and `risk` (the diff changes a public protocol: a new command, new `session_status` fields, `/status` and the protocol version), one round. Fixed: ⚠️ `/compact` `working` frame untested → `test_manual_compaction_emits_working`; ⚠️ (risk) a new TUI on a protocol-3 agent read the missing `state` as `idle` and ended the turn locally → the TUI applies state only after a handshake with `protocol_version >= 4` (`test_old_agent_status_does_not_end_the_turn`); ℹ️ result prefixes duplicated between agent and shared → defined once in `archie_shared.tool_summaries` and imported by `question.py`, plus a round-trip test; ℹ️ `StatusPayload.state` now uses the `SessionState` literal; ℹ️ `pending_question` annotated; ℹ️ the history test now presses ↑ and checks recall; ℹ️ the root-only test asserts on the `tool_config` the LLM receives; ❓ the walkthrough handshake example now shows protocol 4. No rejections. No ❌, so no second round.
+- Merge risk: Medium: the worst reachable failure is a stuck question (for example, the status frame is lost and the TUI never shows the panel). Interrupt still ends the turn, `/status` still shows the question, and the change touches only the root turn path and live status, with no persisted data.
 
 ## Outcome
+
+Delivered a root-only `question` tool that blocks until the user picks an option, types an answer or dismisses it. Live state rides on `session_status` (`state`, `question`) and `/status`. The TUI shows a docked panel with number and arrow keys, a free-text answer, and Esc that dismisses first and interrupts second. Rows read as question → answer, the identity rule points at the tool, and the protocol docs are updated. Evidence: full suite 4754 passed; `ruff check .` passed; `ruff format --check .` flags only the baseline file. Not verified: a live session against a real model and a real terminal (the tests use a mocked LLM, the Starlette TestClient and the Textual pilot).
 
 PR: pending
 CI: pending

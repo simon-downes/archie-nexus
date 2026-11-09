@@ -256,7 +256,7 @@ session_status   live-only
 {
   "type":"handshake",
   "id":"01J...",
-  "protocol_version":2,
+  "protocol_version":4,
   "session_id":"..."
 }
 ```

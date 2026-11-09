@@ -7,7 +7,7 @@ from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.question import QuestionPanel
 from archie_shared.commands import AnswerCommand
-from archie_shared.events import PendingQuestion, QuestionOption, SessionStatus
+from archie_shared.events import Handshake, PendingQuestion, QuestionOption, SessionStatus
 
 QUESTION = PendingQuestion(
     id="tu_q",
@@ -42,7 +42,12 @@ def _app() -> ArchieApp:
     return app
 
 
+def _handshake(app, version: int = 4) -> None:
+    app._apply_event(Handshake(id=f"h{version}", protocol_version=version, session_id="s"))
+
+
 async def _blocked(app, pilot):
+    _handshake(app)
     app._apply_event(_status("blocked", QUESTION, "s1"))
     await pilot.pause()
     return app.query_one("#question", QuestionPanel)
@@ -155,6 +160,7 @@ async def test_working_status_marks_turn_active_after_reconnect():
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
         assert not app._turn_active
+        _handshake(app)
         app._apply_event(_status("working", None, "s1"))
         await pilot.pause()
         assert app._turn_active
@@ -167,8 +173,28 @@ async def test_working_status_marks_turn_active_after_reconnect():
 async def test_history_keys_work_again_after_question():
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
-        await _blocked(app, pilot)
+        inp = app.query_one("#input", MessageInput)
+        inp._history = ["earlier message"]
+        inp._history_idx = 1
+        panel = await _blocked(app, pilot)
+        await pilot.press("up")
+        assert inp.text == ""
+        assert panel.selected == 0
         await pilot.press("2")
         await pilot.pause()
-        inp = app.query_one("#input", MessageInput)
-        assert inp.choice_handler is None
+        app._apply_event(_status("idle", None, "s2"))
+        await pilot.pause()
+        await pilot.press("up")
+        assert inp.text == "earlier message"
+
+
+@pytest.mark.asyncio
+async def test_old_agent_status_does_not_end_the_turn():
+    """A protocol-3 agent sends session_status without state; it decodes as idle."""
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        _handshake(app, version=3)
+        app._turn_active = True
+        app._apply_event(SessionStatus(id="old", model_key="m", git_branch="main"))
+        await pilot.pause()
+        assert app._turn_active

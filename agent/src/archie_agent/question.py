@@ -13,6 +13,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from archie_shared.events import PendingQuestion, QuestionOption
+from archie_shared.tool_summaries import (
+    QUESTION_ANSWERED_PREFIX,
+    QUESTION_DISMISSED_RESULT,
+    QUESTION_SELECTED_PREFIX,
+)
 
 from archie_agent.tools import ToolSpec
 
@@ -20,10 +25,6 @@ log = logging.getLogger(__name__)
 
 MIN_OPTIONS = 2
 MAX_OPTIONS = 4
-
-SELECTED_PREFIX = "User selected option "
-ANSWERED_PREFIX = "User answered: "
-DISMISSED_RESULT = "User dismissed the question without answering. Do not assume an answer."
 
 
 class QuestionError(Exception):
@@ -127,10 +128,10 @@ def format_answer(question: PendingQuestion, answer: Answer) -> str:
     """The model-facing result text for one answer."""
     if answer.option is not None:
         label = question.options[answer.option].label
-        return f"{SELECTED_PREFIX}{answer.option + 1}: {label}"
+        return f"{QUESTION_SELECTED_PREFIX}{answer.option + 1}: {label}"
     if answer.text is not None:
-        return f"{ANSWERED_PREFIX}{answer.text}"
-    return DISMISSED_RESULT
+        return f"{QUESTION_ANSWERED_PREFIX}{answer.text}"
+    return QUESTION_DISMISSED_RESULT
 
 
 def create_question_tool(broker: QuestionBroker) -> ToolSpec:

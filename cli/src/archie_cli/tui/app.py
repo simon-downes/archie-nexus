@@ -44,6 +44,9 @@ from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
 
+# First protocol version whose session_status carries state and question.
+SESSION_STATE_PROTOCOL = 4
+
 
 class ArchieApp(App):
     """TUI client that attaches to a running agent session via WebSocket."""
@@ -97,6 +100,9 @@ class ArchieApp(App):
         self._last_esc_time: float = 0.0
         # The pending question shown in the panel, and the id of an answer being sent.
         self._question: ce.PendingQuestion | None = None
+        # Protocol of the attached agent, from its handshake. Agents before v4 send
+        # session_status without a state, which decodes as the "idle" default.
+        self._agent_protocol: int = 0
         self._answer_in_flight: str | None = None
 
         # Session state for local accumulation. Seeded from Handshake.accounting
@@ -295,6 +301,7 @@ class ArchieApp(App):
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
             self._session_id = event.session_id
+            self._agent_protocol = event.protocol_version
             if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
                 self._protocol_warned = True
                 self._show_client_error(
@@ -314,7 +321,8 @@ class ArchieApp(App):
                 status.model_name = model.name
                 status.supports_cache = model.can_cache
             status.git_branch = event.git_branch
-            self._apply_session_state(event)
+            if self._agent_protocol >= SESSION_STATE_PROTOCOL:
+                self._apply_session_state(event)
         elif isinstance(event, ce.CompactionStart):
             self._remove_throbber()
         elif isinstance(event, ce.CompactionComplete):

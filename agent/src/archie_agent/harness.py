@@ -62,6 +62,7 @@ from archie_agent.skills import BODY_KEY, create_skill_tool, discover_skills
 from archie_agent.tool_policy_live import LiveToolPolicy
 
 if TYPE_CHECKING:
+    from archie_shared.events import PendingQuestion
     from archie_shared.models import ModelEntry
 
     from archie_agent.llm import LLMClient
@@ -285,7 +286,7 @@ class AgentHarness:
         return self._turn_active
 
     @property
-    def pending_question(self):
+    def pending_question(self) -> "PendingQuestion | None":
         """The question the root turn is waiting on, or ``None``."""
         return self._questions.pending
 

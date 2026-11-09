@@ -210,20 +210,22 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             return _esc(name, tag_follows=False)
 
 
-# Result prefixes written by the agent's ``question`` tool (archie_agent.question).
-_QUESTION_SELECTED = "User selected option "
-_QUESTION_ANSWERED = "User answered: "
-_QUESTION_DISMISSED = "User dismissed the question"
+# Result text of the agent's ``question`` tool; archie_agent.question writes these.
+QUESTION_SELECTED_PREFIX = "User selected option "
+QUESTION_ANSWERED_PREFIX = "User answered: "
+QUESTION_DISMISSED_RESULT = (
+    "User dismissed the question without answering. Do not assume an answer."
+)
 
 
 def _question_answer(result: str) -> str:
     """The user's answer from a ``question`` tool result, as Rich markup."""
-    if result.startswith(_QUESTION_SELECTED):
+    if result.startswith(QUESTION_SELECTED_PREFIX):
         _, _, label = result.partition(": ")
         return f"→ {_hi(label)}"
-    if result.startswith(_QUESTION_ANSWERED):
-        return f"→ {_hi(result.removeprefix(_QUESTION_ANSWERED))}"
-    if result.startswith(_QUESTION_DISMISSED):
+    if result.startswith(QUESTION_ANSWERED_PREFIX):
+        return f"→ {_hi(result.removeprefix(QUESTION_ANSWERED_PREFIX))}"
+    if result == QUESTION_DISMISSED_RESULT:
         return _dim("(dismissed)")
     return _dim(f"({len(result)} chars)")
 
