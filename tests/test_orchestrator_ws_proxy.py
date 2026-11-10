@@ -8,7 +8,9 @@ from archie_orchestrator.app import app
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor
 from starlette.testclient import TestClient
-from websockets.exceptions import ConnectionClosedOK, InvalidMessage
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosedError, InvalidMessage, InvalidStatus
+from websockets.http11 import Response as HandshakeResponse
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -76,14 +78,22 @@ def test_ws_stream_backend_unreachable(test_client):
         assert exc_info.value.code == 4002
 
 
-def test_ws_stream_backend_protocol_loss_is_expected(test_client, caplog):
-    """Backend HTTP protocol loss closes with 4002 without an internal error log."""
+@pytest.mark.parametrize(
+    "handshake_error",
+    [
+        InvalidMessage("did not receive a valid HTTP response"),
+        InvalidStatus(HandshakeResponse(503, "Service Unavailable", Headers(), b"")),
+    ],
+    ids=["invalid-message", "invalid-status"],
+)
+def test_ws_stream_backend_protocol_loss_is_expected(test_client, caplog, handshake_error):
+    """A failed backend handshake closes with 4002 without an internal error log."""
     session = _running_session()
     from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
 
     @asynccontextmanager
     async def invalid_connect(url, **kwargs):
-        raise InvalidMessage("did not receive a valid HTTP response")
+        raise handshake_error
         yield  # pragma: no cover
 
     with (
@@ -112,7 +122,9 @@ def test_ws_stream_backend_close_during_relay_is_expected(test_client, caplog):
             return self._frames()
 
         async def _frames(self):
-            raise ConnectionClosedOK(None, None)
+            # websockets ends iteration on a clean close; only an abnormal
+            # close (ConnectionClosedError) escapes the relay.
+            raise ConnectionClosedError(None, None)
             yield  # pragma: no cover
 
         async def __aenter__(self):

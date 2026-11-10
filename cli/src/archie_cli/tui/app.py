@@ -514,6 +514,10 @@ class ArchieApp(App):
                 await asyncio.sleep(0.05)
             return self._ws.connected
 
+        return await self._run_tracked_reconnect()
+
+    async def _run_tracked_reconnect(self) -> bool:
+        """Run a reconnect in a task that quit can cancel, and wait for it."""
         self._reconnecting = True
         task = asyncio.create_task(self._reconnect())
         self._reconnect_task = task
@@ -913,7 +917,7 @@ class ArchieApp(App):
                 recovered = await self._ensure_connected()
             else:
                 await self._ws.disconnect()
-                recovered = await self._reconnect()
+                recovered = await self._run_tracked_reconnect()
             if not recovered:
                 self._show_client_error("Unable to reconnect after closing the editor.")
         except Exception as exc:  # noqa: BLE001 — surface recovery failures only

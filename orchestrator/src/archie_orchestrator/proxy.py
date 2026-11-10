@@ -17,7 +17,7 @@ from archie_shared.session import SessionDescriptor
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
-from websockets.exceptions import ConnectionClosed, InvalidMessage
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from archie_orchestrator.docker import list_sessions
 
@@ -214,7 +214,7 @@ async def proxy_stream(websocket: WebSocket) -> None:
             await websocket.close(code=4002, reason="Session unreachable")
         except Exception:
             pass
-    except (InvalidMessage, ConnectionClosed) as exc:
+    except (InvalidHandshake, ConnectionClosed) as exc:
         log.info("Backend disconnected for %s: %s", session_id, exc)
         try:
             await websocket.close(code=4002, reason="Session unreachable")

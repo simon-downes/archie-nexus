@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from archie_cli.tui.app import ArchieApp
 
@@ -114,3 +115,81 @@ async def test_quit_cancels_receive_and_inflight_history_replay():
     assert replay_cancelled.is_set()
     assert app._reconnect_task is None
     assert not app._reconnecting
+
+
+@pytest.mark.asyncio
+async def test_quit_cancels_reconnect_started_by_editor_recovery():
+    """Quit cancels the reconnect that runs after the external editor closes."""
+    app = _app()
+    app._editor_active = True
+    app._ws.disconnect = AsyncMock()
+    recovery_task = asyncio.create_task(app._recover_after_editor())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert app._reconnect_task is not None
+    reconnect_task = app._reconnect_task
+    with patch.object(app, "exit"):
+        await _confirm_quit(app, False)
+
+    assert reconnect_task.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await recovery_task
+    assert app._reconnect_task is None
+
+
+def _delete_client(**delete_kwargs) -> MagicMock:
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.delete = AsyncMock(**delete_kwargs)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_quit_with_termination_accepts_already_stopped_session():
+    """A 404 from DELETE means the session is already gone; quit exits quietly."""
+    app = _app()
+    app._ws.disconnect = AsyncMock()
+    app._show_client_error = MagicMock()
+    client = _delete_client(return_value=MagicMock(status_code=404))
+
+    with (
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=client),
+        patch.object(app, "exit") as exit_mock,
+    ):
+        await _confirm_quit(app, True)
+
+    client.delete.assert_awaited_once()
+    app._show_client_error.assert_not_called()
+    exit_mock.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delete_kwargs", "message"),
+    [
+        ({"return_value": MagicMock(status_code=500)}, "Failed to terminate session: 500"),
+        (
+            {"side_effect": httpx.ConnectError("refused")},
+            "Failed to terminate session: refused",
+        ),
+    ],
+    ids=["error-status", "transport-error"],
+)
+async def test_quit_with_termination_reports_delete_failure(delete_kwargs, message):
+    """A failed DELETE after client teardown is reported and quit still exits."""
+    app = _app()
+    events = []
+    app._ws.disconnect = AsyncMock(side_effect=lambda: events.append("disconnect"))
+    app._show_client_error = MagicMock(side_effect=lambda msg: events.append(msg))
+    client = _delete_client(**delete_kwargs)
+
+    with (
+        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=client),
+        patch.object(app, "exit") as exit_mock,
+    ):
+        await _confirm_quit(app, True)
+
+    assert events == ["disconnect", message]
+    exit_mock.assert_called_once_with()

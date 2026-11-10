@@ -1,4 +1,4 @@
-# 079 — Session startup and shutdown UX
+# 080 — Session startup and shutdown UX
 
 Status: done
 Branch: build-it/079-session-start-shutdown (base: main @ e6a1ac0)
@@ -158,27 +158,27 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 
 ## Deviations
 
-- None yet.
+- Renumbered from 079 to 080 after review: PR #22 (question tool) also uses plan number 079.
 
 ## Risks
 
 - The initial inherited-environment test run was interrupted before pytest reported a result while this session exported `ARCHIE_BACKEND=kiro` and `ARCHIE_SESSION_ID`; all recorded build checks explicitly unset those variables.
 - The repository-wide format check still reports the pre-existing unrelated `persona/skills/python/assets/output.py`; all 368 other files, including every changed file, are formatted.
-- The PR could not be opened because `gh auth status` reports no authenticated GitHub host and `github.personal_token` is absent from `/home/archie/.nexus/credentials.yaml`; no alternate PR path was attempted.
 
 ## Review
 
 - Plan review: one pass; resolved the M2 private test-seam concern by specifying the public `ArchieApp.action_quit` confirmation path, and expanded M2 acceptance/edge-case coverage to include cancellation of an in-flight `/events` replay.
 - Code review: general and risk roles, two rounds; round 1 found three ❌ findings (non-TTY startup fallback, established relay close classification, and direct reconnect cancellation), all fixed with regression tests. Round 2 for both roles reported no findings.
+- PR review (#23): three ⚠️ concerns and two ℹ️ suggestions, all addressed. Editor-recovery reconnects now run in the tracked reconnect task, so quit cancels them. The WebSocket relay test now raises `ConnectionClosedError`, which is what websockets actually raises on an abnormal close. New tests cover a DELETE 404 and DELETE failures after teardown. The proxy treats any failed handshake (`InvalidHandshake`, including `InvalidStatus`) as session-unreachable. The plan was renumbered to 080.
 - Merge risk: Medium: changes affect CLI startup output and active WebSocket/session teardown, but behavior is bounded to existing paths, transport failures are classified explicitly, and the full safe test suite passes.
 
 ## Outcome
 
 Implemented terminal startup feedback for native and Kiro sessions, client-first TUI shutdown with reconnect/history cancellation, and controlled HTTP/WebSocket proxy handling for expected backend teardown. Added regression coverage for success/failure startup cleanup, non-TTY output, quit ordering, in-flight replay/direct reconnect cancellation, HTTP protocol loss, and established WebSocket closure.
 
-Verified: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` — 4,724 passed with one pre-existing Starlette deprecation warning; `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev ruff check .` — passed; focused review suites — passed. Full `ruff format --check .` is not clean because of the unrelated pre-existing `persona/skills/python/assets/output.py`; changed files are formatted.
+Verified: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` — 4,729 passed after the PR review fixes with one pre-existing Starlette deprecation warning; `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev ruff check .` — passed; focused review suites — passed. Full `ruff format --check .` is not clean because of the unrelated pre-existing `persona/skills/python/assets/output.py`; changed files are formatted.
 
-PR: error: gh auth status failed; no authenticated GitHub host
+PR: https://github.com/simon-downes/archie-nexus/pull/23
 CI: none
 
 ## Follow-ups
