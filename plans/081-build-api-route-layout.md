@@ -1,6 +1,6 @@
 # 081 — Orchestrator API route layout
 
-Status: building
+Status: reviewing
 Branch: build-it/081-api-route-layout (base: main @ a1d18e4)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/081-api-route-layout
 
