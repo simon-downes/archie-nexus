@@ -1,9 +1,10 @@
 """Tests for archie start and archie stop CLI commands (orchestrator API path)."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import msgspec
-from archie_cli.cli import main
+from archie_cli.cli import _startup_status, main
 from archie_shared.session import SessionDescriptor
 from click.testing import CliRunner
 
@@ -48,6 +49,85 @@ def _error_response(status_code: int, error: str) -> MagicMock:
     mock.json.return_value = {"error": error}
     mock.raise_for_status = MagicMock()
     return mock
+
+
+def test_startup_status_uses_backend_label_and_tty_spinner():
+    """The terminal status display names the backend while startup is blocking."""
+    for kiro, message in ((False, "Starting session…"), (True, "Starting Kiro session…")):
+        console = MagicMock(is_terminal=True)
+        with patch("archie_cli.cli.Console", return_value=console):
+            with _startup_status(kiro):
+                pass
+
+        console.status.assert_called_once_with(message, spinner="dots")
+        console.print.assert_not_called()
+
+
+def test_startup_status_prints_non_tty_fallback():
+    """Captured output receives a readable startup line without terminal control codes."""
+    console = MagicMock(is_terminal=False)
+    with patch("archie_cli.cli.Console", return_value=console):
+        with _startup_status(True):
+            pass
+
+    console.print.assert_called_once_with("Starting Kiro session…")
+    console.status.assert_not_called()
+
+
+def test_startup_status_wraps_successful_request(monkeypatch, tmp_path):
+    """Startup status starts before POST and stops after the response."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    events = []
+
+    @contextmanager
+    def status(kiro):
+        events.append(("enter", kiro))
+        yield
+        events.append(("exit", kiro))
+
+    import httpx as real_httpx
+
+    with patch("archie_cli.cli.httpx") as mock_httpx:
+        mock_httpx.post.side_effect = lambda *args, **kwargs: (
+            events.append(("post", kwargs["json"])) or _session_response()
+        )
+        mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
+        with patch("archie_cli.cli._startup_status", side_effect=status):
+            result = CliRunner().invoke(main, ["start", "--detach", "myproject"])
+
+    assert result.exit_code == 0, result.output
+    assert events == [("enter", False), ("post", {"workspace": "myproject"}), ("exit", False)]
+
+
+def test_startup_status_wraps_failed_request(monkeypatch, tmp_path):
+    """Startup status stops before a failed POST is reported."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    events = []
+
+    @contextmanager
+    def status(kiro):
+        events.append(("enter", kiro))
+        try:
+            yield
+        finally:
+            events.append(("exit", kiro))
+
+    import httpx as real_httpx
+
+    with patch("archie_cli.cli.httpx") as mock_httpx:
+        mock_httpx.post.side_effect = lambda *args, **kwargs: (
+            events.append(("post", kwargs["json"]))
+            or (_ for _ in ()).throw(real_httpx.ConnectError("refused"))
+        )
+        mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPError = real_httpx.HTTPError
+        with patch("archie_cli.cli._startup_status", side_effect=status):
+            result = CliRunner().invoke(main, ["start", "--detach", "myproject"])
+
+    assert result.exit_code != 0
+    assert "archie serve" in result.output
+    assert events == [("enter", False), ("post", {"workspace": "myproject"}), ("exit", False)]
 
 
 # ---------------------------------------------------------------------------

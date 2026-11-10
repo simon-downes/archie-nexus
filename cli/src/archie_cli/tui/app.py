@@ -77,6 +77,7 @@ class ArchieApp(App):
         self._container_name = container_name
         self._ws = WSClient()
         self._receive_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
         self._reconnecting: bool = False
         self._shutting_down: bool = False
         self._quit_prompt_open: bool = False
@@ -506,7 +507,14 @@ class ArchieApp(App):
         if self._reconnecting or self._shutting_down:
             return
         self._reconnecting = True
-        asyncio.create_task(self._reconnect(close_code))
+        task = asyncio.create_task(self._reconnect(close_code))
+        self._reconnect_task = task
+
+        def clear_reconnect_task(done: asyncio.Task) -> None:
+            if self._reconnect_task is done:
+                self._reconnect_task = None
+
+        task.add_done_callback(clear_reconnect_task)
 
     async def _ensure_connected(self) -> bool:
         """Ensure the stream is connected before sending a user command."""
@@ -520,7 +528,18 @@ class ArchieApp(App):
                 await asyncio.sleep(0.05)
             return self._ws.connected
 
-        return await self._reconnect()
+        return await self._run_tracked_reconnect()
+
+    async def _run_tracked_reconnect(self) -> bool:
+        """Run a reconnect in a task that quit can cancel, and wait for it."""
+        self._reconnecting = True
+        task = asyncio.create_task(self._reconnect())
+        self._reconnect_task = task
+        try:
+            return await task
+        finally:
+            if self._reconnect_task is task:
+                self._reconnect_task = None
 
     async def _reconnect(self, close_code: int | None = None) -> bool:
         """Reconnect to the agent with backoff and resync via canonical replay.
@@ -945,6 +964,30 @@ class ArchieApp(App):
             self._quit_prompt_open = False
             return
         self._quit_prompt_open = False
+        self._shutting_down = True
+        current_task = asyncio.current_task()
+        active_tasks = (self._receive_task, self._reconnect_task)
+        for task in active_tasks:
+            if task is not None and task is not current_task and not task.done():
+                task.cancel()
+        for task in active_tasks:
+            if task is None or task is current_task or task.done():
+                continue
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 — shutdown must continue
+                log.debug("Session client task ended during shutdown: %s", exc)
+        self._receive_task = None
+        self._reconnect_task = None
+        self._reconnecting = False
+
+        try:
+            await self._ws.disconnect()
+        except Exception as exc:  # noqa: BLE001 — shutdown must continue
+            log.debug("Session WebSocket ended during shutdown: %s", exc)
+
         if terminate_session:
             try:
                 async with httpx.AsyncClient() as client:
@@ -953,10 +996,6 @@ class ArchieApp(App):
                     self._show_client_error(f"Failed to terminate session: {response.status_code}")
             except httpx.HTTPError as exc:
                 self._show_client_error(f"Failed to terminate session: {exc}")
-        self._shutting_down = True
-        if self._receive_task is not None:
-            self._receive_task.cancel()
-        await self._ws.disconnect()
         await super().action_quit()
 
     async def _recover_after_editor(self) -> None:
@@ -971,7 +1010,7 @@ class ArchieApp(App):
                 recovered = await self._ensure_connected()
             else:
                 await self._ws.disconnect()
-                recovered = await self._reconnect()
+                recovered = await self._run_tracked_reconnect()
             if not recovered:
                 self._show_client_error("Unable to reconnect after closing the editor.")
         except Exception as exc:  # noqa: BLE001 — surface recovery failures only
