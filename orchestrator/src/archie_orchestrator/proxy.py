@@ -17,6 +17,7 @@ from archie_shared.session import SessionDescriptor
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from websockets.exceptions import ConnectionClosed, InvalidMessage
 
 from archie_orchestrator.docker import list_sessions
 
@@ -89,15 +90,15 @@ async def forward_http(
                 if content_type:
                     headers["content-type"] = content_type
                 resp = await client.post(target, content=body, headers=headers, timeout=5.0)
-    except httpx.ConnectError:
-        return JSONResponse(
-            {"error": f"Session '{session.session_id}' is unreachable"},
-            status_code=502,
-        )
     except httpx.TimeoutException:
         return JSONResponse(
             {"error": f"Session '{session.session_id}' timed out"},
             status_code=504,
+        )
+    except httpx.TransportError:
+        return JSONResponse(
+            {"error": f"Session '{session.session_id}' is unreachable"},
+            status_code=502,
         )
 
     return Response(
@@ -200,13 +201,19 @@ async def proxy_stream(websocket: WebSocket) -> None:
             for task in done:
                 try:
                     task.result()
-                except (asyncio.CancelledError, WebSocketDisconnect):
+                except (asyncio.CancelledError, WebSocketDisconnect, ConnectionClosed):
                     pass
                 except Exception as exc:  # noqa: BLE001
                     log.warning("WS relay task error for %s: %s", session_id, exc)
 
     except (ConnectionRefusedError, OSError) as exc:
         log.warning("Backend unreachable for %s: %s", session_id, exc)
+        try:
+            await websocket.close(code=4002, reason="Session unreachable")
+        except Exception:
+            pass
+    except (InvalidMessage, ConnectionClosed) as exc:
+        log.info("Backend disconnected for %s: %s", session_id, exc)
         try:
             await websocket.close(code=4002, reason="Session unreachable")
         except Exception:

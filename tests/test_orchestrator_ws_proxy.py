@@ -8,6 +8,7 @@ from archie_orchestrator.app import app
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor
 from starlette.testclient import TestClient
+from websockets.exceptions import InvalidMessage
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -73,6 +74,29 @@ def test_ws_stream_backend_unreachable(test_client):
             with pytest.raises(StarletteDisconnect) as exc_info:
                 ws.receive_text()
         assert exc_info.value.code == 4002
+
+
+def test_ws_stream_backend_protocol_loss_is_expected(test_client, caplog):
+    """Backend HTTP protocol loss closes with 4002 without an internal error log."""
+    session = _running_session()
+    from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
+
+    @asynccontextmanager
+    async def invalid_connect(url, **kwargs):
+        raise InvalidMessage("did not receive a valid HTTP response")
+        yield  # pragma: no cover
+
+    with (
+        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        patch("archie_orchestrator.proxy.websockets.connect", invalid_connect),
+        caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
+    ):
+        with test_client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:
+            with pytest.raises(StarletteDisconnect) as exc_info:
+                ws.receive_text()
+
+    assert exc_info.value.code == 4002
+    assert not any("WS proxy error" in record.message for record in caplog.records)
 
 
 def test_ws_stream_text_relay(test_client):

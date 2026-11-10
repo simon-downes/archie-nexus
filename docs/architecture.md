@@ -44,10 +44,10 @@ AWS Bedrock / OpenAI API / Ollama / local workspace
 
 1. `archie build` builds `archie:latest` from `Dockerfile`.
 2. `archie serve` runs the host orchestrator; the default profile is `127.0.0.1:7600`.
-3. `archie start <workspace>` asks `POST /sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)).
+3. `archie start <workspace>` asks `POST /sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The CLI shows a terminal-aware activity status while this blocking request is in progress.
 4. The orchestrator validates the single directory name, creates a session ID, runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`).
 5. The CLI connects through the orchestrator’s session routes. The orchestrator resolves the session by Docker container name and proxies to the mapped agent port.
-6. `archie stop` calls `DELETE /sessions/{session_id}` and stops the container. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
+6. `archie stop` calls `DELETE /sessions/{session_id}` and stops the container. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
 
 ### Container mounts
 

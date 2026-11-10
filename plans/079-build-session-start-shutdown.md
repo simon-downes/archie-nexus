@@ -147,14 +147,14 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_tui_quit.py tests/test_tui_canonical.py` passes.
 - **Outcome:** Added tracked reconnect-task ownership and client-first shutdown ordering. Tests drive the public quit action, verify WebSocket disconnect precedes DELETE, and verify receive/in-flight history tasks are cancelled with no reconnect. Verified with `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_tui_quit.py tests/test_tui_canonical.py` (53 passed) and Ruff on the changed files.
 
-### [ ] M3 — Handle expected orchestrator backend loss cleanly
+### [x] M3 — Handle expected orchestrator backend loss cleanly
 
 - **Approach:** Update `orchestrator/src/archie_orchestrator/proxy.py` after timeout handling to map HTTP transport loss, including `RemoteProtocolError`, to the existing 502 session-unreachable response. Add an explicit expected WebSocket protocol-loss branch alongside the existing refusal/OSError branch, while retaining the catch-all 1011 path for unexpected exceptions. Add focused proxy tests, then update `docs/architecture.md` and `docs/kiro.md` to describe the unchanged synchronous startup and ordered shutdown behavior.
 - **Test seam:** Orchestrator ASGI HTTP proxy route and WebSocket proxy route with mocked Docker session resolution and backend transports.
 - **Edge cases:** backend disappears during `/events` → 502, not Starlette 500; backend disappears while opening/relaying WebSocket → session-unreachable close and no internal-error traceback; timeout → 504; unexpected exception → 1011 and error log.
 - **Deliverable:** normal session teardown no longer produces unhandled proxy errors while real proxy faults remain diagnosable.
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_orchestrator_proxy.py tests/test_orchestrator_ws_proxy.py tests/test_orchestrator_errors.py` passes, followed by `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` and `scripts/dev ruff check .`.
-- **Outcome:**
+- **Outcome:** Mapped all HTTP transport errors, including `RemoteProtocolError`, to controlled 502 responses while retaining 504 timeouts; classified expected WebSocket protocol loss as session-unreachable and preserved 1011 handling for unexpected errors. Added exact regression tests and documented startup/shutdown behavior. Focused proxy tests passed: 19 passed with the repository's existing Starlette deprecation warning.
 
 ## Deviations
 

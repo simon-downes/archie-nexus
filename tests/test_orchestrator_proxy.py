@@ -98,6 +98,27 @@ async def test_proxy_status_backend_unreachable(http_client):
     assert response.status_code == 502
 
 
+async def test_proxy_status_backend_protocol_disconnect(http_client):
+    """GET /sessions/{id}/status when the backend drops HTTP → 502."""
+    import httpx as real_httpx
+
+    session = _running_session()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(side_effect=real_httpx.RemoteProtocolError("disconnected"))
+
+    with (
+        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
+    ):
+        async with http_client as client:
+            response = await client.get("/sessions/proj-01abc12345/status")
+
+    assert response.status_code == 502
+    assert response.json() == {"error": "Session 'proj-01abc12345' is unreachable"}
+
+
 async def test_proxy_status_backend_timeout(http_client):
     """GET /sessions/{id}/status when container times out → 504."""
     import httpx as real_httpx
