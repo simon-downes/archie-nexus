@@ -176,7 +176,7 @@ When the user runs `archie start`, the CLI first creates the session:
 ```text
 TUI/CLI                    Orchestrator                  Agent container
    │                            │                              │
-   │ POST /api/sessions            │                              │
+   │ POST /api/sessions        │                              │
    │ {"workspace":"project"}  │                              │
    ├───────────────────────────▶│                              │
    │                            │ start Docker container       │

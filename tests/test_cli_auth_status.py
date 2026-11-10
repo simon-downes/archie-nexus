@@ -51,3 +51,4 @@ def test_auth_status_groups_and_sorts_credentials(mock_get):
     assert "ago" in result.output or "in" in result.output
     assert "Expires" not in result.output.split("Static credentials", 1)[1]
     mock_get.assert_called_once()
+    assert mock_get.call_args.args[0].endswith("/api/auth/status")

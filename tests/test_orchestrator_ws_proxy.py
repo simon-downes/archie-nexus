@@ -1,4 +1,4 @@
-"""Tests for orchestrator WebSocket proxy (WS /sessions/{id}/stream)."""
+"""Tests for orchestrator WebSocket proxy (WS /api/sessions/{id}/stream)."""
 
 from contextlib import asynccontextmanager
 from unittest.mock import patch
@@ -39,8 +39,20 @@ def _running_session(session_id: str = "proj-01abc12345", port: int = 32771) -> 
 
 
 # ---------------------------------------------------------------------------
-# WS /sessions/{id}/stream
+# WS /api/sessions/{id}/stream
 # ---------------------------------------------------------------------------
+
+
+def test_ws_stream_former_root_path_is_refused(test_client):
+    """The relay lives only under the API prefix; the old root path has no route."""
+    from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
+
+    with patch("archie_orchestrator.proxy.list_sessions", return_value=[_running_session()]):
+        with pytest.raises(StarletteDisconnect) as exc_info:
+            with test_client.websocket_connect("/sessions/proj-01abc12345/stream"):
+                pass
+    # Starlette's no-route close (1000), not the relay's 4004/4002 from a reached handler.
+    assert exc_info.value.code == 1000
 
 
 def test_ws_stream_session_not_found(test_client):

@@ -327,6 +327,8 @@ def test_start_kiro_posts_backend(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert mock_httpx.post.call_args.kwargs["json"] == {"workspace": "my-app", "backend": "kiro"}
+    status_url = mock_httpx.get.call_args.args[0]
+    assert status_url == "http://127.0.0.1:7600/api/sessions/myproject-01abc12345/status"
     mock_httpx.delete.assert_not_called()
 
 

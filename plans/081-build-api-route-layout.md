@@ -1,6 +1,6 @@
 # 081 — Orchestrator API route layout
 
-Status: reviewing
+Status: done
 Branch: build-it/081-api-route-layout (base: main @ a1d18e4)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/081-api-route-layout
 
@@ -153,8 +153,8 @@ to the new paths, and tests move with them.
   `app.py`) and `routes` for `/`, the viewer, insights, `/auth` and `/auth/callback/{p}`.
 - `orchestrator/src/archie_orchestrator/app.py`: lifespan, metrics loop, `CallbackAccessFilter`,
   `health`, `unhandled_exception_handler`, and the composed `Starlette(routes=...)`.
-- `orchestrator/src/archie_orchestrator/__init__.py`: add a service colour for
-  `archie_orchestrator.api` and `archie_orchestrator.pages` loggers.
+- `orchestrator/src/archie_orchestrator/__init__.py`: add a service colour for the
+  `archie_orchestrator.api` logger (`pages.py` defines no logger).
 - Clients: `cli/src/archie_cli/cli.py`, `cli/src/archie_cli/auth.py`.
 - Templates/static: `templates/base.html`, `templates/auth_status.html`,
   `templates/viewer/{base,list,_results,detail,not_found}.html`,
@@ -236,9 +236,14 @@ to the new paths, and tests move with them.
 
 ## Risks
 
-- An orchestrator started before this change and a CLI after it (or the reverse) disagree on
-  every path: the CLI gets 404s until `archie serve` is restarted. Accepted (single user;
-  both come from the same checkout).
+- Version skew between a running orchestrator and the CLI breaks the CLI until both run this
+  change. New CLI → old orchestrator: `archie ls` prints "Error 404", `start` reports
+  "Orchestrator error (404)". Old CLI → new orchestrator: `archie ls` prints "Unexpected
+  response" (`GET /sessions` is now an HTML page); a TUI attached across an orchestrator
+  restart fails to reconnect and its `DELETE /sessions/{id}` gets 405. Remote profiles
+  (`orchestrator.profiles`) can hit this when hosts are upgraded separately. None of these
+  raise tracebacks; restarting `archie serve` on the upgraded checkout fixes them. Accepted
+  (single user).
 - Browser bookmarks to `/ui/...` stop working (D2).
 
 ## Review
@@ -253,8 +258,37 @@ to the new paths, and tests move with them.
   (⚠️); the "patched token endpoint" phrase was wrong for login (fixed: the transport only
   serves the callback); app-state setup named; the five web test files named; the route-table
   AC split between M1 and M2; a login→callback round-trip test added. Stopped after two passes.
+- Code review: `general` and `risk`, one round (`risk` ran because the change moves the
+  public HTTP contract and the OAuth routes). Fixed: no test refused a WebSocket at the old
+  root path (⚠️/ℹ️, added `test_ws_stream_former_root_path_is_refused`, asserting
+  Starlette's no-route close code 1000); several moved CLI call sites had no URL assertion
+  (⚠️, `ls`, the `--kiro` status probe, `auth status`, `auth refresh`, OAuth login and flow
+  poll now assert full `/api` URLs); stale `WS /sessions/...` docstrings in
+  `test_orchestrator_ws_proxy.py`; a misaligned ASCII diagram row; a dropped trailing newline
+  in `auth_status.html`; the plan claimed a `pages` logger colour (plan corrected); the skew
+  Risk understated what users see (rewritten). The risk reviewer's question about
+  `CallbackAccessFilter` is answered under Follow-ups: it predates this change. No rejections.
+  Evidence after fixes: `env -u ARCHIE_BACKEND scripts/dev test` 4818 passed;
+  `scripts/dev ruff check .` passed; `ruff format --check` clean on all 43 changed Python files.
+- Browser check: `uvicorn archie_orchestrator.app:app` from the worktree with a throwaway
+  `ARCHIE_HOME_DIR` (two synthetic logs) and a stub `docker`. `/health`, `/api/sessions`,
+  `/api/auth/status` → JSON; `/sessions`, `/sessions/{id}`, `/insights`, `/auth` → HTML;
+  `/ui/sessions` → 404 text/plain. In headless Chromium, typing in the `/sessions` search
+  issued `GET /sessions?q=demo` (htmx fragment) and filtered to one row; nav links were
+  `/`, `/sessions`, `/insights`, `/auth`; clicking the row opened `/sessions/demo-01kx5yc7g0`.
+- Merge risk: Medium: a missed path consumer or version skew makes a CLI command or page fail
+  with a 404/405 at runtime; every client call site and page link is now covered by a test,
+  the OAuth callback URI is unchanged, and a restart of `archie serve` or a revert recovers.
 
 ## Outcome
+
+The orchestrator's JSON API (and the session WebSocket relay) is served only under `/api`
+from `api.py`; pages are served at the root from `pages.py`; `/`, `/health` and
+`/auth/callback/{provider}` are unchanged. The CLI, TUI, auth page script, templates and docs
+use the new paths. Verified: full test suite (4818 passed), ruff check and format, the
+browser check above. Not verified: a real OAuth login against Google (covered by the ASGI
+login→callback round trip with a fake token transport) and a TUI attached to a real session
+container (no Docker here; covered by CLI URL tests and the WS proxy tests).
 
 PR: pending
 CI: pending
@@ -262,3 +296,10 @@ CI: pending
 ## Follow-ups
 
 - Return an HTML error page, not JSON, for unhandled exceptions on page routes (D8).
+- `CallbackAccessFilter` (`app.py`) never drops OAuth callback access lines: it checks
+  `record.msg`, but uvicorn passes the path and query string in `record.args`, so `code` and
+  `state` reach `orchestrator.access.log`. Predates this change.
+- Give the CLI a clear "orchestrator version mismatch; restart `archie serve`" message when
+  an `/api` call gets a no-route 404 (see Risks).
+- `tests/test_web_console.py` fails when run on its own (also at the base commit): it relies on
+  `app.state.start_time` set by an earlier test module. Give it its own fixture value.
