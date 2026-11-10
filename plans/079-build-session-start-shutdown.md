@@ -58,7 +58,7 @@ unexpected internal proxy error.
 - MUST preserve the existing `POST /sessions` request body, timeout, response decoding, session output, detach output, and TUI launch behavior.
   - AC: existing `tests/test_cli_start_stop.py` assertions continue to pass, including the Kiro backend request and TUI arguments.
 - MUST prevent the TUI from scheduling or retaining reconnect/history work after shutdown begins.
-  - AC: quit tests set an active reconnect task and verify it is cancelled/awaited, no reconnect is started, and the receive task is also cancelled before deletion.
+  - AC: quit tests set an active reconnect task with an in-flight `/events` replay and verify the reconnect/replay task is cancelled/awaited, no reconnect or second history request is started, and the receive task is also cancelled before deletion.
 - MUST close the TUI WebSocket before requesting session deletion when termination is selected.
   - AC: the quit test records call order and observes WebSocket disconnect before HTTP DELETE; non-terminating quit still disconnects without DELETE.
 - MUST treat an HTTP backend disconnect, including `httpx.RemoteProtocolError`, as a controlled session-unreachable response rather than an unhandled exception.
@@ -141,8 +141,8 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 ### [ ] M2 — Make TUI termination client-first
 
 - **Approach:** Add an owned reconnect-task reference in `cli/src/archie_cli/tui/app.py`; have `_schedule_reconnect` store it and clear it when complete. In `_finish_quit`, set `_shutting_down` before cancellation, cancel/await receive and reconnect tasks, disconnect the WebSocket, then perform the existing DELETE when requested. Keep the existing accepted DELETE statuses and error reporting for actual deletion failures. Extend `tests/test_tui_quit.py` with an ordered fake/side-effect assertion and active reconnect cancellation coverage.
-- **Test seam:** `ArchieApp._finish_quit` with mocked WS, HTTP client, and asyncio tasks.
-- **Edge cases:** quit without termination → disconnect and exit, no DELETE; DELETE returns 404 → exit normally; DELETE transport/status failure after client teardown → report the existing termination error; reconnect is active → cancellation prevents another connect.
+- **Test seam:** Textual's public `ArchieApp.action_quit` confirmation path, driven with the existing Textual test harness; the test may use injected fake transport/tasks to observe the teardown ordering.
+- **Edge cases:** quit without termination → disconnect and exit, no DELETE; DELETE returns 404 → exit normally; DELETE transport/status failure after client teardown → report the existing termination error; reconnect with an in-flight history replay → cancellation stops the replay and prevents a follow-up request; reconnect is active → cancellation prevents another connect.
 - **Deliverable:** terminating the TUI closes all client-side session activity before container deletion and never starts a reconnect during shutdown.
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_tui_quit.py tests/test_tui_canonical.py` passes.
 - **Outcome:**
@@ -167,7 +167,7 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 
 ## Review
 
-- Plan review: pending
+- Plan review: one pass; resolved the M2 private test-seam concern by specifying the public `ArchieApp.action_quit` confirmation path, and expanded M2 acceptance/edge-case coverage to include cancellation of an in-flight `/events` replay.
 - Code review: pending
 - Merge risk: pending
 
