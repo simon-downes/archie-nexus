@@ -51,6 +51,10 @@ StreamingMessage > .header {
     text-style: bold;
 }
 
+QuestionPanel {
+    border-left: thick $primary;
+}
+
 CancelledMessage {
     border-left: thick $error-darken-3;
     color: $error;

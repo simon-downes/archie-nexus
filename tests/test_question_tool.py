@@ -464,3 +464,18 @@ def test_result_text_round_trips_through_row_summary(answer):
     )
     assert "chars)" not in summary
     assert ("→" in summary) or ("(dismissed)" in summary)
+
+
+def test_recommended_option_is_moved_first():
+    from archie_agent.question import _parse
+
+    parsed = _parse(
+        "tu",
+        "Q?",
+        [{"label": "a"}, {"label": "b"}, {"label": "c", "description": "best"}],
+        2,
+    )
+    assert isinstance(parsed, PendingQuestion)
+    assert [option.label for option in parsed.options] == ["c", "a", "b"]
+    assert parsed.options[0].description == "best"
+    assert parsed.recommended == 0

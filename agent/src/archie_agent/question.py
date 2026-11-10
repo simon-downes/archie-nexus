@@ -119,6 +119,10 @@ def _parse(tool_use_id: str, question, options, recommended) -> PendingQuestion 
         or not 0 <= recommended < len(parsed)
     ):
         return f"recommended must be an option index from 0 to {len(parsed) - 1}"
+    if recommended:
+        # The recommended option is always shown first; answers use this order.
+        parsed.insert(0, parsed.pop(recommended))
+        recommended = 0
     return PendingQuestion(
         id=tool_use_id, question=question.strip(), options=parsed, recommended=recommended
     )
@@ -159,8 +163,9 @@ def create_question_tool(broker: QuestionBroker) -> ToolSpec:
             "Ask the user one question and wait for the answer. Use it for a decision "
             "with 2-4 realistic options where the code and context don't settle the "
             "choice; don't use it for open-ended discussion or facts you can look up. "
-            "Put your recommendation first or mark it with `recommended`, and give each "
-            "option a short description of its trade-off. The user can pick an option, "
+            "Mark your recommendation with `recommended`; it is shown to the user as "
+            "option 1. Give each option a description of its trade-off. The user can "
+            "pick an option, "
             "type a different answer, or dismiss the question. One question per call; "
             "never call it more than once at a time."
         ),
@@ -178,7 +183,7 @@ def create_question_tool(broker: QuestionBroker) -> ToolSpec:
                             "label": {"type": "string", "description": "Short option name."},
                             "description": {
                                 "type": "string",
-                                "description": "Optional one-line trade-off.",
+                                "description": "Optional trade-off; may be several sentences.",
                             },
                         },
                         "required": ["label"],

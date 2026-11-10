@@ -8,16 +8,17 @@ from archie_cli.tui.input import MessageInput
 from archie_cli.tui.question import QuestionPanel
 from archie_shared.commands import AnswerCommand
 from archie_shared.events import Handshake, PendingQuestion, QuestionOption, SessionStatus
+from textual.widgets import Static
 
 QUESTION = PendingQuestion(
     id="tu_q",
     question="Which database?",
     options=[
-        QuestionOption(label="SQLite", description="Zero setup"),
         QuestionOption(label="Postgres"),
+        QuestionOption(label="SQLite", description="Zero setup"),
         QuestionOption(label="MySQL"),
     ],
-    recommended=1,
+    recommended=0,
 )
 
 
@@ -59,11 +60,11 @@ async def test_panel_shows_question_with_recommended_selected():
     async with app.run_test(size=(100, 30)) as pilot:
         panel = await _blocked(app, pilot)
         assert panel.display
-        assert panel.selected == 1
-        text = panel.render()
+        assert panel.selected == 0
+        text = "\n".join(str(static.render()) for static in panel.query(Static))
         assert "Which database?" in text
-        assert "2. [bold]Postgres[/]" in text
-        assert "(recommended)" in text
+        assert "❯ 1. Postgres (recommended)" in text
+        assert "  2. SQLite" in text
         assert "Zero setup" in text
         inp = app.query_one("#input", MessageInput)
         assert not inp.disabled
@@ -89,8 +90,8 @@ async def test_arrows_and_enter_pick_selected_option():
         await _blocked(app, pilot)
         await pilot.press("down", "down", "enter")
         await pilot.pause()
-        # Recommended is 1; two downs wrap to 0.
-        app._ws.send_command.assert_awaited_once_with(AnswerCommand(question_id="tu_q", option=0))
+        # Recommended is 0; two downs select 2.
+        app._ws.send_command.assert_awaited_once_with(AnswerCommand(question_id="tu_q", option=2))
 
 
 @pytest.mark.asyncio
@@ -179,7 +180,7 @@ async def test_history_keys_work_again_after_question():
         panel = await _blocked(app, pilot)
         await pilot.press("up")
         assert inp.text == ""
-        assert panel.selected == 0
+        assert panel.selected == 2
         await pilot.press("2")
         await pilot.pause()
         app._apply_event(_status("idle", None, "s2"))
@@ -198,3 +199,24 @@ async def test_old_agent_status_does_not_end_the_turn():
         app._apply_event(SessionStatus(id="old", model_key="m", git_branch="main"))
         await pilot.pause()
         assert app._turn_active
+
+
+@pytest.mark.asyncio
+async def test_long_descriptions_wrap_at_120_columns():
+    long = " ".join(["word"] * 80)
+    question = PendingQuestion(
+        id="tu_long",
+        question=long,
+        options=[QuestionOption(label="A", description=long), QuestionOption(label="B")],
+        recommended=0,
+    )
+    app = _app()
+    async with app.run_test(size=(200, 60)) as pilot:
+        _handshake(app)
+        app._apply_event(_status("blocked", question, "s1"))
+        await pilot.pause()
+        panel = app.query_one("#question", QuestionPanel)
+        for static in panel.query(Static):
+            assert static.size.width <= 120
+        description = panel.query_one(".option-description", Static)
+        assert description.size.height > 1

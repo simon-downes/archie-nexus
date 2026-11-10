@@ -8,23 +8,43 @@ works without switching focus.
 from __future__ import annotations
 
 from archie_shared.events import PendingQuestion
-from rich.markup import escape
-from textual.widget import Widget
+from rich.style import Style
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.containers import Vertical
+from textual.widgets import Static
 
 from archie_cli.tui import theme
 
 HINT = "↑↓ select · Enter choose · 1-4 pick · type to answer · Esc dismiss"
+MARKER = "❯"
 
 
-class QuestionPanel(Widget):
-    """Shows one :class:`PendingQuestion` with numbered options."""
+class QuestionPanel(Vertical):
+    """Shows one :class:`PendingQuestion` with numbered options.
+
+    Text wraps at the panel width, capped at 120 columns. Descriptions are indented under
+    their option's label.
+    """
 
     DEFAULT_CSS = """
     QuestionPanel {
         height: auto;
-        margin: 0;
-        padding: 0 1;
+        margin: 0 0 1 0;
+        padding: 1 2 0 2;
         display: none;
+    }
+    QuestionPanel > Static {
+        height: auto;
+        max-width: 120;
+    }
+    QuestionPanel > .question-text,
+    QuestionPanel > .option-description,
+    QuestionPanel > .option-last {
+        margin: 0 0 1 0;
+    }
+    QuestionPanel > .option-description {
+        padding: 0 0 0 5;
     }
     """
 
@@ -39,33 +59,47 @@ class QuestionPanel(Widget):
             self.selected = question.recommended if question.recommended is not None else 0
         self.question = question
         self.display = True
-        self.refresh(layout=True)
+        self.refresh(recompose=True, layout=True)
 
     def hide(self) -> None:
         """Remove the question from view."""
         self.question = None
         self.display = False
+        self.refresh(recompose=True)
 
     def move(self, delta: int) -> None:
         """Move the selection by ``delta``, wrapping around the options."""
         if self.question is None:
             return
         self.selected = (self.selected + delta) % len(self.question.options)
-        self.refresh()
+        self.refresh(recompose=True)
 
-    def render(self) -> str:
+    def compose(self) -> ComposeResult:
         question = self.question
         if question is None:
-            return ""
-        lines = [f"[bold {theme.PRIMARY}]?[/] [bold]{escape(question.question)}[/]"]
+            return
+        header = Text.assemble(
+            ("? Question", Style(color=theme.PRIMARY, bold=True)),
+            (" - ", theme.MUTED),
+            question.question,
+        )
+        yield Static(header, classes="question-text")
         for index, option in enumerate(question.options):
-            marker = f"[{theme.PRIMARY}]›[/]" if index == self.selected else " "
-            label = escape(option.label)
-            label = f"[bold]{label}[/]" if index == self.selected else label
-            badge = f" [{theme.SUCCESS}](recommended)[/]" if index == question.recommended else ""
-            description = (
-                f" [{theme.MUTED}]— {escape(option.description)}[/]" if option.description else ""
-            )
-            lines.append(f"{marker} {index + 1}. {label}{badge}{description}")
-        lines.append(f"[{theme.MUTED}]{HINT}[/]")
-        return "\n".join(lines)
+            if option.description:
+                yield Static(self.option_line(index), classes="option-label")
+                yield Static(Text(option.description), classes="option-description")
+            else:
+                # Without a description, the label carries the gap before the next option.
+                yield Static(self.option_line(index), classes="option-label option-last")
+        yield Static(Text(HINT, style=theme.MUTED), classes="hint")
+
+    def option_line(self, index: int) -> Text:
+        """The numbered label row for option ``index``, with marker and badge."""
+        assert self.question is not None
+        selected = index == self.selected
+        line = Text(f"{MARKER} " if selected else "  ", style=theme.SUCCESS)
+        label = f"{index + 1}. {self.question.options[index].label}"
+        line.append(label, style=Style(color=theme.ANSWER, bold=selected))
+        if index == self.question.recommended:
+            line.append(" (recommended)", style=theme.SUCCESS)
+        return line
