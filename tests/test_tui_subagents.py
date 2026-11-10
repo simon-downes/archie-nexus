@@ -62,6 +62,12 @@ def _apply(app, *events):
     return app.transcript
 
 
+def test_command_palette_binding_is_available():
+    bindings = {binding.key: binding.action for binding in ArchieApp.BINDINGS}
+
+    assert bindings["ctrl+shift+p"] == "command_palette"
+
+
 def test_live_scoped_llm_cost_is_included_in_status_accounting():
     app = _app()
     app._update_accounting_status = MagicMock()
