@@ -11,6 +11,8 @@ import click
 import httpx
 import uvicorn
 from archie_shared.session import SessionDescriptor, split_id
+from rich.console import Console
+from rich.status import Status
 
 from archie_cli.project import detect_project_dir
 
@@ -49,6 +51,12 @@ from archie_cli.stats import stats  # noqa: E402
 main.add_command(auth)
 main.add_command(config)
 main.add_command(stats)
+
+
+def _startup_status(kiro: bool) -> Status:
+    """Return a terminal-aware status display for the blocking session start."""
+    message = "Starting Kiro session…" if kiro else "Starting session…"
+    return Console(stderr=True).status(message, spinner="dots")
 
 
 @main.command()
@@ -136,16 +144,17 @@ def start(detach: bool, kiro: bool, workspace: str | None):
         )
 
     url = _profile_url(profile)
-    try:
-        response = httpx.post(
-            f"{url}/sessions",
-            json={"workspace": ws_name, **({"backend": "kiro"} if kiro else {})},
-            timeout=60.0,
-        )
-    except httpx.HTTPError as exc:
-        raise click.ClickException(
-            f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
-        ) from None
+    with _startup_status(kiro):
+        try:
+            response = httpx.post(
+                f"{url}/sessions",
+                json={"workspace": ws_name, **({"backend": "kiro"} if kiro else {})},
+                timeout=60.0,
+            )
+        except httpx.HTTPError as exc:
+            raise click.ClickException(
+                f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
+            ) from None
 
     if response.status_code == 400:
         raise click.ClickException(_error_body(response, "Bad request"))

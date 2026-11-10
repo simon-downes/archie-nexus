@@ -129,14 +129,14 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 
 ## Milestones
 
-### [ ] M1 — Show activity during session startup
+### [x] M1 — Show activity during session startup
 
 - **Approach:** Reuse Rich's terminal-aware status context in `cli/src/archie_cli/cli.py` around the existing synchronous `httpx.post` call. Keep status output separate from the existing session descriptor output and preserve the current 60-second timeout and error branches. Add focused tests to the existing CLI start test module, using the current HTTP mocks and a patched status context to prove ordering and cleanup.
 - **Test seam:** Click invocation of `main start`, with the orchestrator HTTP POST mocked.
 - **Edge cases:** POST raises → status is finalized and the existing orchestrator-unreachable Click error is shown; HTTP error response → status is finalized before the existing error; `--detach`/TUI success → existing output is unchanged apart from startup feedback.
 - **Deliverable:** `archie start` visibly reports that startup is in progress before the TUI or detach details appear.
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_cli_start_stop.py` passes, including new indicator tests.
-- **Outcome:**
+- **Outcome:** Added Rich status feedback with native/Kiro wording around the existing POST; focused CLI tests verify backend labels and cleanup ordering on success/failure. Verified with `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_cli_start_stop.py` (13 passed) and Ruff on both changed Python files.
 
 ### [ ] M2 — Make TUI termination client-first
 
