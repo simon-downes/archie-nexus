@@ -92,3 +92,29 @@ def test_edit_diff_uses_text_colours_and_line_markers():
     assert "[#67c26d]   1+ new line[/]" in summary
     assert "[on red]" not in summary
     assert "[on green]" not in summary
+
+
+def test_question_pending_shows_question():
+    assert (
+        format_tool_pending("question", {"question": "Which db?"}) == "Question [bold]Which db?[/]"
+    )
+
+
+def test_question_complete_shows_selected_option():
+    summary = format_tool_complete(
+        "question", {"question": "Which db?"}, "User selected option 2: Postgres", False
+    )
+    assert summary == "Question [bold]Which db?[/] → [bold]Postgres[/]"
+
+
+def test_question_complete_shows_free_text_answer():
+    summary = format_tool_complete(
+        "question", {"question": "Which db?"}, "User answered: MySQL: maybe", False
+    )
+    assert summary == "Question [bold]Which db?[/] → [bold]MySQL: maybe[/]"
+
+
+def test_question_complete_shows_dismissal():
+    result = "User dismissed the question without answering. Do not assume an answer."
+    summary = format_tool_complete("question", {"question": "Which db?"}, result, False)
+    assert summary == "Question [bold]Which db?[/] [dim](dismissed)[/]"

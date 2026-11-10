@@ -87,7 +87,7 @@ ws://<orchestrator>/sessions/<session-id>/stream
 
 The WebSocket is bidirectional:
 
-- **TUI to agent:** flat `message`, `interrupt`, and `switch_model` commands;
+- **TUI to agent:** flat `message`, `interrupt`, `switch_model`, and `answer` commands;
 - **agent to TUI:** public events, including streamed `text_delta` events.
 
 The orchestrator transparently relays this connection to the agent's `/stream` endpoint. It does
@@ -129,6 +129,7 @@ Examples of valid commands are:
 {"type":"interrupt"}
 {"type":"interrupt","scope":"task-01","subagent_index":0}
 {"type":"switch_model","model_key":"bedrock-anthropic.claude-sonnet-4-6"}
+{"type":"answer","question_id":"tooluse_01","option":1}
 ```
 
 An `interrupt` command either targets the root with neither child field or targets a child with
@@ -255,12 +256,14 @@ session_status   live-only
 {
   "type":"handshake",
   "id":"01J...",
-  "protocol_version":2,
+  "protocol_version":4,
   "session_id":"..."
 }
 ```
 
-`session_status` carries live runtime status such as the active model key and Git branch. Neither
+`session_status` carries live runtime status: the active model key, the Git branch, the session
+`state` (`idle`, `working` or `blocked`), and the pending `question` when the root agent is waiting
+for an answer. A client that connects while a question is pending learns about it here. Neither
 event is a history snapshot, accounting source, or replay cursor. `handshake` is always followed by
 `session_status`; model changes are represented by a later `session_status` event.
 
@@ -891,6 +894,21 @@ clients receive the status only through their live connection, and a newly conne
 the current status after its `handshake`.
 
 Historical `llm_request` costs are never repriced.
+
+### Questions
+
+The root agent's `question` tool asks the user one question and waits. The agent emits
+`session_status` with `state=blocked` and the `question` (its `id` is the tool call's
+`tool_use_id`). The TUI shows the question above the input and replies with one flat command:
+
+```json
+{"type":"answer","question_id":"tooluse_01","option":1}
+```
+
+`text` or `dismiss: true` replace `option` for a typed answer or a dismissal. The agent resolves
+the tool call, emits `session_status` with `state=working` and no question, and the tool returns a
+normal `tool_result`. An interrupt while the question waits cancels the tool call like any other.
+No question event is persisted.
 
 ### Transport trust boundary
 

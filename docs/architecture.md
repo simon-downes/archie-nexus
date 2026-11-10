@@ -180,9 +180,10 @@ and live frames through `_apply_event(event)`; both paths deduplicate by event I
 and the shared `TranscriptBuilder` reconciles streamed text by request identity.
 
 A connect sends one live-only `handshake` containing protocol and session identity, followed by
-one `session_status` frame carrying the current model and Git branch. There is no
+one `session_status` frame carrying the current model, Git branch, session state and any pending
+question. There is no
 `session_snapshot` or `session_info` envelope and no parallel wire event schema.
-`PROTOCOL_VERSION` remains 2; clients and agents use this final contract together.
+`PROTOCOL_VERSION` is 4; clients and agents use this final contract together.
 
 The coordinator persists a persisted event before enqueueing it for broadcast. Live-only events are
 never appended. `text_delta` is intentionally excluded from history reads; assistant content is

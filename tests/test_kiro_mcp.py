@@ -57,6 +57,7 @@ async def test_lists_registry_tools_without_skill_or_task(server):
     names = {t.name for t in tools}
     expected = {t["name"] for t in create_registry().to_tool_config()} | {"big"}
     assert names == expected - {"skill", "task"}
+    assert "question" not in names
     shell = next(t for t in tools if t.name == "shell")
     assert "command" in shell.inputSchema["properties"]
 

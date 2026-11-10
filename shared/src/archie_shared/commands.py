@@ -46,7 +46,31 @@ class SwitchModelCommand(
     model_key: str
 
 
-type ClientCommand = MessageCommand | InterruptCommand | SwitchModelCommand
+class AnswerCommand(
+    msgspec.Struct,
+    tag="answer",
+    tag_field="type",
+    forbid_unknown_fields=True,
+    omit_defaults=True,
+):
+    """Client answers the pending question: exactly one of option, text or dismiss."""
+
+    question_id: str
+    option: int | None = None
+    text: str | None = None
+    dismiss: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.option, bool):
+            raise TypeError("option must be an integer")
+        if self.text is not None and not self.text.strip():
+            raise ValueError("text answer must not be empty")
+        given = (self.option is not None) + (self.text is not None) + self.dismiss
+        if given != 1:
+            raise ValueError("answer requires exactly one of option, text or dismiss")
+
+
+type ClientCommand = MessageCommand | InterruptCommand | SwitchModelCommand | AnswerCommand
 
 
 def encode_command(command: ClientCommand) -> str:

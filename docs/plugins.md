@@ -15,7 +15,8 @@ A plugin may provide:
 
 Core tools are not plugins and stay in `agent/src/archie_agent/exec/tools/`: filesystem
 (`read`, `write`, `edit`, `glob`, `grep`), `shell`, web (`web_fetch`, `web_search`),
-`code`, `brain_search`, plus the harness tools `exec`, `skill` and `task`. The `bedrock`
+`code`, `brain_search`, plus the harness tools `exec`, `skill`, `task` and `question` (root agent
+only). The `bedrock`
 model provider is also core and defined in `shared/src/archie_shared/credentials/providers.py`.
 
 ## Directory layout

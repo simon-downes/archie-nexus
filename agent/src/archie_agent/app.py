@@ -13,7 +13,9 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import msgspec
 from archie_shared.commands import (
+    AnswerCommand,
     InterruptCommand,
     MessageCommand,
     SwitchModelCommand,
@@ -24,7 +26,6 @@ from archie_shared.events import (
     ErrorNotice,
     Handshake,
     SessionStarted,
-    SessionStatus,
     encode_event,
 )
 from archie_shared.models import get_model, load_models
@@ -241,6 +242,7 @@ async def status(request: Request) -> JSONResponse:
     """Health check + session metadata."""
     if _agent is None:
         return JSONResponse({"status": "starting"}, status_code=503)
+    status_frame = _agent.status_event()
     return JSONResponse(
         {
             "status": "ok",
@@ -248,6 +250,8 @@ async def status(request: Request) -> JSONResponse:
             "session_id": _agent.session.session_id,
             "turn_count": _agent.session.turn_index,
             "turn_active": _agent.turn_active,
+            "state": status_frame.state,
+            "question": msgspec.to_builtins(status_frame.question),
         }
     )
 
@@ -304,13 +308,7 @@ async def _handle_model_switch(command: SwitchModelCommand, websocket: WebSocket
 
     new_llm = create_llm_client(new_model, _config.global_.region)
     _agent.switch_model(command.model_key, new_model, new_llm)
-    await _agent.event_bus.emit(
-        SessionStatus(
-            id=str(ULID()),
-            model_key=_agent.session.model_id,
-            git_branch=_read_git_branch(),
-        )
-    )
+    await _agent.event_bus.emit(_agent.status_event())
     log.info("Model switched", extra={"model_key": command.model_key, "model_name": new_model.name})
 
 
@@ -333,11 +331,7 @@ async def _handle_kiro_model_switch(
             ErrorNotice(id=str(ULID()), kind="unknown_model", message=error), target=websocket
         )
         return
-    await agent.event_bus.emit(
-        SessionStatus(
-            id=str(ULID()), model_key=agent.session.model_id, git_branch=_read_git_branch()
-        )
-    )
+    await agent.event_bus.emit(agent.status_event())
     log.info("Model switched", extra={"model_key": command.model_key, "backend": "kiro"})
 
 
@@ -345,7 +339,7 @@ async def stream(websocket: WebSocket) -> None:
     """Bidirectional WebSocket endpoint for event streaming.
 
     On connect: sends one canonical Handshake followed by SessionStatus.
-    Receives: message and interrupt commands.
+    Receives: message, interrupt, switch_model and answer commands.
     On disconnect: removes the client from the session bus.
     """
     await websocket.accept()
@@ -363,11 +357,7 @@ async def stream(websocket: WebSocket) -> None:
                 protocol_version=PROTOCOL_VERSION,
                 session_id=_agent.session.session_id,
             ),
-            SessionStatus(
-                id=str(ULID()),
-                model_key=_agent.session.model_id,
-                git_branch=_read_git_branch(),
-            ),
+            _agent.status_event(),
         ),
     )
 
@@ -404,6 +394,10 @@ async def stream(websocket: WebSocket) -> None:
                 _agent.interrupt(command.target)
             elif isinstance(command, SwitchModelCommand):
                 await _handle_model_switch(command, websocket)
+            elif isinstance(command, AnswerCommand):
+                notice = _agent.answer_question(command)
+                if notice is not None:
+                    await _agent.event_bus.emit(notice, target=websocket)
 
     except WebSocketDisconnect:
         pass
