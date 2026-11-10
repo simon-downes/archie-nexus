@@ -291,7 +291,7 @@ login→callback round trip with a fake token transport) and a TUI attached to a
 container (no Docker here; covered by CLI URL tests and the WS proxy tests).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/24
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
