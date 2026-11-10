@@ -150,6 +150,7 @@ class SubagentNode:
     context_tokens: int = 0
     error: str = ""
     activity: str = "Thinking..."
+    prompt: str = ""  # the task prompt from the launching task tool, when known
     items: list = field(default_factory=list)
     kind: str = "subagent"
 
@@ -545,6 +546,8 @@ class TranscriptBuilder:
             tasks = parent.input.get("tasks")
             if isinstance(tasks, list) and index < len(tasks) and isinstance(tasks[index], dict):
                 node.agent = str(tasks[index].get("agent") or "child")
+                prompt = tasks[index].get("prompt")
+                node.prompt = prompt if isinstance(prompt, str) else ""
             parent.children.append(node)
             parent_slot: str | None = parent.children_id
         else:

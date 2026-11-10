@@ -33,6 +33,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from archie_cli.tui import theme
+from archie_cli.tui.conversation import PromptMessage
 from archie_cli.tui.transcript_view import TranscriptView, _markup, _status_glyph
 
 SYNTAX_THEME = "monokai"
@@ -73,7 +74,8 @@ def render_section(section: DetailSection) -> Text:
     The block is a single ``Text`` so Textual can select and copy it; a ``Syntax``
     or ``Group`` renderable gives the screen no text offsets to select by.
     """
-    text = Text(section.title.upper(), style=HEADING_STYLE)
+    text = Text()
+    text.append(section.title.upper(), style=HEADING_STYLE)
     text.append("\n")
     lexer = _lexer_for(section)
     body = section.text.rstrip("\n")
@@ -202,6 +204,9 @@ class SubagentScreen(DetailScreen):
     def on_mount(self) -> None:
         # Build the rows from the node's current items, then follow live changes.
         self.view.suspend()
+        if self.sub.prompt.strip():
+            prompt = self.sub.prompt
+            self.view.add_local(lambda: PromptMessage(prompt))
         for item in self.sub.items:
             self.view.add_node(item)
         self.view.resume()

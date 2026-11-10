@@ -158,6 +158,12 @@ async def test_tool_popup_text_can_be_selected_and_copied():
         await pilot.press("ctrl+c")
         assert app.clipboard == "SOURCE\nx = 1\nprint(x)"
 
+        # A plain (unhighlighted) result uses the default colour; only titles are styled.
+        content = sections.content
+        assert not content.style
+        start = content.plain.index("hello world")
+        assert not any(span.start <= start < span.end for span in content.spans)
+
 
 @pytest.mark.asyncio
 async def test_escape_closes_only_the_popup_and_does_not_interrupt():
@@ -187,7 +193,7 @@ async def test_subagent_row_opens_live_transcript_with_clickable_tools():
         assert isinstance(sub_screen, SubagentScreen)
         assert sub_screen.crumbs == ["Session", "general #0"]
         rows = [type(w).__name__ for w in sub_screen.view.children]
-        assert rows == ["AssistantMessage"]
+        assert rows == ["PromptMessage", "AssistantMessage"]
 
         # A live child tool call appears in the open transcript.
         await _feed(app, pilot, CHILD_SHELL)
@@ -344,7 +350,10 @@ async def test_child_event_before_the_subagent_screen_mounts():
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, SubagentScreen)
-        assert [row.key for row in screen.view.rows] == [item.id for item in screen.sub.items]
+        assert [row.key for row in screen.view.rows] == [
+            "local-1",  # the task prompt
+            *(item.id for item in screen.sub.items),
+        ]
         assert len(screen.view.query(IterationBlock)) == 1
         assert "ls -la" in _text(screen.view.query_one(ToolRow))
 
@@ -379,3 +388,63 @@ async def test_child_error_text_is_not_parsed_as_markup():
         from archie_cli.tui.conversation import ErrorMessage
 
         assert "bad [/] list[str]" in _text(app.screen.view.query_one(ErrorMessage))
+
+
+def test_prompt_preview_caps_lines_and_characters():
+    from archie_cli.tui.conversation import PROMPT_PREVIEW_CHARS, prompt_preview
+
+    assert prompt_preview("short\nprompt\n") == ("short\nprompt", 0)
+    lines = "\n".join(f"line {n}" for n in range(13))
+    text, hidden = prompt_preview(lines)
+    assert text.split("\n") == [f"line {n}" for n in range(10)] and hidden == 3
+    # One huge line is cut at the character cap and counted as hidden.
+    text, hidden = prompt_preview("x" * (PROMPT_PREVIEW_CHARS + 50) + "\nnext")
+    assert text == "x" * PROMPT_PREVIEW_CHARS + "…" and hidden == 2
+
+
+@pytest.mark.asyncio
+async def test_subagent_popup_shows_its_prompt_collapsed_and_expandable():
+    from archie_cli.tui.conversation import PromptMessage, PromptToggle
+
+    prompt = "\n".join(f"step {n}" for n in range(14))
+    task = _call("tk", "task", {"tasks": [{"agent": "general", "prompt": prompt}]})
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _feed(app, pilot, USER, task, CHILD_TEXT)
+        assert app.transcript.subagents[("tk", 0)].prompt == prompt
+        await pilot.click(SubagentRow)
+        await pilot.pause()
+        message = app.screen.view.query_one(PromptMessage)
+        body = message.query_one(".prompt-body", Static)
+        assert "step 9" in body.content.plain and "step 10" not in body.content.plain
+        toggle = message.query_one(PromptToggle)
+        assert "+4 lines" in str(toggle.render())
+
+        await pilot.click(toggle)
+        await pilot.pause()
+        assert "step 13" in body.content.plain
+        assert "collapse" in str(toggle.render())
+        assert message.get_copy_text() == prompt
+
+        await pilot.click(toggle)
+        await pilot.pause()
+        assert "step 10" not in body.content.plain
+
+
+@pytest.mark.asyncio
+async def test_short_prompt_has_no_toggle():
+    from archie_cli.tui.conversation import PromptMessage, PromptToggle
+
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _feed(app, pilot, USER, TASK, CHILD_TEXT)
+        await pilot.click(SubagentRow)
+        await pilot.pause()
+        message = app.screen.view.query_one(PromptMessage)
+        body = message.query_one(".prompt-body", Static).content
+        assert "look" in body.plain
+        assert not message.query(PromptToggle)
+        # Only the header is coloured; the prompt text uses the default colour.
+        assert not body.style
+        header_end = body.plain.index("\n") + 1
+        assert all(span.end <= header_end for span in body.spans)

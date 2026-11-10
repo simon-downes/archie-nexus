@@ -32,6 +32,11 @@ UserMessage {
     border-left: thick $primary;
 }
 
+/* A subagent's task prompt sits where a user message would. */
+PromptMessage {
+    border-left: thick $primary;
+}
+
 /* A dim rule on assistant text; streaming matches so finalising doesn't shift it. */
 AssistantMessage {
     border-left: thick $primary 30%;

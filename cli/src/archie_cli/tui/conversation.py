@@ -112,6 +112,108 @@ class UserMessage(Static):
         return self._content
 
 
+PROMPT_PREVIEW_LINES = 10
+PROMPT_PREVIEW_CHARS = 1500  # also caps a long prompt written as a few huge lines
+
+
+def prompt_preview(prompt: str) -> tuple[str, int]:
+    """Return (collapsed text, lines hidden) for a subagent prompt.
+
+    The preview keeps the first :data:`PROMPT_PREVIEW_LINES` lines, cut at
+    :data:`PROMPT_PREVIEW_CHARS` characters. The hidden count includes the line the
+    character cap cuts into, so "+N lines" is never zero for a truncated prompt.
+    """
+    lines = prompt.rstrip("\n").split("\n")
+    shown: list[str] = []
+    used = 0
+    cut = False
+    for line in lines[:PROMPT_PREVIEW_LINES]:
+        if used + len(line) > PROMPT_PREVIEW_CHARS:
+            shown.append(line[: max(0, PROMPT_PREVIEW_CHARS - used)] + "…")
+            cut = True
+            break
+        shown.append(line)
+        used += len(line) + 1
+    hidden = len(lines) - len(shown) + (1 if cut else 0)
+    return "\n".join(shown), hidden
+
+
+class PromptToggle(Static):
+    """The "… +N lines" line under a collapsed prompt. Clicking it toggles the prompt."""
+
+    DEFAULT_CSS = """
+    PromptToggle {
+        height: 1;
+        color: $text-muted;
+        text-style: italic;
+    }
+    PromptToggle:hover {
+        background: $boost;
+    }
+    """
+
+    def on_click(self, event) -> None:
+        event.stop()
+        prompt = next((a for a in self.ancestors if isinstance(a, PromptMessage)), None)
+        if prompt is not None:
+            prompt.toggle()
+
+
+class PromptMessage(Widget):
+    """The task prompt a subagent was launched with, collapsed when it is long.
+
+    Only the toggle line expands or collapses it, so dragging over the prompt text
+    selects it without toggling. Copy (ctrl+c on the focused block) takes the full
+    prompt either way.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    PromptMessage {
+        margin: 0 0 1 0;
+        padding: 1 2;
+        height: auto;
+    }
+    PromptMessage > Static {
+        height: auto;
+    }
+    """
+
+    def __init__(self, prompt: str) -> None:
+        super().__init__()
+        self._prompt = prompt.rstrip("\n")
+        self._preview, self._hidden = prompt_preview(self._prompt)
+        self.expanded = False
+
+    def _body(self) -> Text:
+        text = Text()
+        text.append("▶ Prompt\n", style=Style(color=theme.SECONDARY, bold=True))
+        text.append(self._prompt if self.expanded else self._preview)
+        return text
+
+    def _toggle_label(self) -> str:
+        if self.expanded:
+            return "▲ collapse"
+        noun = "line" if self._hidden == 1 else "lines"
+        return f"… +{self._hidden} {noun} (click to expand)"
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._body(), classes="prompt-body")
+        if self._hidden:
+            yield PromptToggle(self._toggle_label(), classes="prompt-toggle")
+
+    def toggle(self) -> None:
+        """Switch between the preview and the full prompt."""
+        self.expanded = not self.expanded
+        self.query_one(".prompt-body", Static).update(self._body())
+        self.query_one(PromptToggle).update(self._toggle_label())
+
+    def get_copy_text(self) -> str:
+        """Return the full prompt for clipboard copy, collapsed or not."""
+        return self._prompt
+
+
 class AssistantMessage(Widget):
     """A finalised assistant message with full Markdown rendering."""
 
