@@ -51,15 +51,27 @@ def _error_response(status_code: int, error: str) -> MagicMock:
     return mock
 
 
-def test_startup_status_uses_backend_label():
-    """The status display names the backend while startup is blocking."""
+def test_startup_status_uses_backend_label_and_tty_spinner():
+    """The terminal status display names the backend while startup is blocking."""
     for kiro, message in ((False, "Starting session…"), (True, "Starting Kiro session…")):
-        console = MagicMock()
+        console = MagicMock(is_terminal=True)
         with patch("archie_cli.cli.Console", return_value=console):
-            status = _startup_status(kiro)
+            with _startup_status(kiro):
+                pass
 
-        assert status is console.status.return_value
         console.status.assert_called_once_with(message, spinner="dots")
+        console.print.assert_not_called()
+
+
+def test_startup_status_prints_non_tty_fallback():
+    """Captured output receives a readable startup line without terminal control codes."""
+    console = MagicMock(is_terminal=False)
+    with patch("archie_cli.cli.Console", return_value=console):
+        with _startup_status(True):
+            pass
+
+    console.print.assert_called_once_with("Starting Kiro session…")
+    console.status.assert_not_called()
 
 
 def test_startup_status_wraps_successful_request(monkeypatch, tmp_path):

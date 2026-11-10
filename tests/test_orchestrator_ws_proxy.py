@@ -8,7 +8,7 @@ from archie_orchestrator.app import app
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor
 from starlette.testclient import TestClient
-from websockets.exceptions import InvalidMessage
+from websockets.exceptions import ConnectionClosedOK, InvalidMessage
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -89,6 +89,45 @@ def test_ws_stream_backend_protocol_loss_is_expected(test_client, caplog):
     with (
         patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
         patch("archie_orchestrator.proxy.websockets.connect", invalid_connect),
+        caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
+    ):
+        with test_client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:
+            with pytest.raises(StarletteDisconnect) as exc_info:
+                ws.receive_text()
+
+    assert exc_info.value.code == 4002
+    assert not any("WS proxy error" in record.message for record in caplog.records)
+
+
+def test_ws_stream_backend_close_during_relay_is_expected(test_client, caplog):
+    """An established backend close is relayed as session-unreachable."""
+    session = _running_session()
+    from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
+
+    class ClosingBackend:
+        async def send(self, msg: str) -> None:
+            pass
+
+        def __aiter__(self):
+            return self._frames()
+
+        async def _frames(self):
+            raise ConnectionClosedOK(None, None)
+            yield  # pragma: no cover
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    @asynccontextmanager
+    async def closing_connect(url, **kwargs):
+        yield ClosingBackend()
+
+    with (
+        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        patch("archie_orchestrator.proxy.websockets.connect", closing_connect),
         caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
     ):
         with test_client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:

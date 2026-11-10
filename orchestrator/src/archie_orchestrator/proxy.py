@@ -201,8 +201,10 @@ async def proxy_stream(websocket: WebSocket) -> None:
             for task in done:
                 try:
                     task.result()
-                except (asyncio.CancelledError, WebSocketDisconnect, ConnectionClosed):
+                except (asyncio.CancelledError, WebSocketDisconnect):
                     pass
+                except ConnectionClosed:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     log.warning("WS relay task error for %s: %s", session_id, exc)
 

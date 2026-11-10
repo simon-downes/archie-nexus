@@ -514,7 +514,14 @@ class ArchieApp(App):
                 await asyncio.sleep(0.05)
             return self._ws.connected
 
-        return await self._reconnect()
+        self._reconnecting = True
+        task = asyncio.create_task(self._reconnect())
+        self._reconnect_task = task
+        try:
+            return await task
+        finally:
+            if self._reconnect_task is task:
+                self._reconnect_task = None
 
     async def _reconnect(self, close_code: int | None = None) -> bool:
         """Reconnect to the agent with backoff and resync via canonical replay.

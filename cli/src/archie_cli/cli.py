@@ -5,6 +5,8 @@ import socket
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
@@ -12,7 +14,6 @@ import httpx
 import uvicorn
 from archie_shared.session import SessionDescriptor, split_id
 from rich.console import Console
-from rich.status import Status
 
 from archie_cli.project import detect_project_dir
 
@@ -53,10 +54,17 @@ main.add_command(config)
 main.add_command(stats)
 
 
-def _startup_status(kiro: bool) -> Status:
-    """Return a terminal-aware status display for the blocking session start."""
+@contextmanager
+def _startup_status(kiro: bool) -> Iterator[None]:
+    """Display terminal-aware activity feedback for the blocking session start."""
     message = "Starting Kiro session…" if kiro else "Starting session…"
-    return Console(stderr=True).status(message, spinner="dots")
+    console = Console(stderr=True)
+    if not console.is_terminal:
+        console.print(message)
+        yield
+        return
+    with console.status(message, spinner="dots"):
+        yield
 
 
 @main.command()

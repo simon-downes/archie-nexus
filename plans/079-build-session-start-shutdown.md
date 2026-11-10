@@ -168,7 +168,7 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 ## Review
 
 - Plan review: one pass; resolved the M2 private test-seam concern by specifying the public `ArchieApp.action_quit` confirmation path, and expanded M2 acceptance/edge-case coverage to include cancellation of an in-flight `/events` replay.
-- Code review: pending
+- Code review: general and risk roles, round 1; fixed all three agreed findings: added a non-TTY startup line and test, propagated established relay `ConnectionClosed` to the 4002 handler with a test, and tracked/cancelled `_ensure_connected()` reconnects with a test. Second round pending.
 - Merge risk: pending
 
 ## Outcome

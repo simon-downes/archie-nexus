@@ -65,7 +65,26 @@ async def test_quit_with_termination_disconnects_before_delete():
 
 
 @pytest.mark.asyncio
+async def test_quit_cancels_reconnect_started_by_ensure_connected():
+    """Quit cancels a reconnect started by a send path, not only the receive loop."""
+    app = _app()
+    app._editor_active = True
+    app._ws.disconnect = AsyncMock()
+    ensure_task = asyncio.create_task(app._ensure_connected())
+    await asyncio.sleep(0)
+
+    assert app._reconnect_task is not None
+    with patch.object(app, "exit"):
+        await _confirm_quit(app, False)
+
+    with pytest.raises(asyncio.CancelledError):
+        await ensure_task
+    assert app._reconnect_task is None
+
+
+@pytest.mark.asyncio
 async def test_quit_cancels_receive_and_inflight_history_replay():
+    """Quit cancels receive and history replay tasks before disconnecting."""
     app = _app()
     app._ws.disconnect = AsyncMock()
     history_requests = 0
