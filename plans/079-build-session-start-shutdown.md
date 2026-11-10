@@ -1,6 +1,6 @@
 # 079 — Session startup and shutdown UX
 
-Status: planning
+Status: building
 Branch: build-it/079-session-start-shutdown (base: main @ e6a1ac0)
 Worktree: /workspace/.git/build-it-worktrees/079-session-start-shutdown
 
