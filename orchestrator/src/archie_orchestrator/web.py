@@ -1,7 +1,7 @@
 """Web console route handlers for the orchestrator.
 
 Provides read-only HTML views of orchestrator state: running sessions at GET /,
-credential status at /ui/auth, and the session log viewer under /ui/sessions.
+credential status at /auth, and the session log viewer under /sessions.
 Localhost-only, no auth, no session control actions.
 """
 
@@ -141,7 +141,7 @@ def _auth_status_data(request: Request) -> dict[str, list[dict]]:
 
 
 async def auth_status_page(request: Request) -> HTMLResponse:
-    """GET /auth/status in a browser — render redacted credential status."""
+    """GET /auth — render redacted credential status."""
     grouped = _auth_status_data(request)
     return templates.TemplateResponse(
         request,
@@ -248,7 +248,7 @@ def _row(summary: SessionSummary, active: set[str]) -> dict:
 
 
 async def session_list_page(request: Request) -> HTMLResponse:
-    """GET /ui/sessions — persisted session logs, newest first, filtered by ``q``.
+    """GET /sessions — persisted session logs, newest first, filtered by ``q``.
 
     An htmx request (``HX-Request``) gets only the ``#results`` fragment; htmx
     history restores (``HX-History-Restore-Request``) get the full page.
@@ -317,7 +317,7 @@ def _render_detail(session_id: str, path: Path, active: bool) -> str:
 
 
 async def session_detail_page(request: Request) -> HTMLResponse:
-    """GET /ui/sessions/{session_id} — structured transcript of one session log.
+    """GET /sessions/{session_id} — structured transcript of one session log.
 
     Markdown, highlighting and template rendering of a large log take a few
     hundred milliseconds, so the whole render runs off the event loop.
@@ -493,7 +493,7 @@ async def _live_events(session_id: str, path: Path, cursor: str | None) -> Async
 
 
 async def session_live(request: Request):
-    """GET /ui/sessions/{session_id}/live — server-sent transcript fragments."""
+    """GET /sessions/{session_id}/live — server-sent transcript fragments."""
     session_id = request.path_params["session_id"]
     path = session_log_path(session_id)
     if path is None:

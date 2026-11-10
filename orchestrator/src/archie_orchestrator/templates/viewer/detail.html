@@ -5,7 +5,7 @@
 {% block scripts %}<script src="/static/viewer/overlay.js" defer></script>{% if active %}<script src="/static/viewer/live.js" defer></script>{% endif %}{% endblock %}
 {% block content %}
 <section class="chrome session-head">
-    <p class="crumbs"><a href="/ui/sessions">Session logs</a> /</p>
+    <p class="crumbs"><a href="/sessions">Session logs</a> /</p>
     <h1 class="session-id">{{ session_id }}
         {%- if active %} <span class="live" id="live-wrap"><span class="dot"></span><span id="live-state">connecting</span></span>{% endif %}</h1>
     <p class="facts">
@@ -24,7 +24,7 @@
 
 <div id="transcript" class="transcript"
      data-last-event-id="{{ last_event_id or '' }}"
-     {%- if active %} data-live-url="/ui/sessions/{{ session_id }}/live"{% endif %}>
+     {%- if active %} data-live-url="/sessions/{{ session_id }}/live"{% endif %}>
     {%- for item in preamble %}{{ n.node(item) }}{% endfor %}
     {%- for turn in turns %}{{ n.turn(turn) }}{% endfor %}
     {%- if not turns and not preamble and not error %}

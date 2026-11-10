@@ -26,7 +26,7 @@
             {% for row in rows %}
             <tr data-session-id="{{ row.session_id }}"{% if row.active %} class="active"{% endif %}>
                 <td class="state">{% if row.active %}<span class="badge-active" title="Running">●</span>{% endif %}</td>
-                <td class="id"><a href="/ui/sessions/{{ row.session_id }}">{{ row.session_id }}</a></td>
+                <td class="id"><a href="/sessions/{{ row.session_id }}">{{ row.session_id }}</a></td>
                 <td>{{ row.workspace }}</td>
                 <td class="when">{{ row.started }}</td>
                 {% if row.error %}

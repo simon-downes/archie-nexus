@@ -23,7 +23,7 @@
         <thead><tr><th>Workspace</th><th class="num">Sessions</th><th class="num">Requests</th><th class="num">Cost</th></tr></thead>
         <tbody>
         {%- for w in data.top_workspaces %}
-            <tr><td><a href="{{ link('/ui/insights', workspace=w.workspace) }}">{{ w.workspace }}</a></td><td class="num">{{ m.num(w.sessions) }}</td><td class="num">{{ m.num(w.requests) }}</td><td class="num">{{ m.money(w.cost) }}</td></tr>
+            <tr><td><a href="{{ link('/insights', workspace=w.workspace) }}">{{ w.workspace }}</a></td><td class="num">{{ m.num(w.sessions) }}</td><td class="num">{{ m.num(w.requests) }}</td><td class="num">{{ m.money(w.cost) }}</td></tr>
         {%- else %}<tr><td colspan="4" class="dim">No requests in range.</td></tr>
         {%- endfor %}
         </tbody>
@@ -35,7 +35,7 @@
         <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Cache hit</th><th class="num">Cost</th></tr></thead>
         <tbody>
         {%- for row in data.top_models %}
-            <tr><td><a href="{{ link('/ui/insights', model=row.model) }}">{{ row.model }}</a></td><td class="num">{{ m.num(row.requests) }}</td><td class="num">{{ m.pct(row.cache_hit_pct) }}</td><td class="num">{{ m.money(row.cost) }}</td></tr>
+            <tr><td><a href="{{ link('/insights', model=row.model) }}">{{ row.model }}</a></td><td class="num">{{ m.num(row.requests) }}</td><td class="num">{{ m.pct(row.cache_hit_pct) }}</td><td class="num">{{ m.money(row.cost) }}</td></tr>
         {%- else %}<tr><td colspan="4" class="dim">No requests in range.</td></tr>
         {%- endfor %}
         </tbody>

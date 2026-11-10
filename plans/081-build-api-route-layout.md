@@ -201,7 +201,7 @@ to the new paths, and tests move with them.
   `env -u ARCHIE_BACKEND scripts/dev test` 4801 passed; `scripts/dev ruff check .` passed;
   `ruff format --check` clean on touched files.
 
-### [ ] M2 — Pages at the root without /ui
+### [x] M2 — Pages at the root without /ui
 
 - **Approach:** Create `pages.py` with the page `routes` and move `auth_callback` into it.
   Page paths: `/`, `/sessions`, `/sessions/{session_id}`, `/sessions/{session_id}/live`,
@@ -223,7 +223,14 @@ to the new paths, and tests move with them.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test` passes; `scripts/dev ruff check .`
   passes; `scripts/dev ruff format --check <touched files>` passes;
   `rg -n '/ui/' docs README.md orchestrator/src cli/src` finds nothing.
-- **Outcome:**
+- **Outcome:** `pages.py` holds the page `routes` and `auth_callback`; `app.py` composes
+  `[*pages.routes, /health, Mount(API_PREFIX), /static]`. Templates, `insights_web.VIEWS`,
+  docstrings, `README.md` and `docs/architecture.md` (now split into Pages / JSON API / other
+  root tables) use root paths; the auth page's "Refresh page" link goes to `/auth`. Route
+  tests: 11 former `/ui` paths → 404, `/sessions` → HTML, bad-state callback → 400 HTML, full
+  route-table order; each of the five web test files asserts no `/ui/` in a rendered page.
+  Evidence: `env -u ARCHIE_BACKEND scripts/dev test` 4815 passed; `scripts/dev ruff check .`
+  passed; format check clean; `rg -n '/ui/' docs README.md orchestrator/src cli/src` exits 1.
 
 ## Deviations
 

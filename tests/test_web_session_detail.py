@@ -1,4 +1,4 @@
-"""Tests for GET /ui/sessions/{id} (transcript view) and transcript rendering."""
+"""Tests for GET /sessions/{id} (transcript view) and transcript rendering."""
 
 import re
 from datetime import UTC, datetime
@@ -160,7 +160,7 @@ async def test_detail_header_and_turns(session_logs):
         ],
     )
 
-    resp = await _get(f"/ui/sessions/{SID}")
+    resp = await _get(f"/sessions/{SID}")
     html = resp.text
 
     assert resp.status_code == 200
@@ -176,13 +176,15 @@ async def test_detail_header_and_turns(session_logs):
     assert "$0.5000" in turns[0]  # per-turn footer cost
     assert "live.js" not in html
     assert 'id="live-state"' not in html
+    assert 'href="/sessions"' in html
+    assert "/ui/" not in html
 
 
 @pytest.mark.asyncio
 async def test_detail_404s(session_logs):
     w = session_logs
     (w.dir / ".hidden.jsonl").write_text("")
-    for path in ("/ui/sessions/nope-01k0000000", "/ui/sessions/.hidden", "/ui/sessions/bad%20id"):
+    for path in ("/sessions/nope-01k0000000", "/sessions/.hidden", "/sessions/bad%20id"):
         resp = await _get(path)
         assert resp.status_code == 404, path
 
@@ -197,7 +199,7 @@ async def test_detail_markdown_is_distinct_and_safe(session_logs):
             w.assistant("Here:\n\n```python\nprint('hi')\n```\n\n[x](javascript:alert(1))"),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     assert '<div class="md">' in html
     assert 'class="highlight"' in html
     assert "<script>alert" not in html
@@ -220,7 +222,7 @@ async def test_detail_tool_rows(session_logs):
             w.tool_call("glob", {"pattern": "*.py"}, tool_use_id="t-pending"),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
 
     err = _tool(html, "t-err")
     assert 'class="tool is-error"' in err
@@ -248,7 +250,7 @@ async def test_detail_groups_tools_by_iteration(session_logs):
             w.tool_call("read", {"path": "c"}, tool_use_id="t3", iteration=2),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     groups = re.findall(
         r'<div class="iteration" id="(iter-[^"]+)">(.*?)<!-- /iteration -->', html, re.S
     )
@@ -261,7 +263,7 @@ async def test_detail_groups_tools_by_iteration(session_logs):
 async def test_detail_orphan_tool_result(session_logs):
     w = session_logs
     w.write(SID, [w.user("x"), w.tool_result("orphan output", tool_use_id="t-x", is_error=True)])
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     row = _tool(html, "t-x")
     assert 'class="tool is-error"' in row and "orphan output" in row
 
@@ -307,7 +309,7 @@ async def test_detail_notices(session_logs):
             TurnInterrupted(id="ti", turn=2, scope=None),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     assert html.count('class="notice-block compaction') == 2
     assert "9,000" in html and "900" in html and "<strong>work</strong>" in html
     assert "boom" in html
@@ -337,7 +339,7 @@ async def test_detail_subagents_nest_under_task(session_logs):
             w.assistant("parent wraps up"),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
 
     task = _tool(html, "tu-task")
     assert task.count('class="subagent"') == 2
@@ -353,7 +355,7 @@ async def test_detail_subagents_nest_under_task(session_logs):
 async def test_detail_child_without_task_row(session_logs):
     w = session_logs
     w.write(SID, [w.user("x"), w.assistant("lonely child", scope="tu-missing", index=0)])
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     assert 'id="sub-tu-missing-0"' in html and "lonely child" in html
 
 
@@ -361,7 +363,7 @@ async def test_detail_child_without_task_row(session_logs):
 async def test_detail_events_before_first_user_message(session_logs):
     w = session_logs
     w.write(SID, [SessionStarted(id="s0", schema_version=1, sent_at="x", model_key="m1")])
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     assert 'class="turn"' not in html
     assert "No messages" in html
 
@@ -372,7 +374,7 @@ async def test_detail_unreadable_log(session_logs):
         '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"a"}\n'
         '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"b"}\n'
     )
-    resp = await _get(f"/ui/sessions/{SID}")
+    resp = await _get(f"/sessions/{SID}")
     assert resp.status_code == 200
     assert "conflicting duplicate event id" in resp.text
 
@@ -384,17 +386,17 @@ async def test_detail_active_session_loads_live_client(session_logs):
     running = SessionDescriptor(
         session_id=SID, container_name=f"archie-{SID}", port=1, raw_docker_status="Up"
     )
-    html = (await _get(f"/ui/sessions/{SID}", running=[running])).text
+    html = (await _get(f"/sessions/{SID}", running=[running])).text
     assert '<span id="live-state">connecting</span>' in html
     assert '<script src="/static/viewer/live.js" defer></script>' in html
-    assert f'data-live-url="/ui/sessions/{SID}/live"' in html
+    assert f'data-live-url="/sessions/{SID}/live"' in html
     assert re.search(r'data-last-event-id="am\d+"', html)
 
 
 @pytest.mark.asyncio
 async def test_detail_non_utf8_log(session_logs):
     (session_logs.dir / f"{SID}.jsonl").write_bytes(b"\xff\xfe{bad\n")
-    resp = await _get(f"/ui/sessions/{SID}")
+    resp = await _get(f"/sessions/{SID}")
     assert resp.status_code == 200
     assert "could not be read" in resp.text
 
@@ -405,7 +407,7 @@ async def test_exec_source_is_capped(session_logs):
     w.write(
         SID, [w.user("x"), w.tool_call("exec", {"source": "a = 1\n" * 3000}, tool_use_id="t-exec")]
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     row = _tool(html, "t-exec")
     assert "more characters" in row
     assert row.count("a</span>") <= 8000 // 6 + 1
@@ -428,7 +430,7 @@ async def test_detail_render_runs_off_the_event_loop(session_logs, monkeypatch):
         return real(text)
 
     monkeypatch.setattr(transcript, "render_markdown", spy)
-    resp = await _get(f"/ui/sessions/{SID}")
+    resp = await _get(f"/sessions/{SID}")
     assert resp.status_code == 200
     assert threads and all(t is not main for t in threads)
 
@@ -446,7 +448,7 @@ async def test_tool_row_opens_dialog_with_highlighted_detail(session_logs):
             w.tool_call("shell", {"command": "ls -la\npwd"}, tool_use_id="t-sh"),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     assert '<script src="/static/viewer/overlay.js" defer></script>' in html
     row = _tool(html, "t-exec")
     button = re.search(r"<button[^>]*tool-line.*?</button>", row, re.S).group(0)
@@ -482,7 +484,7 @@ async def test_subagent_row_opens_dialog_holding_its_transcript(session_logs):
             w.llm(scope="tk", index=0, cost_usd=0.125),
         ],
     )
-    html = (await _get(f"/ui/sessions/{SID}")).text
+    html = (await _get(f"/sessions/{SID}")).text
     row = re.search(r'<button[^>]*class="chrome sub-row[^"]*".*?</button>', html, re.S).group(0)
     assert 'data-dialog="sub-tk-0-dialog"' in row and 'id="sub-tk-0-row"' in row
     assert "general #0" in row and "$0.1250" in row

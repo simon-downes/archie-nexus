@@ -1,4 +1,4 @@
-"""Tests for GET /ui/sessions (session log list)."""
+"""Tests for GET /sessions (session log list)."""
 
 import re
 from datetime import UTC, datetime
@@ -46,11 +46,13 @@ async def test_lists_logs_newest_first(session_logs):
     for sid in ("a-01kx5yc7g0", "c-01m4qq54e0", "b-01kx77jkz8"):
         w.write(sid, [w.user(f"hi from {sid}")])
 
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
 
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert _row_ids(resp.text) == ["c-01m4qq54e0", "b-01kx77jkz8", "a-01kx5yc7g0"]
+    assert 'href="/sessions/c-01m4qq54e0"' in resp.text
+    assert "/ui/" not in resp.text
 
 
 @pytest.mark.asyncio
@@ -72,10 +74,10 @@ async def test_row_shows_link_workspace_models_and_usage(session_logs):
     )
     w.write("my-proj-01kx77jkz8", events)
 
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
     html = resp.text
 
-    assert 'href="/ui/sessions/my-proj-01kx77jkz8"' in html
+    assert 'href="/sessions/my-proj-01kx77jkz8"' in html
     assert ">my-proj<" in html
     assert "2026-07-11 00:00" in html
     one, two = html.index("model-one"), html.index("model-two")
@@ -95,7 +97,7 @@ async def test_active_marker(session_logs):
     for sid in ("a-01kx5yc7g0", "b-01kx77jkz8"):
         w.write(sid, [w.user("x")])
 
-    resp = await _get("/ui/sessions", running=[_running("b-01kx77jkz8")])
+    resp = await _get("/sessions", running=[_running("b-01kx77jkz8")])
 
     html = resp.text
     row_b = re.search(r'<tr[^>]*data-session-id="b-01kx77jkz8".*?</tr>', html, re.S).group(0)
@@ -109,7 +111,7 @@ async def test_docker_missing_fails_open(session_logs):
     w = session_logs
     w.write("a-01kx5yc7g0", [w.user("x")])
 
-    resp = await _get("/ui/sessions", side_effect=FileNotFoundError("docker"))
+    resp = await _get("/sessions", side_effect=FileNotFoundError("docker"))
 
     assert resp.status_code == 200
     assert "Active status unavailable" in resp.text
@@ -123,7 +125,7 @@ async def test_row_cap(session_logs):
     for n in range(201):
         (w.dir / f"ws-01kx5yc{n:03d}.jsonl").write_text("")
 
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
 
     assert len(_row_ids(resp.text)) == 200
     assert "Showing 200 of 201" in resp.text
@@ -140,7 +142,7 @@ async def test_unreadable_and_partial_logs_still_render(session_logs):
         '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"b"}\n'
     )
 
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
 
     assert resp.status_code == 200
     assert "4,321" in resp.text
@@ -150,14 +152,14 @@ async def test_unreadable_and_partial_logs_still_render(session_logs):
 
 @pytest.mark.asyncio
 async def test_empty_directory(session_logs):
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
     assert resp.status_code == 200
     assert "No session logs" in resp.text
 
 
 @pytest.mark.asyncio
 async def test_csp_header_and_assets(session_logs):
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
     assert resp.headers["content-security-policy"] == VIEWER_CSP
     assert VIEWER_CSP == (
         "default-src 'self'; img-src 'self' data:; style-src 'self'; "
@@ -180,7 +182,7 @@ async def test_vendored_assets_served():
 @pytest.mark.asyncio
 async def test_console_links_to_session_logs():
     resp = await _get("/")
-    assert 'href="/ui/sessions"' in resp.text
+    assert 'href="/sessions"' in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +206,14 @@ def _search_fixture(w):
 @pytest.mark.asyncio
 async def test_search_phrase(session_logs):
     _search_fixture(session_logs)
-    resp = await _get('/ui/sessions?q="fix the bug"')
+    resp = await _get('/sessions?q="fix the bug"')
     assert _row_ids(resp.text) == ["myarch-01m4mzkm00", "archie-01kx5yc7g0"]
 
 
 @pytest.mark.asyncio
 async def test_search_ignores_tool_output(session_logs):
     _search_fixture(session_logs)
-    resp = await _get("/ui/sessions?q=zebra")
+    resp = await _get("/sessions?q=zebra")
     assert _row_ids(resp.text) == []
     assert "No sessions match" in resp.text
 
@@ -219,16 +221,16 @@ async def test_search_ignores_tool_output(session_logs):
 @pytest.mark.asyncio
 async def test_search_matches_session_id(session_logs):
     _search_fixture(session_logs)
-    resp = await _get("/ui/sessions?q=01kx77")
+    resp = await _get("/sessions?q=01kx77")
     assert _row_ids(resp.text) == ["archie-01kx77jkz8"]
 
 
 @pytest.mark.asyncio
 async def test_search_dates_and_workspace(session_logs):
     _search_fixture(session_logs)
-    after = await _get("/ui/sessions?q=after:2026-07-11")
-    before = await _get("/ui/sessions?q=before:2026-07-11")
-    ws = await _get("/ui/sessions?q=workspace:arch")
+    after = await _get("/sessions?q=after:2026-07-11")
+    before = await _get("/sessions?q=before:2026-07-11")
+    ws = await _get("/sessions?q=workspace:arch")
     assert _row_ids(after.text) == ["myarch-01m4mzkm00", "archie-01kx77jkz8"]
     assert _row_ids(before.text) == ["archie-01kx5yc7g0"]
     assert _row_ids(ws.text) == ["archie-01kx77jkz8", "archie-01kx5yc7g0"]
@@ -237,7 +239,7 @@ async def test_search_dates_and_workspace(session_logs):
 @pytest.mark.asyncio
 async def test_search_invalid_date_notice(session_logs):
     _search_fixture(session_logs)
-    resp = await _get("/ui/sessions?q=before:2026-13-01")
+    resp = await _get("/sessions?q=before:2026-13-01")
     assert len(_row_ids(resp.text)) == 3
     assert "before:2026-13-01" in resp.text
     assert 'value="before:2026-13-01"' in resp.text
@@ -246,14 +248,14 @@ async def test_search_invalid_date_notice(session_logs):
 @pytest.mark.asyncio
 async def test_search_count_reflects_matches(session_logs):
     _search_fixture(session_logs)
-    resp = await _get("/ui/sessions?q=workspace:archie")
+    resp = await _get("/sessions?q=workspace:archie")
     assert "2 sessions" in resp.text
 
 
 @pytest.mark.asyncio
 async def test_htmx_request_returns_results_fragment(session_logs):
     _search_fixture(session_logs)
-    resp = await _get("/ui/sessions?q=before:2026-13-01", headers={"HX-Request": "true"})
+    resp = await _get("/sessions?q=before:2026-13-01", headers={"HX-Request": "true"})
     body = resp.text.strip()
     assert body.startswith('<section id="results"')
     assert "<html" not in body
@@ -266,7 +268,7 @@ async def test_htmx_request_returns_results_fragment(session_logs):
 @pytest.mark.asyncio
 async def test_history_restore_gets_full_page(session_logs):
     resp = await _get(
-        "/ui/sessions?q=x",
+        "/sessions?q=x",
         headers={"HX-Request": "true", "HX-History-Restore-Request": "true"},
     )
     assert "<html" in resp.text
@@ -275,10 +277,10 @@ async def test_history_restore_gets_full_page(session_logs):
 
 @pytest.mark.asyncio
 async def test_full_page_vary_and_search_attributes(session_logs):
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
     assert resp.headers["vary"] == "HX-Request, HX-History-Restore-Request"
     form_input = re.search(r'<input type="search"[^>]*>', resp.text, re.S).group(0)
-    assert 'hx-get="/ui/sessions"' in form_input
+    assert 'hx-get="/sessions"' in form_input
     assert 'hx-target="#results"' in form_input
     assert 'hx-swap="outerHTML"' in form_input
     assert 'hx-push-url="true"' in form_input
@@ -290,7 +292,7 @@ async def test_non_utf8_log_does_not_break_the_list(session_logs):
     w = session_logs
     w.write("good-01kx5yc7g0", [w.user("fine")])
     (w.dir / "bin-01kx77jkz8.jsonl").write_bytes(b"\xff\xfe{bad\n")
-    resp = await _get("/ui/sessions")
+    resp = await _get("/sessions")
     assert resp.status_code == 200
     row = re.search(r'<tr[^>]*data-session-id="bin-01kx77jkz8".*?</tr>', resp.text, re.S)
     assert row and "unreadable" in row.group(0)

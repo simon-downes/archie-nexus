@@ -4,7 +4,7 @@
 {% block insights %}
 <p class="chrome count">{% if data.sessions|length < data.total %}Showing {{ data.sessions|length }} of {{ data.total }}{% else %}{{ data.total }} session{{ "" if data.total == 1 else "s" }}{% endif %}</p>
 {% macro th(key, label, numeric=true) -%}
-<th{% if numeric %} class="num"{% endif %}>{% if key == sort %}<span aria-sort="descending">{{ label }} ▾</span>{% else %}<a href="{{ link('/ui/insights/sessions', sort=key) }}">{{ label }}</a>{% endif %}</th>
+<th{% if numeric %} class="num"{% endif %}>{% if key == sort %}<span aria-sort="descending">{{ label }} ▾</span>{% else %}<a href="{{ link('/insights/sessions', sort=key) }}">{{ label }}</a>{% endif %}</th>
 {%- endmacro %}
 <div class="table-wrap chrome"><table class="insights sessions-table">
     <thead><tr>
