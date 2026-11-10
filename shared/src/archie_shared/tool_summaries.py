@@ -196,6 +196,9 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             count = len(tasks) if isinstance(tasks, list) else 0
             return f"Task · {count} agent{'s' if count != 1 else ''}"
 
+        case "question":
+            return f"Question {_hi(str(input_dict.get('question', '')))}"
+
         case "skill":
             skill_name = input_dict.get("name", "")
             file = input_dict.get("file")
@@ -205,6 +208,26 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
 
         case _:
             return _esc(name, tag_follows=False)
+
+
+# Result text of the agent's ``question`` tool; archie_agent.question writes these.
+QUESTION_SELECTED_PREFIX = "User selected option "
+QUESTION_ANSWERED_PREFIX = "User answered: "
+QUESTION_DISMISSED_RESULT = (
+    "User dismissed the question without answering. Do not assume an answer."
+)
+
+
+def _question_answer(result: str) -> str:
+    """The user's answer from a ``question`` tool result, as Rich markup."""
+    if result.startswith(QUESTION_SELECTED_PREFIX):
+        _, _, label = result.partition(": ")
+        return f"→ {_hi(label)}"
+    if result.startswith(QUESTION_ANSWERED_PREFIX):
+        return f"→ {_hi(result.removeprefix(QUESTION_ANSWERED_PREFIX))}"
+    if result == QUESTION_DISMISSED_RESULT:
+        return _dim("(dismissed)")
+    return _dim(f"({len(result)} chars)")
 
 
 def format_tool_activity(name: str, input_dict: dict) -> str:
@@ -392,6 +415,9 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
             tasks = input_dict.get("tasks", [])
             count = len(tasks) if isinstance(tasks, list) else 0
             return f"Task · {count} agent{'s' if count != 1 else ''}"
+
+        case "question":
+            return f"Question {_hi(str(input_dict.get('question', '')))} {_question_answer(result)}"
 
         case "skill":
             skill_name = input_dict.get("name", "")

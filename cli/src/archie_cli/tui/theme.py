@@ -24,6 +24,7 @@ BRIGHT = "#feffff"  # emphasised values (context %)
 POSITIVE = "#67c26d"  # positive values (input tokens)
 POSITIVE_BRIGHT = "#5ff967"  # bright positive (output tokens)
 COST = "#c7c400"  # monetary values
+ANSWER = "#5fd7d7"  # question option labels
 
 # --- Textual Theme instance ---
 
@@ -42,5 +43,6 @@ THEME = Theme(
         "positive": POSITIVE,
         "positive-bright": POSITIVE_BRIGHT,
         "cost": COST,
+        "answer": ANSWER,
     },
 )

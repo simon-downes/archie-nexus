@@ -73,6 +73,7 @@ async def test_single_task_returns_child_text_and_scoped_events(tmp_path, monkey
     assert child_llm.calls[0]["messages"][0].content[0].text == "Investigate this"
     assert "root-task-id" in "\n".join(broadcasts)
     assert "task" not in [tool["name"] for tool in child_llm.calls[0]["tool_config"]]
+    assert "question" not in [tool["name"] for tool in child_llm.calls[0]["tool_config"]]
 
 
 @pytest.mark.asyncio

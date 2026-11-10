@@ -21,7 +21,7 @@ import time
 
 import httpx
 from archie_shared import events as ce
-from archie_shared.commands import InterruptCommand, SwitchModelCommand
+from archie_shared.commands import AnswerCommand, InterruptCommand, SwitchModelCommand
 from archie_shared.events import LLMRequest, decode_event
 from archie_shared.kiro import kiro_model_id
 from archie_shared.models import load_models
@@ -36,6 +36,7 @@ from archie_cli.tui.conversation import format_cost
 from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
+from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.quit_screen import QuitScreen
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.throbber import Throbber, ThrobberContainer
@@ -43,6 +44,9 @@ from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolCl
 from archie_cli.ws_client import WSClient
 
 log = logging.getLogger(__name__)
+
+# First protocol version whose session_status carries state and question.
+SESSION_STATE_PROTOCOL = 4
 
 
 class ArchieApp(App):
@@ -95,6 +99,12 @@ class ArchieApp(App):
         self._turn_active: bool = False
         self._throbber: Throbber | None = None
         self._last_esc_time: float = 0.0
+        # The pending question shown in the panel, and the id of an answer being sent.
+        self._question: ce.PendingQuestion | None = None
+        # Protocol of the attached agent, from its handshake. Agents before v4 send
+        # session_status without a state, which decodes as the "idle" default.
+        self._agent_protocol: int = 0
+        self._answer_in_flight: str | None = None
 
         # Session state for local accumulation. Seeded from Handshake.accounting
         # on connect, then updated live from broadcast llm_request ledger events.
@@ -131,6 +141,7 @@ class ArchieApp(App):
         """Build the main UI layout."""
         yield Conversation(id="conversation")
         yield ThrobberContainer(id="throbber-container")
+        yield QuestionPanel(id="question")
         yield StatusBar(id="status")
         yield MessageInput(id="input")
         yield Footer()
@@ -295,6 +306,7 @@ class ArchieApp(App):
             status = self.query_one("#status", StatusBar)
             status.session_id = event.session_id
             self._session_id = event.session_id
+            self._agent_protocol = event.protocol_version
             if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
                 self._protocol_warned = True
                 self._show_client_error(
@@ -314,6 +326,8 @@ class ArchieApp(App):
                 status.model_name = model.name
                 status.supports_cache = model.can_cache
             status.git_branch = event.git_branch
+            if self._agent_protocol >= SESSION_STATE_PROTOCOL:
+                self._apply_session_state(event)
         elif isinstance(event, ce.CompactionStart):
             self._remove_throbber()
         elif isinstance(event, ce.CompactionComplete):
@@ -636,6 +650,10 @@ class ArchieApp(App):
             asyncio.create_task(self._run_direct_shell(command))
             return
 
+        if self._question is not None:
+            self._answer(AnswerCommand(question_id=self._question.id, text=content))
+            return
+
         if self._turn_active:
             return
 
@@ -716,6 +734,76 @@ class ArchieApp(App):
             self._shell_proc = None
             self._shell_command = ""
             self._shell_cancel_requested = False
+
+    # --- Pending question ---
+
+    def _apply_session_state(self, event: ce.SessionStatus) -> None:
+        """Follow the agent's live state: the pending question and whether a turn runs."""
+        if event.state in ("working", "blocked") and not self._turn_active:
+            # Joined mid-turn (reconnect or another client's turn): Esc must interrupt.
+            self._turn_active = True
+            self.query_one("#input", MessageInput).disabled = True
+        if event.question is not None:
+            self._show_question(event.question)
+        elif self._question is not None:
+            self._hide_question()
+        if event.state == "idle" and self._turn_active:
+            # A turn the client missed the end of (the terminal event normally ends it first).
+            self._end_turn()
+
+    def _show_question(self, question: ce.PendingQuestion) -> None:
+        self._question = question
+        self.query_one("#question", QuestionPanel).show(question)
+        self._remove_throbber()
+        inp = self.query_one("#input", MessageInput)
+        inp.choice_handler = self._on_choice_key
+        inp.disabled = False
+        inp.focus()
+
+    def _hide_question(self) -> None:
+        self._question = None
+        self._answer_in_flight = None
+        self.query_one("#question", QuestionPanel).hide()
+        inp = self.query_one("#input", MessageInput)
+        inp.choice_handler = None
+        if self._turn_active:
+            inp.disabled = True
+
+    def _on_choice_key(self, key: str) -> bool:
+        """Selection keys on an empty input while a question is shown."""
+        question = self._question
+        if question is None:
+            return False
+        panel = self.query_one("#question", QuestionPanel)
+        if key in ("up", "down"):
+            panel.move(-1 if key == "up" else 1)
+            return True
+        if key in ("enter", "kp_enter"):
+            self._answer(AnswerCommand(question_id=question.id, option=panel.selected))
+            return True
+        if key.isdigit() and 1 <= int(key) <= len(question.options):
+            self._answer(AnswerCommand(question_id=question.id, option=int(key) - 1))
+            return True
+        return False
+
+    def _answer(self, command: AnswerCommand) -> None:
+        if self._answer_in_flight == command.question_id:
+            return
+        self._answer_in_flight = command.question_id
+        asyncio.create_task(self._send_answer(command))
+
+    async def _send_answer(self, command: AnswerCommand) -> None:
+        """Send an answer; hide the panel only once it was sent."""
+        try:
+            if not await self._ensure_connected():
+                raise RuntimeError("Not connected")
+            await self._ws.send_command(command)
+        except Exception as e:  # noqa: BLE001 — surface any send failure
+            self._answer_in_flight = None
+            self._show_client_error(f"Send failed: {e}")
+            return
+        if self._question is not None and self._question.id == command.question_id:
+            self._hide_question()
 
     # --- UI helpers ---
 
@@ -826,6 +914,11 @@ class ArchieApp(App):
         if self._shell_active and self._shell_proc is not None:
             self._shell_cancel_requested = True
             self._shell_proc.kill()
+            return
+        if self._question is not None:
+            # First Esc dismisses the question; the next one interrupts the turn.
+            self._answer(AnswerCommand(question_id=self._question.id, dismiss=True))
+            self._last_esc_time = 0
             return
         if self._turn_active:
             asyncio.create_task(self._ws.send_interrupt())

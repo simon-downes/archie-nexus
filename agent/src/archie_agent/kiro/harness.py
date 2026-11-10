@@ -587,15 +587,33 @@ class KiroHarness:
         except Exception:  # noqa: BLE001 — notices are best effort
             log.warning("Failed to send %s notice", kind, exc_info=True)
 
-    async def _emit_status(self) -> None:
+    @property
+    def pending_question(self) -> None:
+        """Kiro sessions have no ``question`` tool, so nothing is ever pending."""
+        return None
+
+    def status_event(self) -> SessionStatus:
+        """Build the live ``session_status`` frame (``working`` or ``idle``)."""
         from archie_agent.app import _read_git_branch
 
+        return SessionStatus(
+            id=str(ULID()),
+            model_key=self.session.model_id,
+            git_branch=_read_git_branch(),
+            state="working" if self._turn_active else "idle",
+        )
+
+    def answer_question(self, command) -> ErrorNotice:
+        """Reject answers: Kiro sessions never have a pending question."""
+        return ErrorNotice(
+            id=str(ULID()),
+            kind="question_not_pending",
+            message=f"No pending question {command.question_id!r}",
+        )
+
+    async def _emit_status(self) -> None:
         try:
-            await self._event_bus.emit(
-                SessionStatus(
-                    id=str(ULID()), model_key=self.session.model_id, git_branch=_read_git_branch()
-                )
-            )
+            await self._event_bus.emit(self.status_event())
         except Exception:  # noqa: BLE001 — status refresh is best effort
             log.warning("Failed to broadcast final turn status", exc_info=True)
 

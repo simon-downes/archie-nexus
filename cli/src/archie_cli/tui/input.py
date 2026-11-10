@@ -11,6 +11,8 @@ user presses Enter with non-empty content. The parent app handles this
 message via on_message_input_submitted().
 """
 
+from collections.abc import Callable
+
 from textual.message import Message
 from textual.widgets import TextArea
 
@@ -41,6 +43,9 @@ class MessageInput(TextArea):
         self._history: list[str] = []
         self._history_idx: int = 0
         self._draft: str = ""
+        # Set while a question is shown: called with the key when the input is empty,
+        # returning True when it consumed the key (selection keys, digits, Enter).
+        self.choice_handler: Callable[[str], bool] | None = None
 
     def _at_start(self) -> bool:
         """Return True if cursor is at row 0, col 0 (or input is empty)."""
@@ -75,6 +80,10 @@ class MessageInput(TextArea):
         - Down (at end): cycle to next history entry / restore draft
         - Numpad arithmetic keys: insert their character
         """
+        if self.choice_handler is not None and not self.text and self.choice_handler(event.key):
+            event.prevent_default()
+            event.stop()
+            return
         # Numpad key mapping
         if event.key in self._NUMPAD_MAP:
             event.prevent_default()

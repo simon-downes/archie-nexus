@@ -31,10 +31,18 @@ Client-to-agent commands are strict, flat tagged `msgspec` records defined in
 {"type":"interrupt"}
 {"type":"interrupt","scope":"task-01","subagent_index":0}
 {"type":"switch_model","model_key":"bedrock-anthropic.claude-sonnet-4-6"}
+{"type":"answer","question_id":"tooluse_01","option":1}
+{"type":"answer","question_id":"tooluse_01","text":"Use MySQL"}
+{"type":"answer","question_id":"tooluse_01","dismiss":true}
 ```
 
 Unknown fields and tags are rejected. An `interrupt` command either targets the root with no
 fields or targets a child with both `scope` and `subagent_index`; partial targets are invalid.
+An `answer` command replies to the pending question named by `question_id` (the `question` tool
+call's `tool_use_id`) with exactly one of a 0-based `option`, a non-empty `text`, or
+`dismiss: true`; anything else fails to decode. A stale or unknown `question_id` gets a targeted
+`error_notice` with `kind=question_not_pending`, and an out-of-range option gets
+`kind=invalid_answer`; the question stays pending in both cases.
 
 ## Event catalog
 
@@ -58,7 +66,7 @@ fields or targets a child with both `scope` and `subagent_index`; partial target
 | `turn_error` | persisted | `turn: int`, `scope: string?`, `message: string`, `subagent_index: int?` |
 | `turn_interrupted` | persisted | `turn: int`, `scope: string?`, `subagent_index: int?` |
 | `handshake` | live-only | `protocol_version: int`, `session_id: string` |
-| `session_status` | live-only | `model_key: string`, `git_branch: string` |
+| `session_status` | live-only | `model_key: string`, `git_branch: string`, `state: idle \| working \| blocked \| done \| error` (default `idle`), `question: {id: string, question: string, options: list[{label: string, description: string}], recommended: int?}?` |
 | `error_notice` | live-only | `kind: string`, `message: string` |
 
 Compaction operations are persisted as `compaction_start` followed by the compactor `llm_request` (omitted when the transcript cannot be fitted and no provider request is made) and exactly one `compaction_complete`. Compaction failures are reported only through a `failure` or `interrupted` completion. `estimated_next_request_cost_usd` is the active conversation model's pre-compaction estimate for a cold-cache request; it is set only for `cold_cache` compactions and repeated on the completion. Clients display it when present and `cost_saved_usd` otherwise. `skills_loaded` lists the sorted names of skills whose body was loaded when compaction started; it is set on every status and decodes as `[]` from older logs. `tokens_before` and `tokens_after` are provider-facing context estimates: heuristic estimates include the system prompt and tool configuration; provider-baseline estimates retain the provider's reported boundary. `cost_saved_usd` is a display estimate and is not an accounting source. On success it prices the removed tokens at the active model's cache write rate (its input rate when it has none): the cache write the next request avoids, assuming a cold cache. It ignores cache reads on later requests, and it overstates the saving for a compaction that happens while the cache is warm.
@@ -68,6 +76,14 @@ There is no public `usage` event. Provider usage is folded into the persisted
 deduplicated by `id`. Model changes are live-only `session_status` updates and do not reprice
 historical requests. The model catalog maps `model_key` to display metadata, so `session_status`
 and `handshake` do not repeat unnecessary model fields.
+
+`session_status.state` uses the OSC 7501 vocabulary. The agent currently emits `idle`, `working`
+(a root turn or manual compaction is running) and `blocked` (the root `question` tool is waiting;
+`question` carries the pending question). A new frame is sent when a turn starts, when a question
+is asked or resolved, and when the turn ends. `GET /status` returns the same `state` and
+`question` (or `null`). The pending question is live state only: the persisted record of a question
+is its `tool_call` and `tool_result`, whose content is `User selected option N: <label>`,
+`User answered: <text>`, or a dismissal sentence.
 
 ## Turn and replay rules
 

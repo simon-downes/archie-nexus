@@ -163,7 +163,7 @@ def test_websocket_handshake_on_connect(client):
     with client.websocket_connect("/stream") as ws:
         handshake = json.loads(ws.receive_text())
         assert handshake["type"] == "handshake"
-        assert handshake["protocol_version"] == 3
+        assert handshake["protocol_version"] == 4
         assert "model_key" not in handshake
         assert handshake["session_id"] == "test-session"
         assert handshake["id"]
