@@ -35,7 +35,7 @@ The orchestrator re-reads `config.yaml` when it uses it, so most edits apply wit
 restarting it:
 
 - Starting a session reads the file as it is at that moment: `mounts` and
-  `workspace_root`. An invalid file makes `POST /sessions` fail with the validation
+  `workspace_root`. An invalid file makes `POST /api/sessions` fail with the validation
   error; no session starts with a stale config.
 - Plugin `settings` that declare `env` (Scalr's `SCALR_HOSTNAME`) and credential
   environment variables are not part of session start. The agent reads them from the

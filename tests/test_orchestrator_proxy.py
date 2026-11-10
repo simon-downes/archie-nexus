@@ -62,7 +62,7 @@ async def test_proxy_status_success(http_client):
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
-            response = await client.get("/sessions/proj-01abc12345/status")
+            response = await client.get("/api/sessions/proj-01abc12345/status")
 
     assert response.status_code == 200
     mock_client.get.assert_called_once_with("http://127.0.0.1:32771/status", timeout=5.0)
@@ -72,7 +72,7 @@ async def test_proxy_status_session_not_found(http_client):
     """GET /sessions/{id}/status with unknown session → 404."""
     with patch("archie_orchestrator.proxy.list_sessions", return_value=[]):
         async with http_client as client:
-            response = await client.get("/sessions/unknown-01abc12345/status")
+            response = await client.get("/api/sessions/unknown-01abc12345/status")
 
     assert response.status_code == 404
     assert "unknown-01abc12345" in response.json()["error"]
@@ -93,7 +93,7 @@ async def test_proxy_status_backend_unreachable(http_client):
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
-            response = await client.get("/sessions/proj-01abc12345/status")
+            response = await client.get("/api/sessions/proj-01abc12345/status")
 
     assert response.status_code == 502
 
@@ -113,7 +113,7 @@ async def test_proxy_status_backend_protocol_disconnect(http_client):
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
-            response = await client.get("/sessions/proj-01abc12345/status")
+            response = await client.get("/api/sessions/proj-01abc12345/status")
 
     assert response.status_code == 502
     assert response.json() == {"error": "Session 'proj-01abc12345' is unreachable"}
@@ -134,11 +134,13 @@ async def test_proxy_status_backend_timeout(http_client):
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
-            response = await client.get("/sessions/proj-01abc12345/status")
+            response = await client.get("/api/sessions/proj-01abc12345/status")
 
     assert response.status_code == 504
 
 
 def test_orchestrator_shell_route_is_removed():
-    paths = [getattr(route, "path", None) for route in app.routes]
+    from archie_orchestrator import api
+
+    paths = [getattr(route, "path", None) for route in (*app.routes, *api.routes)]
     assert "/sessions/{session_id}/shell" not in paths

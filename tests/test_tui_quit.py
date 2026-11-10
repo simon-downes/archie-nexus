@@ -17,7 +17,7 @@ async def _confirm_quit(app: ArchieApp, terminate: bool | None) -> None:
 def _app() -> ArchieApp:
     return ArchieApp(
         ws_url="ws://localhost/stream",
-        api_url="http://localhost/sessions/session-1",
+        api_url="http://localhost/api/sessions/session-1",
         container_name="container",
     )
 

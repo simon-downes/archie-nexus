@@ -49,8 +49,8 @@ def test_attach_constructs_correct_urls(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     mock_app.assert_called_once_with(
-        ws_url="ws://127.0.0.1:7600/sessions/myproject-01abc12345/stream",
-        api_url="http://127.0.0.1:7600/sessions/myproject-01abc12345",
+        ws_url="ws://127.0.0.1:7600/api/sessions/myproject-01abc12345/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/myproject-01abc12345",
         container_name="archie-myproject-01abc12345",
     )
 
@@ -133,7 +133,7 @@ def test_start_non_detach_uses_proxy_urls(monkeypatch, tmp_path):
             runner.invoke(main, ["start", "myproject"])
 
     mock_app.assert_called_once_with(
-        ws_url="ws://127.0.0.1:7600/sessions/myproject-01abc12345/stream",
-        api_url="http://127.0.0.1:7600/sessions/myproject-01abc12345",
+        ws_url="ws://127.0.0.1:7600/api/sessions/myproject-01abc12345/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/myproject-01abc12345",
         container_name="archie-myproject-01abc12345",
     )

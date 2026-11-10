@@ -141,21 +141,21 @@ async def test_post_sessions_uses_config_as_of_the_request():
         seen.append(config.plugins["scalr"].settings["hostname"])
         return descriptor
 
-    with patch("archie_orchestrator.app.start_session", side_effect=fake_start):
+    with patch("archie_orchestrator.api.start_session", side_effect=fake_start):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
             _write(SCALR % "first.example")
-            assert (await http.post("/sessions", json={"workspace": "ws"})).status_code == 200
+            assert (await http.post("/api/sessions", json={"workspace": "ws"})).status_code == 200
             _write(SCALR % "second.example")
-            assert (await http.post("/sessions", json={"workspace": "ws"})).status_code == 200
+            assert (await http.post("/api/sessions", json={"workspace": "ws"})).status_code == 200
     assert seen == ["first.example", "second.example"]
 
 
 @pytest.mark.asyncio
 async def test_post_sessions_reports_invalid_config():
     _write("plugins:\n  nope: {}\n")
-    with patch("archie_orchestrator.app.start_session") as start:
+    with patch("archie_orchestrator.api.start_session") as start:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
-            response = await http.post("/sessions", json={"workspace": "ws"})
+            response = await http.post("/api/sessions", json={"workspace": "ws"})
     assert response.status_code == 500
     assert "nope" in response.json()["error"]
     start.assert_not_called()

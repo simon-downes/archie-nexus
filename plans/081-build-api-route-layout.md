@@ -165,7 +165,7 @@ to the new paths, and tests move with them.
 
 ## Milestones
 
-### [ ] M1 — JSON API under /api, with its clients
+### [x] M1 — JSON API under /api, with its clients
 
 - **Approach:** Add `API_PREFIX`. Create `api.py` by moving the JSON handlers out of
   `app.py` unchanged; build `routes` from the current JSON entries with the prefix stripped.
@@ -192,7 +192,14 @@ to the new paths, and tests move with them.
 - **Deliverable:** the JSON API answers only under `/api`, and the CLI/TUI use it.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test` passes (no new failures);
   `scripts/dev ruff check .` passes; `scripts/dev ruff format --check <touched files>` passes.
-- **Outcome:**
+- **Outcome:** `api.py` holds the JSON handlers and `routes`, mounted at `API_PREFIX`
+  (`shared/.../protocol.py`); `app.py` keeps lifespan, `/health`, the callback and the page
+  routes. CLI (`cli.py`, `auth.py`), the TUI URLs and the auth page `fetch` use `/api`. New
+  `tests/test_orchestrator_routes.py` (mount, 12 former root routes → plain-text 404/405,
+  refresh/flow reach their handlers, login `redirect_uri`, login→callback round trip); CLI
+  tests assert the full `/api` URLs for start, ls and stop. Evidence:
+  `env -u ARCHIE_BACKEND scripts/dev test` 4801 passed; `scripts/dev ruff check .` passed;
+  `ruff format --check` clean on touched files.
 
 ### [ ] M2 — Pages at the root without /ui
 

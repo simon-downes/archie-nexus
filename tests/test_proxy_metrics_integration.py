@@ -89,7 +89,7 @@ def test_llm_request_frame_forwarded_unchanged():
         patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([frame])),
     ):
         client = TestClient(app, raise_server_exceptions=False)
-        with client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:
+        with client.websocket_connect(f"/api/sessions/{session.session_id}/stream") as ws:
             assert ws.receive_text() == frame
 
 

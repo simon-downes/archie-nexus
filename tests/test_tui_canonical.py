@@ -30,8 +30,8 @@ def _make_app():
     from archie_cli.tui.app import ArchieApp
 
     return ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/sessions/proj-01abc",
+        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
         container_name="archie-proj-01abc",
     )
 

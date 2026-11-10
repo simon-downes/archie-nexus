@@ -31,7 +31,7 @@ async def test_post_credentials_route_removed():
 @pytest.mark.asyncio
 async def test_provider_discovery_is_complete_and_secret_free():
     async with await client() as http:
-        response = await http.get("/auth/providers")
+        response = await http.get("/api/auth/providers")
     assert response.status_code == 200
     providers = {item["name"]: item for item in response.json()}
     assert set(providers) == {
@@ -65,16 +65,16 @@ async def test_provider_discovery_is_complete_and_secret_free():
 @pytest.mark.asyncio
 async def test_static_credential_replacement_and_deletion_preserve_other_entries(tmp_path):
     async with await client() as http:
-        response = await http.put("/auth/credential/github", json=GITHUB)
+        response = await http.put("/api/auth/credential/github", json=GITHUB)
         assert response.status_code == 200
         assert response.json()["state"] == "configured"
-        response = await http.put("/auth/credential/incident_io", json={"api_key": "other"})
+        response = await http.put("/api/auth/credential/incident_io", json={"api_key": "other"})
         assert response.status_code == 200
         response = await http.put(
-            "/auth/credential/github", json={"personal_token": "p2", "work_token": "w2"}
+            "/api/auth/credential/github", json={"personal_token": "p2", "work_token": "w2"}
         )
         assert response.status_code == 200
-        response = await http.delete("/auth/credential/github")
+        response = await http.delete("/api/auth/credential/github")
         assert response.status_code == 200
         assert response.json()["state"] == "missing"
 
@@ -86,10 +86,10 @@ async def test_static_credential_validation_does_not_modify_existing():
     async with await client() as http:
         assert (
             await http.put(
-                "/auth/credential/github", json={"personal_token": "keep", "work_token": "w"}
+                "/api/auth/credential/github", json={"personal_token": "keep", "work_token": "w"}
             )
         ).status_code == 200
-        response = await http.put("/auth/credential/github", json={**GITHUB, "extra": "bad"})
+        response = await http.put("/api/auth/credential/github", json={**GITHUB, "extra": "bad"})
     assert response.status_code == 400
     assert "keep" in (await _read_store()).read_text()
 
@@ -97,9 +97,9 @@ async def test_static_credential_validation_does_not_modify_existing():
 @pytest.mark.asyncio
 async def test_github_requires_both_tokens_and_rejects_legacy_token():
     async with await client() as http:
-        legacy = await http.put("/auth/credential/github", json={"token": "old"})
-        partial = await http.put("/auth/credential/github", json={"personal_token": "p"})
-        status = (await http.get("/auth/status")).json()
+        legacy = await http.put("/api/auth/credential/github", json={"token": "old"})
+        partial = await http.put("/api/auth/credential/github", json={"personal_token": "p"})
+        status = (await http.get("/api/auth/status")).json()
     assert legacy.status_code == 400
     assert partial.status_code == 400
     assert "work_token" in partial.json()["error"]
@@ -110,7 +110,7 @@ async def test_github_requires_both_tokens_and_rejects_legacy_token():
 @pytest.mark.asyncio
 async def test_github_provider_lists_both_fields_and_no_env():
     async with await client() as http:
-        providers = {item["name"]: item for item in (await http.get("/auth/providers")).json()}
+        providers = {item["name"]: item for item in (await http.get("/api/auth/providers")).json()}
     assert providers["github"]["fields"] == ["personal_token", "work_token"]
     assert providers["github"]["env"] == {}
     assert providers["github"]["set_env"] is False
@@ -119,8 +119,8 @@ async def test_github_provider_lists_both_fields_and_no_env():
 @pytest.mark.asyncio
 async def test_unknown_and_oauth_static_updates_are_actionable():
     async with await client() as http:
-        assert (await http.put("/auth/credential/nope", json={})).status_code == 404
-        response = await http.put("/auth/credential/google", json={"access_token": "x"})
+        assert (await http.put("/api/auth/credential/nope", json={})).status_code == 404
+        response = await http.put("/api/auth/credential/google", json={"access_token": "x"})
     assert response.status_code == 400
     assert "OAuth" in response.json()["error"]
 

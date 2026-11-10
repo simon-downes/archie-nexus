@@ -44,7 +44,7 @@ async def test_auth_status_browser_renders_html_and_actions():
 @pytest.mark.asyncio
 async def test_auth_status_endpoint_remains_json():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/auth/status")
+        response = await client.get("/api/auth/status")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")

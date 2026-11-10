@@ -7,7 +7,7 @@ This document describes how Archie Nexus authenticates providers, stores credent
 Nexus has three cooperating parts:
 
 - **CLI** — starts authentication, gathers static credentials, opens the OAuth browser flow, and displays redacted status.
-- **Orchestrator** — owns the client-facing `/auth/*` HTTP API, OAuth state, discovery, token exchange, refresh, validation, and credential persistence.
+- **Orchestrator** — owns the client-facing `/api/auth/*` HTTP API, OAuth state, discovery, token exchange, refresh, validation, and credential persistence.
 - **Shared credential package** — defines provider schemas, typed credential records, provider metadata, API DTOs, and the YAML-backed store used by the orchestrator and agents.
 
 The credential persistence boundary is the shared file:
@@ -153,14 +153,14 @@ This is the credential setup command for both OAuth and static providers.
 
 For `notion`, `slack`, and `google`:
 
-1. The CLI calls `POST /auth/login/{provider}` on the local orchestrator.
+1. The CLI calls `POST /api/auth/login/{provider}` on the local orchestrator.
 2. The orchestrator resolves effective configuration and, if necessary, discovers OAuth endpoints.
 3. If required, the orchestrator dynamically registers an OAuth client.
 4. The orchestrator creates short-lived PKCE and state data in memory.
 5. The CLI opens the returned authorization URL.
 6. The provider redirects the browser to the orchestrator callback.
 7. The orchestrator validates the flow, exchanges the authorization code, normalizes token fields, and persists the credential.
-8. The CLI polls `GET /auth/flow/{flow_id}` until the flow succeeds or fails.
+8. The CLI polls `GET /api/auth/flow/{flow_id}` until the flow succeeds or fails.
 
 The browser callback is orchestrator-owned. The authorization code and PKCE verifier remain inside the orchestrator flow; they are not returned to the CLI.
 
@@ -232,14 +232,14 @@ Example using interactive prompts:
 archie auth login jira
 ```
 
-The CLI sends static credentials to `PUT /auth/credential/{provider}`. The orchestrator performs strict structural decoding, validates required fields, replaces that provider entry atomically, and returns only redacted status.
+The CLI sends static credentials to `PUT /api/auth/credential/{provider}`. The orchestrator performs strict structural decoding, validates required fields, replaces that provider entry atomically, and returns only redacted status.
 
 ### `archie auth refresh <provider>`
 
 Refresh is for OAuth providers with stored refresh state:
 
 ```text
-POST /auth/refresh/{provider}
+POST /api/auth/refresh/{provider}
 ```
 
 The orchestrator loads the typed OAuth credential, calls the effective token endpoint, preserves a previous refresh token when the provider does not rotate it, stores a rotated token when one is returned, and calculates the new ISO-UTC expiry. Failed refreshes do not replace the previous credential.
@@ -251,7 +251,7 @@ Static providers and OAuth providers without refresh state return an actionable 
 Status calls:
 
 ```text
-GET /auth/status
+GET /api/auth/status
 ```
 
 The response contains one redacted status per provider. Status includes:
@@ -267,23 +267,23 @@ No access tokens, refresh tokens, API keys, secret keys, or client secrets are d
 
 ## Orchestrator HTTP API
 
-### `GET /auth/providers`
+### `GET /api/auth/providers`
 
 Returns effective, secret-free provider descriptors. Static entries expose required fields. OAuth entries expose endpoint metadata, scopes, token paths, extra authorization parameters, effective non-secret client ID, and the selected callback URI where applicable.
 
-### `GET /auth/status`
+### `GET /api/auth/status`
 
 Returns redacted status for every registered provider.
 
-### `PUT /auth/credential/{provider}`
+### `PUT /api/auth/credential/{provider}`
 
 Replaces one static provider entry. The request body is JSON matching that provider’s concrete credential struct. Unknown fields, malformed JSON, OAuth-provider submissions, missing required fields, and unknown providers are rejected without changing the existing entry.
 
-### `DELETE /auth/credential/{provider}`
+### `DELETE /api/auth/credential/{provider}`
 
 Deletes one provider entry. Deleting a missing entry is idempotent. The response is redacted status.
 
-### `POST /auth/login/{provider}`
+### `POST /api/auth/login/{provider}`
 
 Starts an OAuth flow and returns:
 
@@ -299,11 +299,11 @@ Starts an OAuth flow and returns:
 
 Consumes the browser callback. It validates provider, state, flow expiry, one-time-use status, and callback URI before exchanging the code. The browser receives a non-secret success or failure page.
 
-### `GET /auth/flow/{flow_id}`
+### `GET /api/auth/flow/{flow_id}`
 
 Returns redacted flow state and outcome while the flow is retained. It does not expose authorization codes, PKCE verifiers, CSRF state, tokens, or provider error payloads.
 
-### `POST /auth/refresh/{provider}`
+### `POST /api/auth/refresh/{provider}`
 
 Performs non-interactive OAuth refresh and returns redacted credential status.
 

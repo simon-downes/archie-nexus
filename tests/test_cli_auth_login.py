@@ -30,7 +30,7 @@ def test_response_error_falls_back_to_status():
 
 
 def test_oauth_login_surfaces_orchestrator_configuration_error():
-    request = httpx.Request("POST", "http://test/auth/login/google")
+    request = httpx.Request("POST", "http://test/api/auth/login/google")
     response = httpx.Response(
         400,
         request=request,
@@ -65,7 +65,7 @@ def test_github_login_reads_both_tokens_from_json_stdin(monkeypatch):
     ):
         _set_static_from_login("github")
     put.assert_called_once_with(
-        "http://127.0.0.1:7600/auth/credential/github",
+        "http://127.0.0.1:7600/api/auth/credential/github",
         json={"personal_token": "p-secret", "work_token": "w-secret"},
         timeout=10,
     )
@@ -163,7 +163,7 @@ def test_login_datadog_takes_static_path():
 
 
 def test_login_slack_takes_oauth_path():
-    request = httpx.Request("POST", "http://test/auth/login/slack")
+    request = httpx.Request("POST", "http://test/api/auth/login/slack")
     with (
         patch("archie_cli.auth._set_static_from_login") as static,
         patch("archie_cli.auth._orchestrator_url", return_value="http://test"),
@@ -208,7 +208,9 @@ def test_aws_chain_providers_store_chain_credentials_in_field_order(service, exp
         patch("archie_cli.auth.httpx.put", return_value=_response()) as put,
     ):
         _set_static_from_login(service)
-    put.assert_called_once_with(f"http://test/auth/credential/{service}", json=expected, timeout=10)
+    put.assert_called_once_with(
+        f"http://test/api/auth/credential/{service}", json=expected, timeout=10
+    )
 
 
 def test_aws_chain_login_is_selected_by_provider_login_not_name(monkeypatch):

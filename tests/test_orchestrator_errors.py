@@ -125,7 +125,7 @@ def test_second_request_succeeds_after_first_explodes():
 async def test_post_sessions_docker_error_returns_helpful_message():
     """POST /sessions with DockerError from start_session → 500 + message."""
     with patch(
-        "archie_orchestrator.app.start_session",
+        "archie_orchestrator.api.start_session",
         side_effect=DockerError(
             command=["docker", "run"],
             stderr="Cannot connect to the Docker daemon",
@@ -134,7 +134,7 @@ async def test_post_sessions_docker_error_returns_helpful_message():
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
-                "/sessions",
+                "/api/sessions",
                 json={"workspace": "myproject"},
             )
 
@@ -148,7 +148,7 @@ async def test_delete_session_docker_error_returns_500():
     session = _make_session()
     with (
         patch(
-            "archie_orchestrator.app.stop_session",
+            "archie_orchestrator.api.stop_session",
             side_effect=DockerError(
                 command=["docker", "stop"],
                 stderr="Error: No such container",
@@ -157,7 +157,7 @@ async def test_delete_session_docker_error_returns_500():
         ),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.delete(f"/sessions/{session.session_id}")
+            resp = await client.delete(f"/api/sessions/{session.session_id}")
 
     assert resp.status_code == 500
     assert "Docker command failed" in resp.json()["error"]
@@ -171,9 +171,9 @@ async def test_delete_session_docker_error_returns_500():
 @pytest.mark.asyncio
 async def test_delete_session_not_found_still_404():
     """DELETE /sessions/{id} for unknown session still returns 404."""
-    with patch("archie_orchestrator.app.stop_session", side_effect=KeyError("no such session")):
+    with patch("archie_orchestrator.api.stop_session", side_effect=KeyError("no such session")):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.delete("/sessions/nonexistent-session-id")
+            resp = await client.delete("/api/sessions/nonexistent-session-id")
 
     assert resp.status_code == 404
 
@@ -182,7 +182,7 @@ async def test_delete_session_not_found_still_404():
 async def test_post_sessions_missing_workspace_still_400():
     """POST /sessions with missing workspace → still 400."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/sessions", json={})
+        resp = await client.post("/api/sessions", json={})
 
     assert resp.status_code == 400
 
@@ -214,7 +214,7 @@ def test_ws_proxy_unexpected_error_closes_with_1011(caplog):
         caplog.at_level(logging.ERROR, logger="archie_orchestrator.proxy"),
     ):
         client = TestClient(app, raise_server_exceptions=False)
-        with client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:
+        with client.websocket_connect(f"/api/sessions/{session.session_id}/stream") as ws:
             data = ws.receive()
             # Expect a close frame
             assert data["type"] == "websocket.close"

@@ -44,10 +44,10 @@ AWS Bedrock / OpenAI API / Ollama / local workspace
 
 1. `archie build` builds `archie:latest` from `Dockerfile`.
 2. `archie serve` runs the host orchestrator; the default profile is `127.0.0.1:7600`.
-3. `archie start <workspace>` asks `POST /sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The CLI shows a terminal-aware activity status while this blocking request is in progress.
+3. `archie start <workspace>` asks `POST /api/sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The CLI shows a terminal-aware activity status while this blocking request is in progress.
 4. The orchestrator validates the single directory name, creates a session ID, runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`).
 5. The CLI connects through the orchestrator’s session routes. The orchestrator resolves the session by Docker container name and proxies to the mapped agent port.
-6. `archie stop` calls `DELETE /sessions/{session_id}` and stops the container. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
+6. `archie stop` calls `DELETE /api/sessions/{session_id}` and stops the container. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
 
 ### Container mounts
 
@@ -89,22 +89,22 @@ The orchestrator exposes these application routes:
 | `GET` | `/ui/insights/subagents` | insights: subagent types and skill loads |
 | `GET` | `/ui/insights/errors` | insights: request, turn and subagent errors |
 | `GET` | `/health` | orchestrator liveness (`{"status":"ok"}`) |
-| `GET` | `/sessions` | list running sessions |
-| `POST` | `/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` |
-| `DELETE` | `/sessions/{id}` | stop a session |
-| `GET` | `/sessions/{id}/status` | proxy agent status |
-| `GET` | `/sessions/{id}/events?after=<id>` | proxy session history read |
-| `GET` | `/sessions/{id}/metrics` | metrics for one session |
-| `GET` | `/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
-| `GET` | `/auth/providers` | typed, secret-free provider definitions |
-| `GET` | `/auth/status` | redacted credential status |
-| `PUT` | `/auth/credential/{provider}` | replace one static provider credential |
-| `DELETE` | `/auth/credential/{provider}` | remove one provider credential |
-| `POST` | `/auth/login/{provider}` | start orchestrator-owned OAuth |
+| `GET` | `/api/sessions` | list running sessions |
+| `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` |
+| `DELETE` | `/api/sessions/{id}` | stop a session |
+| `GET` | `/api/sessions/{id}/status` | proxy agent status |
+| `GET` | `/api/sessions/{id}/events?after=<id>` | proxy session history read |
+| `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
+| `GET` | `/api/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
+| `GET` | `/api/auth/providers` | typed, secret-free provider definitions |
+| `GET` | `/api/auth/status` | redacted credential status |
+| `PUT` | `/api/auth/credential/{provider}` | replace one static provider credential |
+| `DELETE` | `/api/auth/credential/{provider}` | remove one provider credential |
+| `POST` | `/api/auth/login/{provider}` | start orchestrator-owned OAuth |
 | `GET` | `/auth/callback/{provider}` | complete browser OAuth callback |
-| `GET` | `/auth/flow/{flow_id}` | query redacted OAuth flow status |
-| `POST` | `/auth/refresh/{provider}` | refresh OAuth credentials |
-| WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
+| `GET` | `/api/auth/flow/{flow_id}` | query redacted OAuth flow status |
+| `POST` | `/api/auth/refresh/{provider}` | refresh OAuth credentials |
+| WebSocket | `/api/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/static/*` | static assets for the web pages (vendored nimble.css, htmx and Chart.js under `/static/vendor/`) |
 
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.

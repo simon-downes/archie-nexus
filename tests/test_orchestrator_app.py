@@ -46,9 +46,9 @@ async def test_sessions_with_running_containers(http_client):
         ),
     ]
 
-    with patch("archie_orchestrator.app.list_sessions", return_value=fake_sessions):
+    with patch("archie_orchestrator.api.list_sessions", return_value=fake_sessions):
         async with http_client as client:
-            response = await client.get("/sessions")
+            response = await client.get("/api/sessions")
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
@@ -70,9 +70,9 @@ async def test_sessions_with_running_containers(http_client):
 
 async def test_sessions_empty(http_client):
     """GET /sessions with no containers → empty JSON array."""
-    with patch("archie_orchestrator.app.list_sessions", return_value=[]):
+    with patch("archie_orchestrator.api.list_sessions", return_value=[]):
         async with http_client as client:
-            response = await client.get("/sessions")
+            response = await client.get("/api/sessions")
 
     assert response.status_code == 200
     assert response.json() == []
@@ -89,9 +89,9 @@ async def test_sessions_response_is_msgspec_encoded(http_client):
         )
     ]
 
-    with patch("archie_orchestrator.app.list_sessions", return_value=fake_sessions):
+    with patch("archie_orchestrator.api.list_sessions", return_value=fake_sessions):
         async with http_client as client:
-            response = await client.get("/sessions")
+            response = await client.get("/api/sessions")
 
     decoded = msgspec.json.decode(response.content, type=list[SessionDescriptor])
     assert len(decoded) == 1

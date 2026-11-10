@@ -32,8 +32,8 @@ def _status(
 
 def _app() -> ArchieApp:
     app = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/s/stream",
-        api_url="http://127.0.0.1:7600/sessions/s",
+        ws_url="ws://127.0.0.1:7600/api/sessions/s/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/s",
         container_name="archie-s",
     )
     app._ws.connect = AsyncMock(side_effect=OSError("offline"))

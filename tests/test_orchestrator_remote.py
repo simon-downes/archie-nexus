@@ -53,11 +53,11 @@ async def test_health_accessible_from_any_client():
 async def test_get_sessions_accessible_from_remote():
     """GET /sessions returns session list (simulating remote client)."""
     sessions = [_make_session()]
-    with patch("archie_orchestrator.app.list_sessions", return_value=sessions):
+    with patch("archie_orchestrator.api.list_sessions", return_value=sessions):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://10.0.0.2"
         ) as client:
-            resp = await client.get("/sessions")
+            resp = await client.get("/api/sessions")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -69,9 +69,9 @@ async def test_get_sessions_accessible_from_remote():
 async def test_response_bodies_contain_no_hardcoded_localhost():
     """Session list responses do not embed localhost/127.0.0.1 addresses."""
     sessions = [_make_session(port=32771)]
-    with patch("archie_orchestrator.app.list_sessions", return_value=sessions):
+    with patch("archie_orchestrator.api.list_sessions", return_value=sessions):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/sessions")
+            resp = await client.get("/api/sessions")
 
     body_text = resp.text
     # Session descriptors should not expose internal loopback addresses
@@ -127,7 +127,7 @@ async def test_proxy_status_forwards_to_loopback(tmp_path):
         patch("archie_orchestrator.proxy.httpx.AsyncClient", _FakeAsyncClient),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            await client.get(f"/sessions/{session.session_id}/status")
+            await client.get(f"/api/sessions/{session.session_id}/status")
 
     assert len(captured_urls) == 1
     assert captured_urls[0].startswith("http://127.0.0.1:32771")

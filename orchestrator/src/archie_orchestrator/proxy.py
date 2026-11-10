@@ -114,7 +114,7 @@ async def forward_http(
 
 
 async def proxy_status(request: Request) -> Response:
-    """GET /sessions/{session_id}/status — proxy to session /status."""
+    """GET /api/sessions/{session_id}/status — proxy to session /status."""
     session_id = request.path_params["session_id"]
     try:
         session = resolve_session(session_id)
@@ -145,7 +145,7 @@ async def proxy_events(request: Request) -> Response:
 
 
 async def proxy_stream(websocket: WebSocket) -> None:
-    """WS /sessions/{session_id}/stream — bidirectional relay to session /stream."""
+    """WS /api/sessions/{session_id}/stream — bidirectional relay to session /stream."""
     session_id = websocket.path_params["session_id"]
 
     try:

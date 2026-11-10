@@ -12,6 +12,7 @@ from pathlib import Path
 import click
 import httpx
 import uvicorn
+from archie_shared.protocol import API_PREFIX
 from archie_shared.session import SessionDescriptor, split_id
 from rich.console import Console
 
@@ -155,7 +156,7 @@ def start(detach: bool, kiro: bool, workspace: str | None):
     with _startup_status(kiro):
         try:
             response = httpx.post(
-                f"{url}/sessions",
+                f"{url}{API_PREFIX}/sessions",
                 json={"workspace": ws_name, **({"backend": "kiro"} if kiro else {})},
                 timeout=60.0,
             )
@@ -192,8 +193,8 @@ def start(detach: bool, kiro: bool, workspace: str | None):
 
         base = _profile_url(profile)
         ws_base = base.replace("http://", "ws://")
-        ws_url = f"{ws_base}/sessions/{descriptor.session_id}/stream"
-        api_url = f"{base}/sessions/{descriptor.session_id}"
+        ws_url = f"{ws_base}{API_PREFIX}/sessions/{descriptor.session_id}/stream"
+        api_url = f"{base}{API_PREFIX}/sessions/{descriptor.session_id}"
         app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=descriptor.container_name)
         app.run()
 
@@ -207,14 +208,14 @@ def _require_kiro_session(url: str, session_id: str) -> None:
     from archie_shared.kiro import kiro_model_id
 
     try:
-        response = httpx.get(f"{url}/sessions/{session_id}/status", timeout=10.0)
+        response = httpx.get(f"{url}{API_PREFIX}/sessions/{session_id}/status", timeout=10.0)
         model = response.json().get("model", "") if response.status_code == 200 else ""
     except (httpx.HTTPError, ValueError, AttributeError):
         model = ""
     if kiro_model_id(model or "") is not None:
         return
     try:
-        httpx.delete(f"{url}/sessions/{session_id}", timeout=15.0)
+        httpx.delete(f"{url}{API_PREFIX}/sessions/{session_id}", timeout=15.0)
     except httpx.HTTPError:
         pass
     raise click.ClickException(
@@ -226,7 +227,7 @@ def _require_kiro_session(url: str, session_id: str) -> None:
 def _fetch_sessions(url: str) -> list[SessionDescriptor]:
     """Fetch running sessions from the orchestrator. Raises ClickException on error."""
     try:
-        response = httpx.get(f"{url}/sessions", timeout=5.0)
+        response = httpx.get(f"{url}{API_PREFIX}/sessions", timeout=5.0)
         response.raise_for_status()
     except httpx.ConnectError:
         raise click.ClickException(
@@ -467,7 +468,7 @@ def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -
         click.echo(f"\n[{label}]")
 
     try:
-        response = httpx.get(f"{url}/sessions", timeout=5.0)
+        response = httpx.get(f"{url}{API_PREFIX}/sessions", timeout=5.0)
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         click.echo(f"  ✗ Error {exc.response.status_code} from {url}")
@@ -543,8 +544,8 @@ def attach(session_id: str | None):
 
     base = _profile_url(profile)
     ws_base = base.replace("http://", "ws://")
-    ws_url = f"{ws_base}/sessions/{target.session_id}/stream"
-    api_url = f"{base}/sessions/{target.session_id}"
+    ws_url = f"{ws_base}{API_PREFIX}/sessions/{target.session_id}/stream"
+    api_url = f"{base}{API_PREFIX}/sessions/{target.session_id}"
 
     from archie_cli.tui.app import ArchieApp
 
@@ -584,7 +585,9 @@ def stop(session_id: str | None):
 
     # Stop via orchestrator
     try:
-        stop_response = httpx.delete(f"{url}/sessions/{target.session_id}", timeout=15.0)
+        stop_response = httpx.delete(
+            f"{url}{API_PREFIX}/sessions/{target.session_id}", timeout=15.0
+        )
     except httpx.HTTPError as exc:
         raise click.ClickException(
             f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"

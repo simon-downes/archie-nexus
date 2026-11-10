@@ -21,7 +21,7 @@ unchanged. The backend is chosen per session.
 
 ## How a session starts
 
-1. `archie start --kiro` posts `{"workspace": …, "backend": "kiro"}` to `POST /sessions`. The CLI displays a terminal-aware activity indicator while the existing blocking startup request is pending; it does not stream raw Kiro stderr or ACP frames.
+1. `archie start --kiro` posts `{"workspace": …, "backend": "kiro"}` to `POST /api/sessions`. The CLI displays a terminal-aware activity indicator while the existing blocking startup request is pending; it does not stream raw Kiro stderr or ACP frames.
 2. The orchestrator adds `-e ARCHIE_BACKEND=kiro` to `docker run` and waits up to 45 s for
    `/status`. Native sessions wait 30 s.
 3. The agent's lifespan loads the config and runs plugin startup hooks. It skips the native
