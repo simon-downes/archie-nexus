@@ -138,14 +138,14 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_cli_start_stop.py` passes, including new indicator tests.
 - **Outcome:** Added Rich status feedback with native/Kiro wording around the existing POST; focused CLI tests verify backend labels and cleanup ordering on success/failure. Verified with `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_cli_start_stop.py` (13 passed) and Ruff on both changed Python files.
 
-### [ ] M2 — Make TUI termination client-first
+### [x] M2 — Make TUI termination client-first
 
 - **Approach:** Add an owned reconnect-task reference in `cli/src/archie_cli/tui/app.py`; have `_schedule_reconnect` store it and clear it when complete. In `_finish_quit`, set `_shutting_down` before cancellation, cancel/await receive and reconnect tasks, disconnect the WebSocket, then perform the existing DELETE when requested. Keep the existing accepted DELETE statuses and error reporting for actual deletion failures. Extend `tests/test_tui_quit.py` with an ordered fake/side-effect assertion and active reconnect cancellation coverage.
 - **Test seam:** Textual's public `ArchieApp.action_quit` confirmation path, driven with the existing Textual test harness; the test may use injected fake transport/tasks to observe the teardown ordering.
 - **Edge cases:** quit without termination → disconnect and exit, no DELETE; DELETE returns 404 → exit normally; DELETE transport/status failure after client teardown → report the existing termination error; reconnect with an in-flight history replay → cancellation stops the replay and prevents a follow-up request; reconnect is active → cancellation prevents another connect.
 - **Deliverable:** terminating the TUI closes all client-side session activity before container deletion and never starts a reconnect during shutdown.
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_tui_quit.py tests/test_tui_canonical.py` passes.
-- **Outcome:**
+- **Outcome:** Added tracked reconnect-task ownership and client-first shutdown ordering. Tests drive the public quit action, verify WebSocket disconnect precedes DELETE, and verify receive/in-flight history tasks are cancelled with no reconnect. Verified with `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test tests/test_tui_quit.py tests/test_tui_canonical.py` (53 passed) and Ruff on the changed files.
 
 ### [ ] M3 — Handle expected orchestrator backend loss cleanly
 
