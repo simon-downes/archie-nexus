@@ -54,7 +54,6 @@ class ArchieApp(App):
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
-        Binding("ctrl+shift+p", "command_palette", "Command Palette"),
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+c", "copy_block", "Copy Block"),
         Binding("ctrl+g", "editor", "Editor", show=False),
