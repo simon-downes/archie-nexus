@@ -290,7 +290,7 @@ browser check above. Not verified: a real OAuth login against Google (covered by
 login→callback round trip with a fake token transport) and a TUI attached to a real session
 container (no Docker here; covered by CLI URL tests and the WS proxy tests).
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/24
 CI: pending
 
 ## Follow-ups
