@@ -23,7 +23,6 @@ from archie_shared.transcript import (
     tool_detail_sections,
     tool_headline,
 )
-from rich.console import Group
 from rich.syntax import Syntax
 from rich.text import Text
 from textual import events
@@ -68,25 +67,27 @@ def _lexer_for(section: DetailSection) -> str | None:
     return None
 
 
-def render_section(section: DetailSection):
-    """One input/result block: a title, then highlighted (or plain) text."""
-    title = Text(section.title.upper(), style=HEADING_STYLE)
+def render_section(section: DetailSection) -> Text:
+    """One input/result block: a title, then highlighted (or plain) text.
+
+    The block is a single ``Text`` so Textual can select and copy it; a ``Syntax``
+    or ``Group`` renderable gives the screen no text offsets to select by.
+    """
+    text = Text(section.title.upper(), style=HEADING_STYLE)
+    text.append("\n")
     lexer = _lexer_for(section)
+    body = section.text.rstrip("\n")
     if lexer:
-        body = Syntax(
-            section.text.rstrip("\n"),
-            lexer,
-            theme=SYNTAX_THEME,
-            word_wrap=True,
-            background_color=theme.SURFACE,
-        )
+        syntax = Syntax(body, lexer, theme=SYNTAX_THEME, background_color=theme.SURFACE)
+        highlighted = syntax.highlight(body)
+        highlighted.rstrip()  # ``highlight`` adds a trailing newline
+        text.append_text(highlighted)
     else:
-        body = Text(section.text)
-    parts = [title, body]
+        text.append(body)
     if section.omitted:
-        parts.append(Text(f"… {section.omitted:,} more characters", style="dim italic"))
-    parts.append(Text(""))
-    return Group(*parts)
+        text.append(f"\n… {section.omitted:,} more characters", style="dim italic")
+    text.append("\n")
+    return text
 
 
 class DetailScreen(ModalScreen[None]):
@@ -184,7 +185,7 @@ class ToolDetailScreen(DetailScreen):
         sections = [render_section(s) for s in tool_detail_sections(tool)]
         if tool.result is None:
             sections.append(Text("Running…", style="dim italic"))
-        self.query_one("#tool-sections", Static).update(Group(*sections))
+        self.query_one("#tool-sections", Static).update(Text("\n").join(sections))
 
 
 class SubagentScreen(DetailScreen):

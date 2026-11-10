@@ -23,7 +23,7 @@ from archie_shared.events import (
     TurnComplete,
     UserMessage,
 )
-from rich.syntax import Syntax
+from rich.text import Text
 from textual.widgets import Static
 
 
@@ -106,10 +106,6 @@ def _static_text(screen, selector) -> str:
     return console.export_text()
 
 
-def _section_renderables(screen):
-    return list(screen.query_one("#tool-sections", Static).content.renderables)
-
-
 @pytest.mark.asyncio
 async def test_clicking_a_tool_row_opens_its_detail_popup():
     app = _App()
@@ -125,11 +121,42 @@ async def test_clicking_a_tool_row_opens_its_detail_popup():
 
         # The open popup updates when the result arrives.
         await _feed(app, pilot, _result("t1", '{"answer": 42}'))
-        rendered = _section_renderables(screen)
-        syntaxes = [r for group in rendered for r in getattr(group, "renderables", [])]
-        lexers = [s.lexer.name for s in syntaxes if isinstance(s, Syntax)]
-        assert lexers == ["Python", "JSON"]
+        sections = screen.query_one("#tool-sections", Static).content
+        assert isinstance(sections, Text)
+        assert "Running" not in sections.plain
         assert "running" not in _static_text(screen, ".detail-status")
+        # The Python input and the JSON result are both syntax-highlighted.
+        for snippet in ("print", "answer"):
+            start = sections.plain.index(snippet)
+            assert any(
+                span.start <= start < span.end and getattr(span.style, "color", None)
+                for span in sections.spans
+            ), snippet
+
+
+@pytest.mark.asyncio
+async def test_tool_popup_text_can_be_selected_and_copied():
+    app = _App()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _feed(
+            app,
+            pilot,
+            USER,
+            _call("t1", "exec", {"source": "x = 1\nprint(x)"}),
+            _result("t1", "hello world"),
+        )
+        await pilot.click(ToolRow)
+        await pilot.pause()
+        screen = app.screen
+        sections = screen.query_one("#tool-sections", Static)
+        # Drag from the start of the SOURCE title to the end of the second code line.
+        await pilot.mouse_down(sections, offset=(0, 0))
+        await pilot.hover(sections, offset=(8, 2))
+        await pilot.mouse_up(sections, offset=(8, 2))
+        assert screen.get_selected_text() == "SOURCE\nx = 1\nprint(x)"
+
+        await pilot.press("ctrl+c")
+        assert app.clipboard == "SOURCE\nx = 1\nprint(x)"
 
 
 @pytest.mark.asyncio
@@ -333,7 +360,7 @@ async def test_event_before_the_tool_popup_mounts_still_draws_it():
         screen = app.screen
         assert isinstance(screen, ToolDetailScreen)
         assert "a.py" in _static_text(screen, ".detail-status")
-        assert _section_renderables(screen)
+        assert screen.query_one("#tool-sections", Static).content.plain
 
 
 @pytest.mark.asyncio
