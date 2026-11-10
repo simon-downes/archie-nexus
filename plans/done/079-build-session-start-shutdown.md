@@ -164,6 +164,7 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 
 - The initial inherited-environment test run was interrupted before pytest reported a result while this session exported `ARCHIE_BACKEND=kiro` and `ARCHIE_SESSION_ID`; all recorded build checks explicitly unset those variables.
 - The repository-wide format check still reports the pre-existing unrelated `persona/skills/python/assets/output.py`; all 368 other files, including every changed file, are formatted.
+- The PR could not be opened because `gh auth status` reports no authenticated GitHub host and `github.personal_token` is absent from `/home/archie/.nexus/credentials.yaml`; no alternate PR path was attempted.
 
 ## Review
 
@@ -177,8 +178,8 @@ Implemented terminal startup feedback for native and Kiro sessions, client-first
 
 Verified: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` — 4,724 passed with one pre-existing Starlette deprecation warning; `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev ruff check .` — passed; focused review suites — passed. Full `ruff format --check .` is not clean because of the unrelated pre-existing `persona/skills/python/assets/output.py`; changed files are formatted.
 
-PR: pending
-CI: pending
+PR: error: gh auth status failed; no authenticated GitHub host
+CI: none
 
 ## Follow-ups
 
