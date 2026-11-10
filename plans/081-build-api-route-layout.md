@@ -1,6 +1,6 @@
 # 081 — Orchestrator API route layout
 
-Status: planning
+Status: building
 Branch: build-it/081-api-route-layout (base: main @ a1d18e4)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/081-api-route-layout
 
@@ -32,9 +32,17 @@ Codebase facts:
 - Templates and `insights_web.VIEWS` hard-code `/ui/...` links; `templates/viewer/detail.html`
   carries the live SSE URL in `data-live-url`.
 - Tests patch `archie_orchestrator.app.{list_sessions,start_session,stop_session,home_dir}`
-  and import `_query_metrics` and `unhandled_exception_handler` from `app`.
+  and import `_query_metrics` and `unhandled_exception_handler` from `app`. Lifespan tests
+  patch `app.list_sessions` (`test_orchestrator_bounce.py:48,83`,
+  `test_orchestrator_logging.py:168`) and keep doing so; `GET /sessions` tests need
+  `api.list_sessions` (`test_orchestrator_bounce.py:65`, `test_orchestrator_remote.py:56,72`,
+  `test_orchestrator_app.py:49,73,92`). `app.config_source.get` patches keep working because
+  they patch the shared object.
+- No test sends a request to `/auth/login`, `/auth/refresh`, `/auth/flow` or
+  `/auth/callback`; `AuthService` tests call it directly.
 - Docs listing routes: `docs/architecture.md`, `docs/auth-credentials.md`,
-  `docs/session-protocol-walkthrough.md`, `docs/config.md`, `docs/kiro.md`.
+  `docs/session-protocol-walkthrough.md`, `docs/config.md`, `docs/kiro.md`, and
+  `README.md:52` (a `/ui/insights` link). `insights.py:1` names `/ui/insights` in a docstring.
 
 ## Baseline
 
@@ -56,19 +64,23 @@ Codebase facts:
 | D2 | What happens to the old paths (`/ui/*`, root JSON routes) | removed; they return 404 (or the new page where a page now owns the path) | redirects or aliases | single-user system, so no compatibility window is needed (roadmap note) | self |
 | D3 | Where the route tables live | new `api.py` (the JSON handlers moved out of `app.py`, plus `routes`) and new `pages.py` (the page `routes`, plus the OAuth callback handler); `app.py` keeps the lifespan, `/health`, the exception handler and composes `[*pages.routes, /health, Mount(API_PREFIX, api.routes), /static]` | route lists inside `web.py` | `insights_web.py` imports from `web.py`, so a page table in `web.py` would need a circular import; two modules make the table read as two blocks, as the note asks | self |
 | D4 | Which module owns `auth_callback` | `pages.py` | `api.py` | it returns HTML and a browser lands on it; API handlers never render HTML | self |
-| D5 | Where the `/api` prefix is defined | `API_PREFIX = "/api"` in `shared/src/archie_shared/protocol.py`, used by the orchestrator mount and the CLI | a literal in each package | the CLI and the orchestrator must agree; `protocol.py` already holds the client/server protocol version | self |
+| D5 | Where the `/api` prefix is defined | `API_PREFIX = "/api"` in `shared/src/archie_shared/protocol.py`, used by the orchestrator mount and the CLI; the auth page's inline script keeps a literal `/api/auth/...` | a literal in each Python package | the CLI and the orchestrator are separate packages that must agree, and `shared` is the only package both import; `protocol.py` is the closest existing home for client/server wire constants | self |
 | D6 | How the CLI builds request URLs | keep `_profile_url()` / `_orchestrator_url()` returning the orchestrator base (used in error messages) and build each request as `f"{url}{API_PREFIX}/..."` | a helper that returns the API base | error messages keep naming the orchestrator address, and tests that patch `_orchestrator_url` still check the prefix | self |
 | D7 | How templates refer to pages | literal root paths, as now | Starlette `url_for` with named routes | `_render_viewer` renders in a worker thread without a request, so `url_for` is not available there | self |
 | D8 | Error body for unhandled exceptions on page routes | unchanged (JSON 500 for every path) | HTML 500 for pages | not part of the route move; listed as a follow-up | self |
 
 ## Requirements
 
-- MUST serve every JSON route under `/api`: `GET|POST /api/sessions`, `DELETE /api/sessions/{id}`,
-  `GET /api/sessions/{id}/status`, `/events`, `/metrics`, `GET /api/metrics`,
-  `GET /api/auth/providers`, `/api/auth/status`, `/api/auth/flow/{flow_id}`,
-  `POST /api/auth/login/{p}`, `/api/auth/refresh/{p}`, `PUT|DELETE /api/auth/credential/{p}`,
-  with unchanged request and response bodies.
+- MUST serve every JSON route under `/api`, with unchanged request and response bodies:
+  `GET /api/sessions`, `POST /api/sessions`, `DELETE /api/sessions/{id}`,
+  `GET /api/sessions/{id}/status`, `GET /api/sessions/{id}/events`,
+  `GET /api/sessions/{id}/metrics`, `GET /api/metrics`, `GET /api/auth/providers`,
+  `GET /api/auth/status`, `GET /api/auth/flow/{flow_id}`, `POST /api/auth/login/{p}`,
+  `POST /api/auth/refresh/{p}`, `PUT /api/auth/credential/{p}`,
+  `DELETE /api/auth/credential/{p}`.
   - AC: the existing orchestrator tests for these handlers pass against the `/api` paths.
+  - AC: new tests in `tests/test_orchestrator_routes.py` get a JSON response (not 404) from
+    `POST /api/auth/login/{p}`, `POST /api/auth/refresh/{p}` and `GET /api/auth/flow/{id}`.
   - AC: `GET /metrics`, `GET /auth/status`, `GET /auth/providers`, `POST /auth/login/x` and
     `DELETE /sessions/x` at the root return 404 or 405.
 - MUST serve the session WebSocket relay at `/api/sessions/{id}/stream`.
@@ -80,16 +92,21 @@ Codebase facts:
   - AC: the web tests pass at these paths and get `text/html` (or `text/event-stream` for
     `/live`); every former `/ui/...` path returns 404.
 - MUST keep `/`, `/health` and `/auth/callback/{provider}` unchanged.
-  - AC: `GET /` renders the running-sessions page, `GET /health` returns `{"status":"ok"}`,
-    the OAuth callback tests pass at `/auth/callback/{p}`, and `redirect_uri` is still
-    `<origin>/auth/callback/{p}`.
+  - AC: `GET /` renders the running-sessions page and `GET /health` returns
+    `{"status":"ok"}` (existing tests).
+  - AC (new, M1): `POST /api/auth/login/{p}` for a configured OAuth provider returns a
+    `redirect_uri` of `http://test/auth/callback/{p}`.
+  - AC (new, M2): `GET /auth/callback/{p}?state=bad` returns 400 `text/html`
+    ("Invalid or expired flow").
 - MUST keep htmx fragments with their page: `GET /sessions` with `HX-Request: true` returns
   only the results fragment.
   - AC: the session-list fragment test passes at `/sessions`.
 - MUST point every link, form action, `hx-get`, `fetch` and live URL in the templates and
   static JS at the new paths, including the auth page's "Refresh page" link (`/auth`) and its
   `fetch` (`/api/auth/...`).
-  - AC: rendering each page in tests yields no `/ui/` substring;
+  - AC: the existing web tests (`tests/test_web_console.py`, `test_web_auth_status.py`,
+    `test_web_session_list.py`, `test_web_session_detail.py`, `test_web_insights.py`), using
+    their own fixtures, assert the rendered page contains no `/ui/`;
     `rg -n '/ui/' orchestrator/src` finds nothing.
 - MUST make the CLI and TUI call the `/api` paths: `archie start`, `ls`, `attach`, `stop`,
   the `--kiro` check, `archie auth login|refresh|status` and static credential pushes; the TUI
@@ -133,7 +150,9 @@ to the new paths, and tests move with them.
 - Templates/static: `templates/base.html`, `templates/auth_status.html`,
   `templates/viewer/{base,list,_results,detail,not_found}.html`,
   `templates/insights/{_macros,models,overview,session,sessions,not_found}.html`,
-  `insights_web.VIEWS` and docstrings in `web.py` / `insights_web.py`.
+  `insights_web.VIEWS` and docstrings in `web.py`, `insights_web.py` and `insights.py`.
+- Docs: `README.md`, `docs/architecture.md`, `docs/auth-credentials.md`,
+  `docs/session-protocol-walkthrough.md`, `docs/config.md`, `docs/kiro.md`.
 
 ## Milestones
 
@@ -146,8 +165,11 @@ to the new paths, and tests move with them.
   to `f"{url}{API_PREFIX}/..."` (D6), the TUI `ws_url`/`api_url` built in `cli.py`, and the
   auth page `fetch` to `/api/auth/...`. Move test patch targets from
   `archie_orchestrator.app.<name>` to `archie_orchestrator.api.<name>` where the name moved
-  (`list_sessions` stays patched in `app` for lifespan tests). Update test paths. Add
-  `tests/test_orchestrator_routes.py` for the old-path 404/405 checks and the mount check.
+  (`list_sessions` stays patched in `app` for lifespan tests; see Context for the files).
+  Update test paths. Add `tests/test_orchestrator_routes.py` for the old-path 404/405 checks,
+  the mount check, the login/refresh/flow reachability checks and the login `redirect_uri`
+  check (an OAuth provider configured through `NexusConfig`, following
+  `tests/test_orchestrator_auth_oauth.py`, with the token endpoint call patched).
   Update the API rows in `docs/architecture.md`, `docs/auth-credentials.md`,
   `docs/session-protocol-walkthrough.md`, `docs/config.md` and `docs/kiro.md`.
   ⚠️ Starlette matches routes in order; the `Mount` must not shadow a page route (no page
@@ -156,7 +178,7 @@ to the new paths, and tests move with them.
   CLI commands through `CliRunner` with `httpx` patched.
 - **Deliverable:** the JSON API answers only under `/api`, and the CLI/TUI use it.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test` passes (no new failures);
-  `scripts/dev ruff check .` passes.
+  `scripts/dev ruff check .` passes; `scripts/dev ruff format --check <touched files>` passes.
 - **Outcome:**
 
 ### [ ] M2 — Pages at the root without /ui
@@ -166,15 +188,18 @@ to the new paths, and tests move with them.
   `/insights` (+ the six sub-pages), `/auth`, `/auth/callback/{provider}`. `app.py` uses
   `*pages.routes`. Replace every `/ui/...` link in the templates and `insights_web.VIEWS`;
   point the auth page's "Refresh page" link at `/auth` (it pointed at the JSON route). Update
-  docstrings, the web tests' paths, and the page rows in `docs/architecture.md`. Extend
+  docstrings (`web.py`, `insights_web.py`, `insights.py`), the web tests' paths, the page rows
+  in `docs/architecture.md`, and the `README.md:52` link. Extend
   `tests/test_orchestrator_routes.py`: former `/ui/...` paths return 404; `GET /sessions`
-  returns HTML; rendered pages contain no `/ui/`.
+  returns HTML; `GET /auth/callback/{p}?state=bad` returns 400 HTML. Add a "no `/ui/`"
+  assertion to one rendering test in each existing web test file.
   ⚠️ `/sessions/{session_id}` (page) and `/api/sessions/{id}` no longer collide because the
   API is mounted; `/auth` (page) and `/auth/callback/{p}` are distinct paths.
 - **Test seam:** the ASGI app through `httpx.AsyncClient(ASGITransport)` / `TestClient`.
 - **Deliverable:** every page is served at its root path and links only to root paths.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test` passes; `scripts/dev ruff check .`
-  passes; `rg -n '/ui/' docs README.md orchestrator/src cli/src` finds nothing.
+  passes; `scripts/dev ruff format --check <touched files>` passes;
+  `rg -n '/ui/' docs README.md orchestrator/src cli/src` finds nothing.
 - **Outcome:**
 
 ## Deviations
@@ -187,6 +212,13 @@ to the new paths, and tests move with them.
 - Browser bookmarks to `/ui/...` stop working (D2).
 
 ## Review
+
+- Plan review: 1 pass. Fixed: no HTTP test covered the OAuth callback or login (❌, added
+  new tests in M1/M2); login/refresh/flow had no `/api` route test (⚠️, added reachability
+  checks); `README.md:52` and `insights.py:1` were missing (⚠️, added); format check added to
+  Verify; "no `/ui/`" assertions placed in the existing web tests; full paths spelled out; D5
+  reason restated and the template literal accepted; Context lists the patch-target files.
+  No second pass: the ❌ was a missing test, fixed by naming the tests, not a design change.
 
 ## Outcome
 
