@@ -79,10 +79,13 @@ Codebase facts:
   `POST /api/auth/refresh/{p}`, `PUT /api/auth/credential/{p}`,
   `DELETE /api/auth/credential/{p}`.
   - AC: the existing orchestrator tests for these handlers pass against the `/api` paths.
-  - AC: new tests in `tests/test_orchestrator_routes.py` get a JSON response (not 404) from
-    `POST /api/auth/login/{p}`, `POST /api/auth/refresh/{p}` and `GET /api/auth/flow/{id}`.
-  - AC: `GET /metrics`, `GET /auth/status`, `GET /auth/providers`, `POST /auth/login/x` and
-    `DELETE /sessions/x` at the root return 404 or 405.
+  - AC: new tests in `tests/test_orchestrator_routes.py`, with `google` configured
+    (`client_id`), get the handlers' own JSON answers: `POST /api/auth/refresh/google` with no
+    stored credential → 400 JSON; `GET /api/auth/flow/unknown` → 400 JSON.
+  - AC: the former root JSON routes (`GET /metrics`, `GET /auth/status`,
+    `GET /auth/providers`, `POST /auth/login/google`, `POST /auth/refresh/google`,
+    `GET /auth/flow/x`, `DELETE /sessions/x`, `GET /sessions/x/status`) return 404 or 405
+    with a non-JSON body, i.e. Starlette's no-route response, not a handler's JSON 404.
 - MUST serve the session WebSocket relay at `/api/sessions/{id}/stream`.
   - AC: the WS proxy tests connect at `/api/sessions/{id}/stream`; a connection to
     `/sessions/{id}/stream` is refused.
@@ -94,9 +97,13 @@ Codebase facts:
 - MUST keep `/`, `/health` and `/auth/callback/{provider}` unchanged.
   - AC: `GET /` renders the running-sessions page and `GET /health` returns
     `{"status":"ok"}` (existing tests).
-  - AC (new, M1): `POST /api/auth/login/{p}` for a configured OAuth provider returns a
-    `redirect_uri` of `http://test/auth/callback/{p}`.
-  - AC (new, M2): `GET /auth/callback/{p}?state=bad` returns 400 `text/html`
+  - AC (new, M1): `POST /api/auth/login/google` (google configured with `client_id`) returns
+    a `redirect_uri` of `http://test/auth/callback/google`.
+  - AC (new, M1): a round trip on one app — login through `/api/auth/login/google`, then
+    `GET /auth/callback/google?state=<state from the authorization URL>&code=x` with a fake
+    token transport — returns 200 "Authentication successful", and
+    `GET /api/auth/flow/{flow_id}` then reports `succeeded`.
+  - AC (new, M2): `GET /auth/callback/google?state=bad` returns 400 `text/html`
     ("Invalid or expired flow").
 - MUST keep htmx fragments with their page: `GET /sessions` with `HX-Request: true` returns
   only the results fragment.
@@ -114,8 +121,10 @@ Codebase facts:
   - AC: CLI tests assert the requested URLs include `/api/`.
 - MUST compose the app from the two route modules: JSON routes only in `api.py` under
   `Mount(API_PREFIX)`, page routes only in `pages.py`.
-  - AC: a route-table test checks that `app.routes` contains a `Mount` at `API_PREFIX` whose
-    routes are `api.routes`, and that no top-level route path starts with `/ui` or `/api/`.
+  - AC (M1): a route-table test checks that `app.routes` contains a `Mount` at `API_PREFIX`
+    whose routes are `api.routes`.
+  - AC (M2): the same test checks that the remaining top-level routes are `pages.routes`,
+    `/health` and `/static`, and that none starts with `/ui`.
 - MUST update the docs that list routes.
   - AC: `rg -n '/ui/' docs README.md orchestrator/src cli/src` finds nothing, and the
     `docs/architecture.md` route table lists the `/api` routes.
@@ -167,9 +176,13 @@ to the new paths, and tests move with them.
   `archie_orchestrator.app.<name>` to `archie_orchestrator.api.<name>` where the name moved
   (`list_sessions` stays patched in `app` for lifespan tests; see Context for the files).
   Update test paths. Add `tests/test_orchestrator_routes.py` for the old-path 404/405 checks,
-  the mount check, the login/refresh/flow reachability checks and the login `redirect_uri`
-  check (an OAuth provider configured through `NexusConfig`, following
-  `tests/test_orchestrator_auth_oauth.py`, with the token endpoint call patched).
+  the mount check (the `Mount` only; the no-`/ui` part waits for M2), the refresh/flow
+  checks, the login `redirect_uri` check and the login→callback round trip. Set app state
+  with `monkeypatch.setattr(app.state, ..., raising=False)` as in
+  `tests/test_plugin_enabled.py:57-58`, with `ARCHIE_HOME_DIR` at `tmp_path` and
+  `AuthService(NexusConfig(plugins={"google": PluginConfig(auth=PluginAuthConfig(client_id="client"))}), transport=FakeTransport())`
+  following `tests/test_orchestrator_auth_oauth.py:22-28,80-93`. Login itself makes no HTTP
+  call for google; only the callback's token exchange uses the transport.
   Update the API rows in `docs/architecture.md`, `docs/auth-credentials.md`,
   `docs/session-protocol-walkthrough.md`, `docs/config.md` and `docs/kiro.md`.
   ⚠️ Starlette matches routes in order; the `Mount` must not shadow a page route (no page
@@ -191,8 +204,11 @@ to the new paths, and tests move with them.
   docstrings (`web.py`, `insights_web.py`, `insights.py`), the web tests' paths, the page rows
   in `docs/architecture.md`, and the `README.md:52` link. Extend
   `tests/test_orchestrator_routes.py`: former `/ui/...` paths return 404; `GET /sessions`
-  returns HTML; `GET /auth/callback/{p}?state=bad` returns 400 HTML. Add a "no `/ui/`"
-  assertion to one rendering test in each existing web test file.
+  returns HTML; `GET /auth/callback/google?state=bad` returns 400 HTML; the route-table test
+  checks the top-level routes are `pages.routes`, `/health` and `/static` with no `/ui`. Add a
+  "no `/ui/`" assertion to one rendering test in each of `tests/test_web_console.py`,
+  `test_web_auth_status.py`, `test_web_session_list.py`, `test_web_session_detail.py` and
+  `test_web_insights.py` (`test_web_session_live.py` only streams, so it just gets new paths).
   ⚠️ `/sessions/{session_id}` (page) and `/api/sessions/{id}` no longer collide because the
   API is mounted; `/auth` (page) and `/auth/callback/{p}` are distinct paths.
 - **Test seam:** the ASGI app through `httpx.AsyncClient(ASGITransport)` / `TestClient`.
@@ -218,7 +234,11 @@ to the new paths, and tests move with them.
   checks); `README.md:52` and `insights.py:1` were missing (⚠️, added); format check added to
   Verify; "no `/ui/`" assertions placed in the existing web tests; full paths spelled out; D5
   reason restated and the template literal accepted; Context lists the patch-target files.
-  No second pass: the ❌ was a missing test, fixed by naming the tests, not a design change.
+  Pass 2: old-path checks must tell Starlette's no-route 404 from a handler's JSON 404
+  (⚠️, ACs now require a non-JSON body); refresh/flow checks name inputs and expected codes
+  (⚠️); the "patched token endpoint" phrase was wrong for login (fixed: the transport only
+  serves the callback); app-state setup named; the five web test files named; the route-table
+  AC split between M1 and M2; a login→callback round-trip test added. Stopped after two passes.
 
 ## Outcome
 
