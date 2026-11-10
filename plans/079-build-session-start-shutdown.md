@@ -1,6 +1,6 @@
 # 079 — Session startup and shutdown UX
 
-Status: reviewing
+Status: done
 Branch: build-it/079-session-start-shutdown (base: main @ e6a1ac0)
 Worktree: /workspace/.git/build-it-worktrees/079-session-start-shutdown
 
@@ -162,18 +162,20 @@ unset session-only backend variables so agent lifespan tests cannot accidentally
 
 ## Risks
 
-- Rich's captured-output rendering may differ between Click's test runner and a real non-TTY; the status helper tests will assert readable fallback behavior rather than terminal escape sequences.
-- The initial inherited-environment test run was interrupted before pytest reported a result. The safe baseline with session-only variables unset passed the full suite.
+- The initial inherited-environment test run was interrupted before pytest reported a result while this session exported `ARCHIE_BACKEND=kiro` and `ARCHIE_SESSION_ID`; all recorded build checks explicitly unset those variables.
+- The repository-wide format check still reports the pre-existing unrelated `persona/skills/python/assets/output.py`; all 368 other files, including every changed file, are formatted.
 
 ## Review
 
 - Plan review: one pass; resolved the M2 private test-seam concern by specifying the public `ArchieApp.action_quit` confirmation path, and expanded M2 acceptance/edge-case coverage to include cancellation of an in-flight `/events` replay.
-- Code review: general and risk roles, round 1; fixed all three agreed findings: added a non-TTY startup line and test, propagated established relay `ConnectionClosed` to the 4002 handler with a test, and tracked/cancelled `_ensure_connected()` reconnects with a test. Second round pending.
-- Merge risk: pending
+- Code review: general and risk roles, two rounds; round 1 found three ❌ findings (non-TTY startup fallback, established relay close classification, and direct reconnect cancellation), all fixed with regression tests. Round 2 for both roles reported no findings.
+- Merge risk: Medium: changes affect CLI startup output and active WebSocket/session teardown, but behavior is bounded to existing paths, transport failures are classified explicitly, and the full safe test suite passes.
 
 ## Outcome
 
-Pending implementation and review.
+Implemented terminal startup feedback for native and Kiro sessions, client-first TUI shutdown with reconnect/history cancellation, and controlled HTTP/WebSocket proxy handling for expected backend teardown. Added regression coverage for success/failure startup cleanup, non-TTY output, quit ordering, in-flight replay/direct reconnect cancellation, HTTP protocol loss, and established WebSocket closure.
+
+Verified: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` — 4,724 passed with one pre-existing Starlette deprecation warning; `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev ruff check .` — passed; focused review suites — passed. Full `ruff format --check .` is not clean because of the unrelated pre-existing `persona/skills/python/assets/output.py`; changed files are formatted.
 
 PR: pending
 CI: pending
