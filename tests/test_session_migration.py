@@ -311,30 +311,77 @@ def test_migrate_sessions_cli_backfills_metrics(tmp_path, monkeypatch):
     _write_legacy_log(log_path)
     with log_path.open("a") as output:
         output.write("[]\n")
-    metrics_path = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
 
     result = CliRunner().invoke(
-        main,
-        [
-            "migrate-sessions",
-            "--sessions-dir",
-            str(sessions_dir),
-            "--metrics-db",
-            str(metrics_path),
-        ],
+        main, ["migrate-sessions", "--sessions-dir", str(sessions_dir), "--db", str(db)]
     )
 
     assert result.exit_code == 0, result.output
     assert (
         f"Migrated 1 session logs; removed 1 shell records and 1 model-switch records; "
-        f"rebuilt metrics at {metrics_path}"
+        f"rebuilt metrics in {db}"
     ) in result.output
-    conn = sqlite3.connect(metrics_path)
+    conn = sqlite3.connect(db)
     try:
-        row = conn.execute("SELECT session_id, event_id, turn, iteration FROM requests").fetchone()
+        row = conn.execute(
+            "SELECT session_id, event_id, turn, iteration FROM metrics_requests"
+        ).fetchone()
+        sessions = conn.execute("SELECT session_id, status FROM sessions").fetchall()
     finally:
         conn.close()
     assert row == ("session-5", "request-1", 2, 1)
+    assert sessions == [("session-5", "stopped")]  # imported once, as a new database
+
+
+def test_migrate_sessions_cli_db_rebuilds_metrics_and_keeps_sessions(tmp_path):
+    from archie_orchestrator.metrics import MetricsIndex
+
+    from tests.session_fakes import migrated_store, sessions_rows
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    _write_legacy_log(sessions_dir / "session-7.jsonl")
+    store = migrated_store(tmp_path)
+    store.update("session-7", name="Kept", name_fixed=True)
+    db = tmp_path / "archie.db"
+    MetricsIndex(db, sessions_dir).sync()
+    before = sessions_rows(db)
+
+    result = CliRunner().invoke(
+        main, ["migrate-sessions", "--sessions-dir", str(sessions_dir), "--db", str(db)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"rebuilt metrics in {db}" in result.output
+    assert sessions_rows(db) == before
+    assert db.exists() and not list(tmp_path.glob("archie.db.legacy*"))
+    conn = sqlite3.connect(db)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM metrics_requests").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1
+
+
+def test_migrate_sessions_cli_defaults_to_home_archie_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir()
+    _write_legacy_log(tmp_path / "sessions" / "session-8.jsonl")
+
+    result = CliRunner().invoke(main, ["migrate-sessions"])
+
+    assert result.exit_code == 0, result.output
+    assert f"rebuilt metrics in {tmp_path / 'archie.db'}" in result.output
+    assert not (tmp_path / "metrics.db").exists()
+
+
+def test_migrate_sessions_cli_metrics_db_option_is_gone(tmp_path):
+    result = CliRunner().invoke(
+        main, ["migrate-sessions", "--metrics-db", str(tmp_path / "metrics.db")]
+    )
+    assert result.exit_code == 2
+    assert "No such option" in result.output
 
 
 def test_migrate_sessions_cli_reports_metrics_failure(tmp_path, monkeypatch):
@@ -354,8 +401,8 @@ def test_migrate_sessions_cli_reports_metrics_failure(tmp_path, monkeypatch):
             "migrate-sessions",
             "--sessions-dir",
             str(sessions_dir),
-            "--metrics-db",
-            str(tmp_path / "metrics.db"),
+            "--db",
+            str(tmp_path / "archie.db"),
         ],
     )
 

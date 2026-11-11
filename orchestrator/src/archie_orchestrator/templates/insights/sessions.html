@@ -9,7 +9,7 @@
 <div class="table-wrap chrome"><table class="insights sessions-table">
     <thead><tr>
         {{ th("started", "Started (UTC)", false) }}
-        <th>Session</th><th>Workspace</th><th>Title</th>
+        <th>Session</th><th>Workspace</th><th>Name</th>
         {{ th("turns", "Turns") }}{{ th("requests", "Requests") }}{{ th("cost", "Cost") }}
         <th class="num">Cache hit</th>{{ th("errors", "Errors") }}{{ th("duration", "Duration") }}
     </tr></thead>
@@ -19,7 +19,7 @@
             <td class="when">{{ m.when(s.started_at) }}</td>
             <td class="id">{{ m.session_links(s.session_id) }}</td>
             <td>{{ s.workspace }}</td>
-            <td class="title">{{ s.title or "" }}</td>
+            <td class="title">{{ s.name or "" }}</td>
             <td class="num">{{ m.num(s.turns) }}</td>
             <td class="num">{{ m.num(s.requests) }}</td>
             <td class="num">{{ m.money(s.cost) }}</td>

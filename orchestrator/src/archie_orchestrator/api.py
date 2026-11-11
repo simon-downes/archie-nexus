@@ -38,6 +38,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
+from archie_orchestrator import store
 from archie_orchestrator.auth import AuthError
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.docker import DockerError
@@ -313,10 +314,10 @@ def _query_metrics(
     session_id: str | None = None,
     since: str | None = None,
 ) -> dict:
-    """Query aggregated metrics from SQLite. Returns a metrics dict.
+    """Query aggregated metrics from ``metrics_requests``. Returns a metrics dict.
 
     Args:
-        db_path: Path to the SQLite database.
+        db_path: Path to ``archie.db``.
         session_id: If given, restrict to rows for this session.
         since: Optional ISO date string (YYYY-MM-DD). Filters to rows with
             timestamp >= since.
@@ -365,7 +366,7 @@ def _query_metrics(
             f"  COALESCE(SUM(output_tokens), 0) AS output_tokens, "
             f"  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, "
             f"  COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens "
-            f"FROM requests {where}",
+            f"FROM metrics_requests {where}",
             params,
         ).fetchone()
 
@@ -379,7 +380,7 @@ def _query_metrics(
             f"SELECT model_key AS model, "
             f"  COALESCE(SUM(cost_usd), 0.0) AS cost, "
             f"  COUNT(*) AS requests "
-            f"FROM requests {where} "
+            f"FROM metrics_requests {where} "
             f"GROUP BY model",
             params,
         ).fetchall()
@@ -424,8 +425,7 @@ async def get_metrics(request: Request) -> Response:
                 },
                 status_code=400,
             )
-    db_path = home_dir() / "metrics.db"
-    result = await asyncio.to_thread(_query_metrics, db_path, since=since)
+    result = await asyncio.to_thread(_query_metrics, store.db_path(home_dir()), since=since)
     return Response(msgspec.json.encode(result), media_type="application/json")
 
 
@@ -435,9 +435,10 @@ async def get_session_metrics(request: Request) -> Response:
     Returns 404 if no metrics have been recorded for that session.
     """
     session_id = request.path_params["session_id"]
-    db_path = home_dir() / "metrics.db"
     try:
-        result = await asyncio.to_thread(_query_metrics, db_path, session_id=session_id)
+        result = await asyncio.to_thread(
+            _query_metrics, store.db_path(home_dir()), session_id=session_id
+        )
     except KeyError:
         return JSONResponse(
             {"error": f"No metrics found for session '{session_id}'"},

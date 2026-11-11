@@ -9,14 +9,23 @@ from archie_orchestrator import insights
 from archie_orchestrator.insights import InsightsError, parse_filters, percentile
 from archie_orchestrator.metrics import MetricsIndex, connect
 
+from tests.session_fakes import migrated_store, record, set_mtime
+
 ALL = parse_filters(since="all")
+
+
+def _sync(home):
+    """Sync the index in ``home`` (importing its logs first) and open it."""
+    MetricsIndex(home / "archie.db", home / "sessions").sync()
+    return connect(home / "archie.db")
 
 
 @pytest.fixture
 def db(session_logs, tmp_path):
-    """Two sessions in two workspaces; returns an open connection after a sync."""
+    """Two indexed sessions in two workspaces (alpha named), a ``failed`` start with no
+    log; returns an open connection after a sync."""
     w = session_logs
-    w.write(
+    alpha = w.write(
         "alpha-01k0000000",
         [
             w.session_started(sent_at="2026-07-01T09:00:00+00:00"),
@@ -103,8 +112,19 @@ def db(session_logs, tmp_path):
             w.turn_interrupted(turn=1),
         ],
     )
-    MetricsIndex(tmp_path / "metrics.db", tmp_path / "sessions").sync()
-    conn = connect(tmp_path / "metrics.db")
+    set_mtime(alpha, "2026-07-02T10:00:02+00:00")  # imported as its last activity (D7)
+    store = migrated_store(tmp_path)
+    store.update("alpha-01k0000000", name="Alpha session title", name_fixed=True)
+    store.save(
+        record(
+            "ghost-01k0000002",
+            status="failed",
+            error="no image",
+            started_at="2026-07-02T09:00:00+00:00",
+            ended_at="2026-07-02T09:00:01+00:00",
+        )
+    )
+    conn = _sync(tmp_path)
     yield conn
     conn.close()
 
@@ -209,13 +229,15 @@ def test_sessions_default_sort_newest_first(db):
     data = insights.sessions(db, ALL)
     assert data["total"] == 2
     assert [s["session_id"] for s in data["sessions"]] == ["beta-01k0000001", "alpha-01k0000000"]
-    alpha = data["sessions"][1]
-    assert alpha["title"] == "Alpha session title"
+    beta, alpha = data["sessions"]
+    assert alpha["name"] == "Alpha session title"
+    assert beta["name"] is None  # not fixed: the ID isn't repeated (D1)
+    assert "initial_model" not in alpha
     assert alpha["turns"] == 2
     assert alpha["requests"] == 4
     assert alpha["cost"] == pytest.approx(2.0)
     assert alpha["errors"] == 2  # one error request + one root turn error
-    assert alpha["duration_s"] == 90002  # 09:00 day 1 -> 10:00:02 day 2
+    assert alpha["duration_s"] == 90002  # started 09:00 day 1 -> last activity 10:00:02 day 2
 
 
 def test_sessions_sort_by_cost(db):
@@ -250,8 +272,7 @@ def test_sessions_cap_is_200(session_logs, tmp_path):
     w = session_logs
     for n in range(201):
         w.write(f"bulk-01k{n:07d}", [w.llm(cost_usd=0.01)])
-    MetricsIndex(tmp_path / "metrics.db", tmp_path / "sessions").sync()
-    conn = connect(tmp_path / "metrics.db")
+    conn = _sync(tmp_path)
     try:
         data = insights.sessions(conn, ALL, limit=500)
     finally:
@@ -284,6 +305,47 @@ def test_session_detail_unknown_raises_key_error(db):
         insights.session_detail(db, "nope-01k0000000")
 
 
+def test_session_detail_name_only_when_fixed(db):
+    assert insights.session_detail(db, "alpha-01k0000000")["session"]["name"] == (
+        "Alpha session title"
+    )
+    assert insights.session_detail(db, "beta-01k0000001")["session"]["name"] is None
+
+
+# ---------------------------------------------------------------------------
+# Listed sessions (082 D19b)
+# ---------------------------------------------------------------------------
+
+
+def test_session_without_indexed_log_is_not_listed(db):
+    """The ``failed`` start has a record but no log: no list, count, workspace or page."""
+    assert "ghost-01k0000002" not in [
+        s["session_id"] for s in insights.sessions(db, ALL)["sessions"]
+    ]
+    assert insights.overview(db, ALL)["totals"]["sessions"] == 2
+    assert "ghost" not in insights.filter_options(db)["workspaces"]
+    assert insights.sessions(db, parse_filters(since="all", workspace="ghost"))["total"] == 0
+    with pytest.raises(KeyError):
+        insights.session_detail(db, "ghost-01k0000002")
+
+
+def test_session_whose_log_failed_to_index_is_not_listed(session_logs, tmp_path):
+    w = session_logs
+    w.write("ok-01k0000000", [w.llm(cost_usd=0.01)])
+    (w.dir / "bad-01k0000001.jsonl").mkdir()  # reading it fails
+    migrated_store(tmp_path).save(record("bad-01k0000001", status="stopped"))
+    conn = _sync(tmp_path)
+    try:
+        listed = [s["session_id"] for s in insights.sessions(conn, ALL)["sessions"]]
+        assert listed == ["ok-01k0000000"]
+        assert insights.overview(conn, ALL)["totals"]["sessions"] == 1
+        assert insights.filter_options(conn)["workspaces"] == ["ok"]
+        with pytest.raises(KeyError):
+            insights.session_detail(conn, "bad-01k0000001")
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -302,8 +364,7 @@ def test_models_usage_latency_and_errors(db):
 def test_models_percentiles_known_set(session_logs, tmp_path):
     w = session_logs
     w.write("p-01k0000000", [w.llm(duration_ms=d) for d in range(100, 1100, 100)])
-    MetricsIndex(tmp_path / "metrics.db", tmp_path / "sessions").sync()
-    conn = connect(tmp_path / "metrics.db")
+    conn = _sync(tmp_path)
     try:
         (row,) = insights.models(conn, ALL)["models"]
     finally:
@@ -383,8 +444,7 @@ def test_turn_error_without_requests_uses_session_start(session_logs, tmp_path):
         "e-01k0000000",
         [w.session_started(sent_at="2026-07-05T08:00:00+00:00"), w.user("x"), w.turn_error("auth")],
     )
-    MetricsIndex(tmp_path / "metrics.db", tmp_path / "sessions").sync()
-    conn = connect(tmp_path / "metrics.db")
+    conn = _sync(tmp_path)
     try:
         data = insights.errors(conn, parse_filters(since="2026-07-05"))
     finally:
@@ -407,8 +467,7 @@ def test_daily_series_fill_gaps(session_logs, tmp_path):
             w.llm(cost_usd=2.0, sent_at="2026-07-04T10:00:00+00:00", status="error", error="x"),
         ],
     )
-    MetricsIndex(tmp_path / "metrics.db", tmp_path / "sessions").sync()
-    conn = connect(tmp_path / "metrics.db")
+    conn = _sync(tmp_path)
     try:
         daily = insights.overview(conn, ALL)["daily_cost"]
         errs = insights.errors(conn, ALL)["daily"]

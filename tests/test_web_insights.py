@@ -15,6 +15,8 @@ from archie_orchestrator.web import VIEWER_CSP
 from archie_shared.schemas import NexusConfig
 from httpx import ASGITransport, AsyncClient
 
+from tests.session_fakes import migrated_store, record
+
 PAGES = [
     "/insights",
     "/insights/sessions",
@@ -25,6 +27,7 @@ PAGES = [
 ]
 TEMPLATES = Path(insights.__file__).parent / "templates" / "insights"
 SID = "proj-01k0000000"
+GHOST = "ghost-01k0000002"  # a failed start: a record with no log
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +65,10 @@ def home(session_logs, tmp_path):
         ],
     )
     w.write("other-01k0000001", [w.llm(model_key="m1", cost_usd=0.1)])
+    store = migrated_store(tmp_path)  # imports both logs
+    store.update(SID, name="Fix <b>the</b> parser", name_fixed=True)
+    store.update("other-01k0000001", name="unfixed-name")
+    store.save(record(GHOST, status="failed", error="no image", ended_at="2026-07-01T00:00:00Z"))
     return tmp_path
 
 
@@ -82,11 +89,14 @@ async def test_pages_render_with_csp_and_nav(home, path):
 
 
 @pytest.mark.asyncio
-async def test_page_syncs_index_first(home):
-    assert not (home / "metrics.db").exists()
+async def test_page_syncs_index_first(session_logs, tmp_path):
+    w = session_logs
+    w.write(SID, [w.llm(model_key="m1", cost_usd=1.85)])
+    assert not (tmp_path / "archie.db").exists()
     resp = await _get("/insights?since=all")
     assert "$1.85" in resp.text
-    assert (home / "metrics.db").exists()
+    assert (tmp_path / "archie.db").exists()
+    assert not (tmp_path / "metrics.db").exists()
 
 
 @pytest.mark.asyncio
@@ -129,7 +139,34 @@ async def test_sessions_rows_link_to_detail_and_transcript(home):
     row = re.search(rf'<tr data-session-id="{SID}">.*?</tr>', resp.text, re.S).group(0)
     assert f'href="/insights/sessions/{SID}"' in row
     assert f'href="/sessions/{SID}"' in row
-    assert "Fix &lt;b&gt;the&lt;/b&gt; parser" in row  # escaped
+    assert "Fix &lt;b&gt;the&lt;/b&gt; parser" in row  # the fixed name, escaped
+
+
+@pytest.mark.asyncio
+async def test_sessions_page_names_only_fixed_and_lists_only_indexed(home):
+    resp = await _get("/insights/sessions?since=all")
+    assert "<th>Name</th>" in resp.text and "<th>Title</th>" not in resp.text
+    other = re.search(r'<tr data-session-id="other-01k0000001">.*?</tr>', resp.text, re.S).group(0)
+    assert '<td class="title"></td>' in other
+    assert "unfixed-name" not in resp.text
+    assert GHOST not in resp.text
+    assert "2 sessions" in resp.text
+    assert '<option value="ghost"' not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_session_page_shows_fixed_name(home):
+    resp = await _get(f"/insights/sessions/{SID}")
+    assert '<p class="title">Fix &lt;b&gt;the&lt;/b&gt; parser</p>' in resp.text
+    other = await _get("/insights/sessions/other-01k0000001")
+    assert other.status_code == 200
+    assert '<p class="title">' not in other.text
+
+
+@pytest.mark.asyncio
+async def test_session_page_for_record_without_log_is_404(home):
+    resp = await _get(f"/insights/sessions/{GHOST}")
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -156,7 +193,7 @@ async def test_tools_and_errors_content(home):
 
 @pytest.mark.asyncio
 async def test_page_while_index_locked_shows_updating(home):
-    index = MetricsIndex(home / "metrics.db", home / "sessions")
+    index = MetricsIndex(home / "archie.db", home / "sessions")
     with index._locked(wait=True):
         resp = await _get("/insights?since=all")
     assert resp.status_code == 200
@@ -181,7 +218,7 @@ def _chart(html: str, chart_id: str):
 async def test_chart_overview_daily_cost_matches_query(home):
     resp = await _get("/insights?since=all")
     payload = _chart(resp.text, "daily-cost")
-    conn = connect(home / "metrics.db")
+    conn = connect(home / "archie.db")
     try:
         expected = insights.overview(conn, insights.parse_filters(since="all"))["daily_cost"]
     finally:
@@ -227,7 +264,7 @@ def test_templates_have_no_inline_script_or_style():
 
 @pytest.mark.asyncio
 async def test_sync_failure_shows_notice_and_renders(home, monkeypatch):
-    MetricsIndex(home / "metrics.db", home / "sessions").sync()
+    MetricsIndex(home / "archie.db", home / "sessions").sync()
 
     def boom(self, *args, **kwargs):
         raise RuntimeError("disk on fire")
@@ -241,7 +278,7 @@ async def test_sync_failure_shows_notice_and_renders(home, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unindexed_session_while_updating_is_200_with_notice(home):
-    index = MetricsIndex(home / "metrics.db", home / "sessions")
+    index = MetricsIndex(home / "archie.db", home / "sessions")
     with index._locked(wait=True):
         resp = await _get(f"/insights/sessions/{SID}")
     assert resp.status_code == 200

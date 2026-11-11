@@ -399,38 +399,41 @@ def serve():
     help="Directory containing session .jsonl files (default: ~/.nexus/sessions).",
 )
 @click.option(
-    "--metrics-db",
+    "--db",
+    "db",
     type=click.Path(path_type=Path, dir_okay=False),
     default=None,
-    help="Metrics database path (default: ~/.nexus/metrics.db).",
+    help="Archie database whose metrics tables are rebuilt (default: ~/.nexus/archie.db).",
 )
 @click.option("--force", is_flag=True, help="Overwrite existing .legacy log backups.")
-def migrate_sessions(sessions_dir: Path | None, metrics_db: Path | None, force: bool):
+def migrate_sessions(sessions_dir: Path | None, db: Path | None, force: bool):
     """Migrate stopped session logs and rebuild the metrics index.
 
+    Only the metrics tables of the database are rebuilt; session records are kept.
     Stop all sessions and the orchestrator before running this one-shot command.
     """
     from archie_orchestrator.metrics import reset_and_backfill
+    from archie_orchestrator.store import db_path
     from archie_shared.config import home_dir
     from archie_shared.session.migrate import migrate_session_logs
 
     sessions_dir = sessions_dir or home_dir() / "sessions"
-    metrics_db = metrics_db or home_dir() / "metrics.db"
+    db = db or db_path(home_dir())
     if not sessions_dir.exists():
         raise click.ClickException(f"Session directory not found: {sessions_dir}")
 
     paths = sorted(sessions_dir.glob("*.jsonl"))
     try:
         stats = migrate_session_logs(paths, force=force)
-        reset_and_backfill(metrics_db, paths)
-    except (OSError, ValueError, sqlite3.Error) as exc:
+        reset_and_backfill(db, paths)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         raise click.ClickException(str(exc)) from None
 
     click.echo(
         f"Migrated {stats.logs_migrated} session logs; removed "
         f"{stats.shell_records_removed} shell records and "
         f"{stats.model_switch_records_removed} model-switch records; "
-        f"rebuilt metrics at {metrics_db}"
+        f"rebuilt metrics in {db}"
     )
 
 

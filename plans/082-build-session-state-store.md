@@ -517,7 +517,7 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   the M4 changes only: an M5 edit in progress in the same worktree broke collection of
   `tests/test_orchestrator_metrics.py` at the time.
 
-### [ ] M5 — Metrics in archie.db
+### [x] M5 — Metrics in archie.db
 
 - **Approach:** point `MetricsIndex` at `archie.db`; `sync()` and `reset_and_backfill()` call
   `store.migrate()` before taking their own lock (both use `archie.db.lock`, and a second
@@ -533,7 +533,45 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   functions; `archie stats` and `migrate-sessions` via the CLI runner; `/insights` pages.
 - **Deliverable:** insights, `archie stats` and `/api/metrics` read `archie.db`.
 - **Verify:** full suite passes, including the "sessions unchanged" test; Ruff clean.
-- **Outcome:**
+- **Outcome:** `metrics.py` indexes into `archie.db` as `metrics_ingest_files`,
+  `metrics_requests`, `metrics_turns`, `metrics_tool_calls`, `metrics_compactions` and
+  `metrics_subagents` (same columns, indexes renamed `idx_metrics_*`); the metrics `sessions`
+  table, `initial_model`, `_ensure_session`, the `SessionStarted`/title/`last_activity_at`
+  writes, `TITLE_CHARS`, `_end_time` and `_archive_database` are gone, and `connect` is
+  `store.connect`. `sync()` and `reset_and_backfill()` run `MetricsIndex._migrate()` before
+  their `archie.db.lock` flock; it calls `store.migrate(db)` (import from `<db dir>/sessions`)
+  only when `store.schema_version` is below the latest, so an already-migrated database never
+  waits on the lock and `sync(wait=False)` stays non-blocking. D5: `METRICS_VERSION = 5` in
+  the `meta` row `metrics_version`; `schema_version`/`is_current`/`_open_current` read only
+  that row; a missing or different version (and `reset_and_backfill`) drops every
+  `metrics_*` table and recreates them plus the meta row in one `BEGIN IMMEDIATE`
+  transaction, then refills per file. D8: `_sync_file` first checks `sessions`; with no row
+  it records `no session record` (size -1, rechecked each sync), counts
+  `SyncStats.skipped` (new) and is not an error in strict mode; `_record_error` now also
+  resets `size` to -1 on conflict. `insights.py` joins canonical `sessions`; `name` is
+  `CASE WHEN name_fixed THEN name END` (D1) in place of `title`, `initial_model` dropped;
+  `duration_s` now uses the record's `last_activity_at`. D19b rule, one SQL fragment
+  `_INDEXED` used by session lists and their `total`, the overview `sessions` count,
+  `filter_options` workspaces and `session_detail`: a session is listed iff it has a
+  `metrics_ingest_files` row with `error IS NULL` (its log was read successfully); request,
+  tool, turn and model aggregates are not filtered. Templates show `Name` (fixed only);
+  `archie stats` sessions column `Name`, `stats session` prints the name. `api.py` reads
+  `store.db_path(home)` / `metrics_requests`; the lifespan's loop already used
+  `default_index()`, now `archie.db` (no `app.py` change). `migrate-sessions --db` (default
+  `<home>/archie.db`, prints `rebuilt metrics in <db>`, also maps `RuntimeError` from a
+  too-new database to exit 1); nothing reads, moves or deletes `metrics.db`. Tests:
+  `tests/session_fakes.py` gains `migrated_store`, `set_mtime`, `sessions_rows`; new tests for
+  the version bump (stale `metrics_obsolete` dropped, sessions identical, refill), a missing
+  version row, no rebuild when current, the version in `meta` not `user_version`, the exact
+  table set (no `requests` / old `sessions` columns), sync + rebuild leaving `sessions`
+  identical, the D8 skip (strict sync and rebuild, then indexed once a row exists), the import
+  reading `<db dir>/sessions`, `metrics.db` untouched, insights/page/stats fixed vs unfixed
+  names and a `failed` row with no log absent from lists, counts, workspaces and the session
+  page (404 / "Session not found"), a log that failed to index not listed, `/api/metrics`
+  reading `archie.db`, and `migrate-sessions --db` (rebuild keeps rows, default path, the old
+  option rejected). Evidence: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` →
+  5009 passed (M4 head: 4992 reported); `scripts/dev ruff check .` clean; `ruff format --check`
+  on the 14 touched Python files clean; no `~/.nexus/archie.db` created by the run.
 
 ### [ ] M6 — Ended-session history, prompt and docs
 

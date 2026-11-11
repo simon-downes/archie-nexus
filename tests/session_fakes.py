@@ -11,9 +11,12 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import os
+import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from archie_orchestrator.docker import RunningContainer
@@ -37,6 +40,33 @@ def record(session_id: str = SID, *, status: str = "idle", **fields) -> SessionD
     }
     values.update(fields)
     return SessionDescriptor(session_id=session_id, status=status, **values)
+
+
+def migrated_store(home: Path | None = None) -> SessionStore:
+    """A store over a migrated ``archie.db`` in ``home`` (the test's ARCHIE_HOME_DIR).
+
+    Migration 1 imports the logs already in ``<home>/sessions``; logs written later
+    get no ``sessions`` row, so the metrics sync skips them (082 D8).
+    """
+    store = SessionStore(db_path(home or home_dir()))
+    store.migrate()
+    return store
+
+
+def set_mtime(path: Path, when: str) -> None:
+    """Set a file's mtime to an ISO 8601 time; the import's ``last_activity_at`` (D7)."""
+    stamp = datetime.fromisoformat(when).timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+def sessions_rows(db: Path) -> list[dict]:
+    """Every ``sessions`` row as a dict, ordered by session ID."""
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute("SELECT * FROM sessions ORDER BY session_id")]
+    finally:
+        conn.close()
 
 
 def running(session_id: str = SID, port: int | None = PORT) -> RunningContainer:
