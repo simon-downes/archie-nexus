@@ -11,7 +11,7 @@ from archie_cli.tui.prototype.app import PrototypeApp
 from archie_cli.tui.prototype.commands import model_price
 from archie_cli.tui.prototype.dialogs import ConfirmDialog
 from archie_cli.tui.prototype.panes import ToolDetailView
-from archie_cli.tui.prototype.widgets import SessionList
+from archie_cli.tui.prototype.widgets import ActivityLine, SessionList
 from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.transcript_view import ToolClicked
 from archie_shared.events import (
@@ -160,6 +160,33 @@ async def test_sidebar_groups_by_workspace_oldest_first_live_only(tmp_path, monk
     assert order == ["alpha-01", "alpha-02", "zeta-01"]
     # One line: glyph, the id without the workspace prefix (never the first prompt), age.
     assert "\n" not in row and "01" in row and "alpha" not in row and "task" not in row
+
+
+@pytest.mark.asyncio
+async def test_activity_line_follows_the_turn_until_it_ends(home, monkeypatch):
+    monkeypatch.setattr(proto_app, "BACKGROUND_FINISH_AFTER", 3600)
+    sessions = data.discover(home, limit=10)
+    sessions[0].state = "idle"
+    app = PrototypeApp(sessions)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        line = app.query_one("#activity", ActivityLine)
+        assert not line.display  # nothing running
+
+        app.query_one("#input").focus()
+        await pilot.press(*"hi", "enter")
+        await pilot.pause(0.3)
+        assert line.display and "Thinking… (esc to cancel)" in str(line.render())
+
+        await pilot.pause(1.2)  # the mock turn's tool call
+        assert "Working…" in str(line.render())
+
+        await pilot.pause(2.6)  # thinking again (until 3.8s in), then the reply streams
+        assert "Responding…" in str(line.render())
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert not line.display
 
 
 def test_compact_rows_put_shell_and_exec_on_one_line():

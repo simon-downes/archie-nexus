@@ -73,6 +73,9 @@ class MockSession:
     accounting: Accounting = field(default_factory=Accounting)
     last_question: PendingQuestion | None = None  # the log's last root question, if any
     name: str = ""  # set by the user; shown instead of the session id
+    # While working: "thinking" (waiting on the model), "responding" (a reply is
+    # streaming) or "working" (tool calls are running).
+    activity: Literal["thinking", "responding", "working"] = "thinking"
 
     @property
     def display_name(self) -> str:

@@ -225,6 +225,42 @@ class SessionStatusBar(StatusBar):
         right.update(Text(f"{self.session_id} " if self.session_id else ""))
 
 
+ACTIVITY_WORDS = {"thinking": "Thinking", "responding": "Responding", "working": "Working"}
+
+
+class ActivityLine(Static):
+    """``⠋ Thinking… (esc to cancel)``: one line, shown for the whole turn.
+
+    The attach TUI's throbber appears when a model request starts and hides on the
+    first text or tool call, so it blinks off while tools run. This line stays up
+    from the user's message to the end of the turn and only changes its word:
+
+    - "Thinking": a model request is outstanding (after the user's message and
+      between tool calls) and no text has arrived yet.
+    - "Responding": a reply is streaming.
+    - "Working": tool calls are running.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__("", **kwargs)
+        self.activity = "thinking"
+        self.frame = 0
+
+    def show(self, activity: str, frame: int) -> None:
+        self.activity = activity
+        self.frame = frame
+        self.update(self._line())
+
+    def _line(self) -> Text:
+        word = ACTIVITY_WORDS.get(self.activity, "Thinking")
+        return Text.assemble(
+            (SPINNER[self.frame % len(SPINNER)], f"bold {theme.PRIMARY}"),
+            " ",
+            (f"{word}…", "bold"),
+            (" (esc to cancel)", theme.MUTED),
+        )
+
+
 class SessionHeader(Horizontal):
     """Above the transcript: state glyph, name and badge."""
 

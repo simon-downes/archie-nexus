@@ -127,9 +127,16 @@ SessionHeader #header-right {
 #views Conversation,
 #views TranscriptView,
 PaneView,
-ThrobberContainer,
-Throbber {
+#activity {
     background: $pane;
+}
+
+/* The activity line, only while a turn runs: the last row of the conversation, on the
+ * conversation's colour. The blank row under it is bottom padding, not margin, so it
+ * is the conversation's colour too (a margin would show the input's colour). */
+#activity {
+    height: auto;
+    padding: 0 2 1 2;
 }
 
 #views Conversation,

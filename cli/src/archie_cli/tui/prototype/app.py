@@ -5,7 +5,7 @@ Layout::
     ┌ sidebar ──────────────────┬ session pane ──────────────────────────────────────┐
     │ brand, filter              │ header: state, name, badge; status bar       │
     │ workspace groups           │ transcript, or a tool/subagent view on top   │
-    │ Recent                     │ throbber, question                           │
+    │                            │ activity line, question                      │
     │ f1 Keys │ ^q Quit │ ^p …    │ input                                        │
     └────────────────────────────┴───────────────────────────────────────────────┘
 
@@ -62,6 +62,7 @@ from archie_cli.tui.prototype.panes import (
     tool_crumb,
 )
 from archie_cli.tui.prototype.widgets import (
+    ActivityLine,
     SessionHeader,
     SessionList,
     SessionStatusBar,
@@ -71,7 +72,6 @@ from archie_cli.tui.prototype.widgets import (
 )
 from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.status import StatusBar
-from archie_cli.tui.throbber import Throbber, ThrobberContainer
 from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
 
 _TUI_DIR = Path(__file__).resolve().parents[1]
@@ -151,7 +151,7 @@ class PrototypeApp(App):
                 yield SessionHeader(id="session-header")
                 with ContentSwitcher(id="views"):
                     yield Static("", id="loading")
-                yield ThrobberContainer(id="throbber-container")
+                yield ActivityLine(id="activity")
                 yield QuestionPanel(id="question")
                 yield MessageInput(id="input")
                 yield SessionStatusBar(id="status")
@@ -218,6 +218,20 @@ class PrototypeApp(App):
             return  # shutting down: the timer outlived the widgets
         if self.current is not None and self.current.state == "working":
             self._q("#session-header", SessionHeader).show(self.current, self._frame)
+            self._q("#activity", ActivityLine).show(self.current.activity, self._frame)
+        if self._frame % 24 == 0:  # every 3s
+            self._cycle_scripted_activity()
+
+    def _cycle_scripted_activity(self) -> None:
+        """Scripted working sessions cycle thinking, responding and working, to show each.
+
+        Sessions running a mock reply follow their own script instead.
+        """
+        for session in self.sessions:
+            if session.state == "working" and session.session_id not in self._replies:
+                cycle = ("thinking", "responding", "working")
+                following = cycle[(cycle.index(session.activity) + 1) % len(cycle)]
+                self._set_activity(session, following)
 
     def _session(self, session_id: str) -> MockSession | None:
         return next((s for s in self.sessions if s.session_id == session_id), None)
@@ -297,10 +311,10 @@ class PrototypeApp(App):
         view.resume()
 
     def _show_pane(self, session: MockSession) -> None:
-        """Header, throbber, question and input for ``session``'s state."""
+        """Header, activity line, question and input for ``session``'s state."""
         self._q("#session-header", SessionHeader).show(session, self._frame)
         self._update_status(session)
-        self._show_throbber(session.state == "working")
+        self._show_activity(session)
         panel = self._q("#question", QuestionPanel)
         inp = self._q("#input", MessageInput)
         if session.state == "blocked" and session.loaded:
@@ -313,15 +327,22 @@ class PrototypeApp(App):
             inp.choice_handler = None
         inp.disabled = session.state in ("working", "ended")
         inp.placeholder = {
-            "working": "Archie is working · esc to interrupt",
+            "working": "Archie is working",
             "blocked": "Type an answer, or pick an option above",
             "ended": "This session has ended · read-only",
         }.get(session.state, "Message Archie · shift+enter for a new line")
 
-    def _show_throbber(self, show: bool) -> None:
-        """Show or hide the throbber's row; hidden, the transcript runs down to the input."""
-        self._q("#throbber-container", ThrobberContainer).display = show
-        self._q("#throbber", Throbber).display = show
+    def _show_activity(self, session: MockSession) -> None:
+        """The activity line while ``session`` works; hidden, the transcript meets the input."""
+        line = self._q("#activity", ActivityLine)
+        line.display = session.state == "working"
+        if line.display:
+            line.show(session.activity, self._frame)
+
+    def _set_activity(self, session: MockSession, activity: str) -> None:
+        session.activity = activity  # type: ignore[assignment]
+        if session is self.current:
+            self._show_activity(session)
 
     def _update_status(self, session: MockSession) -> None:
         status = self._q("#status", StatusBar)
@@ -425,11 +446,23 @@ class PrototypeApp(App):
 
     def _reply_worker(self, session: MockSession) -> Worker:
         # A worker, so quitting cancels it before the widgets go away.
-        return self.run_worker(self._mock_reply(session), group="replies")
+        return self.run_worker(self._mock_reply_guarded(session), group="replies")
+
+    async def _mock_reply_guarded(self, session: MockSession) -> None:
+        try:
+            await self._mock_reply(session)
+        except NoMatches:
+            pass  # the app is shutting down mid-turn and its widgets are gone
 
     async def _mock_reply(self, session: MockSession) -> None:
-        """Throbber, then a streamed canned reply, then ready (unseen if you moved on)."""
-        await asyncio.sleep(1.5)
+        """A mock turn: thinking, a tool call (working), thinking, then a streamed reply
+        (responding).
+
+        Ends ready, and unseen if you moved to another session meanwhile.
+        """
+        for activity, seconds in (("thinking", 1.2), ("working", 1.8), ("thinking", 0.8)):
+            self._set_activity(session, activity)
+            await asyncio.sleep(seconds)
         view = self._views.get(session.session_id)
         if view is None:
             return
@@ -439,9 +472,8 @@ class PrototypeApp(App):
             holder.append(StreamingMessage(""))
             return holder[0]
 
-        if self.current is session:
-            self._show_throbber(False)
         view.add_local(make)
+        self._set_activity(session, "responding")
         for word in MOCK_REPLY.split(" "):
             if holder:
                 holder[0].append(word + " ")
@@ -472,6 +504,8 @@ class PrototypeApp(App):
 
     def _set_state(self, session: MockSession, state: data.MockState) -> None:
         session.state = state
+        if state == "working":
+            session.activity = "thinking"  # a turn starts with the model thinking
         session.last_activity = datetime.now(UTC)
         self._refresh_sidebar()
         if session is self.current:
