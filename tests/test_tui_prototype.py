@@ -171,12 +171,15 @@ async def test_activity_line_follows_the_turn_until_it_ends(home, monkeypatch):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         line = app.query_one("#activity", ActivityLine)
-        assert not line.display  # nothing running
+        views = app.query_one("#views")
+        height = views.region.height
+        assert str(line.render()).strip() == ""  # nothing running: blank, not hidden
 
         app.query_one("#input").focus()
         await pilot.press(*"hi", "enter")
         await pilot.pause(0.3)
-        assert line.display and "Thinking… (esc to cancel)" in str(line.render())
+        assert "Thinking… (esc to cancel)" in str(line.render())
+        assert views.region.height == height  # the transcript didn't shift
 
         await pilot.pause(1.2)  # the mock turn's tool call
         assert "Working…" in str(line.render())
@@ -186,7 +189,8 @@ async def test_activity_line_follows_the_turn_until_it_ends(home, monkeypatch):
 
         await pilot.press("escape")
         await pilot.pause(0.1)
-        assert not line.display
+        assert str(line.render()).strip() == ""
+        assert views.region.height == height
 
 
 @pytest.mark.asyncio

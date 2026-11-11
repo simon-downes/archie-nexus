@@ -357,11 +357,16 @@ class PrototypeApp(App):
         }.get(session.state, "Message Archie · shift+enter for a new line")
 
     def _show_activity(self, session: MockSession) -> None:
-        """The activity line while ``session`` works; hidden, the transcript meets the input."""
+        """The activity line while ``session`` works, blank otherwise.
+
+        The line keeps its rows either way, so the transcript above doesn't grow and
+        shrink as turns start and end.
+        """
         line = self._q("#activity", ActivityLine)
-        line.display = session.state == "working"
-        if line.display:
+        if session.state == "working":
             line.show(session.activity, self._frame)
+        else:
+            line.clear()
 
     def _set_activity(self, session: MockSession, activity: str) -> None:
         session.activity = activity  # type: ignore[assignment]

@@ -153,8 +153,8 @@ PaneView,
     background: $pane;
 }
 
-/* The activity line, only while a turn runs: the last row of the conversation, on the
- * conversation's colour. The blank row under it is bottom padding, not margin, so it
+/* The activity line: the last row of the conversation, on the conversation's colour.
+ * It is always there (blank between turns), so the transcript never changes height. The blank row under it is bottom padding, not margin, so it
  * is the conversation's colour too (a margin would show the input's colour). */
 #activity {
     height: auto;

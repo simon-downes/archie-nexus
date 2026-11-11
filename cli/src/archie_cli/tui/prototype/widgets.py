@@ -231,6 +231,8 @@ ACTIVITY_WORDS = {"thinking": "Thinking", "responding": "Responding", "working":
 class ActivityLine(Static):
     """``⠋ Thinking… (esc to cancel)``: one line, shown for the whole turn.
 
+    Between turns the line is blank, not hidden, so its space stays reserved.
+
     The attach TUI's throbber appears when a model request starts and hides on the
     first text or tool call, so it blinks off while tools run. This line stays up
     from the user's message to the end of the turn and only changes its word:
@@ -250,6 +252,10 @@ class ActivityLine(Static):
         self.activity = activity
         self.frame = frame
         self.update(self._line())
+
+    def clear(self) -> None:
+        """Blank the line but keep its rows (and the conversation's colour behind them)."""
+        self.update("")
 
     def _line(self) -> Text:
         word = ACTIVITY_WORDS.get(self.activity, "Thinking")
