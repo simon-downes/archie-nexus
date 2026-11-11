@@ -338,9 +338,7 @@ def test_stop_sends_delete_for_matching_session(monkeypatch, tmp_path):
 
     sessions = _make_sessions(("myproject-01abc12345", "idle"))
     sessions_resp = _sessions_list_response(sessions)
-    stop_resp = MagicMock()
-    stop_resp.status_code = 200
-    stop_resp.json.return_value = {"stopped": "myproject-01abc12345"}
+    stop_resp = _session_response(status="stopped", status_code=200)
 
     with patch("archie_cli.cli.httpx") as mock_httpx:
         mock_httpx.get.return_value = sessions_resp
@@ -358,6 +356,45 @@ def test_stop_sends_delete_for_matching_session(monkeypatch, tmp_path):
         mock_httpx.delete.call_args[0][0]
         == "http://127.0.0.1:7600/api/sessions/myproject-01abc12345"
     )
+
+
+def _stop(stop_resp: MagicMock):
+    """Run ``archie stop myproject`` against one running session and a DELETE response."""
+    import httpx as real_httpx
+
+    sessions_resp = _sessions_list_response(_make_sessions((SID, "idle")))
+    with patch("archie_cli.cli.httpx") as mock_httpx:
+        mock_httpx.get.return_value = sessions_resp
+        mock_httpx.delete.return_value = stop_resp
+        mock_httpx.HTTPError = real_httpx.HTTPError
+        mock_httpx.ConnectError = real_httpx.ConnectError
+        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
+        return CliRunner().invoke(main, ["stop", "myproject"])
+
+
+def test_stop_reports_a_session_that_is_no_longer_running(monkeypatch, tmp_path):
+    """A 404 from DELETE means the session has gone."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    result = _stop(_error_response(404, f"No session with ID '{SID}'"))
+    assert result.exit_code == 1
+    assert f"Session '{SID}' is no longer running." in result.output
+
+
+def test_stop_reports_a_conflict(monkeypatch, tmp_path):
+    """A 409 from DELETE shows the orchestrator's reason (starting, stopping or ended)."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    result = _stop(_error_response(409, f"Session '{SID}' is already stopping"))
+    assert result.exit_code == 1
+    assert f"Error: Session '{SID}' is already stopping" in result.output
+    assert "Stopped session" not in result.output
+
+
+def test_stop_reports_a_failed_stop(monkeypatch, tmp_path):
+    """Any other status is a failure with the error body."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    result = _stop(_error_response(500, "Docker command failed: daemon busy"))
+    assert result.exit_code == 1
+    assert "Failed to stop session: Docker command failed: daemon busy" in result.output
 
 
 def test_stop_no_sessions(monkeypatch, tmp_path):

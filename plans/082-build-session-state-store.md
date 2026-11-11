@@ -437,7 +437,7 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   `tests/test_session_tracker.py` run 40 times in a row with no failure; `scripts/dev ruff check .`
   clean; `ruff format --check` on the touched files clean.
 
-### [ ] M3 — Stop, rename and seen
+### [x] M3 — Stop, rename and seen
 
 - **Approach:** `DELETE` per D19 and D19a through `tracker.stop()`; `PATCH` per the
   requirement through `tracker.patch()`; `archie stop` reports 404 and 409 bodies;
@@ -446,7 +446,37 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 - **Deliverable:** sessions can be stopped, renamed and marked seen through the API.
 - **Verify:** full test command passes, including the DELETE and PATCH tests in
   `tests/test_sessions_api.py`; Ruff clean.
-- **Outcome:**
+- **Outcome:** `tracker.stop()` (D19, D19a): unknown → `KeyError`; `starting`, `stopping`
+  and ended → new `SessionConflictError`; otherwise `stopping` is written and published,
+  `Runtime.stop` runs in a thread (`DockerRuntime.stop` = `docker.stop_container` by name, no
+  `docker ps`, then `_remove_empty_session_log`, which now returns whether it removed the log;
+  `lifecycle.stop_session` is unchanged), the follow task is cancelled and the record becomes
+  `stopped` + `ended_at`. A removed log puts the session in `_discard`, so its terminal write
+  (`_persist`) deletes the row (`SessionStore.delete`, new) after the `stopped` record is
+  published; a failed delete is retried like any terminal write (D12a). A failed stop asks
+  `is_running`: gone → `stopped` (the log is left in place); running (or Docker can't tell) →
+  the previous status is restored, the stream followed again if its task ended, and the
+  error re-raised. While `stopping`, agent frames don't change the status, and `_still_running`
+  re-checks the record after `is_running` so a close racing a stop can't mark `exited`.
+  `tracker.patch(name=, unseen=)` (D18): live and pending-terminal records go through
+  `_update(strict=True)` (a failed write raises `sqlite3.Error`, memory keeps the change);
+  ended ones through `SessionStore.update`, then published. API: `DELETE` → 200 `stopped`
+  record / 404 / 409 `{"error": ...}` / 500; new `PATCH /api/sessions/{id}` with the POST name
+  validator shared (`_INVALID_NAME`), 400 for a non-object, empty object, unknown keys, an
+  invalid name or `unseen` other than `false`, 404, 500 on a failed write. `archie stop` shows
+  the 409 body; the TUI accepts 200/404/409 on terminate. M1's deviation is resolved: a
+  session stopped with `archie stop` now ends as `stopped`, not `exited`. Tests: 17 tracker
+  tests (stop sequence, row deletion and its retry, each conflict, unknown id, failure with
+  the container running/gone, frames while stopping, the close/stop race, patch live/ended/
+  unknown/write failure, `DockerRuntime.stop`), 28 API tests in `test_sessions_api.py` (each
+  D19 AC including a never-prompted session through the real `DockerRuntime`, every PATCH
+  field, `null`, each bad body, 404, ended rename, write failure live and ended), 3 `archie
+  stop` tests (404, 409, 500), the TUI terminate test parametrised over 200/404/409, the old
+  `stop_session`-patching DELETE tests moved to the tracker, `_remove_empty_session_log`
+  return values. Evidence: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` →
+  4977 passed (M2: 4927); `tests/test_session_tracker.py` + `tests/test_sessions_api.py` run
+  40 times in a row with no failure; `scripts/dev ruff check .` clean; `ruff format --check`
+  on the 14 touched files clean.
 
 ### [ ] M4 — Sessions feed
 
@@ -499,6 +529,11 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   `insert`/`get`/`list`/`update`; the tracker writes its in-memory record whole, which is what
   makes D12a's "retried with the next change" and reconcile adoption work without a separate
   insert path.
+- M3: `DELETE` returns 200 with the `stopped` record even when writing that record fails;
+  the terminal write is retried per D12a and readers see the record from memory meanwhile.
+  Error handling said `DELETE` returns 500 on a failed write, but by then the container has
+  stopped, and a 500 would tell `archie stop` the stop failed while a retry gets 409. `PATCH`
+  keeps the 500.
 
 ## Risks
 

@@ -607,6 +607,8 @@ def stop(session_id: str | None):
 
     if stop_response.status_code == 404:
         raise click.ClickException(f"Session '{target.session_id}' is no longer running.")
+    if stop_response.status_code == 409:
+        raise click.ClickException(_error_body(stop_response))
     if stop_response.status_code != 200:
         raise click.ClickException(f"Failed to stop session: {_error_body(stop_response)}")
 

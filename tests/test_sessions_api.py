@@ -1,4 +1,4 @@
-"""Tests for the session record API: GET/POST /api/sessions and GET /api/sessions/{id} (082)."""
+"""Tests for the session record API: list, get, create, stop and patch (082)."""
 
 import asyncio
 import sqlite3
@@ -9,11 +9,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import msgspec
 import pytest
 from archie_orchestrator.app import app
+from archie_orchestrator.docker import DockerError
 from archie_orchestrator.store import db_path
 from archie_orchestrator.tracker import DockerRuntime
 from archie_shared.config import home_dir
+from archie_shared.events import SessionStarted
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor
+from archie_shared.session.log import SessionLog
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
@@ -376,3 +379,234 @@ def test_starting_session_without_port_is_not_ready():
                 pass
     assert events.status_code == 503
     assert exc_info.value.code == 4003
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/sessions/{id} (D19, D19a)
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_returns_the_stopped_record():
+    runtime = FakeRuntime()
+    with serve(app, records=_records(), runtime=runtime) as tracker:
+        async with _client() as http:
+            response = await http.delete(f"/api/sessions/{SID}")
+            after = await http.get(f"/api/sessions/{SID}")
+            listed = await http.get("/api/sessions")
+        await tracker.close()
+    assert response.status_code == 200
+    stopped = msgspec.json.decode(response.content, type=SessionDescriptor)
+    assert stopped.status == "stopped"
+    assert stopped.ended_at is not None
+    assert response.json()["container_name"] is None
+    assert after.json() == response.json()
+    assert listed.json() == []
+    assert runtime.stops == [SID]
+
+
+@pytest.mark.parametrize(
+    ("stored", "message"),
+    [
+        (record(SID, status="starting"), f"Session '{SID}' is still starting"),
+        (record(SID, status="stopping"), f"Session '{SID}' is already stopping"),
+        (
+            record(SID, status="stopped", ended_at="2026-07-01T11:00:00+00:00"),
+            f"Session '{SID}' has already ended (stopped)",
+        ),
+    ],
+    ids=["starting", "stopping", "ended"],
+)
+async def test_delete_conflicts_are_409(stored, message):
+    runtime = FakeRuntime()
+    with serve(app, records=[stored], runtime=runtime):
+        async with _client() as http:
+            response = await http.delete(f"/api/sessions/{SID}")
+            after = await http.get(f"/api/sessions/{SID}")
+    assert response.status_code == 409
+    assert response.json() == {"error": message}
+    assert after.json()["status"] == stored.status
+    assert runtime.stops == []
+
+
+async def test_delete_unknown_session_is_404():
+    with serve(app):
+        async with _client() as http:
+            response = await http.delete("/api/sessions/nope-01kx77jkz8")
+    assert response.status_code == 404
+    assert response.json() == {"error": "No session with ID 'nope-01kx77jkz8'"}
+
+
+async def test_delete_docker_failure_with_container_running_is_500_and_restores_status():
+    error = DockerError(command=["docker", "stop"], stderr="daemon busy", returncode=1)
+    runtime = FakeRuntime(stop_error=error, alive=True)
+    with serve(app, records=_records(), runtime=runtime) as tracker:
+        async with _client() as http:
+            response = await http.delete(f"/api/sessions/{SID}")
+            after = await http.get(f"/api/sessions/{SID}")
+        await tracker.close()
+    assert response.status_code == 500
+    assert "daemon busy" in response.json()["error"]
+    assert after.json()["status"] == "working"
+    assert tracker.store.get(SID).status == "working"
+
+
+async def test_delete_docker_failure_with_container_gone_is_stopped():
+    error = DockerError(command=["docker", "stop"], stderr="No such container", returncode=1)
+    runtime = FakeRuntime(stop_error=error, alive=False)
+    with serve(app, records=_records(), runtime=runtime) as tracker:
+        async with _client() as http:
+            response = await http.delete(f"/api/sessions/{SID}")
+        await tracker.close()
+    assert response.status_code == 200
+    assert response.json()["status"] == "stopped"
+    assert tracker.store.get(SID).status == "stopped"
+
+
+async def test_delete_never_prompted_session_leaves_no_row():
+    """The real DockerRuntime removes the prompt-less log, so the row goes too (D19a)."""
+    log_path = home_dir() / "sessions" / f"{SID}.jsonl"
+    SessionLog(log_path).append(
+        SessionStarted(id="s", schema_version=2, sent_at="2026-07-02T10:00:00Z", model_key="m")
+    )
+    with (
+        serve(app, {SID: PORT}, runtime=DockerRuntime()) as tracker,
+        patch("archie_orchestrator.docker.stop_container") as stop_container,
+    ):
+        async with _client() as http:
+            response = await http.delete(f"/api/sessions/{SID}")
+            after = await http.get(f"/api/sessions/{SID}")
+            ended = await http.get("/api/sessions", params={"include": "ended"})
+        await tracker.close()
+    stop_container.assert_called_once_with(f"archie-{SID}")
+    assert response.status_code == 200
+    assert response.json()["status"] == "stopped"
+    assert not log_path.exists()
+    assert after.status_code == 404
+    assert ended.json() == []
+    conn = sqlite3.connect(db_path(home_dir()))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone() == (0,)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/sessions/{id} (D18)
+# ---------------------------------------------------------------------------
+
+
+async def _patch(payload, *, records=None, session_id: str = SID):
+    with serve(app, records=_records() if records is None else records) as tracker:
+        async with _client() as http:
+            if isinstance(payload, bytes):
+                response = await http.patch(
+                    f"/api/sessions/{session_id}",
+                    content=payload,
+                    headers={"content-type": "application/json"},
+                )
+            else:
+                response = await http.patch(f"/api/sessions/{session_id}", json=payload)
+            after = await http.get(f"/api/sessions/{session_id}")
+    return response, after, tracker
+
+
+async def test_patch_name_is_trimmed_and_fixed():
+    response, after, tracker = await _patch({"name": "  Review PR  "})
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["name"], body["name_fixed"], body["status"]) == ("Review PR", True, "working")
+    assert after.json() == body
+    assert tracker.store.get(SID).name == "Review PR"
+
+
+async def test_patch_null_name_resets_to_the_id():
+    response, _, _ = await _patch(
+        {"name": None}, records=[record(SID, name="Review", name_fixed=True)]
+    )
+    assert response.status_code == 200
+    assert (response.json()["name"], response.json()["name_fixed"]) == (SID, False)
+
+
+async def test_patch_unseen_false_clears_it():
+    response, _, tracker = await _patch({"unseen": False}, records=[record(SID, unseen=True)])
+    assert response.status_code == 200
+    assert response.json()["unseen"] is False
+    assert tracker.store.get(SID).unseen is False
+
+
+async def test_patch_name_and_unseen_together():
+    response, _, _ = await _patch(
+        {"name": "Both", "unseen": False}, records=[record(SID, unseen=True)]
+    )
+    body = response.json()
+    assert (body["name"], body["name_fixed"], body["unseen"]) == ("Both", True, False)
+
+
+async def test_patch_ended_session_is_allowed():
+    response, after, tracker = await _patch({"name": "History"}, session_id=ENDED)
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["name"], body["name_fixed"], body["status"]) == ("History", True, "stopped")
+    assert after.json() == body
+    assert tracker.store.get(ENDED).name == "History"
+
+
+async def test_patch_name_of_80_characters_is_accepted():
+    response, _, _ = await _patch({"name": "x" * 80})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"not json", "Invalid JSON body"),
+        (b"[1, 2]", "Invalid JSON body"),
+        ({}, "Expected 'name' or 'unseen'"),
+        ({"status": "idle"}, "Unknown fields: status"),
+        ({"name": "ok", "model_key": "m"}, "Unknown fields: model_key"),
+        ({"unseen": True}, "Invalid 'unseen'"),
+        ({"unseen": 0}, "Invalid 'unseen'"),
+        ({"unseen": None}, "Invalid 'unseen'"),
+        ({"name": 5}, "Invalid 'name'"),
+        ({"name": "   "}, "Invalid 'name'"),
+        ({"name": "x" * 81}, "Invalid 'name'"),
+    ],
+    ids=[
+        "not-json",
+        "not-object",
+        "empty",
+        "unknown-key",
+        "unknown-key-with-name",
+        "unseen-true",
+        "unseen-zero",
+        "unseen-null",
+        "name-not-string",
+        "name-blank",
+        "name-too-long",
+    ],
+)
+async def test_patch_bad_body_is_400_and_changes_nothing(payload, message):
+    response, after, _ = await _patch(payload, records=[record(SID, unseen=True)])
+    assert response.status_code == 400
+    assert message in response.json()["error"]
+    assert after.json() == msgspec.to_builtins(record(SID, unseen=True))
+
+
+async def test_patch_unknown_session_is_404():
+    response, _, _ = await _patch({"name": "x"}, session_id="nope-01kx77jkz8")
+    assert response.status_code == 404
+    assert response.json() == {"error": "No session with ID 'nope-01kx77jkz8'"}
+
+
+@pytest.mark.parametrize("session_id", [SID, ENDED], ids=["live", "ended"])
+async def test_patch_store_write_failure_is_500(monkeypatch, session_id):
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with serve(app, records=_records()) as tracker:
+        monkeypatch.setattr(tracker.store, "save", broken)
+        monkeypatch.setattr(tracker.store, "update", broken)
+        async with _client() as http:
+            response = await http.patch(f"/api/sessions/{session_id}", json={"name": "x"})
+    assert response.status_code == 500
+    assert response.json() == {"error": "Session store unavailable"}

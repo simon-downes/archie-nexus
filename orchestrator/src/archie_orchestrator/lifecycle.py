@@ -48,23 +48,30 @@ BACKENDS = ("native", "kiro")
 READY_TIMEOUT_S = {"native": 30.0, "kiro": 45.0}
 
 
-def _remove_empty_session_log(session_id: str) -> None:
-    """Remove a stopped session log that contains no submitted prompt."""
+def _remove_empty_session_log(session_id: str) -> bool:
+    """Remove a stopped session log that contains no submitted prompt.
+
+    Returns:
+        True if the log was removed; False if there was none, it holds a prompt, or it
+        could not be inspected or removed.
+    """
     path = home_dir() / "sessions" / f"{session_id}.jsonl"
     if not path.exists():
-        return
+        return False
     try:
         raw_lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
         events = SessionLog(path).read()
     except Exception:  # noqa: BLE001 — preserve the log when inspection fails
         log.warning("Could not inspect session log; preserving %s", path, exc_info=True)
-        return
+        return False
     if len(events) != len(raw_lines) or any(isinstance(event, UserMessage) for event in events):
-        return
+        return False
     try:
         path.unlink()
     except OSError:
         log.warning("Could not remove empty session log %s", path, exc_info=True)
+        return False
+    return True
 
 
 @dataclass(frozen=True)

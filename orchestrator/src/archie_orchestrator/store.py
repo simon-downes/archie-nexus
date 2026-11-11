@@ -319,6 +319,11 @@ class SessionStore:
         with self._conn() as conn:
             conn.execute(_SAVE_SQL, _row_values(record))
 
+    def delete(self, session_id: str) -> None:
+        """Delete one row (a stopped session that left no log, D19a); a missing row is fine."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
     def get(self, session_id: str) -> SessionDescriptor | None:
         """Return one record, or None if there is no row."""
         with self._conn() as conn:

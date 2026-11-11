@@ -147,12 +147,13 @@ def _delete_client(**delete_kwargs) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_quit_with_termination_accepts_already_stopped_session():
-    """A 404 from DELETE means the session is already gone; quit exits quietly."""
+@pytest.mark.parametrize("status_code", [200, 404, 409], ids=["stopped", "gone", "conflict"])
+async def test_quit_with_termination_accepts_stopped_gone_or_conflict(status_code):
+    """200 (stopped), 404 (already gone) and 409 (starting, stopping or ended) are all fine."""
     app = _app()
     app._ws.disconnect = AsyncMock()
     app._show_client_error = MagicMock()
-    client = _delete_client(return_value=MagicMock(status_code=404))
+    client = _delete_client(return_value=MagicMock(status_code=status_code))
 
     with (
         patch("archie_cli.tui.app.httpx.AsyncClient", return_value=client),

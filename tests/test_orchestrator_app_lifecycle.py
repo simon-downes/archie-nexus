@@ -1,7 +1,5 @@
 """Tests for orchestrator app.py — POST /sessions and DELETE /sessions/{id}."""
 
-from unittest.mock import patch
-
 import msgspec
 import pytest
 from archie_orchestrator.app import app
@@ -94,21 +92,21 @@ async def test_post_sessions_invalid_json(http_client):
 
 
 async def test_delete_session_success(http_client):
-    """DELETE /sessions/{id} for existing session → 200 + {"stopped": id}."""
-    with patch("archie_orchestrator.api.stop_session"):
+    """DELETE /sessions/{id} for a running session → 200 + the stopped SessionDescriptor."""
+    runtime = FakeRuntime()
+    with serve(app, {"myproject-01abc12345": 32771}, runtime=runtime):
         async with http_client as client:
             response = await client.delete("/api/sessions/myproject-01abc12345")
 
     assert response.status_code == 200
-    assert response.json() == {"stopped": "myproject-01abc12345"}
+    assert response.json()["session_id"] == "myproject-01abc12345"
+    assert response.json()["status"] == "stopped"
+    assert runtime.stops == ["myproject-01abc12345"]
 
 
 async def test_delete_session_not_found(http_client):
-    """DELETE /sessions/{id} for non-existent session → 404."""
-    with patch(
-        "archie_orchestrator.api.stop_session",
-        side_effect=KeyError("myproject-01abc12345"),
-    ):
+    """DELETE /sessions/{id} for an unknown session → 404."""
+    with serve(app):
         async with http_client as client:
             response = await client.delete("/api/sessions/myproject-01abc12345")
 

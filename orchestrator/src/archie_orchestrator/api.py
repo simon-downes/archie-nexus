@@ -7,7 +7,8 @@ are relative to the mount:
   GET    /sessions                        — session records (?include=ended for all)
   POST   /sessions                        — start a new session (202, starting)
   GET    /sessions/{session_id}           — one session record
-  DELETE /sessions/{session_id}           — stop a running session
+  PATCH  /sessions/{session_id}           — rename a session or mark it seen
+  DELETE /sessions/{session_id}           — stop a running session (200, stopped)
   GET    /sessions/{session_id}/events    — proxy to session /events
   GET    /sessions/{session_id}/metrics   — metrics for one session
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
@@ -37,8 +38,9 @@ from starlette.routing import Route, WebSocketRoute
 from archie_orchestrator.auth import AuthError
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.docker import DockerError
-from archie_orchestrator.lifecycle import BACKENDS, stop_session
+from archie_orchestrator.lifecycle import BACKENDS
 from archie_orchestrator.proxy import proxy_events, proxy_stream
+from archie_orchestrator.tracker import SessionConflictError
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,10 @@ log = logging.getLogger(__name__)
 
 
 NAME_MAX_CHARS = 80
+PATCH_FIELDS = ("name", "unseen")
+_INVALID_NAME = (
+    f"Invalid 'name': expected a non-blank string of at most {NAME_MAX_CHARS} characters"
+)
 
 
 def _json(value: object, status_code: int = 200) -> Response:
@@ -133,13 +139,7 @@ async def sessions_post(request: Request) -> Response:
     if data.get("name") is not None:
         name = _valid_name(data["name"])
         if name is None:
-            return JSONResponse(
-                {
-                    "error": f"Invalid 'name': expected a non-blank string of at most "
-                    f"{NAME_MAX_CHARS} characters"
-                },
-                status_code=400,
-            )
+            return JSONResponse({"error": _INVALID_NAME}, status_code=400)
 
     try:
         config = config_source.get()
@@ -161,26 +161,83 @@ async def sessions_post(request: Request) -> Response:
     return _json(record, status_code=202)
 
 
-async def session_delete(request: Request) -> Response:
-    """Stop a running session by exact session ID.
+async def session_patch(request: Request) -> Response:
+    """Rename a session or mark it seen; allowed on ended sessions too (082 D18).
+
+    Request body: a JSON object with ``name`` and/or ``unseen``. ``name`` is a string
+    (stored trimmed; sets ``name_fixed``) or null (resets the name to the session ID);
+    ``unseen`` must be false.
 
     Returns:
-        200 + {"stopped": "<session_id>"} on success.
-        404 if no session with that ID is running.
+        200 + the updated SessionDescriptor.
+        400 for a body that isn't such an object (unknown keys, no keys, an invalid name,
+        ``unseen`` other than false).
+        404 for an unknown ID.
+        500 if the change could not be written.
     """
     session_id = request.path_params["session_id"]
+    try:
+        data = msgspec.json.decode(await request.body(), type=dict)
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body: expected an object"}, status_code=400)
+    unknown = sorted(set(data) - set(PATCH_FIELDS))
+    if unknown:
+        return JSONResponse(
+            {"error": f"Unknown fields: {', '.join(unknown)}; expected 'name' or 'unseen'"},
+            status_code=400,
+        )
+    if not data:
+        return JSONResponse({"error": "Expected 'name' or 'unseen'"}, status_code=400)
+
+    changes: dict[str, object] = {}
+    if "name" in data:
+        if data["name"] is None:
+            changes["name"] = None
+        else:
+            name = _valid_name(data["name"])
+            if name is None:
+                return JSONResponse({"error": _INVALID_NAME}, status_code=400)
+            changes["name"] = name
+    if "unseen" in data:
+        if data["unseen"] is not False:
+            return JSONResponse(
+                {"error": "Invalid 'unseen': only false is accepted"}, status_code=400
+            )
+        changes["unseen"] = False
 
     try:
-        await asyncio.to_thread(stop_session, session_id)
+        record = await request.app.state.tracker.patch(session_id, **changes)
     except KeyError:
-        return JSONResponse(
-            {"error": f"No running session with ID '{session_id}'"},
-            status_code=404,
-        )
-    except (DockerError, RuntimeError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
+    except sqlite3.Error as exc:
+        log.error("Session store write failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    return _json(record)
 
-    return JSONResponse({"stopped": session_id})
+
+async def session_delete(request: Request) -> Response:
+    """Stop a running session by exact session ID and wait for it (082 D19).
+
+    Returns:
+        200 + the ``stopped`` SessionDescriptor. A session that never received a prompt
+        leaves no record afterwards (D19a).
+        404 for an unknown ID.
+        409 for a session that is ``starting``, ``stopping`` or has ended.
+        500 if the container could not be stopped (its previous status is restored).
+    """
+    session_id = request.path_params["session_id"]
+    try:
+        record = await request.app.state.tracker.stop(session_id)
+    except KeyError:
+        return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
+    except SessionConflictError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except (DockerError, RuntimeError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    return _json(record)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +459,7 @@ routes = [
     Route("/sessions", sessions_get, methods=["GET"]),
     Route("/sessions", sessions_post, methods=["POST"]),
     Route("/sessions/{session_id}", session_get, methods=["GET"]),
+    Route("/sessions/{session_id}", session_patch, methods=["PATCH"]),
     Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
     Route("/sessions/{session_id}/events", proxy_events, methods=["GET"]),
     Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),

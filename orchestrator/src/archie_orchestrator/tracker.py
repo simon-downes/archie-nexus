@@ -9,6 +9,8 @@ the registered listeners; changes to ``last_activity_at`` alone are throttled (D
 
 At start the stored records are reconciled with ``docker ps`` (D13), and a closed stream
 is followed again while the container runs, or ends the session when it has gone (D14).
+:meth:`SessionTracker.stop` stops a container for ``DELETE`` (D19, D19a) and
+:meth:`SessionTracker.patch` renames a session or marks it seen for ``PATCH`` (D18).
 
 Docker is reached only through a :class:`Runtime`, so tests can substitute a fake.
 """
@@ -63,6 +65,9 @@ ACTIVITY_INTERVAL = 10.0
 RESTARTED_DURING_STARTUP = "orchestrator restarted during startup"
 """The ``error`` of a session that was ``starting`` when the orchestrator stopped (D13)."""
 
+_UNSET: object = object()
+"""Default of :meth:`SessionTracker.patch` arguments that were not given."""
+
 _STREAM_ERRORS = (OSError, TimeoutError, WebSocketException)
 # Events that are not agent activity: connect frames, status and targeted notices.
 _NOT_ACTIVITY = (Handshake, SessionStatus, ErrorNotice)
@@ -71,6 +76,10 @@ _NOT_ACTIVITY = (Handshake, SessionStatus, ErrorNotice)
 def resubscribe_delay(attempt: int) -> float:
     """The back-off before resubscribe attempt ``attempt`` (0-based) of one session (D14)."""
     return RESUBSCRIBE_DELAYS[min(attempt, len(RESUBSCRIBE_DELAYS) - 1)]
+
+
+class SessionConflictError(Exception):
+    """The session's status doesn't allow the operation (``starting``, ``stopping`` or ended)."""
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +106,10 @@ class Runtime(Protocol):
         """Whether the session's container is running."""
         ...
 
+    def stop(self, session_id: str) -> bool:
+        """Stop the session's container; return whether its prompt-less log was removed."""
+        ...
+
 
 class DockerRuntime:
     """The :class:`Runtime` backed by the Docker CLI."""
@@ -112,6 +125,13 @@ class DockerRuntime:
 
     def is_running(self, session_id: str) -> bool:
         return docker.container_running(container_name(session_id))
+
+    def stop(self, session_id: str) -> bool:
+        """``docker stop`` by name (no ``docker ps``), then drop a log with no prompt (D19)."""
+        docker.stop_container(container_name(session_id))
+        removed = lifecycle._remove_empty_session_log(session_id)
+        log.info("Session stopped: %s", session_id)
+        return removed
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +181,8 @@ class SessionTracker:
         self._pending_activity: dict[str, str] = {}
         self._activity_written: dict[str, float] = {}
         self._flush_tasks: dict[str, asyncio.Task] = {}
+        # Stopped sessions whose log was removed: their terminal write deletes the row (D19a).
+        self._discard: set[str] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -382,6 +404,102 @@ class SessionTracker:
         self._ports[session_id] = port
         await self._follow(session_id)
 
+    # -- stop and patch ------------------------------------------------------
+
+    async def stop(self, session_id: str) -> SessionDescriptor:
+        """Stop a running session and return its ``stopped`` record (D19).
+
+        The record is ``stopping`` (written and published) while the container stops. If
+        the stop removed a log with no prompt, the row is deleted after the ``stopped``
+        record is published (D19a), so later reads return 404. If ``docker stop`` fails
+        but the container has gone, the session is still ``stopped``; if it still runs,
+        the previous status is restored, the stream followed again if it ended, and the
+        error raised.
+
+        Raises:
+            KeyError: No session with that ID.
+            SessionConflictError: The session is ``starting``, ``stopping`` or has ended.
+            sqlite3.Error: The store could not be read to tell an ended session from an
+                unknown one.
+            Exception: Whatever the runtime's stop raised, with the container still running.
+        """
+        record = self._records.get(session_id)
+        if record is None or record.ended:
+            # Only ended sessions are outside memory (D12a); the store tells them from unknown.
+            ended = record or await asyncio.to_thread(self.store.get, session_id)
+            if ended is None:
+                raise KeyError(session_id)
+            raise SessionConflictError(f"Session '{session_id}' has already ended ({ended.status})")
+        if record.status == "starting":
+            raise SessionConflictError(f"Session '{session_id}' is still starting")
+        if record.status == "stopping":
+            raise SessionConflictError(f"Session '{session_id}' is already stopping")
+        previous = record.status
+        await self._update(session_id, status="stopping")
+        try:
+            log_removed = await asyncio.to_thread(self.runtime.stop, session_id)
+        except Exception as exc:
+            if await self._container_alive(session_id):
+                log.warning("Cannot stop session %s: %s", session_id, exc)
+                await self._update(session_id, status=previous)
+                task = self._tasks.get(session_id)
+                if session_id in self._ports and (task is None or task.done()):
+                    self._spawn(session_id, self._follow(session_id))
+                raise
+            log.info("Session %s stop failed but its container has gone: %s", session_id, exc)
+            log_removed = False
+        task = self._tasks.get(session_id)
+        if task is not None and not task.done():
+            task.cancel()  # the stream is over; nothing it sends changes the record now
+        if log_removed:
+            self._discard.add(session_id)
+        stopped = await self._update(session_id, status="stopped", ended_at=now_iso())
+        if stopped is None:  # pragma: no cover - only the stop ends a stopping record
+            stopped = msgspec.structs.replace(record, status="stopped", ended_at=now_iso())
+        return stopped
+
+    async def _container_alive(self, session_id: str) -> bool:
+        """After a failed stop: whether the container still runs (True when Docker can't tell)."""
+        try:
+            return await asyncio.to_thread(self.runtime.is_running, session_id)
+        except (DockerError, OSError) as exc:
+            log.warning("Cannot check whether session %s runs: %s", session_id, exc)
+            return True
+
+    async def patch(
+        self, session_id: str, *, name: object = _UNSET, unseen: bool | None = None
+    ) -> SessionDescriptor:
+        """Rename a session or mark it seen, live or ended (D18), and publish the record.
+
+        Args:
+            session_id: The session.
+            name: A validated, trimmed name (sets ``name_fixed``), or None to reset the
+                name to the session ID; leave out to keep the name.
+            unseen: The new ``unseen`` flag; None keeps it.
+
+        Returns:
+            The updated record.
+
+        Raises:
+            KeyError: No session with that ID.
+            sqlite3.Error: The change could not be written. A record held in memory keeps
+                the change (D12a) and the next write retries it.
+        """
+        changes: dict[str, object] = {}
+        if name is not _UNSET:
+            changes["name"] = session_id if name is None else name
+            changes["name_fixed"] = name is not None
+        if unseen is not None:
+            changes["unseen"] = unseen
+        if session_id in self._records:
+            updated = await self._update(session_id, strict=True, **changes)
+            if updated is not None:
+                return updated
+        # Ended sessions are not held in memory: change the stored row directly.
+        updated = await asyncio.to_thread(self.store.update, session_id, **changes)
+        self._publish(updated)
+        return updated
+
     # -- following the agent stream ------------------------------------------
 
     async def _follow(self, session_id: str) -> None:
@@ -448,6 +566,8 @@ class SessionTracker:
             changes = {"unseen": True}
         elif root and isinstance(event, TurnInterrupted):
             self._turn_failed.discard(session_id)
+        if record.status == "stopping":
+            changes.pop("status", None)  # the stop decides the next status (D19)
         changes = {key: value for key, value in changes.items() if getattr(record, key) != value}
         if not isinstance(event, _NOT_ACTIVITY):
             self._pending_activity[session_id] = now_iso()
@@ -468,14 +588,23 @@ class SessionTracker:
             return True
         if running:
             return True
+        record = self._records.get(session_id)
+        if record is None or record.ended or record.status == "stopping":
+            return False  # stopped meanwhile: the stop records the outcome
         log.info("Session %s exited", session_id)
         await self._update(session_id, status="exited", ended_at=now_iso())
         return False
 
     # -- writes --------------------------------------------------------------
 
-    async def _update(self, session_id: str, **changes: object) -> SessionDescriptor | None:
-        """Apply ``changes`` plus any pending activity to the live record, then write it."""
+    async def _update(
+        self, session_id: str, *, strict: bool = False, **changes: object
+    ) -> SessionDescriptor | None:
+        """Apply ``changes`` plus any pending activity to the live record, then write it.
+
+        With ``strict`` a failed write raises ``sqlite3.Error`` (the record stays changed in
+        memory); otherwise it is logged and retried later (D12a).
+        """
         record = self._records.get(session_id)
         if record is None:
             return None
@@ -487,7 +616,7 @@ class SessionTracker:
                 flush.cancel()
         if "last_activity_at" in changes:
             self._activity_written[session_id] = self.clock()
-        return await self._put(msgspec.structs.replace(record, **changes))
+        return await self._put(msgspec.structs.replace(record, **changes), strict=strict)
 
     async def _note_activity(self, session_id: str) -> None:
         """Write pending activity now, or at the end of the session's window (D11)."""
@@ -508,8 +637,12 @@ class SessionTracker:
         if session_id in self._pending_activity:
             await self._update(session_id)
 
-    async def _put(self, record: SessionDescriptor) -> SessionDescriptor:
-        """Make ``record`` current in memory, publish it and write it to the store."""
+    async def _put(self, record: SessionDescriptor, *, strict: bool = False) -> SessionDescriptor:
+        """Make ``record`` current in memory, publish it and write it to the store.
+
+        A failed terminal write is retried in the background; with ``strict`` the error is
+        raised as well.
+        """
         session_id = record.session_id
         self._records[session_id] = record
         if record.ended:
@@ -517,25 +650,42 @@ class SessionTracker:
             self._turn_failed.discard(session_id)
             self._activity_written.pop(session_id, None)
         self._publish(record)
-        if not await self._persist(session_id) and record.ended:
+        try:
+            written = await self._persist(session_id, strict=strict)
+        except sqlite3.Error:
+            if record.ended:
+                self._background_task(self._retry_terminal(session_id))
+            raise
+        if not written and record.ended:
             self._background_task(self._retry_terminal(session_id))
         return record
 
-    async def _persist(self, session_id: str) -> bool:
-        """Write the current record; drop an ended one from memory once written."""
+    async def _persist(self, session_id: str, *, strict: bool = False) -> bool:
+        """Write the current record; drop an ended one from memory once written.
+
+        The terminal write of a session in ``_discard`` deletes its row instead (D19a).
+        A failed write returns False, or raises ``sqlite3.Error`` with ``strict``.
+        """
         lock = self._write_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             record = self._records.get(session_id)
             if record is None:
                 return True
+            discard = record.ended and session_id in self._discard
             try:
-                await asyncio.to_thread(self.store.save, record)
+                if discard:
+                    await asyncio.to_thread(self.store.delete, session_id)
+                else:
+                    await asyncio.to_thread(self.store.save, record)
             except sqlite3.Error as exc:
                 log.warning("Cannot write session %s: %s", session_id, exc)
+                if strict:
+                    raise
                 return False
             if record.ended and self._records.get(session_id) is record:
                 del self._records[session_id]
                 self._write_locks.pop(session_id, None)
+                self._discard.discard(session_id)
             return True
 
     async def _retry_terminal(self, session_id: str) -> None:

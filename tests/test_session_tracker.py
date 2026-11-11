@@ -3,6 +3,7 @@
 import asyncio
 import itertools
 import os
+import re
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
@@ -16,6 +17,7 @@ from archie_orchestrator.store import SessionStore, db_path, id_start_time
 from archie_orchestrator.tracker import (
     RESTARTED_DURING_STARTUP,
     DockerRuntime,
+    SessionConflictError,
     SessionTracker,
     resubscribe_delay,
 )
@@ -775,6 +777,209 @@ async def test_reconcile_retries_while_docker_fails(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# stop() (D19, D19a) and patch() (D18)
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_marks_stopping_then_stopped():
+    runtime = FakeRuntime()
+    runtime.stop_gate = threading.Event()
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+    published = []
+    tracker.add_listener(published.append)
+
+    stopping = asyncio.create_task(tracker.stop(SID))
+    await until(lambda: tracker.live(SID).status == "stopping")
+    assert tracker.store.get(SID).status == "stopping"  # written before Docker is asked
+    runtime.stop_gate.set()
+    stopped = await stopping
+
+    assert (stopped.status, stopped.container_name) == ("stopped", None)
+    assert stopped.ended_at is not None
+    assert tracker.store.get(SID) == stopped
+    assert tracker.live_ids() == set()
+    assert tracker.port(SID) is None
+    assert [r.status for r in published] == ["stopping", "stopped"]
+    assert runtime.stops == [SID]
+    await tracker.close()
+
+
+async def test_stop_that_removed_the_log_deletes_the_row():
+    tracker = make_tracker({SID: PORT}, runtime=FakeRuntime(log_removed=True))
+    published = []
+    tracker.add_listener(published.append)
+
+    stopped = await tracker.stop(SID)
+
+    assert stopped.status == "stopped"
+    assert published[-1] == stopped  # the terminal record is still published
+    assert tracker.store.get(SID) is None
+    assert await tracker.get(SID) is None
+    assert await tracker.list(include_ended=True) == []
+    await tracker.close()
+
+
+async def test_stop_row_delete_failure_is_retried(monkeypatch, fast_retry):
+    tracker = make_tracker({SID: PORT}, runtime=FakeRuntime(log_removed=True))
+    real_delete = tracker.store.delete
+    failures = [sqlite3.OperationalError("locked")]
+
+    def flaky(session_id):
+        if failures:
+            raise failures.pop()
+        real_delete(session_id)
+
+    monkeypatch.setattr(tracker.store, "delete", flaky)
+    stopped = await tracker.stop(SID)
+    assert (await tracker.get(SID)) == stopped  # held in memory until the delete commits
+    await until(lambda: SID not in tracker._records)
+    assert tracker.store.get(SID) is None
+    await tracker.close()
+
+
+@pytest.mark.parametrize(
+    ("stored", "message"),
+    [
+        (record(SID, status="starting"), "is still starting"),
+        (record(SID, status="stopping"), "is already stopping"),
+        (
+            record(SID, status="exited", ended_at="2026-07-01T10:00:00+00:00"),
+            "has already ended (exited)",
+        ),
+    ],
+    ids=["starting", "stopping", "ended"],
+)
+async def test_stop_conflicts(stored, message):
+    runtime = FakeRuntime()
+    tracker = make_tracker(records=[stored], runtime=runtime)
+    with pytest.raises(SessionConflictError, match=re.escape(message)):
+        await tracker.stop(SID)
+    assert runtime.stops == []
+    assert (await tracker.get(SID)).status == stored.status
+
+
+async def test_stop_unknown_session_is_key_error():
+    runtime = FakeRuntime()
+    with pytest.raises(KeyError):
+        await make_tracker(runtime=runtime).stop(SID)
+    assert runtime.stops == []
+
+
+async def test_stop_failure_with_container_running_restores_status_and_follows_again():
+    error = DockerError(command=["docker", "stop"], stderr="daemon busy", returncode=1)
+    runtime = FakeRuntime(stop_error=error, alive=True)
+    runtime.stop_gate = threading.Event()
+    tracker = make_tracker({SID: PORT}, records=[record(SID, status="working")], runtime=runtime)
+    published = []
+    tracker.add_listener(published.append)
+    agent = FakeAgent([handshake_frame()], [status_frame("idle"), 30.0])
+    with _patch_agent(agent):
+        stopping = asyncio.create_task(tracker.stop(SID))
+        await until(lambda: tracker.live(SID).status == "stopping")
+        # The stream closes while stopping: the end check is skipped and following ends.
+        tracker._spawn(SID, tracker._follow(SID))
+        await until(lambda: SID not in tracker._tasks)
+        assert runtime.checked == []
+        runtime.stop_gate.set()
+        with pytest.raises(DockerError):
+            await stopping
+
+        assert runtime.checked == [SID]  # asked once, after the failed stop
+        await until(lambda: tracker.live(SID).status == "idle")  # followed again
+        assert len(agent.urls) == 2
+        # The previous status was restored (and written) before the stream moved it on.
+        assert [r.status for r in published] == ["stopping", "working", "idle"]
+        await until(lambda: tracker.store.get(SID).status == "idle")
+        await tracker.close()
+
+
+async def test_stop_failure_with_container_gone_is_stopped():
+    error = DockerError(command=["docker", "stop"], stderr="No such container", returncode=1)
+    runtime = FakeRuntime(stop_error=error, alive=False)
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+    stopped = await tracker.stop(SID)
+    assert stopped.status == "stopped"
+    assert tracker.store.get(SID).status == "stopped"
+    assert runtime.checked == [SID]
+    await tracker.close()
+
+
+async def test_frames_while_stopping_keep_the_status():
+    runtime = FakeRuntime()
+    runtime.stop_gate = threading.Event()
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+    stopping = asyncio.create_task(tracker.stop(SID))
+    await until(lambda: tracker.live(SID).status == "stopping")
+    await tracker._on_frame(SID, status_frame("idle", model_key="m9"))
+    await tracker._on_frame(SID, user_frame())
+    assert tracker.live(SID).status == "stopping"
+    assert tracker.live(SID).model_key == "m9"
+    runtime.stop_gate.set()
+    assert (await stopping).status == "stopped"
+    await tracker.close()
+
+
+async def test_container_gone_check_racing_a_stop_does_not_mark_exited():
+    runtime = FakeRuntime()
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+
+    def stopped_meanwhile(session_id):
+        tracker._records[SID] = record(SID, status="stopping")
+        return False
+
+    runtime.is_running = stopped_meanwhile
+    assert await tracker._still_running(SID) is False
+    assert tracker.live(SID).status == "stopping"
+
+
+async def test_patch_live_session_name_and_unseen():
+    tracker = make_tracker(records=[record(SID, unseen=True)])
+    published = []
+    tracker.add_listener(published.append)
+
+    renamed = await tracker.patch(SID, name="Review")
+    assert (renamed.name, renamed.name_fixed, renamed.unseen) == ("Review", True, True)
+    seen = await tracker.patch(SID, unseen=False)
+    assert (seen.name, seen.unseen) == ("Review", False)
+    reset = await tracker.patch(SID, name=None)
+    assert (reset.name, reset.name_fixed) == (SID, False)
+
+    assert published == [renamed, seen, reset]
+    assert tracker.live(SID) == reset
+    assert tracker.store.get(SID) == reset
+
+
+async def test_patch_ended_session_updates_the_store_and_publishes():
+    ended = record(SID, status="stopped", ended_at="2026-07-01T10:00:00+00:00", unseen=True)
+    tracker = make_tracker(records=[ended])
+    published = []
+    tracker.add_listener(published.append)
+
+    updated = await tracker.patch(SID, name="Old work", unseen=False)
+
+    assert (updated.name, updated.name_fixed, updated.unseen) == ("Old work", True, False)
+    assert (updated.status, updated.ended_at) == ("stopped", ended.ended_at)
+    assert tracker.store.get(SID) == updated
+    assert published == [updated]
+    assert SID not in tracker._records
+
+
+async def test_patch_unknown_session_is_key_error():
+    with pytest.raises(KeyError):
+        await make_tracker().patch(SID, name="x")
+
+
+async def test_patch_write_failure_raises_and_memory_keeps_the_change(monkeypatch):
+    tracker = make_tracker({SID: PORT})
+    monkeypatch.setattr(
+        tracker.store, "save", lambda r: (_ for _ in ()).throw(sqlite3.OperationalError("x"))
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        await tracker.patch(SID, name="Review")
+    assert tracker.live(SID).name == "Review"  # D12a: memory stays authoritative
+
+
+# ---------------------------------------------------------------------------
 # DockerRuntime
 # ---------------------------------------------------------------------------
 
@@ -795,3 +1000,18 @@ def test_docker_runtime_delegates_to_docker_and_lifecycle():
     alive.assert_called_once_with(f"archie-{SID}")
     prep.assert_called_once_with("proj", "config", backend="kiro")
     run.assert_called_once_with("prepared")
+
+
+def test_docker_runtime_stop_stops_by_name_and_reports_log_removal():
+    runtime = DockerRuntime()
+    with (
+        patch("archie_orchestrator.docker.stop_container") as stop,
+        patch("archie_orchestrator.docker.list_sessions") as ls,
+        patch(
+            "archie_orchestrator.lifecycle._remove_empty_session_log", return_value=True
+        ) as remove,
+    ):
+        assert runtime.stop(SID) is True
+    stop.assert_called_once_with(f"archie-{SID}")
+    ls.assert_not_called()  # no docker ps (D19)
+    remove.assert_called_once_with(SID)

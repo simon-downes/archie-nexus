@@ -140,18 +140,10 @@ async def test_post_sessions_docker_error_returns_helpful_message():
 
 @pytest.mark.asyncio
 async def test_delete_session_docker_error_returns_500():
-    """DELETE /sessions/{id} with DockerError → 500."""
+    """DELETE /sessions/{id} with a DockerError and the container still running → 500."""
     session = _make_session()
-    with (
-        patch(
-            "archie_orchestrator.api.stop_session",
-            side_effect=DockerError(
-                command=["docker", "stop"],
-                stderr="Error: No such container",
-                returncode=1,
-            ),
-        ),
-    ):
+    error = DockerError(command=["docker", "stop"], stderr="daemon busy", returncode=1)
+    with serve(app, {session.session_id: session.port}, runtime=FakeRuntime(stop_error=error)):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete(f"/api/sessions/{session.session_id}")
 
@@ -167,7 +159,7 @@ async def test_delete_session_docker_error_returns_500():
 @pytest.mark.asyncio
 async def test_delete_session_not_found_still_404():
     """DELETE /sessions/{id} for unknown session still returns 404."""
-    with patch("archie_orchestrator.api.stop_session", side_effect=KeyError("no such session")):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete("/api/sessions/nonexistent-session-id")
 

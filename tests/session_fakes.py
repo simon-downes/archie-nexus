@@ -55,7 +55,9 @@ class FakeRuntime:
         port: What ``run`` returns.
         run_error: Raised by ``run`` instead.
         prepare_error: Raised by ``prepare`` instead.
-        alive: What ``is_running`` returns.
+        alive: What ``is_running`` returns; a successful ``stop`` sets it False.
+        stop_error: Raised by ``stop`` instead.
+        log_removed: What a successful ``stop`` returns (the log had no prompt).
     """
 
     def __init__(
@@ -67,6 +69,8 @@ class FakeRuntime:
         run_error: Exception | None = None,
         prepare_error: Exception | None = None,
         alive: bool = True,
+        stop_error: Exception | None = None,
+        log_removed: bool = False,
     ) -> None:
         self.containers = list(containers)
         self.list_error = list_error
@@ -74,12 +78,16 @@ class FakeRuntime:
         self.run_error = run_error
         self.prepare_error = prepare_error
         self.alive = alive
+        self.stop_error = stop_error
+        self.log_removed = log_removed
+        self.stops: list[str] = []
         self.prepared: list[tuple[str, str]] = []
         self.runs: list[PreparedStart] = []
         self.checked: list[str] = []
         self.list_calls = 0
-        # Set to hold ``run`` until the test releases it.
+        # Set to hold ``run`` (or ``stop``) until the test releases it.
         self.run_gate: threading.Event | None = None
+        self.stop_gate: threading.Event | None = None
         self._ids = itertools.count(1)
 
     def list_running(self) -> list[RunningContainer]:
@@ -113,6 +121,15 @@ class FakeRuntime:
     def is_running(self, session_id: str) -> bool:
         self.checked.append(session_id)
         return self.alive
+
+    def stop(self, session_id: str) -> bool:
+        self.stops.append(session_id)
+        if self.stop_gate is not None:
+            self.stop_gate.wait(5)
+        if self.stop_error is not None:
+            raise self.stop_error
+        self.alive = False
+        return self.log_removed
 
 
 def status_frame(state: str = "idle", model_key: str = "m1", question: dict | None = None) -> str:
