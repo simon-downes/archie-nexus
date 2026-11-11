@@ -1,6 +1,6 @@
 # 082 — Session state store and session API
 
-Status: building
+Status: reviewing
 Branch: build-it/082-session-state-store (base: main @ b13e411)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/082-session-state-store
 
