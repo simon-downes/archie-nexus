@@ -1,6 +1,6 @@
 # 082 — Session state store and session API
 
-Status: reviewing
+Status: done
 Branch: build-it/082-session-state-store (base: main @ b13e411)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/082-session-state-store
 
@@ -616,8 +616,9 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   (`architecture.md` lifecycle step 4 and agent-service paragraph, `event-spec.md:83`,
   `kiro.md:26`, the walkthrough's section 4) and `/api/auth/status`; `rg -n
   'initial_model|--metrics-db|ingest_files\b' docs README.md` shows only the new
-  `metrics_ingest_files`. No `~/.nexus/archie.db` created by the run. The screenshot of `/` with
-  a running session is pending; it is captured during delivery.
+  `metrics_ingest_files`. No `~/.nexus/archie.db` created by the run. The screenshot of `/` was
+  captured during delivery: a uvicorn run with a temp home and three seeded live rows shows the
+  Session ID, Name (only the fixed one), Workspace, Status and Last activity columns.
 
 ## Deviations
 
@@ -639,6 +640,8 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 
 ## Risks
 
+- Not run against real Docker or a live agent: the tracker's subscription, reconcile and
+  start/stop paths are covered by fakes only.
 - The tracker is one more WebSocket client per session on the agent's bus; a stalled tracker is
   disconnected by the agent's 1024-frame queue and resubscribes (D14).
 - `unseen` is set on every root turn end and nothing clears it until the TUI refactor uses
@@ -664,8 +667,43 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   the no-Docker AC patches `subprocess.run`; both metrics handlers named; the docs grep allows
   `/api/auth/status`; M1/M2 split of `sessions_page`, `proxy_status` and `live_ids()`. None
   rejected. Stopped after two passes as the skill requires.
+- Code review: `general` and `risk`, one round (`risk` ran because the change touches SQL,
+  a public API and CLI shapes, and per-request code). Fixed (c0f96f0): `container_running`
+  treated any `docker inspect` failure as "gone" (now raises `DockerError` unless the container
+  doesn't exist, with a 10 s timeout); port-less adopted containers were never followed (now
+  rechecked every 30 s, ended as `exited` when they disappear); names with control characters
+  reached the terminal through `archie ls` (now 400); an older orchestrator's 200 start left a
+  stray session (the CLI now stops it and says to restart `archie serve`; `docs/kiro.md`
+  updated); duplicated stop logic (`DockerRuntime.stop` delegates to `lifecycle.stop_session`,
+  which no longer runs `docker ps`); a revived row kept its start `error`; a tautological
+  runtime test; `archie stats` traceback on a newer schema. Rejected: assertions on the
+  tracker's private `_listeners`/`_flush_tasks` (they check that subscriptions and timers are
+  released, which has no public observable). Answered the `docker inspect` timeout question by
+  adding the timeout. No ❌, so no second round.
+- Merge risk: High: every `archie start`, `attach` and `stop` now goes through new tracker
+  and store code that was tested only against fakes, not real Docker or a live agent, so a
+  defect would block day-to-day use; it is limited by a clean revert (session logs and the old
+  `metrics.db` are untouched, and `archie.db` can be deleted).
 
 ## Outcome
+
+The orchestrator now keeps a session record per session in `~/.nexus/archie.db`, maintained by
+a session tracker that follows every running agent's stream, and serves it through
+`GET/POST /api/sessions`, `GET/PATCH/DELETE /api/sessions/{id}`, the SSE
+`/api/sessions/feed` and log-backed `/events` for ended sessions. The metrics index lives in the
+same file as `metrics_*` tables joined to `sessions`. CLI, web `/` page, insights, stats, the
+prompt and the docs follow.
+
+Evidence: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` → 5045 passed;
+`scripts/dev ruff check .` clean; `ruff format --check` on the 54 changed Python files clean;
+`rg -n 'metrics\.db|archie\.db' persona/` → nothing; no `~/.nexus/archie.db` created by any
+run. Manual: `uvicorn archie_orchestrator.app:app` with a temp `ARCHIE_HOME_DIR` and seeded
+rows served `GET /api/sessions`, the feed (snapshot, then one `session` event per PATCH),
+a 400 for a name with a newline, a 404 for the removed `/status`, and the `/` page
+(screenshot attached to the PR).
+
+Not verified: anything against real Docker or a live agent container (no Docker in this
+environment); the feed behind a real reverse proxy.
 
 PR: pending
 CI: pending
