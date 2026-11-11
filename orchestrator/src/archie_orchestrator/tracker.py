@@ -8,7 +8,8 @@ authoritative (D12a); reads of ended sessions go to the store. Every change is p
 the registered listeners; changes to ``last_activity_at`` alone are throttled (D11).
 :meth:`SessionTracker.subscribe_feed` queues those changes for one sessions-feed client.
 
-At start the stored records are reconciled with ``docker ps`` (D13), and a closed stream
+At start the stored records are reconciled with ``docker ps`` (D13), the port of a
+container listed without one is looked up again until it appears, and a closed stream
 is followed again while the container runs, or ends the session when it has gone (D14).
 :meth:`SessionTracker.stop` stops a container for ``DELETE`` (D19, D19a) and
 :meth:`SessionTracker.patch` renames a session or marks it seen for ``PATCH`` (D18).
@@ -60,7 +61,8 @@ starts the sequence again.
 TERMINAL_RETRY_INTERVAL = 5.0
 """Seconds between retries of a failed terminal write (D12a)."""
 RECONCILE_RETRY_INTERVAL = 30.0
-"""Seconds between reconcile attempts while ``docker ps`` fails (D13)."""
+"""Seconds between reconcile attempts while ``docker ps`` fails, and between port lookups
+for sessions whose container was listed without a port (D13)."""
 ACTIVITY_INTERVAL = 10.0
 """Minimum seconds between writes of one session that change only ``last_activity_at`` (D11)."""
 RESTARTED_DURING_STARTUP = "orchestrator restarted during startup"
@@ -178,10 +180,7 @@ class DockerRuntime:
 
     def stop(self, session_id: str) -> bool:
         """``docker stop`` by name (no ``docker ps``), then drop a log with no prompt (D19)."""
-        docker.stop_container(container_name(session_id))
-        removed = lifecycle._remove_empty_session_log(session_id)
-        log.info("Session stopped: %s", session_id)
-        return removed
+        return lifecycle.stop_session(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +223,9 @@ class SessionTracker:
         self._listeners: list[Callable[[SessionDescriptor], None]] = []
         # Stored records not yet checked against ``docker ps`` (D13).
         self._unreconciled: set[str] = set()
+        self._reconciled = False
+        # Live sessions whose container was listed without a published port (D13).
+        self._portless: set[str] = set()
         # Sessions whose last root turn failed: their next ``idle`` is ``error`` (D10).
         self._turn_failed: set[str] = set()
         # Activity not yet written, the clock time activity was last written, and the
@@ -240,13 +242,15 @@ class SessionTracker:
         """Migrate the store, load live records, reconcile with Docker and follow sessions.
 
         If ``docker ps`` fails, the stored records are kept as they are and reconcile is
-        retried every :data:`RECONCILE_RETRY_INTERVAL` seconds until it succeeds.
+        retried every :data:`RECONCILE_RETRY_INTERVAL` seconds until it succeeds. A
+        container listed without a port has its port looked up again at the same
+        interval until it has one or has gone.
         """
         await asyncio.to_thread(self.store.migrate)
         for record in await asyncio.to_thread(self.store.list, False):
             self._records[record.session_id] = record
         self._unreconciled = set(self._records)
-        if not await self._reconcile():
+        if not await self._reconcile() or self._portless:
             self._background_task(self._retry_reconcile())
 
     async def close(self) -> None:
@@ -272,8 +276,9 @@ class SessionTracker:
     async def _reconcile(self) -> bool:
         """Match the stored records against ``docker ps`` (D13); False if Docker failed.
 
-        A running container makes its record live (``idle``, ``ended_at`` cleared, followed
-        when it has a port), adopting containers with no row. A stored record that is
+        A running container makes its record live (``idle``, ``ended_at`` and ``error``
+        cleared, followed when it has a port, else noted for :meth:`_refresh_ports`),
+        adopting containers with no row. A stored record that is
         still live with no container ends: ``stopping`` becomes ``stopped``, ``starting``
         becomes ``failed`` and anything else ``exited``, with ``ended_at`` the log's mtime
         (or now). Records this tracker created or already revived are left alone, so a
@@ -300,7 +305,10 @@ class SessionTracker:
             self._unreconciled.discard(session_id)
             if container.port is not None:
                 self._ports[session_id] = container.port
-            await self._put(msgspec.structs.replace(record, status="idle", ended_at=None))
+            else:
+                self._portless.add(session_id)
+            revived = msgspec.structs.replace(record, status="idle", ended_at=None, error=None)
+            await self._put(revived)
             if session_id in self._ports and session_id not in self._tasks:
                 self._spawn(session_id, self._follow(session_id))
         for session_id in sorted(self._unreconciled - found):
@@ -317,14 +325,60 @@ class SessionTracker:
             log.info("Session %s has no container: %s", session_id, changes["status"])
             await self._update(session_id, **changes, ended_at=ended_at)
         self._unreconciled.clear()
+        self._reconciled = True
         return True
 
     async def _retry_reconcile(self) -> None:
+        """Reconcile until ``docker ps`` succeeds, then look up ports until none is missing.
+
+        Each attempt waits :data:`RECONCILE_RETRY_INTERVAL` seconds (D13).
+        """
         while True:
             await asyncio.sleep(RECONCILE_RETRY_INTERVAL)
-            if await self._reconcile():
+            if not self._reconciled:
+                if not await self._reconcile():
+                    continue
                 log.info("Reconciled sessions with Docker")
+            else:
+                await self._refresh_ports()
+            if not self._portless:
                 return
+
+    async def _refresh_ports(self) -> None:
+        """Look up the ports of live sessions whose container was listed without one.
+
+        A container that now has a port is followed. One that is no longer listed ends
+        the session as ``exited`` with ``ended_at`` the log's mtime (or now), as reconcile
+        would (D13). ``stopping`` sessions are left to the stop; nothing changes when
+        ``docker ps`` fails.
+        """
+        try:
+            running = await asyncio.to_thread(self.runtime.list_running)
+        except (DockerError, OSError) as exc:
+            log.warning("Cannot list running sessions: %s", exc)
+            return
+        ports = {container.session_id: container.port for container in running}
+        for session_id in sorted(self._portless):
+            record = self._records.get(session_id)
+            if record is None or record.ended or session_id in self._ports:
+                self._portless.discard(session_id)
+                continue
+            if record.status == "stopping":
+                continue  # the stop records the outcome; a failed stop leaves it running
+            if session_id not in ports:
+                ended_at = await asyncio.to_thread(self._log_mtime, session_id) or now_iso()
+                record = self._records.get(session_id)
+                if record is None or record.ended or record.status == "stopping":
+                    continue  # stopped meanwhile; checked again on the next pass
+                self._portless.discard(session_id)
+                log.info("Session %s has no container: exited", session_id)
+                await self._update(session_id, status="exited", ended_at=ended_at)
+            elif ports[session_id] is not None:
+                self._portless.discard(session_id)
+                self._ports[session_id] = ports[session_id]
+                log.info("Session %s published port %d", session_id, ports[session_id])
+                if session_id not in self._tasks:
+                    self._spawn(session_id, self._follow(session_id))
 
     def log_path(self, session_id: str) -> Path:
         """Where a session's event log lives: ``<home>/sessions/<id>.jsonl``."""
@@ -708,6 +762,7 @@ class SessionTracker:
         self._records[session_id] = record
         if record.ended:
             self._ports.pop(session_id, None)
+            self._portless.discard(session_id)
             self._turn_failed.discard(session_id)
             self._activity_written.pop(session_id, None)
         self._publish(record)

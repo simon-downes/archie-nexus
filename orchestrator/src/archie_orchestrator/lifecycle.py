@@ -31,7 +31,6 @@ from archie_orchestrator.docker import (
     DockerError,
     RunningContainer,
     check_image,
-    list_sessions,
     run_container,
     stop_container,
     wait_for_ready,
@@ -301,20 +300,22 @@ def _kiro_startup_error(nexus_home: Path, session_id: str) -> str | None:
     return text or None
 
 
-def stop_session(session_id: str) -> None:
-    """Stop a running session by exact session ID.
+def stop_session(session_id: str) -> bool:
+    """Stop a session's container by name, then remove its log if it holds no prompt.
+
+    Runs ``docker stop archie-<session_id>`` directly, without a ``docker ps`` lookup
+    (082 D19); a log with no submitted prompt is removed (D19a).
 
     Args:
         session_id: Exact session ID to stop (no prefix matching).
 
+    Returns:
+        Whether the session's log was removed.
+
     Raises:
-        KeyError: If no running session with that ID exists.
-        RuntimeError: If docker stop fails.
+        DockerError: If docker stop fails (the log is left alone).
     """
-    sessions = list_sessions()
-    target = next((s for s in sessions if s.session_id == session_id), None)
-    if target is None:
-        raise KeyError(f"No running session with ID '{session_id}'")
-    stop_container(target.container_name)
-    _remove_empty_session_log(session_id)
+    stop_container(container_name(session_id))
+    removed = _remove_empty_session_log(session_id)
     log.info("Session stopped: %s", session_id)
+    return removed

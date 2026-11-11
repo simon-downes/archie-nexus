@@ -243,6 +243,27 @@ async def test_stream_close_with_container_running_resubscribes(fast_retry):
     await tracker.close()
 
 
+async def test_stream_close_when_docker_cannot_tell_keeps_following(fast_retry):
+    """A failed ``docker inspect`` is not "container gone": back off and follow again."""
+    error = DockerError(command=["docker", "inspect"], stderr="daemon down", returncode=1)
+    runtime = FakeRuntime(alive_error=error)
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+    snapshots = []
+    tracker.add_listener(snapshots.append)
+    agent = FakeAgent([status_frame("working")])
+    with _patch_agent(agent):
+        task = asyncio.create_task(tracker._follow(SID))
+        await until(lambda: len(runtime.checked) >= 3)  # the close, then two refusals
+        assert len(agent.urls) >= 3  # followed again after each check
+        assert tracker.live(SID).status == "working"
+        assert tracker.store.get(SID).status == "working"
+        runtime.alive_error = None
+        runtime.alive = False
+        await asyncio.wait_for(task, 2)
+    assert [s.status for s in snapshots] == ["working", "exited"]
+    await tracker.close()
+
+
 async def test_close_cancels_following_without_status_change():
     runtime = FakeRuntime(alive=False)
     tracker = make_tracker({SID: PORT}, runtime=runtime)
@@ -653,7 +674,8 @@ async def test_start_adopts_a_container_with_a_log_but_no_row(session_logs):
     assert (adopted.status, adopted.backend, adopted.model_key) == ("idle", "kiro", "kiro/auto")
     assert adopted.started_at == "2026-07-01T09:59:00+00:00"
     assert adopted.ended_at is None
-    assert tracker.port(SID) is None  # no port published yet, so nothing to follow
+    # No port published yet, so nothing to follow until a later lookup finds one.
+    assert tracker.port(SID) is None
     assert tracker._tasks == {}
     assert tracker.store.get(SID) == adopted
     await tracker.close()
@@ -676,6 +698,80 @@ async def test_start_keeps_live_rows_from_the_store():
     await restarted.start()
     assert restarted.live(SID).status == "idle"  # a running container is live and idle
     await restarted.close()
+
+
+async def test_start_revives_a_failed_row_and_clears_its_error():
+    failed = record(
+        SID, status="failed", error="did not become ready", ended_at="2026-07-01T10:00:00+00:00"
+    )
+    tracker = make_tracker(records=[failed])
+    restarted = SessionTracker(tracker.store, FakeRuntime([running(SID, PORT)]))
+    with _patch_agent(FakeAgent([30.0])):
+        await restarted.start()
+        live = restarted.live(SID)
+        assert (live.status, live.ended_at, live.error) == ("idle", None, None)
+        assert restarted.store.get(SID) == live
+        await restarted.close()
+
+
+@pytest.fixture
+def fast_reconcile(monkeypatch):
+    monkeypatch.setattr(tracker_module, "RECONCILE_RETRY_INTERVAL", 0.01)
+
+
+async def test_port_less_container_is_followed_once_its_port_appears(fast_reconcile):
+    runtime = FakeRuntime([running(SID, None)])
+    tracker = SessionTracker(SessionStore(db_path(home_dir())), runtime)
+    agent = FakeAgent([status_frame("working"), 30.0])
+    with _patch_agent(agent):
+        await tracker.start()
+        await until(lambda: runtime.list_calls >= 3)  # still no port: asked again
+        assert tracker.port(SID) is None
+        assert agent.urls == []
+        assert tracker.live(SID).status == "idle"
+
+        runtime.containers = [running(SID, PORT)]
+        await until(lambda: tracker.live(SID).status == "working")
+        assert tracker.port(SID) == PORT
+        assert agent.urls == [f"ws://127.0.0.1:{PORT}/stream"]
+        calls = runtime.list_calls
+        await asyncio.sleep(0.05)
+        assert runtime.list_calls == calls  # no more lookups once every port is known
+        await tracker.close()
+
+
+async def test_port_less_container_that_goes_away_ends_as_exited(fast_reconcile, session_logs):
+    tracker = make_tracker(records=[record(SID, status="working")])
+    w = session_logs
+    w.write(SID, [w.user("hi")])
+    mtime = datetime(2026, 7, 1, 11, 30, tzinfo=UTC).timestamp()
+    os.utime(w.dir / f"{SID}.jsonl", (mtime, mtime))
+    runtime = FakeRuntime([running(SID, None)])
+    restarted = SessionTracker(tracker.store, runtime)
+    published = []
+    restarted.add_listener(published.append)
+
+    await restarted.start()
+    assert restarted.live(SID).status == "idle"
+    runtime.containers = []
+    await until(lambda: SID not in restarted._records)  # ended and written
+
+    row = restarted.store.get(SID)
+    assert (row.status, row.ended_at) == ("exited", "2026-07-01T11:30:00+00:00")
+    assert [r.status for r in published] == ["idle", "exited"]
+    calls = runtime.list_calls
+    await asyncio.sleep(0.05)
+    assert runtime.list_calls == calls  # nothing left to look up
+    await restarted.close()
+
+
+async def test_port_lookup_leaves_a_stopping_session_to_the_stop():
+    runtime = FakeRuntime([])
+    tracker = make_tracker(records=[record(SID, status="stopping")], runtime=runtime)
+    tracker._portless.add(SID)
+    await tracker._refresh_ports()
+    assert tracker.live(SID).status == "stopping"
+    assert runtime.list_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -904,6 +1000,26 @@ async def test_stop_failure_with_container_gone_is_stopped():
     await tracker.close()
 
 
+async def test_stop_failure_when_docker_cannot_tell_restores_status():
+    """A failed ``docker inspect`` after a failed stop is not "container gone"."""
+    runtime = FakeRuntime(
+        stop_error=DockerError(command=["docker", "stop"], stderr="daemon down", returncode=1),
+        alive_error=DockerError(command=["docker", "inspect"], stderr="daemon down", returncode=1),
+    )
+    tracker = make_tracker(records=[record(SID, status="working")], runtime=runtime)
+    published = []
+    tracker.add_listener(published.append)
+
+    with pytest.raises(DockerError, match="daemon down"):
+        await tracker.stop(SID)
+
+    assert runtime.checked == [SID]
+    assert tracker.live(SID).status == "working"
+    assert tracker.store.get(SID).status == "working"
+    assert [r.status for r in published] == ["stopping", "working"]
+    await tracker.close()
+
+
 async def test_frames_while_stopping_keep_the_status():
     runtime = FakeRuntime()
     runtime.stop_gate = threading.Event()
@@ -986,26 +1102,31 @@ async def test_patch_write_failure_raises_and_memory_keeps_the_change(monkeypatc
 
 def test_docker_runtime_delegates_to_docker_and_lifecycle():
     runtime = DockerRuntime()
+    config = NexusConfig()
+    prepared = object()
     with (
-        patch("archie_orchestrator.docker.list_sessions", return_value=[running()]) as ls,
-        patch("archie_orchestrator.docker.container_running", return_value=True) as alive,
-        patch("archie_orchestrator.lifecycle.prepare_start", return_value="prepared") as prep,
-        patch("archie_orchestrator.lifecycle.run_start", return_value=PORT) as run,
+        patch("archie_orchestrator.docker.list_sessions") as ls,
+        patch("archie_orchestrator.docker.container_running") as alive,
+        patch("archie_orchestrator.lifecycle.prepare_start") as prep,
+        patch("archie_orchestrator.lifecycle.run_start") as run,
+        patch("archie_orchestrator.lifecycle.stop_session") as stop,
     ):
-        assert runtime.list_running() == [running()]
-        assert runtime.is_running(SID) is True
-        assert runtime.prepare("proj", "config", "kiro") == "prepared"
-        assert runtime.run("prepared") == PORT
+        runtime.list_running()
+        runtime.is_running(SID)
+        runtime.prepare("proj", config, "kiro")
+        runtime.run(prepared)
+        runtime.stop(SID)
     ls.assert_called_once_with()
     alive.assert_called_once_with(f"archie-{SID}")
-    prep.assert_called_once_with("proj", "config", backend="kiro")
-    run.assert_called_once_with("prepared")
+    prep.assert_called_once_with("proj", config, backend="kiro")
+    run.assert_called_once_with(prepared)
+    stop.assert_called_once_with(SID)
 
 
 def test_docker_runtime_stop_stops_by_name_and_reports_log_removal():
     runtime = DockerRuntime()
     with (
-        patch("archie_orchestrator.docker.stop_container") as stop,
+        patch("archie_orchestrator.lifecycle.stop_container") as stop,
         patch("archie_orchestrator.docker.list_sessions") as ls,
         patch(
             "archie_orchestrator.lifecycle._remove_empty_session_log", return_value=True

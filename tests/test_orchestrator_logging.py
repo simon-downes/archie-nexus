@@ -139,10 +139,7 @@ def test_start_session_logs_info(tmp_path, caplog):
 
 def test_stop_session_logs_info(caplog):
     """stop_session emits INFO log with session_id."""
-    session = _make_session("myproject-01abc12345")
-
     with (
-        patch("archie_orchestrator.lifecycle.list_sessions", return_value=[session]),
         patch("archie_orchestrator.lifecycle.stop_container"),
         caplog.at_level(logging.INFO, logger="archie_orchestrator.lifecycle"),
     ):
@@ -255,7 +252,6 @@ def test_log_level_warning_suppresses_info(monkeypatch, caplog):
     """INFO messages are suppressed when LOG_LEVEL=WARNING."""
     session = _make_session()
     with (
-        patch("archie_orchestrator.lifecycle.list_sessions", return_value=[session]),
         patch("archie_orchestrator.lifecycle.stop_container"),
         caplog.at_level(logging.WARNING, logger="archie_orchestrator.lifecycle"),
     ):

@@ -127,10 +127,10 @@ JSON API:
 | Method | Route | Role |
 | --- | --- | --- |
 | `GET` | `/api/sessions?include=ended` | session records, newest first; only sessions that haven't ended unless `include=ended` |
-| `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` and `"name"` (non-blank, at most 80 characters, stored trimmed); 202 with the `starting` record |
+| `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` and `"name"` (non-blank, at most 80 characters, no control characters, stored trimmed); 202 with the `starting` record |
 | `GET` | `/api/sessions/feed?include=ended` | server-sent events: a `snapshot` event (`{"sessions": [...]}`, filtered like the list), then one `session` event with the full record per change, whatever the filter; `: ping` after 15 s idle |
 | `GET` | `/api/sessions/{id}` | one session record, live or ended |
-| `PATCH` | `/api/sessions/{id}` | `name` (a string sets it and `name_fixed`; `null` resets it to the ID) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
+| `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it and `name_fixed`; `null` resets it to the ID) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
 | `DELETE` | `/api/sessions/{id}` | stop a running session and wait; 200 with the `stopped` record, 409 while `starting` or `stopping` or once ended, 500 if the container is still running (previous status restored) |
 | `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting` |
 | `GET` | `/api/sessions/{id}/metrics` | metrics for one session |

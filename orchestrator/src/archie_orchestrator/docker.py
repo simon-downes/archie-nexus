@@ -69,12 +69,39 @@ class RunningContainer(msgspec.Struct, frozen=True):
 # ---------------------------------------------------------------------------
 
 
+INSPECT_TIMEOUT_S = 10.0
+"""Seconds :func:`container_running` waits for ``docker inspect``."""
+_NO_SUCH_OBJECT = ("no such object", "no such container")
+
+
 def container_running(name: str) -> bool:
-    """Return True if the named container is currently running."""
+    """Return whether the named container is currently running.
+
+    False when it exists but isn't running, or when Docker reports no such container
+    (a ``--rm`` container is removed once it exits).
+
+    Raises:
+        DockerError: If ``docker inspect`` fails for another reason (the daemon is down,
+            for example) or doesn't answer within :data:`INSPECT_TIMEOUT_S`, so the
+            caller can't tell whether the container runs.
+        OSError: If the docker CLI cannot be executed.
+    """
     cmd = ["docker", "inspect", "-f", "{{.State.Running}}", name]
     log.debug("docker %s", " ".join(cmd[1:]))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=INSPECT_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        raise DockerError(
+            command=cmd[:2], stderr=f"timed out after {INSPECT_TIMEOUT_S:.0f} s", returncode=-1
+        ) from None
+    if result.returncode == 0:
+        return result.stdout.strip() == "true"
+    stderr = result.stderr or ""
+    if any(marker in stderr.lower() for marker in _NO_SUCH_OBJECT):
+        return False
+    raise DockerError(command=cmd[:2], stderr=stderr, returncode=result.returncode)
 
 
 def _status_ok(port: str) -> bool:
@@ -159,7 +186,8 @@ def wait_for_ready(
         timeout: Maximum seconds to wait before raising.
 
     Raises:
-        DockerError: If the container crashes or the timeout is exceeded.
+        DockerError: If the container crashes, ``docker inspect`` fails (liveness can't
+            be checked, so startup is abandoned) or the timeout is exceeded.
     """
     deadline = time.monotonic() + timeout
     port: str | None = None

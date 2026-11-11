@@ -1,6 +1,7 @@
 """Tests for archie_orchestrator.docker — session discovery via docker subprocess."""
 
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from archie_orchestrator.docker import (
     RunningContainer,
     container_running,
     list_sessions,
+    wait_for_ready,
 )
 
 
@@ -140,14 +142,19 @@ def test_list_sessions_docker_missing_raises_oserror():
 
 
 @pytest.mark.parametrize(
-    ("returncode", "stdout", "expected"),
-    [(0, "true\n", True), (0, "false\n", False), (1, "", False)],
+    ("returncode", "stdout", "stderr", "expected"),
+    [
+        (0, "true\n", "", True),
+        (0, "false\n", "", False),
+        (1, "", "Error: No such object: archie-p-01abc12345\n", False),
+        (1, "", "Error response from daemon: no such container: archie-p-01abc12345", False),
+    ],
+    ids=["running", "not-running", "no-such-object", "no-such-container"],
 )
-def test_container_running(returncode, stdout, expected):
-    with patch(
-        "archie_orchestrator.docker.subprocess.run",
-        return_value=_make_run_result(stdout=stdout, returncode=returncode),
-    ) as run:
+def test_container_running(returncode, stdout, stderr, expected):
+    result = _make_run_result(stdout=stdout, returncode=returncode)
+    result.stderr = stderr
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=result) as run:
         assert container_running("archie-p-01abc12345") is expected
     assert run.call_args.args[0] == [
         "docker",
@@ -156,6 +163,42 @@ def test_container_running(returncode, stdout, expected):
         "{{.State.Running}}",
         "archie-p-01abc12345",
     ]
+    assert run.call_args.kwargs["timeout"] == 10
+
+
+def test_container_running_docker_failure_raises():
+    """A daemon failure is not "container gone": the caller can't tell either way."""
+    result = _make_run_result(returncode=1)
+    result.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=result):
+        with pytest.raises(DockerError, match="Cannot connect to the Docker daemon"):
+            container_running("archie-p-01abc12345")
+
+
+def test_container_running_timeout_raises():
+    with patch(
+        "archie_orchestrator.docker.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["docker", "inspect"], 10),
+    ):
+        with pytest.raises(DockerError, match="timed out"):
+            container_running("archie-p-01abc12345")
+
+
+def test_wait_for_ready_reports_a_removed_container_as_exited():
+    gone = _make_run_result(returncode=1)
+    gone.stderr = "Error: No such object: archie-p-01abc12345"
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=gone):
+        with pytest.raises(DockerError, match="exited during startup"):
+            wait_for_ready("archie-p-01abc12345", ["docker", "run", "--rm"], timeout=5)
+
+
+def test_wait_for_ready_inspect_failure_aborts_with_the_docker_error():
+    down = _make_run_result(returncode=1)
+    down.stderr = "Cannot connect to the Docker daemon"
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=down) as run:
+        with pytest.raises(DockerError, match="Cannot connect to the Docker daemon"):
+            wait_for_ready("archie-p-01abc12345", ["docker", "run", "--rm"], timeout=5)
+    run.assert_called_once()  # startup is abandoned at once, as before
 
 
 def test_list_sessions_malformed_json_line():

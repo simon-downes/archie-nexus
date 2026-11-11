@@ -26,6 +26,7 @@ are relative to the mount:
 import asyncio
 import logging
 import sqlite3
+import unicodedata
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -58,7 +59,8 @@ PATCH_FIELDS = ("name", "unseen")
 FEED_PING_INTERVAL = 15.0
 """Seconds without an event before the sessions feed sends a ``: ping`` comment."""
 _INVALID_NAME = (
-    f"Invalid 'name': expected a non-blank string of at most {NAME_MAX_CHARS} characters"
+    f"Invalid 'name': expected a non-blank string of at most {NAME_MAX_CHARS} characters "
+    "with no control characters"
 )
 
 
@@ -69,8 +71,16 @@ def _json(value: object, status_code: int = 200) -> Response:
 
 
 def _valid_name(value: object) -> str | None:
-    """A session name trimmed, or None if it isn't a non-blank string of at most 80 chars."""
+    """A session name trimmed, or None if it isn't a valid name.
+
+    A valid name is a string that is non-blank, at most 80 characters once trimmed and
+    free of control characters anywhere, even in the trimmed whitespace (Unicode category
+    ``Cc``: newline, tab, ESC, DEL, C1), which would break terminal and log output. Other
+    characters, such as emoji sequences joined by ZWJ, are allowed.
+    """
     if not isinstance(value, str):
+        return None
+    if any(unicodedata.category(char) == "Cc" for char in value):
         return None
     name = value.strip()
     if not name or len(name) > NAME_MAX_CHARS:

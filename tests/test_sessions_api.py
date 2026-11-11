@@ -34,6 +34,7 @@ from tests.session_fakes import (
 )
 
 ENDED = "proj-01kx77jkz8"
+EMOJI_NAME = "\U0001f469\u200d\U0001f4bb Review \u00e9"  # woman technologist (a ZWJ sequence)
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +208,10 @@ async def test_post_null_name_is_the_default():
         ({"workspace": "p", "name": 5}, "Invalid 'name'"),
         ({"workspace": "p", "name": "   "}, "Invalid 'name'"),
         ({"workspace": "p", "name": "x" * 81}, "Invalid 'name'"),
+        ({"workspace": "p", "name": "Review\nPR"}, "Invalid 'name'"),
+        ({"workspace": "p", "name": "Review\tPR"}, "Invalid 'name'"),
+        ({"workspace": "p", "name": "Review \x1b[31mPR"}, "Invalid 'name'"),
+        ({"workspace": "p", "name": "Review PR\n"}, "Invalid 'name'"),
     ],
     ids=[
         "not-json",
@@ -218,6 +223,10 @@ async def test_post_null_name_is_the_default():
         "name-not-string",
         "name-blank",
         "name-too-long",
+        "name-newline",
+        "name-tab",
+        "name-escape",
+        "name-trailing-newline",
     ],
 )
 async def test_post_bad_body_is_400_and_starts_nothing(payload, message):
@@ -241,6 +250,15 @@ async def test_post_name_of_80_characters_is_accepted():
             response = await http.post("/api/sessions", json={"workspace": "p", "name": "x" * 80})
         await tracker.close()
     assert response.status_code == 202
+
+
+async def test_post_name_with_an_emoji_zwj_sequence_is_accepted():
+    with serve(app, runtime=FakeRuntime(run_error=RuntimeError("x"))) as tracker:
+        async with _client() as http:
+            response = await http.post("/api/sessions", json={"workspace": "p", "name": EMOJI_NAME})
+        await tracker.close()
+    assert response.status_code == 202
+    assert response.json()["name"] == EMOJI_NAME
 
 
 @pytest.mark.parametrize(
@@ -541,9 +559,16 @@ async def test_delete_unknown_session_is_404():
     assert response.json() == {"error": "No session with ID 'nope-01kx77jkz8'"}
 
 
-async def test_delete_docker_failure_with_container_running_is_500_and_restores_status():
+@pytest.mark.parametrize(
+    "alive_error",
+    [None, DockerError(command=["docker", "inspect"], stderr="daemon down", returncode=1)],
+    ids=["running", "cannot-tell"],
+)
+async def test_delete_docker_failure_with_container_running_is_500_and_restores_status(
+    alive_error,
+):
     error = DockerError(command=["docker", "stop"], stderr="daemon busy", returncode=1)
-    runtime = FakeRuntime(stop_error=error, alive=True)
+    runtime = FakeRuntime(stop_error=error, alive=True, alive_error=alive_error)
     with serve(app, records=_records(), runtime=runtime) as tracker:
         async with _client() as http:
             response = await http.delete(f"/api/sessions/{SID}")
@@ -567,6 +592,26 @@ async def test_delete_docker_failure_with_container_gone_is_stopped():
     assert tracker.store.get(SID).status == "stopped"
 
 
+async def test_delete_when_docker_cannot_inspect_is_500_and_restores_status():
+    """A daemon failure on ``docker inspect`` is not "container gone" (real DockerRuntime)."""
+    stop_error = DockerError(command=["docker", "stop"], stderr="daemon down", returncode=1)
+    inspect = MagicMock(returncode=1, stdout="", stderr="Cannot connect to the Docker daemon")
+    with (
+        serve(app, records=_records(), runtime=DockerRuntime()) as tracker,
+        patch("archie_orchestrator.lifecycle.stop_container", side_effect=stop_error),
+        patch("archie_orchestrator.docker.subprocess.run", return_value=inspect) as run,
+    ):
+        async with _client() as http:
+            response = await http.delete(f"/api/sessions/{SID}")
+            after = await http.get(f"/api/sessions/{SID}")
+        await tracker.close()
+    assert run.call_args.args[0][:2] == ["docker", "inspect"]
+    assert response.status_code == 500
+    assert "daemon down" in response.json()["error"]
+    assert after.json()["status"] == "working"
+    assert tracker.store.get(SID).status == "working"
+
+
 async def test_delete_never_prompted_session_leaves_no_row():
     """The real DockerRuntime removes the prompt-less log, so the row goes too (D19a)."""
     log_path = home_dir() / "sessions" / f"{SID}.jsonl"
@@ -575,7 +620,7 @@ async def test_delete_never_prompted_session_leaves_no_row():
     )
     with (
         serve(app, {SID: PORT}, runtime=DockerRuntime()) as tracker,
-        patch("archie_orchestrator.docker.stop_container") as stop_container,
+        patch("archie_orchestrator.lifecycle.stop_container") as stop_container,
     ):
         async with _client() as http:
             response = await http.delete(f"/api/sessions/{SID}")
@@ -661,6 +706,13 @@ async def test_patch_name_of_80_characters_is_accepted():
     assert response.status_code == 200
 
 
+async def test_patch_name_with_an_emoji_zwj_sequence_is_accepted():
+    response, _, tracker = await _patch({"name": EMOJI_NAME})
+    assert response.status_code == 200
+    assert response.json()["name"] == EMOJI_NAME
+    assert tracker.store.get(SID).name == EMOJI_NAME
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
@@ -675,6 +727,11 @@ async def test_patch_name_of_80_characters_is_accepted():
         ({"name": 5}, "Invalid 'name'"),
         ({"name": "   "}, "Invalid 'name'"),
         ({"name": "x" * 81}, "Invalid 'name'"),
+        ({"name": "Review\nPR"}, "Invalid 'name'"),
+        ({"name": "Review\tPR"}, "Invalid 'name'"),
+        ({"name": "Review \x1b[31mPR"}, "Invalid 'name'"),
+        ({"name": "Review\x7f"}, "Invalid 'name'"),
+        ({"name": "Review\x9b"}, "Invalid 'name'"),
     ],
     ids=[
         "not-json",
@@ -688,6 +745,11 @@ async def test_patch_name_of_80_characters_is_accepted():
         "name-not-string",
         "name-blank",
         "name-too-long",
+        "name-newline",
+        "name-tab",
+        "name-escape",
+        "name-del",
+        "name-c1-control",
     ],
 )
 async def test_patch_bad_body_is_400_and_changes_nothing(payload, message):

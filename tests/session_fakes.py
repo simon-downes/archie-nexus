@@ -86,6 +86,7 @@ class FakeRuntime:
         run_error: Raised by ``run`` instead.
         prepare_error: Raised by ``prepare`` instead.
         alive: What ``is_running`` returns; a successful ``stop`` sets it False.
+        alive_error: Raised by ``is_running`` instead (Docker can't tell).
         stop_error: Raised by ``stop`` instead.
         log_removed: What a successful ``stop`` returns (the log had no prompt).
     """
@@ -99,6 +100,7 @@ class FakeRuntime:
         run_error: Exception | None = None,
         prepare_error: Exception | None = None,
         alive: bool = True,
+        alive_error: Exception | None = None,
         stop_error: Exception | None = None,
         log_removed: bool = False,
     ) -> None:
@@ -108,6 +110,7 @@ class FakeRuntime:
         self.run_error = run_error
         self.prepare_error = prepare_error
         self.alive = alive
+        self.alive_error = alive_error
         self.stop_error = stop_error
         self.log_removed = log_removed
         self.stops: list[str] = []
@@ -150,6 +153,8 @@ class FakeRuntime:
 
     def is_running(self, session_id: str) -> bool:
         self.checked.append(session_id)
+        if self.alive_error is not None:
+            raise self.alive_error
         return self.alive
 
     def stop(self, session_id: str) -> bool:

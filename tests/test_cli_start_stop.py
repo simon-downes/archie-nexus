@@ -152,13 +152,20 @@ def test_startup_status_wraps_failed_request(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _start(args, *, post=None, polls=(), monotonic=None):
-    """Run ``archie start`` with a mocked orchestrator; returns (result, httpx mock, time mock)."""
+def _start(args, *, post=None, polls=(), monotonic=None, delete=None):
+    """Run ``archie start`` with a mocked orchestrator; returns (result, httpx mock, time mock).
+
+    ``delete`` is what ``httpx.delete`` returns, or an exception it raises.
+    """
     import httpx as real_httpx
 
     with patch("archie_cli.cli.httpx") as mock_httpx, patch("archie_cli.cli.time") as mock_time:
         mock_httpx.post.return_value = post or _session_response()
         mock_httpx.get.side_effect = list(polls)
+        if isinstance(delete, Exception):
+            mock_httpx.delete.side_effect = delete
+        elif delete is not None:
+            mock_httpx.delete.return_value = delete
         mock_httpx.ConnectError = real_httpx.ConnectError
         mock_httpx.HTTPError = real_httpx.HTTPError
         mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
@@ -273,6 +280,58 @@ def test_start_non_202_is_an_orchestrator_error(monkeypatch, tmp_path):
 
     assert result.exit_code == 1
     assert "Orchestrator error (500): boom" in result.output
+
+
+OLDER = "The running orchestrator is older than this CLI; restart it with: archie serve"
+
+
+def test_start_answered_200_by_an_older_orchestrator_stops_its_session(monkeypatch, tmp_path):
+    """A pre-082 orchestrator starts the session before answering 200: stop it and fail."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+
+    result, mock_httpx, _ = _start(
+        ["--detach", "--kiro", "myproject"],
+        post=_session_response(status="idle", status_code=200),
+        delete=MagicMock(status_code=200),
+    )
+
+    assert result.exit_code == 1
+    assert OLDER in result.output
+    assert f"the session it started, {SID}, was stopped" in result.output
+    assert "Session:" not in result.output
+    mock_httpx.delete.assert_called_once()
+    assert mock_httpx.delete.call_args.args[0] == f"http://127.0.0.1:7600/api/sessions/{SID}"
+    mock_httpx.get.assert_not_called()
+
+
+def test_start_older_orchestrator_stop_failure_is_reported_not_raised(monkeypatch, tmp_path):
+    """The stop is best effort: a failed DELETE still fails the start with the same message."""
+    import httpx as real_httpx
+
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+
+    for delete in (real_httpx.ConnectError("refused"), MagicMock(status_code=500)):
+        result, mock_httpx, _ = _start(
+            ["--detach", "myproject"],
+            post=_session_response(status="idle", status_code=200),
+            delete=delete,
+        )
+        assert result.exit_code == 1
+        assert OLDER in result.output
+        assert f"stop it with: archie stop {SID}" in result.output
+        mock_httpx.delete.assert_called_once()
+
+
+def test_start_answered_200_without_a_session_id_fails_without_a_stop(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    body = MagicMock(status_code=200)
+    body.json.return_value = {"status": "ok"}
+
+    result, mock_httpx, _ = _start(["--detach", "myproject"], post=body)
+
+    assert result.exit_code == 1
+    assert OLDER in result.output
+    mock_httpx.delete.assert_not_called()
 
 
 def test_start_orchestrator_unreachable(monkeypatch, tmp_path):

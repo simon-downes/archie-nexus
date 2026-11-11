@@ -9,6 +9,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NoReturn
 
 import click
 import httpx
@@ -171,6 +172,8 @@ def start(detach: bool, kiro: bool, workspace: str | None):
 
         if response.status_code == 400:
             raise click.ClickException(_error_body(response, "Bad request"))
+        if response.status_code == 200:
+            _reject_blocking_start(url, response)
         if response.status_code != 202:
             raise click.ClickException(
                 f"Orchestrator error ({response.status_code}): {_error_body(response)}"
@@ -192,6 +195,34 @@ def start(detach: bool, kiro: bool, workspace: str | None):
         api_url = f"{base}{API_PREFIX}/sessions/{descriptor.session_id}"
         app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=descriptor.container_name)
         app.run()
+
+
+def _reject_blocking_start(url: str, response: httpx.Response) -> NoReturn:
+    """Fail a start answered 200 by an orchestrator older than this CLI (082 D22).
+
+    Older orchestrators start the session before answering (and may ignore ``backend``),
+    so the session the response names is stopped, best effort, before failing.
+    """
+    message = "The running orchestrator is older than this CLI; restart it with: archie serve"
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    session_id = body.get("session_id") if isinstance(body, dict) else None
+    if not isinstance(session_id, str) or not session_id:
+        raise click.ClickException(message)
+    try:
+        stopped = httpx.delete(f"{url}{API_PREFIX}/sessions/{session_id}", timeout=15.0)
+        stopped_ok = stopped.status_code < 400
+    except httpx.HTTPError:
+        stopped_ok = False
+    if stopped_ok:
+        raise click.ClickException(
+            f"{message}\n(the session it started, {session_id}, was stopped)"
+        )
+    raise click.ClickException(
+        f"{message}\n(it started session {session_id}; stop it with: archie stop {session_id})"
+    )
 
 
 def _decode_session(response: httpx.Response) -> SessionDescriptor:

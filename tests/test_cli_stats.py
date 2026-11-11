@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from archie_cli.cli import main
@@ -141,6 +142,20 @@ def test_stats_session_without_log_not_found(home):
 def test_stats_bad_sort_rejected(home):
     result = _invoke("sessions", "--sort", "nope")
     assert result.exit_code == 2
+
+
+@pytest.mark.parametrize("args", [["--since", "all"], ["session", "proj-01k0000000"]])
+def test_stats_newer_database_schema_exits_1(home, args):
+    conn = sqlite3.connect(home / "archie.db")
+    try:
+        conn.execute("PRAGMA user_version = 99")
+    finally:
+        conn.close()
+    result = _invoke(*args)
+    assert result.exit_code == 1
+    assert "schema version 99" in result.output
+    assert "Update Archie" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_group_options_apply_to_subcommand(home):

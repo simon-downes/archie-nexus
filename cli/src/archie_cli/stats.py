@@ -94,7 +94,11 @@ def _table(title: str, columns: list[tuple[str, str]]) -> Table:
 
 
 def _sync_index():
-    """Sync the index, telling the user on stderr if another sync holds the lock."""
+    """Sync the index, telling the user on stderr if another sync holds the lock.
+
+    Raises:
+        click.ClickException: ``archie.db`` has a newer schema than this Archie supports.
+    """
     from archie_orchestrator.metrics import default_index
 
     index = default_index()
@@ -105,6 +109,8 @@ def _sync_index():
     timer.start()
     try:
         index.sync()
+    except RuntimeError as exc:  # store.migrate: the database is newer than this code
+        raise click.ClickException(str(exc)) from None
     finally:
         timer.cancel()
     return index
