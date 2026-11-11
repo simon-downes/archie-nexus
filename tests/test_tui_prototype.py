@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from archie_cli.tui import transcript_view
+from archie_cli.tui.conversation import UserMessage as UserMessageRow
 from archie_cli.tui.prototype import app as proto_app
 from archie_cli.tui.prototype import data, rows
 from archie_cli.tui.prototype.app import PrototypeApp
@@ -291,6 +292,28 @@ def test_long_paths_lose_their_middle():
     assert len(second) == 40 and "…" in second and second.endswith("prototype/data.py")
 
 
+def test_tool_names_are_blue():
+    line = rows.render_row(_tool("read", {"path": "a.py"}), 80)
+    name = line.plain.index("Read")
+    assert any(
+        span.start <= name < span.end and "#5fafff" in str(span.style) for span in line.spans
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_messages_have_no_header(home, monkeypatch):
+    monkeypatch.setattr(proto_app, "BACKGROUND_FINISH_AFTER", 3600)
+    sessions = data.discover(home, limit=10)
+    app = PrototypeApp(sessions)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.5)
+        messages = list(app.query(rows.PlainUserMessage))
+        texts = [str(m.query_one("Static").render()) for m in messages]
+
+    assert messages and all("You" not in text for text in texts)
+    assert any(text.startswith("task number") for text in texts)
+
+
 def test_question_and_task_rows():
     question = _tool("question", {"question": "Which?"}, "User selected option 1: A coding choice")
     assert _lines(question) == ["● Question · → A coding choice", "╰ Which?"]
@@ -305,14 +328,16 @@ def test_question_and_task_rows():
 
 
 @pytest.mark.asyncio
-async def test_two_line_rows_are_restored_when_the_app_exits(home, monkeypatch):
+async def test_prototype_rows_are_restored_when_the_app_exits(home, monkeypatch):
     monkeypatch.setattr(proto_app, "BACKGROUND_FINISH_AFTER", 3600)
     original = transcript_view.ToolRow
     app = PrototypeApp(data.discover(home, limit=10))
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.2)
         assert transcript_view.ToolRow is rows.TwoLineToolRow
+        assert transcript_view.UserMessage is rows.PlainUserMessage
     assert transcript_view.ToolRow is original
+    assert transcript_view.UserMessage is UserMessageRow
 
 
 @pytest.mark.asyncio

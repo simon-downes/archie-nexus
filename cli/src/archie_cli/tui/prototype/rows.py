@@ -1,4 +1,6 @@
-"""Two-line tool rows for the prototype's transcripts (plans/tui-tool-rows.md).
+"""Transcript rows for the prototype: two-line tool rows and plain user messages.
+
+Tool rows follow plans/tui-tool-rows.md.
 
 Every tool call is two lines::
 
@@ -10,9 +12,11 @@ failed call its error in red. Line 2 is what the call acted on: a path, pattern,
 URL, query, or for shell and exec a ``description`` input when the call has one (a
 proposed parameter). Diffs and output previews stay in the tool detail view.
 
-The attach TUI's row widget and renderer live in ``archie_cli.tui.transcript_view``
-and are shared, so the app swaps these in while it runs and puts the originals back
-when it exits.
+User messages drop the attach TUI's "▶ You" header; their left rule marks them.
+
+The attach TUI's row widgets live in ``archie_cli.tui.transcript_view`` and are
+shared, so the app swaps these in while it runs and puts the originals back when it
+exits.
 """
 
 from __future__ import annotations
@@ -31,12 +35,16 @@ from archie_shared.tool_summaries import (
 )
 from archie_shared.transcript import ToolNode
 from rich.text import Text
+from textual.app import ComposeResult
+from textual.widgets import Static
 
 from archie_cli.tui import theme, transcript_view
+from archie_cli.tui.conversation import UserMessage
 
 WORKSPACE = "/workspace"
 CONNECTOR = "╰ "
 TARGET_STYLE = "#9a9a9a"  # between the muted metrics and normal text
+TOOL_NAME_STYLE = "bold #5fafff"  # bright blue, from the same xterm-256 range as theme.ANSWER
 
 NAMES = {
     "read": "Read",
@@ -446,7 +454,7 @@ def _cut_middle(text: str, width: int) -> str:
 def render_row(tool: ToolNode, width: int = 120) -> Text:
     """The two lines for ``tool`` at ``width`` columns."""
     parts = row_parts(tool)
-    line1 = Text.assemble(_glyph(tool, parts), " ", (parts.name, "bold"))
+    line1 = Text.assemble(_glyph(tool, parts), " ", (parts.name, TOOL_NAME_STYLE))
     for fact in parts.facts:
         line1.append(" · ", style=theme.MUTED)
         line1.append(fact, style=theme.MUTED)
@@ -479,12 +487,20 @@ class TwoLineToolRow(transcript_view.ToolRow):
         self.refresh()
 
 
+class PlainUserMessage(UserMessage):
+    """A user message without the "▶ You" header: just the text beside its left rule."""
+
+    def compose(self) -> ComposeResult:
+        yield Static(Text(self._content))
+
+
 def install() -> Callable[[], None]:
-    """Draw tool rows with ``TwoLineToolRow`` until the returned undo is called."""
-    previous = transcript_view.ToolRow
+    """Use the prototype's tool rows and user messages until the returned undo is called."""
+    previous = transcript_view.ToolRow, transcript_view.UserMessage
     transcript_view.ToolRow = TwoLineToolRow
+    transcript_view.UserMessage = PlainUserMessage
 
     def restore() -> None:
-        transcript_view.ToolRow = previous
+        transcript_view.ToolRow, transcript_view.UserMessage = previous
 
     return restore

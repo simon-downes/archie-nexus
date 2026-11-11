@@ -39,7 +39,6 @@ from archie_cli.tui.conversation import (
     CancelledMessage,
     ErrorMessage,
     StreamingMessage,
-    UserMessage,
     format_cost,
 )
 from archie_cli.tui.input import MessageInput
@@ -468,7 +467,7 @@ class PrototypeApp(App):
         view = self._views.get(session.session_id)
         if view is None:
             return
-        view.add_local(lambda: UserMessage(content))
+        view.add_local(lambda: rows.PlainUserMessage(content))
         view.scroll_end(animate=False)
         self._set_state(session, "working")
         self._replies[session.session_id] = self._reply_worker(session)
