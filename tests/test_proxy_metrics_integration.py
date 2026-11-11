@@ -10,9 +10,11 @@ from unittest.mock import patch
 import pytest
 from archie_orchestrator import proxy
 from archie_orchestrator.app import app
+from archie_orchestrator.docker import RunningContainer
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from starlette.testclient import TestClient
+
+from tests.session_fakes import serve
 
 
 @pytest.fixture(autouse=True)
@@ -21,12 +23,11 @@ def _app_state():
     yield
 
 
-def _make_session(session_id: str = "proj-01abc12345") -> SessionDescriptor:
-    return SessionDescriptor(
+def _make_session(session_id: str = "proj-01abc12345") -> RunningContainer:
+    return RunningContainer(
         session_id=session_id,
         container_name=f"archie-{session_id}",
         port=32771,
-        raw_docker_status="Up",
     )
 
 
@@ -85,7 +86,7 @@ def test_llm_request_frame_forwarded_unchanged():
     session = _make_session()
     frame = _llm_request_frame()
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", _make_ws_backend([frame])),
     ):
         client = TestClient(app, raise_server_exceptions=False)

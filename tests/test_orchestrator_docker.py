@@ -3,7 +3,13 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from archie_orchestrator.docker import list_sessions
+import pytest
+from archie_orchestrator.docker import (
+    DockerError,
+    RunningContainer,
+    container_running,
+    list_sessions,
+)
 
 
 def _make_run_result(stdout: str = "", returncode: int = 0) -> MagicMock:
@@ -11,6 +17,7 @@ def _make_run_result(stdout: str = "", returncode: int = 0) -> MagicMock:
     mock = MagicMock()
     mock.returncode = returncode
     mock.stdout = stdout
+    mock.stderr = ""
     return mock
 
 
@@ -30,7 +37,7 @@ def _port_result(port: str | None) -> MagicMock:
 
 
 def test_list_sessions_two_archie_containers():
-    """Two archie containers in docker ps → two SessionDescriptors."""
+    """Two archie containers in docker ps → two RunningContainers."""
     ps_output = "\n".join(
         [
             _ps_line("archie-myproject-01abc12345", "Up 3 hours"),
@@ -59,7 +66,8 @@ def test_list_sessions_two_archie_containers():
     assert "myproject-01abc12345" in by_id
     assert by_id["myproject-01abc12345"].port == 32771
     assert by_id["myproject-01abc12345"].container_name == "archie-myproject-01abc12345"
-    assert by_id["myproject-01abc12345"].raw_docker_status == "Up 3 hours"
+    assert by_id["myproject-01abc12345"].docker_status == "Up 3 hours"
+    assert all(isinstance(s, RunningContainer) for s in sessions)
 
     assert "otherapp-01def67890" in by_id
     assert by_id["otherapp-01def67890"].port == 32772
@@ -115,13 +123,39 @@ def test_list_sessions_port_none_when_not_published():
 
 
 def test_list_sessions_docker_ps_failure():
-    """docker ps returning non-zero → returns empty list."""
+    """docker ps returning non-zero → DockerError, not "nothing runs" (082)."""
+    result = _make_run_result(stdout="", returncode=1)
+    result.stderr = "Cannot connect to the Docker daemon"
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=result):
+        with pytest.raises(DockerError, match="Cannot connect to the Docker daemon"):
+            list_sessions()
+
+
+def test_list_sessions_docker_missing_raises_oserror():
+    with patch(
+        "archie_orchestrator.docker.subprocess.run", side_effect=FileNotFoundError("docker")
+    ):
+        with pytest.raises(OSError):
+            list_sessions()
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [(0, "true\n", True), (0, "false\n", False), (1, "", False)],
+)
+def test_container_running(returncode, stdout, expected):
     with patch(
         "archie_orchestrator.docker.subprocess.run",
-        return_value=_make_run_result(stdout="", returncode=1),
-    ):
-        sessions = list_sessions()
-    assert sessions == []
+        return_value=_make_run_result(stdout=stdout, returncode=returncode),
+    ) as run:
+        assert container_running("archie-p-01abc12345") is expected
+    assert run.call_args.args[0] == [
+        "docker",
+        "inspect",
+        "-f",
+        "{{.State.Running}}",
+        "archie-p-01abc12345",
+    ]
 
 
 def test_list_sessions_malformed_json_line():

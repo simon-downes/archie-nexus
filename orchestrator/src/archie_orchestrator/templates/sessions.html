@@ -9,7 +9,6 @@
             <th>Session ID</th>
             <th>Workspace</th>
             <th>Status</th>
-            <th>Port</th>
         </tr>
     </thead>
     <tbody>
@@ -17,8 +16,7 @@
         <tr>
             <td>{{ s.session_id }}</td>
             <td>{{ s.workspace }}</td>
-            <td>{{ s.raw_docker_status }}</td>
-            <td>{{ s.port or "—" }}</td>
+            <td>{{ s.status }}</td>
         </tr>
         {% endfor %}
     </tbody>

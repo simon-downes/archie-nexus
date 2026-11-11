@@ -13,12 +13,12 @@ import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import msgspec
 import websockets
 from archie_shared import __version__
 from archie_shared.events import ErrorNotice, Handshake, SessionStatus, decode_event
-from archie_shared.session import split_id
 from archie_shared.session.accounting import UsageTotals
 from archie_shared.transcript import (
     Change,
@@ -37,8 +37,7 @@ from starlette.responses import HTMLResponse, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from archie_orchestrator import transcript as transcript_html
-from archie_orchestrator.docker import list_sessions
-from archie_orchestrator.proxy import resolve_session
+from archie_orchestrator.proxy import AgentEndpoint, resolve_session
 from archie_orchestrator.session_index import (
     SessionIndex,
     SessionSummary,
@@ -47,6 +46,9 @@ from archie_orchestrator.session_index import (
     summarize_events,
 )
 from archie_orchestrator.session_search import matches, parse_query
+
+if TYPE_CHECKING:
+    from archie_orchestrator.tracker import SessionTracker
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -157,24 +159,14 @@ async def auth_status_page(request: Request) -> HTMLResponse:
 async def sessions_page(request: Request) -> HTMLResponse:
     """GET / — render the session list as HTML.
 
-    Lists all currently running sessions with workspace name, status, and port.
-    Auto-refreshes every 5 seconds via <meta http-equiv="refresh">.
+    Lists every session that has not ended with its workspace and status, from the
+    tracker's records (no Docker call). Auto-refreshes every 5 seconds via
+    <meta http-equiv="refresh">.
     """
-    sessions = list_sessions()
-
-    # Convert SessionDescriptor structs to plain dicts for Jinja2 rendering.
-    # split_id() returns (workspace, ulid_prefix); fall back to raw ID on error.
-    session_data = []
-    for s in sessions:
-        workspace, _ = split_id(s.session_id)
-        session_data.append(
-            {
-                "session_id": s.session_id,
-                "workspace": workspace,
-                "raw_docker_status": s.raw_docker_status,
-                "port": s.port,
-            }
-        )
+    records = await request.app.state.tracker.list()
+    session_data = [
+        {"session_id": r.session_id, "workspace": r.workspace, "status": r.status} for r in records
+    ]
 
     return templates.TemplateResponse(
         request,
@@ -216,13 +208,9 @@ def _session_index(request: Request) -> SessionIndex:
     return index
 
 
-def _active_ids() -> set[str] | None:
-    """Return running session IDs, or None when Docker cannot be queried."""
-    try:
-        return {s.session_id for s in list_sessions()}
-    except OSError as exc:
-        log.warning("Active session lookup failed: %s", exc)
-        return None
+def _active_ids(tracker: SessionTracker) -> set[str]:
+    """Return the IDs of sessions that have not ended (from memory, no Docker call)."""
+    return tracker.live_ids()
 
 
 def _fmt_started(summary: SessionSummary) -> str:
@@ -256,14 +244,9 @@ async def session_list_page(request: Request) -> HTMLResponse:
     q = request.query_params.get("q", "")
     query = parse_query(q)
     index = _session_index(request)
-    summaries, active = await asyncio.gather(
-        asyncio.to_thread(index.summaries, sessions_dir()),
-        asyncio.to_thread(_active_ids),
-    )
+    summaries = await asyncio.to_thread(index.summaries, sessions_dir())
+    active = _active_ids(request.app.state.tracker)
     notices = list(query.notices)
-    if active is None:
-        notices.append("Active status unavailable: Docker could not be queried.")
-        active = set()
     matched = [s for s in summaries if matches(s, query)]
     rows = [_row(s, active) for s in matched[:MAX_ROWS]]
     context = {"q": q, "rows": rows, "total": len(matched), "notices": notices}
@@ -326,7 +309,7 @@ async def session_detail_page(request: Request) -> HTMLResponse:
     path = session_log_path(session_id)
     if path is None:
         return _not_found(request, session_id)
-    active = session_id in (await asyncio.to_thread(_active_ids) or set())
+    active = session_id in _active_ids(request.app.state.tracker)
     body = await asyncio.to_thread(_render_detail, session_id, path, active)
     return HTMLResponse(body, headers={"Content-Security-Policy": VIEWER_CSP})
 
@@ -408,16 +391,18 @@ def _message_for(event, builder: TranscriptBuilder) -> str | None:
     return _sse("fragment", html, event.id if event.persist else None)
 
 
-async def _resolve_live(session_id: str):
+async def _resolve_live(tracker: SessionTracker, session_id: str) -> AgentEndpoint | None:
     try:
-        return await asyncio.to_thread(resolve_session, session_id)
-    except (KeyError, ValueError, OSError) as exc:
+        return resolve_session(tracker, session_id)
+    except (KeyError, ValueError) as exc:
         log.info("Live view: session %s not available: %s", session_id, exc)
         return None
 
 
-async def _live_events(session_id: str, path: Path, cursor: str | None) -> AsyncIterator[str]:
-    session = await _resolve_live(session_id)
+async def _live_events(
+    tracker: SessionTracker, session_id: str, path: Path, cursor: str | None
+) -> AsyncIterator[str]:
+    session = await _resolve_live(tracker, session_id)
     if session is None:
         yield _sse("end", _live_notice("Session is not running."))
         return
@@ -500,7 +485,7 @@ async def session_live(request: Request):
         return _not_found(request, session_id)
     cursor = request.headers.get("last-event-id") or request.query_params.get("after") or None
     return StreamingResponse(
-        _live_events(session_id, path, cursor),
+        _live_events(request.app.state.tracker, session_id, path, cursor),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

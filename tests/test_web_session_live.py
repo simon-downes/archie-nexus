@@ -3,7 +3,7 @@
 import asyncio
 import json
 import re
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -13,8 +13,9 @@ from archie_orchestrator import web
 from archie_orchestrator.app import app
 from archie_shared.events import encode_event
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import serve
 
 SID = "proj-01kx77jkz8"
 LIVE_JS = Path(__file__).parents[1] / "orchestrator/src/archie_orchestrator/static/viewer/live.js"
@@ -25,12 +26,6 @@ def _app_state():
     app.state.config = NexusConfig()
     app.state.start_time = datetime.now(UTC)
     yield
-
-
-def _running(port: int = 32771) -> SessionDescriptor:
-    return SessionDescriptor(
-        session_id=SID, container_name=f"archie-{SID}", port=port, raw_docker_status="Up"
-    )
 
 
 class FakeAgent:
@@ -98,23 +93,15 @@ def _parse_sse(body: str) -> list[dict]:
     return messages
 
 
-async def _live(path, *, agent=None, running=True, headers=None, list_side_effect=None):
-    kwargs = (
-        {"side_effect": list_side_effect}
-        if list_side_effect
-        else {"return_value": [_running()] if running else []}
-    )
-    patches = [patch("archie_orchestrator.proxy.list_sessions", **kwargs)]
-    if agent is not None:
-        patches.append(patch("archie_orchestrator.web.websockets.connect", agent.connect()))
-    for p in patches:
-        p.start()
-    try:
+async def _live(path, *, agent=None, running=True, port=32771, headers=None):
+    with ExitStack() as stack:
+        stack.enter_context(serve(app, {SID: port} if running else None))
+        if agent is not None:
+            stack.enter_context(
+                patch("archie_orchestrator.web.websockets.connect", agent.connect())
+            )
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await asyncio.wait_for(client.get(path, headers=headers or {}), timeout=5)
-    finally:
-        for p in patches:
-            p.stop()
     return resp, _parse_sse(resp.text)
 
 
@@ -314,19 +301,20 @@ async def test_not_running_cases(session_logs, case):
     kwargs = {}
     if case == "not-running":
         kwargs["running"] = False
-    elif case == "docker-missing":
-        kwargs["list_side_effect"] = FileNotFoundError("docker")
+    elif case == "docker-missing":  # never asked: the tracker knows it isn't running
+        kwargs["running"] = False
     elif case == "no-port":
-        kwargs["list_side_effect"] = lambda: [
-            SessionDescriptor(session_id=SID, container_name="c", port=None, raw_docker_status="Up")
-        ]
+        kwargs["port"] = None
 
     @asynccontextmanager
     async def refusing(url, **kw):
         raise ConnectionRefusedError("refused")
         yield  # pragma: no cover
 
-    with patch("archie_orchestrator.web.websockets.connect", refusing):
+    with (
+        patch("archie_orchestrator.web.websockets.connect", refusing),
+        patch("archie_orchestrator.docker.subprocess.run", side_effect=FileNotFoundError("docker")),
+    ):
         resp, messages = await _live(f"/sessions/{SID}/live", **kwargs)
 
     assert resp.status_code == 200

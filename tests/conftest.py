@@ -27,6 +27,16 @@ from archie_shared.events import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_archie_home(tmp_path_factory, monkeypatch):
+    """Point ARCHIE_HOME_DIR at a fresh directory for every test.
+
+    Nothing a test runs (the orchestrator lifespan included) may create or import into
+    the real ``~/.nexus/archie.db``. Tests that set the variable themselves override this.
+    """
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path_factory.mktemp("archie-home")))
+
+
 @pytest.fixture
 def make_llm_request() -> Callable[..., LLMRequest]:
     """Factory for `LLMRequest` events with defaults.

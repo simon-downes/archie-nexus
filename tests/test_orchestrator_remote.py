@@ -11,9 +11,11 @@ from unittest.mock import patch
 
 import pytest
 from archie_orchestrator.app import app
+from archie_orchestrator.docker import RunningContainer
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import record, serve
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -26,12 +28,11 @@ def _app_state():
     yield
 
 
-def _make_session(session_id: str = "proj-01abc12345", port: int = 32771) -> SessionDescriptor:
-    return SessionDescriptor(
+def _make_session(session_id: str = "proj-01abc12345", port: int = 32771) -> RunningContainer:
+    return RunningContainer(
         session_id=session_id,
         container_name=f"archie-{session_id}",
         port=port,
-        raw_docker_status="Up",
     )
 
 
@@ -53,7 +54,7 @@ async def test_health_accessible_from_any_client():
 async def test_get_sessions_accessible_from_remote():
     """GET /sessions returns session list (simulating remote client)."""
     sessions = [_make_session()]
-    with patch("archie_orchestrator.api.list_sessions", return_value=sessions):
+    with serve(app, {s.session_id: s.port for s in sessions}):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://10.0.0.2"
         ) as client:
@@ -69,7 +70,7 @@ async def test_get_sessions_accessible_from_remote():
 async def test_response_bodies_contain_no_hardcoded_localhost():
     """Session list responses do not embed localhost/127.0.0.1 addresses."""
     sessions = [_make_session(port=32771)]
-    with patch("archie_orchestrator.api.list_sessions", return_value=sessions):
+    with serve(app, {s.session_id: s.port for s in sessions}):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/api/sessions")
 
@@ -123,7 +124,7 @@ async def test_proxy_status_forwards_to_loopback(tmp_path):
             return mock
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.httpx.AsyncClient", _FakeAsyncClient),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -154,7 +155,7 @@ async def test_archie_host_ls_queries_correct_address(monkeypatch, tmp_path):
 
     sessions_resp = MagicMock()
     sessions_resp.status_code = 200
-    sessions_resp.content = msgspec.json.encode([_make_session()])
+    sessions_resp.content = msgspec.json.encode([record("proj-01abc12345")])
     sessions_resp.raise_for_status = MagicMock()
 
     with patch("archie_cli.cli.httpx") as mock_httpx:

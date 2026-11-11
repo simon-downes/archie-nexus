@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from archie_orchestrator import configure_logging
 from archie_orchestrator.app import app
+from archie_orchestrator.docker import RunningContainer
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
+
+from tests.session_fakes import FakeRuntime, running, serve, use_runtime
 
 # ---------------------------------------------------------------------------
 # Shared fixture — prime app state before each test
@@ -21,12 +23,12 @@ def _app_state():
     yield
 
 
-def _make_session(session_id: str = "proj-01abc12345") -> SessionDescriptor:
-    return SessionDescriptor(
+def _make_session(session_id: str = "proj-01abc12345") -> RunningContainer:
+    return RunningContainer(
         session_id=session_id,
         container_name=f"archie-{session_id}",
         port=32771,
-        raw_docker_status="Up 5 minutes",
+        docker_status="Up 5 minutes",
     )
 
 
@@ -162,10 +164,10 @@ def test_stop_session_logs_info(caplog):
 @pytest.mark.asyncio
 async def test_startup_logs_discovered_sessions(caplog):
     """App startup logs the count of discovered sessions."""
-    sessions = [_make_session("proj-01abc12345"), _make_session("proj-02def67890")]
+    runtime = FakeRuntime([running("proj-01abc12345", None), running("proj-02def67890", None)])
 
     with (
-        patch("archie_orchestrator.app.list_sessions", return_value=sessions),
+        use_runtime(app, runtime),
         patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
         caplog.at_level(logging.INFO, logger="archie_orchestrator.app"),
     ):
@@ -215,7 +217,7 @@ async def test_proxy_stream_logs_connect_disconnect(caplog):
             pass
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", _FakeConnect()),
         caplog.at_level(logging.INFO, logger="archie_orchestrator.proxy"),
     ):
@@ -238,7 +240,7 @@ def test_docker_list_sessions_debug_log(caplog):
     with (
         patch(
             "archie_orchestrator.docker.subprocess.run",
-            return_value=MagicMock(returncode=1, stdout="", stderr=""),
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
         ),
         caplog.at_level(logging.DEBUG, logger="archie_orchestrator.docker"),
     ):

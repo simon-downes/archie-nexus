@@ -12,11 +12,8 @@ import time
 import urllib.error
 import urllib.request
 
-from archie_shared.session import (
-    CONTAINER_PREFIX,
-    SessionDescriptor,
-    parse_container_name,
-)
+import msgspec
+from archie_shared.session import CONTAINER_PREFIX, parse_container_name
 
 CONTAINER_PORT = "8080"
 # Container-side username. Fixed at image build time (Dockerfile ARG USERNAME),
@@ -51,12 +48,28 @@ class DockerError(Exception):
         super().__init__(f"Docker command failed ({self.command}): {stderr.strip()}")
 
 
+class RunningContainer(msgspec.Struct, frozen=True):
+    """A running archie container as seen by ``docker ps`` (orchestrator-internal).
+
+    Attributes:
+        session_id: The session identifier parsed from the container name.
+        container_name: Docker container name (archie-{session_id}).
+        port: Published host port, or None if not yet mapped.
+        docker_status: Raw Status string from docker ps (for logs).
+    """
+
+    session_id: str
+    container_name: str
+    port: int | None = None
+    docker_status: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Low-level subprocess helpers
 # ---------------------------------------------------------------------------
 
 
-def _container_running(name: str) -> bool:
+def container_running(name: str) -> bool:
     """Return True if the named container is currently running."""
     cmd = ["docker", "inspect", "-f", "{{.State.Running}}", name]
     log.debug("docker %s", " ".join(cmd[1:]))
@@ -152,7 +165,7 @@ def wait_for_ready(
     port: str | None = None
 
     while time.monotonic() < deadline:
-        if not _container_running(name):
+        if not container_running(name):
             debug_cmd = [a for a in docker_run_cmd if a != "--rm"]
             raise DockerError(
                 command=["docker", "inspect", name],
@@ -193,15 +206,21 @@ def _query_port(name: str) -> str | None:
     return line.rsplit(":", 1)[-1]
 
 
-def list_sessions() -> list[SessionDescriptor]:
-    """List running archie containers as typed SessionDescriptors.
+def list_sessions() -> list[RunningContainer]:
+    """List running archie containers.
 
     Identifies archie-nexus containers by name pattern via parse_container_name.
+
+    Raises:
+        DockerError: If ``docker ps`` exits non-zero (an empty list means none run).
+        OSError: If the docker CLI cannot be executed.
     """
     cmd = ["docker", "ps", "--filter", f"name={CONTAINER_PREFIX}", "--format", "{{json .}}"]
     log.debug("docker ps --filter name=%s", CONTAINER_PREFIX)
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        raise DockerError(command=cmd[:2], stderr=result.stderr or "", returncode=result.returncode)
+    if not result.stdout.strip():
         return []
 
     sessions = []
@@ -216,11 +235,11 @@ def list_sessions() -> list[SessionDescriptor]:
             continue
         port_str = _query_port(name)
         sessions.append(
-            SessionDescriptor(
+            RunningContainer(
                 session_id=session_id,
                 container_name=name,
                 port=int(port_str) if port_str else None,
-                raw_docker_status=data.get("Status", ""),
+                docker_status=data.get("Status", ""),
             )
         )
     return sessions

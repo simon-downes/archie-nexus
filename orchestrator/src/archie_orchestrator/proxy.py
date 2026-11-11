@@ -10,16 +10,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 import websockets
-from archie_shared.session import SessionDescriptor
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from archie_orchestrator.docker import list_sessions
+if TYPE_CHECKING:
+    from archie_orchestrator.tracker import SessionTracker
 
 log = logging.getLogger(__name__)
 
@@ -40,20 +42,27 @@ def get_active_ws_connections() -> int:
 # ---------------------------------------------------------------------------
 
 
-def resolve_session(session_id: str) -> SessionDescriptor:
-    """Find a running session by exact ID.
+@dataclass(frozen=True)
+class AgentEndpoint:
+    """Where a running session's agent listens on the host loopback."""
+
+    session_id: str
+    port: int
+
+
+def resolve_session(tracker: SessionTracker, session_id: str) -> AgentEndpoint:
+    """Find a running session's agent by exact ID, from the tracker's memory (no Docker).
 
     Raises:
         KeyError: No session with that ID is running.
         ValueError: Session is running but has no port yet (still starting).
     """
-    sessions = list_sessions()
-    for s in sessions:
-        if s.session_id == session_id:
-            if s.port is None:
-                raise ValueError(f"Session '{session_id}' has no port (still starting?)")
-            return s
-    raise KeyError(f"No session with ID '{session_id}'")
+    if tracker.live(session_id) is None:
+        raise KeyError(f"No session with ID '{session_id}'")
+    port = tracker.port(session_id)
+    if port is None:
+        raise ValueError(f"Session '{session_id}' has no port (still starting?)")
+    return AgentEndpoint(session_id=session_id, port=port)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +71,7 @@ def resolve_session(session_id: str) -> SessionDescriptor:
 
 
 async def forward_http(
-    session: SessionDescriptor,
+    session: AgentEndpoint,
     path: str,
     method: str = "GET",
     body: bytes = b"",
@@ -71,7 +80,7 @@ async def forward_http(
     """Forward an HTTP request to a session container and return the response.
 
     Args:
-        session: Resolved SessionDescriptor (must have a port).
+        session: The resolved agent endpoint.
         path: URL path on the agent (e.g. "/status").
         method: HTTP method ("GET" or "POST").
         body: Request body bytes (for POST).
@@ -117,7 +126,7 @@ async def proxy_status(request: Request) -> Response:
     """GET /api/sessions/{session_id}/status — proxy to session /status."""
     session_id = request.path_params["session_id"]
     try:
-        session = resolve_session(session_id)
+        session = resolve_session(request.app.state.tracker, session_id)
     except KeyError:
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
@@ -129,7 +138,7 @@ async def proxy_events(request: Request) -> Response:
     """Proxy canonical event replay, forwarding the cursor unchanged."""
     session_id = request.path_params["session_id"]
     try:
-        session = resolve_session(session_id)
+        session = resolve_session(request.app.state.tracker, session_id)
     except KeyError:
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
@@ -149,7 +158,7 @@ async def proxy_stream(websocket: WebSocket) -> None:
     session_id = websocket.path_params["session_id"]
 
     try:
-        session = resolve_session(session_id)
+        session = resolve_session(websocket.app.state.tracker, session_id)
     except KeyError:
         await websocket.close(code=4004, reason="Session not found")
         return

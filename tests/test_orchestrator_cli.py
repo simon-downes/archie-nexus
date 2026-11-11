@@ -5,22 +5,25 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 from archie_cli.cli import ls_cmd, main
-from archie_shared.session import SessionDescriptor
+from archie_shared.session import SessionDescriptor, split_id
 from click.testing import CliRunner
 
 # --- Helpers ---
 
 
 def _make_sessions(*args) -> list[SessionDescriptor]:
-    """Build a list of SessionDescriptors from (session_id, port, status) tuples."""
+    """Build SessionDescriptors from (session_id, status, name or None) tuples."""
     return [
         SessionDescriptor(
             session_id=sid,
-            container_name=f"archie-{sid}",
-            port=port,
-            raw_docker_status=status,
+            workspace=split_id(sid)[0],
+            backend="native",
+            name=name or sid,
+            name_fixed=name is not None,
+            status=status,
+            started_at="2026-07-01T10:00:00+00:00",
         )
-        for sid, port, status in args
+        for sid, status, name in args
     ]
 
 
@@ -41,8 +44,8 @@ def test_ls_displays_sessions(monkeypatch, tmp_path):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
 
     sessions = _make_sessions(
-        ("myproject-01abc12345", 32771, "Up 3 hours"),
-        ("otherapp-01def67890", None, "Up 10 minutes"),
+        ("myproject-01abc12345", "working", "Review PR"),
+        ("otherapp-01def67890", "starting", None),
     )
     mock_response = _http_response(sessions)
 
@@ -53,14 +56,13 @@ def test_ls_displays_sessions(monkeypatch, tmp_path):
         result = runner.invoke(ls_cmd)
 
     assert result.exit_code == 0
-    assert "myproject-01abc12345" in result.output
-    assert "myproject" in result.output
-    assert "Up 3 hours" in result.output
-    assert "32771" in result.output
-    assert "otherapp-01def67890" in result.output
-    assert "Up 10 minutes" in result.output
-    # No port for second session
-    assert "-" in result.output
+    lines = result.output.splitlines()
+    assert lines[0].split() == ["SESSION", "ID", "WORKSPACE", "STATUS", "NAME"]
+    first = next(line for line in lines if line.startswith("myproject-01abc12345"))
+    second = next(line for line in lines if line.startswith("otherapp-01def67890"))
+    assert first.split() == ["myproject-01abc12345", "myproject", "working", "Review", "PR"]
+    # An unfixed name (the session ID) is not repeated.
+    assert second.split() == ["otherapp-01def67890", "otherapp", "starting"]
 
 
 def test_ls_no_sessions(monkeypatch, tmp_path):

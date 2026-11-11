@@ -1,6 +1,5 @@
 """Route layout: JSON under API_PREFIX, pages at the root, no old paths."""
 
-from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -13,6 +12,7 @@ from archie_shared.schemas import NexusConfig
 from httpx import ASGITransport, AsyncClient
 from starlette.routing import Mount
 
+from tests.session_fakes import serve
 from tests.test_orchestrator_auth_oauth import FakeTransport
 
 GOOGLE = NexusConfig(plugins={"google": PluginConfig(auth=PluginAuthConfig(client_id="client"))})
@@ -136,7 +136,7 @@ async def test_former_ui_pages_are_gone(path):
 
 @pytest.mark.asyncio
 async def test_sessions_root_path_is_the_log_viewer_page():
-    with patch("archie_orchestrator.web.list_sessions", return_value=[]):
+    with serve(app):
         async with _client() as http:
             response = await http.get("/sessions")
     assert response.status_code == 200

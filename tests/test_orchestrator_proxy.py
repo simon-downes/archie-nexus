@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from archie_orchestrator.app import app
+from archie_orchestrator.docker import RunningContainer
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import serve
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -25,12 +27,11 @@ def http_client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-def _running_session(session_id: str = "proj-01abc12345", port: int = 32771) -> SessionDescriptor:
-    return SessionDescriptor(
+def _running_session(session_id: str = "proj-01abc12345", port: int = 32771) -> RunningContainer:
+    return RunningContainer(
         session_id=session_id,
         container_name=f"archie-{session_id}",
         port=port,
-        raw_docker_status="Up",
     )
 
 
@@ -58,7 +59,7 @@ async def test_proxy_status_success(http_client):
     mock_client.get = AsyncMock(return_value=backend_resp)
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
@@ -70,7 +71,7 @@ async def test_proxy_status_success(http_client):
 
 async def test_proxy_status_session_not_found(http_client):
     """GET /sessions/{id}/status with unknown session → 404."""
-    with patch("archie_orchestrator.proxy.list_sessions", return_value=[]):
+    with serve(app):
         async with http_client as client:
             response = await client.get("/api/sessions/unknown-01abc12345/status")
 
@@ -89,7 +90,7 @@ async def test_proxy_status_backend_unreachable(http_client):
     mock_client.get = AsyncMock(side_effect=real_httpx.ConnectError("refused"))
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
@@ -109,7 +110,7 @@ async def test_proxy_status_backend_protocol_disconnect(http_client):
     mock_client.get = AsyncMock(side_effect=real_httpx.RemoteProtocolError("disconnected"))
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:
@@ -130,7 +131,7 @@ async def test_proxy_status_backend_timeout(http_client):
     mock_client.get = AsyncMock(side_effect=real_httpx.TimeoutException("timeout"))
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=mock_client),
     ):
         async with http_client as client:

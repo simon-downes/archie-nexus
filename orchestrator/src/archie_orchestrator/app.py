@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from archie_shared.config import home_dir
 from archie_shared.protocol import API_PREFIX
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -24,9 +25,10 @@ from archie_orchestrator import api, configure_logging, pages
 from archie_orchestrator.auth import AuthService
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.credential_refresh import credential_refresh_loop
-from archie_orchestrator.docker import list_sessions
 from archie_orchestrator.metrics import MetricsIndex, default_index
 from archie_orchestrator.proxy import get_active_ws_connections
+from archie_orchestrator.store import SessionStore, db_path
+from archie_orchestrator.tracker import DockerRuntime, SessionTracker
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -72,9 +74,13 @@ async def lifespan(app: Starlette):
     # config_source so edits apply without restarting the orchestrator.
     config_source.get()
     app.state.auth_service = AuthService(config_source.latest)
-    # list_sessions() shells out to docker (blocking) — keep it off the loop.
-    sessions = await asyncio.to_thread(list_sessions)
-    log.info("Discovered %d running sessions", len(sessions))
+    # Migrate archie.db, reconcile with Docker and follow running sessions before the
+    # metrics loop takes its lock (D13). Tests inject a fake runtime (D16).
+    runtime = getattr(app.state, "runtime", None) or DockerRuntime()
+    tracker = SessionTracker(SessionStore(db_path(home_dir())), runtime)
+    await tracker.start()
+    app.state.tracker = tracker
+    log.info("Discovered %d running sessions", len(tracker.live_ids()))
 
     # Keep the metrics index in step with the session logs.
     metrics_task = asyncio.create_task(_metrics_sync_loop(default_index()))
@@ -100,6 +106,7 @@ async def lifespan(app: Starlette):
             await task
         except asyncio.CancelledError:
             pass
+    await tracker.close()
 
     active = get_active_ws_connections()
     log.info("Orchestrator stopping (%d active connections)", active)

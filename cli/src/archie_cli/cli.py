@@ -5,6 +5,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +14,7 @@ import click
 import httpx
 import uvicorn
 from archie_shared.protocol import API_PREFIX
-from archie_shared.session import SessionDescriptor, split_id
+from archie_shared.session import SessionDescriptor
 from rich.console import Console
 
 from archie_cli.project import detect_project_dir
@@ -22,6 +23,9 @@ from archie_cli.project import detect_project_dir
 # Needed by `archie build` (direct Docker command — not routed via orchestrator).
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _IMAGE_TAG = "archie:latest"
+# `archie start` polls the new session's record while it is starting (082 D22).
+START_POLL_INTERVAL_S = 0.5
+START_TIMEOUT_S = 60.0
 
 
 @click.group()
@@ -57,7 +61,7 @@ main.add_command(stats)
 
 @contextmanager
 def _startup_status(kiro: bool) -> Iterator[None]:
-    """Display terminal-aware activity feedback for the blocking session start."""
+    """Display terminal-aware activity feedback while the session starts."""
     message = "Starting Kiro session…" if kiro else "Starting session…"
     console = Console(stderr=True)
     if not console.is_terminal:
@@ -158,36 +162,27 @@ def start(detach: bool, kiro: bool, workspace: str | None):
             response = httpx.post(
                 f"{url}{API_PREFIX}/sessions",
                 json={"workspace": ws_name, **({"backend": "kiro"} if kiro else {})},
-                timeout=60.0,
+                timeout=30.0,
             )
         except httpx.HTTPError as exc:
             raise click.ClickException(
                 f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
             ) from None
 
-    if response.status_code == 400:
-        raise click.ClickException(_error_body(response, "Bad request"))
-    if response.status_code != 200:
-        raise click.ClickException(
-            f"Orchestrator error ({response.status_code}): {_error_body(response)}"
-        )
-
-    import msgspec
-
-    try:
-        descriptor = msgspec.json.decode(response.content, type=SessionDescriptor)
-    except msgspec.DecodeError as exc:
-        raise click.ClickException(f"Unexpected response from orchestrator: {exc}") from None
-
-    if kiro:
-        _require_kiro_session(url, descriptor.session_id)
+        if response.status_code == 400:
+            raise click.ClickException(_error_body(response, "Bad request"))
+        if response.status_code != 202:
+            raise click.ClickException(
+                f"Orchestrator error ({response.status_code}): {_error_body(response)}"
+            )
+        descriptor = _decode_session(response)
+        descriptor = _wait_until_started(url, descriptor)
 
     # Always print session ID (visible in scrollback if TUI crashes)
     click.echo(f"Session: {descriptor.session_id}")
 
     if detach:
         click.echo(f"Container: {descriptor.container_name}")
-        click.echo(f"Agent: http://{profile.host}:{descriptor.port}")
     else:
         from archie_cli.tui.app import ArchieApp
 
@@ -199,29 +194,46 @@ def start(detach: bool, kiro: bool, workspace: str | None):
         app.run()
 
 
-def _require_kiro_session(url: str, session_id: str) -> None:
-    """Fail, stopping the session, unless the agent is running on Kiro.
+def _decode_session(response: httpx.Response) -> SessionDescriptor:
+    """Decode one session record from a response. Raises ClickException on bad JSON."""
+    import msgspec
 
-    An orchestrator from before ``--kiro`` ignores ``backend`` and starts a native session;
-    a Kiro agent reports a ``kiro/`` model key.
+    try:
+        return msgspec.json.decode(response.content, type=SessionDescriptor)
+    except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+        raise click.ClickException(f"Unexpected response from orchestrator: {exc}") from None
+
+
+def _wait_until_started(url: str, descriptor: SessionDescriptor) -> SessionDescriptor:
+    """Poll a new session's record until it leaves ``starting`` (082 D22).
+
+    Returns the record once the agent is ready. Raises ClickException (exit 1) when the
+    start failed (with the stored error), the session ended another way, or it is still
+    starting after START_TIMEOUT_S; the session is not stopped in that case.
     """
-    from archie_shared.kiro import kiro_model_id
-
-    try:
-        response = httpx.get(f"{url}{API_PREFIX}/sessions/{session_id}/status", timeout=10.0)
-        model = response.json().get("model", "") if response.status_code == 200 else ""
-    except (httpx.HTTPError, ValueError, AttributeError):
-        model = ""
-    if kiro_model_id(model or "") is not None:
-        return
-    try:
-        httpx.delete(f"{url}{API_PREFIX}/sessions/{session_id}", timeout=15.0)
-    except httpx.HTTPError:
-        pass
-    raise click.ClickException(
-        f"Session {session_id} did not start on Kiro (agent model: {model or 'unknown'}); "
-        "it was stopped. Restart the orchestrator (archie serve) so it supports --kiro."
-    )
+    deadline = time.monotonic() + START_TIMEOUT_S
+    while descriptor.status == "starting":
+        if time.monotonic() >= deadline:
+            raise click.ClickException(
+                f"Session is still starting after {START_TIMEOUT_S:.0f} s; check archie ls"
+            )
+        time.sleep(START_POLL_INTERVAL_S)
+        try:
+            response = httpx.get(f"{url}{API_PREFIX}/sessions/{descriptor.session_id}", timeout=5.0)
+        except httpx.HTTPError as exc:
+            raise click.ClickException(
+                f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
+            ) from None
+        if response.status_code != 200:
+            raise click.ClickException(
+                f"Orchestrator error ({response.status_code}): {_error_body(response)}"
+            )
+        descriptor = _decode_session(response)
+    if descriptor.status == "failed":
+        raise click.ClickException(descriptor.error or "Session failed to start")
+    if descriptor.ended:
+        raise click.ClickException(f"Session ended during startup ({descriptor.status})")
+    return descriptor
 
 
 def _fetch_sessions(url: str) -> list[SessionDescriptor]:
@@ -242,7 +254,7 @@ def _fetch_sessions(url: str) -> list[SessionDescriptor]:
 
     try:
         return msgspec.json.decode(response.content, type=list[SessionDescriptor])
-    except msgspec.DecodeError as exc:
+    except (msgspec.DecodeError, msgspec.ValidationError) as exc:
         raise click.ClickException(f"Unexpected response from orchestrator: {exc}") from None
 
 
@@ -479,7 +491,7 @@ def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -
 
     try:
         sessions = msgspec.json.decode(response.content, type=list[SessionDescriptor])
-    except msgspec.DecodeError:
+    except (msgspec.DecodeError, msgspec.ValidationError):
         click.echo(f"  ✗ Unexpected response from {url}")
         return
 
@@ -487,8 +499,8 @@ def _print_sessions_for_profile(url: str, label: str, show_label: bool = True) -
         click.echo("No running sessions.")
         return
 
-    click.echo(f"{'SESSION ID':<40} {'WORKSPACE':<20} {'STATUS':<20} {'PORT'}")
-    click.echo(f"{'-' * 40} {'-' * 20} {'-' * 20} {'-' * 6}")
+    click.echo(f"{'SESSION ID':<40} {'WORKSPACE':<20} {'STATUS':<10} {'NAME'}")
+    click.echo(f"{'-' * 40} {'-' * 20} {'-' * 10} {'-' * 20}")
     for s in sessions:
         click.echo(_format_session_row(s))
 
@@ -604,19 +616,17 @@ def stop(session_id: str | None):
 
 def _format_session_row(session: SessionDescriptor, prefix: str = "") -> str:
     """Format one session consistently for lists and selection prompts."""
-    workspace, _ = split_id(session.session_id)
-    port_str = str(session.port) if session.port else "-"
+    name = session.name if session.name_fixed else ""
     return (
-        f"{prefix}{session.session_id:<40} {workspace:<20} "
-        f"{session.raw_docker_status:<20} {port_str}"
-    )
+        f"{prefix}{session.session_id:<40} {session.workspace:<20} {session.status:<10} {name}"
+    ).rstrip()
 
 
 def _pick_session(sessions: list[SessionDescriptor]) -> SessionDescriptor:
     """Display a numbered session table and prompt the user to choose."""
     click.echo()
-    click.echo(f"{'#':<4} {'SESSION ID':<40} {'WORKSPACE':<20} {'STATUS':<20} {'PORT'}")
-    click.echo(f"{'-' * 4} {'-' * 40} {'-' * 20} {'-' * 20} {'-' * 6}")
+    click.echo(f"{'#':<4} {'SESSION ID':<40} {'WORKSPACE':<20} {'STATUS':<10} {'NAME'}")
+    click.echo(f"{'-' * 4} {'-' * 40} {'-' * 20} {'-' * 10} {'-' * 20}")
     for i, s in enumerate(sessions, 1):
         click.echo(_format_session_row(s, prefix=f"{i:<4} "))
     click.echo()

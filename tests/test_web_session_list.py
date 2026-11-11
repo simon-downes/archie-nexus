@@ -8,8 +8,9 @@ import pytest
 from archie_orchestrator.app import app
 from archie_orchestrator.web import VIEWER_CSP
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import serve
 
 
 @pytest.fixture(autouse=True)
@@ -20,18 +21,8 @@ def _app_state():
     yield
 
 
-def _running(session_id: str) -> SessionDescriptor:
-    return SessionDescriptor(
-        session_id=session_id,
-        container_name=f"archie-{session_id}",
-        port=32771,
-        raw_docker_status="Up",
-    )
-
-
-async def _get(path: str, *, running=(), headers=None, side_effect=None):
-    kwargs = {"side_effect": side_effect} if side_effect else {"return_value": list(running)}
-    with patch("archie_orchestrator.web.list_sessions", **kwargs):
+async def _get(path: str, *, running=(), headers=None):
+    with serve(app, dict.fromkeys(running, 32771)):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             return await client.get(path, headers=headers or {})
 
@@ -97,7 +88,7 @@ async def test_active_marker(session_logs):
     for sid in ("a-01kx5yc7g0", "b-01kx77jkz8"):
         w.write(sid, [w.user("x")])
 
-    resp = await _get("/sessions", running=[_running("b-01kx77jkz8")])
+    resp = await _get("/sessions", running=["b-01kx77jkz8"])
 
     html = resp.text
     row_b = re.search(r'<tr[^>]*data-session-id="b-01kx77jkz8".*?</tr>', html, re.S).group(0)
@@ -107,16 +98,20 @@ async def test_active_marker(session_logs):
 
 
 @pytest.mark.asyncio
-async def test_docker_missing_fails_open(session_logs):
+async def test_active_status_comes_from_the_tracker_not_docker(session_logs):
     w = session_logs
     w.write("a-01kx5yc7g0", [w.user("x")])
 
-    resp = await _get("/sessions", side_effect=FileNotFoundError("docker"))
+    with patch(
+        "archie_orchestrator.docker.subprocess.run", side_effect=FileNotFoundError("docker")
+    ) as run:
+        resp = await _get("/sessions", running=["a-01kx5yc7g0"])
 
+    run.assert_not_called()
     assert resp.status_code == 200
-    assert "Active status unavailable" in resp.text
+    assert "Active status unavailable" not in resp.text
     assert _row_ids(resp.text) == ["a-01kx5yc7g0"]
-    assert 'class="active"' not in resp.text
+    assert 'class="active"' in resp.text
 
 
 @pytest.mark.asyncio

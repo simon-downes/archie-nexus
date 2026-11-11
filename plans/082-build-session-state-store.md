@@ -346,7 +346,7 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 
 ## Milestones
 
-### [ ] M1 — Session records and the read and create API
+### [x] M1 — Session records and the read and create API
 
 - **Approach:** add `store.py` (migration 1 with the import, `SessionStore`) and `tracker.py`
   with `Runtime`/`DockerRuntime`, in-memory live records (D12a), `create()` with the
@@ -377,7 +377,26 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 - **Verify:** `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` passes, including
   new `tests/test_session_store.py`, `tests/test_session_tracker.py` and
   `tests/test_sessions_api.py`; `scripts/dev ruff check .` is clean.
-- **Outcome:**
+- **Outcome:** Built `store.py` (`archie.db`, WAL + busy timeout, `user_version` migrations
+  under the `archie.db.lock` flock, migration 1 with the D7 import, `SessionStore`
+  `insert`/`save`/`get`/`list`/`update`) and `tracker.py` (`Runtime`, `DockerRuntime`,
+  `SessionTracker` with in-memory live records, the D12a write and terminal-retry rules,
+  `create()` with the background `run_start`, a `/stream` subscription applying
+  `session_status`, `start()` = migrate + load + minimal reconcile, `close()`, a listener hook
+  for M4). Reshaped `SessionDescriptor` (+ `SessionRecordStatus`, `TERMINAL_STATUSES`,
+  computed `container_name`); `docker.list_sessions()` returns `RunningContainer` and raises
+  `DockerError`; `container_running()` public; `lifecycle.prepare_start`/`run_start`.
+  `GET /api/sessions[?include=ended]`, `GET /api/sessions/{id}`, `POST` → 202; proxy, `/status`,
+  the live viewer, `/`, `/sessions` and `/sessions/{id}` resolve through the tracker (no
+  Docker); lifespan runs the tracker (`app.state.runtime` honoured). CLI `start` polls per D22,
+  `_require_kiro_session` and the `Agent:` line removed, `ls`/picker rows show
+  `SESSION ID, WORKSPACE, STATUS, NAME`. `tests/conftest.py` isolates `ARCHIE_HOME_DIR`;
+  `tests/session_fakes.py` holds `FakeRuntime`, `FakeAgent`, `make_tracker`/`serve`/
+  `use_runtime`. New tests: `test_session_store.py` (18), `test_session_tracker.py` (19),
+  `test_sessions_api.py` (27); 23 existing test files moved to the tracker/record seams.
+  Evidence: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` → 4900 passed
+  (baseline 4818); `scripts/dev ruff check .` clean; `ruff format --check` on the 39 touched
+  files clean; no `archie.db` appeared in the real `~/.nexus` after the run.
 
 ### [ ] M2 — Turn status, reconcile and ending
 
@@ -447,6 +466,17 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 - **Outcome:**
 
 ## Deviations
+
+- M1: the subscription already ends sessions minimally: when a stream closes it asks
+  `Runtime.is_running` and marks the record `exited` (container gone) or follows again after a
+  fixed 1 s (still running); `stopping`/ended records are not checked. Without it a container
+  that stops (including through `archie stop`, whose DELETE is unchanged until M3) would stay
+  listed as live until the next orchestrator start. M2 replaces the fixed delay with D14's
+  1, 2, 5 s back-off; until M3, a session stopped with `archie stop` ends as `exited`.
+- M1: `SessionStore.save()` (an upsert of the whole record) was added next to
+  `insert`/`get`/`list`/`update`; the tracker writes its in-memory record whole, which is what
+  makes D12a's "retried with the next change" and reconcile adoption work without a separate
+  insert path.
 
 ## Risks
 

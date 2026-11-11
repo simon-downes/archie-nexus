@@ -9,7 +9,10 @@ from archie_shared.session.accounting import (
     scope_inclusive_costs,
 )
 from archie_shared.session.descriptor import (
+    TERMINAL_STATUSES,
+    SessionBackend,
     SessionDescriptor,
+    SessionRecordStatus,
     StatusPayload,
 )
 from archie_shared.session.identity import (
@@ -24,7 +27,10 @@ from archie_shared.session.identity import (
 __all__ = [
     "CONTAINER_PREFIX",
     "SESSION_PATTERN",
+    "TERMINAL_STATUSES",
+    "SessionBackend",
     "SessionDescriptor",
+    "SessionRecordStatus",
     "StatusPayload",
     "container_name",
     "generate_session_id",

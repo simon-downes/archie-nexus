@@ -4,8 +4,9 @@ Callers are code: the CLI, the TUI and agents. Every handler returns JSON (or
 relays the session WebSocket); none renders a template. Paths in :data:`routes`
 are relative to the mount:
 
-  GET    /sessions                        — list running archie sessions
-  POST   /sessions                        — start a new session
+  GET    /sessions                        — session records (?include=ended for all)
+  POST   /sessions                        — start a new session (202, starting)
+  GET    /sessions/{session_id}           — one session record
   DELETE /sessions/{session_id}           — stop a running session
   GET    /sessions/{session_id}/status    — proxy to session /status
   GET    /sessions/{session_id}/events    — proxy to session /events
@@ -36,8 +37,8 @@ from starlette.routing import Route, WebSocketRoute
 
 from archie_orchestrator.auth import AuthError
 from archie_orchestrator.config_source import config_source
-from archie_orchestrator.docker import DockerError, list_sessions
-from archie_orchestrator.lifecycle import BACKENDS, start_session, stop_session
+from archie_orchestrator.docker import DockerError
+from archie_orchestrator.lifecycle import BACKENDS, stop_session
 from archie_orchestrator.proxy import proxy_events, proxy_status, proxy_stream
 
 log = logging.getLogger(__name__)
@@ -47,22 +48,67 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+NAME_MAX_CHARS = 80
+
+
+def _json(value: object, status_code: int = 200) -> Response:
+    return Response(
+        msgspec.json.encode(value), status_code=status_code, media_type="application/json"
+    )
+
+
+def _valid_name(value: object) -> str | None:
+    """A session name trimmed, or None if it isn't a non-blank string of at most 80 chars."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or len(name) > NAME_MAX_CHARS:
+        return None
+    return name
+
+
 async def sessions_get(request: Request) -> Response:
-    """Return running archie sessions as a JSON array of SessionDescriptors."""
-    result = list_sessions()
-    content = msgspec.json.encode(result)
-    return Response(content, media_type="application/json")
+    """Return session records as a JSON array of SessionDescriptors, newest first.
+
+    Sessions that have not ended by default; ``?include=ended`` returns every record.
+    Served from the tracker's memory (and the store for ended ones), never Docker.
+    """
+    include = request.query_params.get("include")
+    if include not in (None, "ended"):
+        return JSONResponse({"error": "Invalid 'include': expected 'ended'"}, status_code=400)
+    try:
+        records = await request.app.state.tracker.list(include_ended=include == "ended")
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    return _json(records)
+
+
+async def session_get(request: Request) -> Response:
+    """Return one session record, or 404 for an unknown ID."""
+    session_id = request.path_params["session_id"]
+    try:
+        record = await request.app.state.tracker.get(session_id)
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    if record is None:
+        return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
+    return _json(record)
 
 
 async def sessions_post(request: Request) -> Response:
     """Start a new agent session.
 
-    Request body: {"workspace": "<name>", "backend": "native" | "kiro"} (backend optional)
+    Request body: ``{"workspace": "<name>", "backend": "native" | "kiro", "name": "<name>"}``
+    (``backend`` and ``name`` optional). The container starts in the background; poll
+    ``GET /api/sessions/{id}`` until the status leaves ``starting``.
 
     Returns:
-        200 + SessionDescriptor on success.
-        400 if workspace key is missing or directory not found.
-        500 on Docker/startup failure.
+        202 + the ``starting`` SessionDescriptor.
+        400 for a bad body, workspace, backend or name (not a string, blank after
+        trimming, or over 80 characters).
+        500 for a config error, a missing image or a failed record insert.
     """
     try:
         body = await request.body()
@@ -84,20 +130,36 @@ async def sessions_post(request: Request) -> Response:
             status_code=400,
         )
 
+    name = None
+    if data.get("name") is not None:
+        name = _valid_name(data["name"])
+        if name is None:
+            return JSONResponse(
+                {
+                    "error": f"Invalid 'name': expected a non-blank string of at most "
+                    f"{NAME_MAX_CHARS} characters"
+                },
+                status_code=400,
+            )
+
     try:
         config = config_source.get()
     except ConfigError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     try:
-        descriptor = await asyncio.to_thread(start_session, workspace, config, backend=backend)
+        record = await request.app.state.tracker.create(
+            workspace, backend=backend, name=name, config=config
+        )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except (DockerError, RuntimeError) as exc:
+    except (DockerError, RuntimeError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
+    except sqlite3.Error as exc:
+        log.error("Session record insert failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
 
-    content = msgspec.json.encode(descriptor)
-    return Response(content, media_type="application/json")
+    return _json(record, status_code=202)
 
 
 async def session_delete(request: Request) -> Response:
@@ -340,6 +402,7 @@ async def auth_credential_delete(request: Request) -> Response:
 routes = [
     Route("/sessions", sessions_get, methods=["GET"]),
     Route("/sessions", sessions_post, methods=["POST"]),
+    Route("/sessions/{session_id}", session_get, methods=["GET"]),
     Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
     Route("/sessions/{session_id}/status", proxy_status, methods=["GET"]),
     Route("/sessions/{session_id}/events", proxy_events, methods=["GET"]),

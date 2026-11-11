@@ -1,0 +1,288 @@
+"""Tests for archie_orchestrator.store — archie.db, migrations and session rows (082)."""
+
+import os
+import sqlite3
+from datetime import UTC, datetime
+
+import pytest
+from archie_orchestrator import store as store_module
+from archie_orchestrator.store import (
+    SessionStore,
+    db_path,
+    id_start_time,
+    import_log,
+    migrate,
+    schema_version,
+)
+from archie_shared.events import PendingQuestion, QuestionOption
+
+from tests.session_fakes import record
+
+SID = "proj-01kx77jkz8"
+MTIME = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
+
+
+def _touch(path, when: datetime = MTIME):
+    stamp = when.timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+@pytest.fixture
+def store(tmp_path) -> SessionStore:
+    s = SessionStore(db_path(tmp_path))
+    s.migrate()
+    return s
+
+
+def _full_record(session_id: str = SID, **fields):
+    values = {
+        "workspace": "proj",
+        "backend": "kiro",
+        "name": "My session",
+        "name_fixed": True,
+        "error": "boom",
+        "question": PendingQuestion(
+            id="tu1", question="Which?", options=[QuestionOption("a", "first")], recommended=0
+        ),
+        "unseen": True,
+        "model_key": "kiro/auto",
+        "started_at": "2026-07-01T09:00:00+00:00",
+        "last_activity_at": "2026-07-01T09:05:00+00:00",
+    }
+    values.update(fields)
+    return record(session_id, status="blocked", **values)
+
+
+# ---------------------------------------------------------------------------
+# Database and migrations
+# ---------------------------------------------------------------------------
+
+
+def test_db_path_is_archie_db_in_home(tmp_path):
+    assert db_path(tmp_path) == tmp_path / "archie.db"
+
+
+def test_migrate_creates_schema_wal_and_lock(tmp_path):
+    db = db_path(tmp_path)
+    assert schema_version(db) is None
+    assert migrate(db) == 1
+    assert schema_version(db) == 1
+    assert (tmp_path / "archie.db.lock").exists()
+    conn = sqlite3.connect(db)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        conn.close()
+    assert {"sessions", "meta"} <= tables
+    assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
+    assert columns == list(store_module.COLUMNS)
+    assert mode == "wal"
+
+
+def test_migrate_is_idempotent(tmp_path):
+    db = db_path(tmp_path)
+    migrate(db)
+    SessionStore(db).insert(record(SID))
+    assert migrate(db) == 1
+    assert [r.session_id for r in SessionStore(db).list()] == [SID]
+
+
+def test_migrate_rejects_a_newer_schema(tmp_path):
+    db = db_path(tmp_path)
+    migrate(db)
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version = 99")
+    conn.close()
+    with pytest.raises(RuntimeError, match="schema version 99"):
+        migrate(db)
+
+
+def test_failed_migration_rolls_back(tmp_path, monkeypatch):
+    def broken(conn, sessions_dir):
+        conn.execute("CREATE TABLE sessions (x TEXT)")
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr(store_module, "MIGRATIONS", (broken,))
+    db = db_path(tmp_path)
+    with pytest.raises(sqlite3.OperationalError):
+        migrate(db)
+    assert schema_version(db) == 0
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='sessions'").fetchall() == []
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Historical import (D6, D7)
+# ---------------------------------------------------------------------------
+
+
+def test_migration_imports_each_log_once(session_logs, tmp_path):
+    w = session_logs
+    native = "alpha-01kx77jkz8"
+    bare = "beta-01kx77jkz9"
+    kiro = "gamma-01kx77jkza"
+    paths = [
+        w.write(
+            native,
+            [
+                w.session_started(model_key="m-start", sent_at="2026-07-01T09:59:00+00:00"),
+                w.user("hello"),
+                w.llm(model_key="m-first"),
+                w.llm(model_key="m-last", iteration=2),
+                w.llm(model_key="m-child", scope="tc-1", index=0),
+            ],
+        ),
+        w.write(bare, [w.user("hi")]),
+        w.write(kiro, [w.user("hi"), w.llm(model_key="kiro/claude-sonnet-4.5")]),
+    ]
+    for path in paths:
+        _touch(path)
+
+    migrate(db_path(tmp_path))
+    store = SessionStore(db_path(tmp_path))
+    mtime = MTIME.isoformat()
+
+    rows = {r.session_id: r for r in store.list(include_ended=True)}
+    assert set(rows) == {native, bare, kiro}
+    assert store.list() == []  # every imported row has ended
+
+    a = rows[native]
+    assert (a.workspace, a.backend, a.name, a.name_fixed) == ("alpha", "native", native, False)
+    assert (a.status, a.error, a.question, a.unseen) == ("stopped", None, None, False)
+    assert a.started_at == "2026-07-01T09:59:00+00:00"
+    assert a.model_key == "m-last"  # last root request, not the subagent's
+    assert a.last_activity_at == a.ended_at == mtime
+    assert a.container_name is None
+
+    b = rows[bare]
+    assert b.started_at == id_start_time(bare) is not None
+    assert b.model_key is None
+    assert b.backend == "native"
+    assert b.last_activity_at == b.ended_at == mtime
+
+    c = rows[kiro]
+    assert c.backend == "kiro"
+    assert c.model_key == "kiro/claude-sonnet-4.5"
+
+    # A log written after the migration never gets a row from it.
+    w.write("delta-01kx77jkzb", [w.user("late")])
+    migrate(db_path(tmp_path))
+    assert store.get("delta-01kx77jkzb") is None
+
+
+def test_import_falls_back_to_mtime_and_session_started_model(tmp_path):
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    path = sessions / "noulid.jsonl"
+    path.write_text(
+        '{"type": "session_started", "id": "s", "schema_version": 1, "model_key": "m0"}\n'
+        "not json\n"
+        '["not", "an", "object"]\n'
+        '{"type": "user_message", "legacy_field": true}\n'
+    )
+    _touch(path)
+
+    imported = import_log(path)
+
+    assert imported is not None
+    assert imported.started_at == MTIME.isoformat()  # no sent_at and no ULID suffix
+    assert imported.model_key == "m0"
+    assert imported.workspace == "noulid"
+
+
+def test_import_log_unreadable_returns_none(tmp_path):
+    assert import_log(tmp_path / "missing-01kx77jkz8.jsonl") is None
+
+
+def test_migration_without_sessions_dir(tmp_path):
+    migrate(db_path(tmp_path))
+    assert SessionStore(db_path(tmp_path)).list(include_ended=True) == []
+
+
+# ---------------------------------------------------------------------------
+# SessionStore
+# ---------------------------------------------------------------------------
+
+
+def test_insert_get_round_trips_every_field(store):
+    original = _full_record()
+    store.insert(original)
+    loaded = store.get(SID)
+    assert loaded == original
+    assert loaded.container_name == f"archie-{SID}"
+
+
+def test_ended_record_round_trips_without_container(store):
+    ended = record(SID, status="failed", error="no image", ended_at="2026-07-01T10:00:00+00:00")
+    store.insert(ended)
+    loaded = store.get(SID)
+    assert loaded == ended
+    assert loaded.container_name is None
+
+
+def test_insert_duplicate_raises(store):
+    store.insert(record(SID))
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert(record(SID))
+
+
+def test_save_inserts_then_replaces(store):
+    store.save(record(SID, status="starting"))
+    store.save(_full_record())
+    assert store.get(SID) == _full_record()
+
+
+def test_get_unknown_returns_none(store):
+    assert store.get("nope-01kx77jkz8") is None
+
+
+def test_list_filters_ended_and_orders_newest_first(store):
+    store.insert(record("a-01kx77jkz1", started_at="2026-07-01T01:00:00+00:00"))
+    store.insert(record("b-01kx77jkz2", status="working", started_at="2026-07-01T03:00:00+00:00"))
+    for status, hour in (("stopped", 2), ("exited", 4), ("failed", 5)):
+        store.insert(
+            record(
+                f"{status}-01kx77jkz{hour}",
+                status=status,
+                started_at=f"2026-07-01T0{hour}:00:00+00:00",
+                ended_at="2026-07-01T06:00:00+00:00",
+            )
+        )
+    assert [r.session_id for r in store.list()] == ["b-01kx77jkz2", "a-01kx77jkz1"]
+    assert [r.session_id for r in store.list(include_ended=True)] == [
+        "failed-01kx77jkz5",
+        "exited-01kx77jkz4",
+        "b-01kx77jkz2",
+        "stopped-01kx77jkz2",
+        "a-01kx77jkz1",
+    ]
+
+
+def test_update_changes_fields_and_returns_record(store):
+    store.insert(record(SID))
+    question = PendingQuestion(id="q", question="?", options=[])
+    updated = store.update(SID, name="Renamed", name_fixed=True, unseen=True, question=question)
+    assert (updated.name, updated.name_fixed, updated.unseen) == ("Renamed", True, True)
+    assert updated.question == question
+    assert store.get(SID) == updated
+    assert store.update(SID, question=None).question is None
+
+
+def test_update_rejects_unknown_fields_and_ids(store):
+    store.insert(record(SID))
+    with pytest.raises(ValueError, match="container_name"):
+        store.update(SID, container_name="x")
+    with pytest.raises(KeyError):
+        store.update("nope-01kx77jkz8", name="x")
+
+
+def test_reader_does_not_create_a_missing_database(tmp_path):
+    with pytest.raises(sqlite3.OperationalError):
+        SessionStore(db_path(tmp_path)).get(SID)
+    assert not db_path(tmp_path).exists()

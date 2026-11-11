@@ -1,12 +1,12 @@
 """Tests for archie_orchestrator.app — Starlette HTTP endpoints."""
 
-from unittest.mock import patch
-
 import msgspec
 import pytest
 from archie_orchestrator.app import app
 from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import record, serve
 
 
 @pytest.fixture
@@ -30,23 +30,13 @@ async def test_health_returns_200(http_client):
 
 
 async def test_sessions_with_running_containers(http_client):
-    """GET /sessions with patched docker → serialized SessionDescriptors."""
-    fake_sessions = [
-        SessionDescriptor(
-            session_id="myproject-01abc12345",
-            container_name="archie-myproject-01abc12345",
-            port=32771,
-            raw_docker_status="Up 3 hours",
-        ),
-        SessionDescriptor(
-            session_id="otherapp-01def67890",
-            container_name="archie-otherapp-01def67890",
-            port=None,
-            raw_docker_status="Up 10 minutes",
-        ),
+    """GET /sessions → the tracker's live records as serialized SessionDescriptors."""
+    records = [
+        record("myproject-01abc12345", status="working", started_at="2026-07-02T00:00:00+00:00"),
+        record("otherapp-01def67890", status="starting", started_at="2026-07-01T00:00:00+00:00"),
     ]
 
-    with patch("archie_orchestrator.api.list_sessions", return_value=fake_sessions):
+    with serve(app, {"myproject-01abc12345": 32771, "otherapp-01def67890": None}, records=records):
         async with http_client as client:
             response = await client.get("/api/sessions")
 
@@ -60,17 +50,17 @@ async def test_sessions_with_running_containers(http_client):
     first = data[0]
     assert first["session_id"] == "myproject-01abc12345"
     assert first["container_name"] == "archie-myproject-01abc12345"
-    assert first["port"] == 32771
-    assert first["raw_docker_status"] == "Up 3 hours"
+    assert first["status"] == "working"
+    assert "port" not in first and "raw_docker_status" not in first
 
     second = data[1]
     assert second["session_id"] == "otherapp-01def67890"
-    assert second["port"] is None
+    assert second["status"] == "starting"
 
 
 async def test_sessions_empty(http_client):
-    """GET /sessions with no containers → empty JSON array."""
-    with patch("archie_orchestrator.api.list_sessions", return_value=[]):
+    """GET /sessions with no sessions → empty JSON array."""
+    with serve(app):
         async with http_client as client:
             response = await client.get("/api/sessions")
 
@@ -80,20 +70,11 @@ async def test_sessions_empty(http_client):
 
 async def test_sessions_response_is_msgspec_encoded(http_client):
     """Response body is decodable via msgspec as list[SessionDescriptor]."""
-    fake_sessions = [
-        SessionDescriptor(
-            session_id="test-01zzz00001",
-            container_name="archie-test-01zzz00001",
-            port=9999,
-            raw_docker_status="Up 1 second",
-        )
-    ]
-
-    with patch("archie_orchestrator.api.list_sessions", return_value=fake_sessions):
+    with serve(app, {"test-01zzz00001": 9999}):
         async with http_client as client:
             response = await client.get("/api/sessions")
 
     decoded = msgspec.json.decode(response.content, type=list[SessionDescriptor])
     assert len(decoded) == 1
     assert decoded[0].session_id == "test-01zzz00001"
-    assert decoded[0].port == 9999
+    assert decoded[0].status == "idle"
