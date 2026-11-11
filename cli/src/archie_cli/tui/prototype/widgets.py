@@ -6,7 +6,7 @@ from archie_shared.kiro import kiro_model_id
 from archie_shared.models import load_models
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import OptionList, Static
@@ -259,6 +259,41 @@ class ActivityLine(Static):
             (f"{word}…", "bold"),
             (" (esc to cancel)", theme.MUTED),
         )
+
+
+class Notice(Static):
+    """One notification: an optional bold title over the message. A click dismisses it."""
+
+    def __init__(self, message: str, title: str, severity: str) -> None:
+        text = Text()
+        if title:
+            text.append(title, style="bold")
+            text.append("\n")
+        text.append(message)
+        super().__init__(text, classes=f"-{severity}")
+
+    def on_click(self) -> None:
+        self.remove()
+
+
+class NoticeStack(Vertical):
+    """Notifications at the foot of the sidebar, above the key hints, newest last.
+
+    Replaces Textual's toasts in the bottom-right corner, which covered the input and
+    the status bar. Notices take sidebar space while shown, so at most ``LIMIT`` are
+    kept; older ones go first.
+    """
+
+    LIMIT = 3
+
+    def add(self, message: str, title: str, severity: str, timeout: float) -> None:
+        older = [child for child in self.children if isinstance(child, Notice)]
+        for old in older[: max(0, len(older) - (self.LIMIT - 1))]:
+            old.remove()  # make room: keep the newest LIMIT - 1, plus this one
+        notice = Notice(message, title, severity)
+        self.mount(notice)
+        # The timer belongs to the notice, so it dies with it if it goes earlier.
+        notice.set_timer(timeout, notice.remove)
 
 
 class SessionHeader(Horizontal):

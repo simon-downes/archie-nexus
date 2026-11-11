@@ -63,6 +63,7 @@ from archie_cli.tui.prototype.panes import (
 )
 from archie_cli.tui.prototype.widgets import (
     ActivityLine,
+    NoticeStack,
     SessionHeader,
     SessionList,
     SessionStatusBar,
@@ -143,6 +144,7 @@ class PrototypeApp(App):
                 yield Static(self._brand(), id="brand")
                 yield Input(placeholder="Filter sessions", id="filter")
                 yield SessionList(id="session-list")
+                yield NoticeStack(id="notices")
                 yield Static(
                     key_hints(("f1", "Keys"), ("^q", "Quit"), ("^p", "Palette")),
                     id="sidebar-keys",
@@ -177,6 +179,28 @@ class PrototypeApp(App):
 
     def on_unmount(self) -> None:
         self._restore_rows()
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: str = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        """Show notifications at the foot of the sidebar instead of as corner toasts.
+
+        Messages are shown as plain text (session names may contain brackets).
+        """
+        try:
+            stack = self._q("#notices", NoticeStack)
+        except (NoMatches, IndexError):  # before mount or after shutdown
+            super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+            return
+        stack.add(
+            message, title, severity, self.NOTIFICATION_TIMEOUT if timeout is None else timeout
+        )
 
     def _focus_pane(self) -> None:
         """Focus the input, or the sidebar when the session can't take a message."""

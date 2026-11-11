@@ -11,7 +11,7 @@ from archie_cli.tui.prototype.app import PrototypeApp
 from archie_cli.tui.prototype.commands import model_price
 from archie_cli.tui.prototype.dialogs import ConfirmDialog
 from archie_cli.tui.prototype.panes import ToolDetailView
-from archie_cli.tui.prototype.widgets import ActivityLine, SessionList
+from archie_cli.tui.prototype.widgets import ActivityLine, Notice, NoticeStack, SessionList
 from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.transcript_view import ToolClicked
 from archie_shared.events import (
@@ -187,6 +187,31 @@ async def test_activity_line_follows_the_turn_until_it_ends(home, monkeypatch):
         await pilot.press("escape")
         await pilot.pause(0.1)
         assert not line.display
+
+
+@pytest.mark.asyncio
+async def test_notifications_stack_in_the_sidebar_above_the_key_hints(home, monkeypatch):
+    monkeypatch.setattr(proto_app, "BACKGROUND_FINISH_AFTER", 3600)
+    app = PrototypeApp(data.discover(home, limit=10))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        for n in range(5):
+            app.notify(f"note [{n}]", title="Heads up", timeout=0.6)
+        await pilot.pause(0.1)
+        notices = list(app.query(Notice))
+        stack = app.query_one("#notices", NoticeStack)
+        keys = app.query_one("#sidebar-keys")
+
+        # Newest LIMIT kept, in order; plain text (brackets aren't markup); no toasts.
+        assert [str(n.render()).splitlines()[-1] for n in notices] == [
+            f"note [{n}]" for n in range(5 - NoticeStack.LIMIT, 5)
+        ]
+        assert not app.query("Toast")
+        assert stack.region.bottom <= keys.region.y
+        assert stack.region.right <= app.query_one("#sidebar").region.right
+
+        await pilot.pause(0.8)  # past the timeout
+        assert not app.query(Notice)
 
 
 def test_compact_rows_put_shell_and_exec_on_one_line():

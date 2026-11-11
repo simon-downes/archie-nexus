@@ -85,6 +85,28 @@ SessionList {
     }
 }
 
+/* Notifications, above the key hints (prototype/widgets.py NoticeStack). */
+NoticeStack {
+    height: auto;
+    padding: 0 1;
+}
+
+Notice {
+    height: auto;
+    margin-top: 1;
+    padding: 1 1;
+    background: $surface-lighten-1;
+    border-left: thick $primary;
+}
+
+Notice.-warning {
+    border-left: thick $warning;
+}
+
+Notice.-error {
+    border-left: thick $error;
+}
+
 #sidebar-keys {
     height: 1;
     padding: 0 2;
@@ -250,8 +272,3 @@ Dialog.-pane {
     tint: $background 60%;
 }
 
-/* --- Toasts, framed like the dialogs --- */
-Toast {
-    background: $surface;
-    border-left: thick $primary;
-}
