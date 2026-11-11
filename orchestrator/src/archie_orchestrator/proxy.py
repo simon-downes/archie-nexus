@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 import websockets
+from archie_shared.events import encode_event
+from archie_shared.session import TERMINAL_STATUSES
+from archie_shared.session.log import (
+    CursorNotFound,
+    EventIdConflict,
+    LogAppendError,
+    SessionLog,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -122,16 +132,54 @@ async def forward_http(
 # ---------------------------------------------------------------------------
 
 
-async def proxy_events(request: Request) -> Response:
-    """Proxy canonical event replay, forwarding the cursor unchanged."""
-    session_id = request.path_params["session_id"]
+def _read_log(path: Path, after: str | None) -> str:
+    """A session log's canonical events after ``after`` as NDJSON, as the agent serves them."""
+    return "".join(encode_event(event) + "\n" for event in SessionLog(path).read(after))
+
+
+async def _ended_events(
+    tracker: SessionTracker, session_id: str, after: str | None
+) -> Response | None:
+    """Replay an ended session's events from its log (082 D21); None if it hasn't ended.
+
+    A session with no log (a ``failed`` start) has no events: 200 with an empty body.
+    """
     try:
-        session = resolve_session(request.app.state.tracker, session_id)
+        record = await tracker.get(session_id)
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    if record is None or record.status not in TERMINAL_STATUSES:
+        return None
+    try:
+        body = await asyncio.to_thread(_read_log, tracker.log_path(session_id), after)
+    except CursorNotFound:
+        return JSONResponse({"error": "cursor_not_found", "cursor": after}, status_code=409)
+    except (LogAppendError, EventIdConflict) as exc:
+        log.warning("Failed to replay the log of %s: %s", session_id, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return Response(body, media_type="application/x-ndjson")
+
+
+async def proxy_events(request: Request) -> Response:
+    """Replay canonical events: proxied to a running agent, from the log once ended.
+
+    The ``after`` cursor is forwarded unchanged; an ended session answers like the agent
+    (NDJSON, 409 ``cursor_not_found`` for an unknown cursor). 404 for an unknown ID and
+    503 for a session still starting.
+    """
+    session_id = request.path_params["session_id"]
+    tracker = request.app.state.tracker
+    after = request.query_params.get("after")
+    try:
+        session = resolve_session(tracker, session_id)
     except KeyError:
+        ended = await _ended_events(tracker, session_id, after)
+        if ended is not None:
+            return ended
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
-    after = request.query_params.get("after")
     path = "/events" + (f"?after={after}" if after is not None else "")
     return await forward_http(session, path)
 

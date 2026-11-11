@@ -8,7 +8,7 @@ Relative paths resolve from {workspace_dir}; `~` is {home}, not /root.
 
 Persistent (host-mounted; everything else is lost when the session ends):
 - `/workspace` — project files
-- `~/.nexus` — agent home: `config.yaml`, `credentials.yaml`, `sessions/` (session logs, JSONL), `logs/` (orchestrator logs), `metrics.db` (LLM request metrics, SQLite)
+- `~/.nexus` — agent home: `config.yaml`, `credentials.yaml`, `sessions/` (session logs, JSONL), `logs/` (orchestrator logs)
 - `{brain_dir}` — the brain (curated knowledge store)
 - `~/.agents/skills` — shared agent skills
 - `/opt/archie/agent`, `/opt/archie/persona`, `/opt/archie/plugins` — this agent's own code, prompts and skills, and plugins (plugins is read-only); don't edit unless asked

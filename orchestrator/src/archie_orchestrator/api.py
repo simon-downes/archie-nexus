@@ -10,7 +10,7 @@ are relative to the mount:
   GET    /sessions/{session_id}           — one session record
   PATCH  /sessions/{session_id}           — rename a session or mark it seen
   DELETE /sessions/{session_id}           — stop a running session (200, stopped)
-  GET    /sessions/{session_id}/events    — proxy to session /events
+  GET    /sessions/{session_id}/events    — proxy to session /events (the log once ended)
   GET    /sessions/{session_id}/metrics   — metrics for one session
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
   GET    /metrics                         — aggregate metrics

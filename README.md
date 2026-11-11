@@ -17,7 +17,7 @@ archie-nexus is Archie’s current host/container implementation: a Python 3.13 
 | Path | Responsibility |
 | --- | --- |
 | `cli/` | `archie` command, Textual TUI, orchestrator client, auth commands |
-| `orchestrator/` | Host-side HTTP/WebSocket service, Docker lifecycle, session proxy, log viewer, metrics index and insights pages |
+| `orchestrator/` | Host-side HTTP/WebSocket service, Docker lifecycle, session records, session proxy, log viewer, metrics index and insights pages |
 | `agent/` | Container-side Starlette service, agent loop, providers, core tools, plugin SDK, subagents |
 | `shared/` | Configuration, models, public commands/events, session-log persistence, credentials, plugin manifests, the transcript model both clients render |
 | `plugins/` | One directory per integration: `plugin.yaml`, code, skills, tests ([Plugins](docs/plugins.md)) |
@@ -63,7 +63,7 @@ Build the image again after changing Dockerfile or dependency layers. Source for
 
 The default user-data directory is `~/.nexus`, overridable with `ARCHIE_HOME_DIR`. Configuration is `~/.nexus/config.yaml`; an absent file uses defaults. Important settings are `global.model`, `global.region`, `global.workspace_root`, `agent.subagents.max_concurrent`, `agent.turn_cost_limit` (per-turn USD budget, default `50.0`), named `orchestrator.profiles`, per-integration `plugins.<id>` sections, and top-level `mounts` for host bind mounts. See [Configuration](docs/config.md) for the complete schema and mount examples.
 
-Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; `~/.nexus/metrics.db` is a metadata index built from those logs (rebuildable at any time). Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory and `ARCHIE_PLUGINS_DIR` the plugins directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
+Session event logs are stored under `~/.nexus/sessions/<session-id>.jsonl`; `~/.nexus/archie.db` holds the orchestrator's session records plus a metadata index built from those logs (rebuildable at any time); an old `~/.nexus/metrics.db` is no longer used and can be deleted. Credentials default to `~/.nexus/credentials.yaml`, and brain data defaults to `~/.nexus/brain`. `ARCHIE_BRAIN_DIR` can override the brain location, while `ARCHIE_PERSONA_DIR` overrides the persona directory and `ARCHIE_PLUGINS_DIR` the plugins directory. See [Architecture](docs/architecture.md#configuration-and-ownership) before changing persisted or wire formats.
 
 For multiple orchestrators, define named profiles under `orchestrator.profiles` and use `profile/value` arguments. `ARCHIE_HOST=host[:port]` overrides profile selection for CLI commands; the default port is 7600. The `serve` command binds to the configured default profile, so binding it to a non-loopback host exposes the orchestrator to that network.
 

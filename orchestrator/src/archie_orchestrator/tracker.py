@@ -326,20 +326,21 @@ class SessionTracker:
                 log.info("Reconciled sessions with Docker")
                 return
 
-    def _log_path(self, session_id: str) -> Path:
+    def log_path(self, session_id: str) -> Path:
+        """Where a session's event log lives: ``<home>/sessions/<id>.jsonl``."""
         return self.store.db.parent / "sessions" / f"{session_id}.jsonl"
 
     def _log_mtime(self, session_id: str) -> str | None:
         """The session log's mtime as an ISO 8601 UTC string, or None without a log."""
         try:
-            mtime = self._log_path(session_id).stat().st_mtime
+            mtime = self.log_path(session_id).stat().st_mtime
         except OSError:
             return None
         return datetime.fromtimestamp(mtime, UTC).isoformat()
 
     def _adopt(self, session_id: str) -> SessionDescriptor:
         """A record for a running container with no row: from its log, else from its ID."""
-        path = self._log_path(session_id)
+        path = self.log_path(session_id)
         record = import_log(path) if path.is_file() else None
         if record is not None:
             return record

@@ -573,7 +573,7 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   5009 passed (M4 head: 4992 reported); `scripts/dev ruff check .` clean; `ruff format --check`
   on the 14 touched Python files clean; no `~/.nexus/archie.db` created by the run.
 
-### [ ] M6 — Ended-session history, prompt and docs
+### [x] M6 — Ended-session history, prompt and docs
 
 - **Approach:** the `/events` ended-session branch (D21); `environment.md`; the docs and
   README listed in the requirements; the browser screenshot of `/` for the PR.
@@ -582,7 +582,42 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 - **Verify:** full suite passes; `rg -n 'metrics\.db|archie\.db' persona/` finds nothing;
   `rg -n 'metrics\.db|raw_docker_status|/status\b' docs README.md` shows only the old-file
   note, the agent's own `/status` and `/api/auth/status`; a screenshot of `/` with a running session exists.
-- **Outcome:**
+- **Outcome:** `proxy.proxy_events` (D21): a session the tracker doesn't hold as live is looked
+  up with `tracker.get()` (memory, so an ended record awaiting its terminal write counts, else
+  the store); an ended one is answered from `tracker.log_path(id)` (the former private
+  `_log_path`, now public) with `SessionLog(path).read(after)` in `asyncio.to_thread`, encoded
+  with `encode_event` one line per event as `application/x-ndjson`, exactly as the agent's
+  `events`; `CursorNotFound` → 409 `{"error": "cursor_not_found", "cursor": after}`; no log →
+  200 with an empty body; a store read failure → 500 `Session store unavailable`, an unreadable
+  or conflicting log (`LogAppendError`, `EventIdConflict`) → 500 like the agent's catch-all.
+  Unknown → 404, `starting` → 503 and running → proxied, all unchanged. `environment.md` no
+  longer lists `metrics.db` (and doesn't mention `archie.db`). Docs: `architecture.md` (lifecycle
+  steps for the 202 start, background run and CLI poll, port lookup from the tracker, stop and
+  restart; new "Session records and the tracker" section with the `SessionDescriptor` fields,
+  the status vocabulary, the D10/D11/D14 folding, D12a writes, D13 reconcile and the feed; the
+  route table with `?include=ended`, POST `name`/202, feed, `GET`/`PATCH`/`DELETE {id}` semantics,
+  ended-session `/events`, no `/status` proxy; new "Orchestrator datastore" section (`sessions`/
+  `meta`, `user_version` migrations under `archie.db.lock`, the D7 import, old `metrics.db` no
+  longer read and deletable); "Orchestrator metrics" on `metrics_*` tables, the join, the D8 skip,
+  D1/D19b, the `meta` `metrics_version` rebuild and `migrate-sessions --db`; ownership and change
+  impact), `session-protocol-walkthrough.md` (component list, section 4 diagram and text for the
+  202 + poll flow, connection step, ended-session `/events`, metrics wording, invariant 2, the
+  end-to-end summary), `kiro.md` (non-blocking start; a failed start's reason is the record's
+  `error`), `event-spec.md` (`migrate-sessions` rebuilds `metrics_*` in `archie.db`) and
+  `README.md` (`archie.db`: session records plus a rebuildable index; old file deletable). Tests
+  (7, `tests/test_sessions_api.py`): ended events equal the log's NDJSON with the content type,
+  `after` honoured (tail and empty after the last), 409 body, empty 200 for a `failed` session
+  with no log, an ended record still in memory served from the log, a running session with a log
+  still proxied, unknown 404, store failure 500. Evidence: `env -u ARCHIE_BACKEND -u
+  ARCHIE_SESSION_ID scripts/dev test` → 5016 passed (M5: 5009), `tests/test_environment.py` 12
+  passed; `scripts/dev ruff check .` clean; `ruff format --check` on the 4 touched Python files
+  clean; `rg -n 'metrics\.db|archie\.db' persona/` finds nothing; the docs grep shows only the
+  old-file notes (`README.md:66`, `docs/architecture.md`), the agent's own `/status`
+  (`architecture.md` lifecycle step 4 and agent-service paragraph, `event-spec.md:83`,
+  `kiro.md:26`, the walkthrough's section 4) and `/api/auth/status`; `rg -n
+  'initial_model|--metrics-db|ingest_files\b' docs README.md` shows only the new
+  `metrics_ingest_files`. No `~/.nexus/archie.db` created by the run. The screenshot of `/` with
+  a running session is pending; it is captured during delivery.
 
 ## Deviations
 

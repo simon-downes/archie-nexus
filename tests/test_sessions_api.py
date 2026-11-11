@@ -1,6 +1,7 @@
-"""Tests for the session record API: list, get, create, stop and patch (082)."""
+"""Tests for the session record API: list, get, create, stop, patch and events (082)."""
 
 import asyncio
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from archie_orchestrator.docker import DockerError
 from archie_orchestrator.store import db_path
 from archie_orchestrator.tracker import DockerRuntime
 from archie_shared.config import home_dir
-from archie_shared.events import SessionStarted
+from archie_shared.events import SessionStarted, encode_event
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor
 from archie_shared.session.log import SessionLog
@@ -379,6 +380,110 @@ def test_starting_session_without_port_is_not_ready():
                 pass
     assert events.status_code == 503
     assert exc_info.value.code == 4003
+
+
+# ---------------------------------------------------------------------------
+# GET /api/sessions/{id}/events for ended sessions (D21)
+# ---------------------------------------------------------------------------
+
+
+def _ndjson(path, after=None) -> str:
+    return "".join(encode_event(e) + "\n" for e in SessionLog(path).read(after))
+
+
+async def test_ended_session_events_are_served_from_the_log(session_logs):
+    w = session_logs
+    with serve(app, records=_records()):
+        path = w.write(ENDED, [w.user("hello"), w.assistant("hi"), w.user("again", turn=2)])
+        first, second, third = (e.id for e in SessionLog(path).read())
+        async with _client() as http:
+            full = await http.get(f"/api/sessions/{ENDED}/events")
+            tail = await http.get(f"/api/sessions/{ENDED}/events", params={"after": first})
+            last = await http.get(f"/api/sessions/{ENDED}/events", params={"after": third})
+    assert full.status_code == 200
+    assert full.headers["content-type"] == "application/x-ndjson"
+    assert full.text == _ndjson(path)
+    assert len(full.text.splitlines()) == 3
+    assert tail.status_code == 200
+    assert [json.loads(line)["id"] for line in tail.text.splitlines()] == [second, third]
+    assert last.status_code == 200
+    assert last.text == ""
+
+
+async def test_ended_session_unknown_cursor_is_409(session_logs):
+    w = session_logs
+    with serve(app, records=_records()):
+        w.write(ENDED, [w.user("hello")])
+        async with _client() as http:
+            response = await http.get(f"/api/sessions/{ENDED}/events", params={"after": "nope"})
+    assert response.status_code == 409
+    assert response.json() == {"error": "cursor_not_found", "cursor": "nope"}
+
+
+async def test_failed_session_without_a_log_has_no_events():
+    failed = record(
+        ENDED, status="failed", error="image missing", ended_at="2026-07-01T11:00:00+00:00"
+    )
+    with serve(app, records=[failed]) as tracker:
+        assert not tracker.log_path(ENDED).exists()
+        async with _client() as http:
+            response = await http.get(f"/api/sessions/{ENDED}/events")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/x-ndjson"
+    assert response.content == b""
+
+
+async def test_ended_record_awaiting_its_terminal_write_is_served_from_the_log(session_logs):
+    w = session_logs
+    with serve(app) as tracker:
+        tracker._records[SID] = record(SID, status="exited", ended_at="2026-07-01T11:00:00+00:00")
+        path = w.write(SID, [w.user("hello")])
+        async with _client() as http:
+            response = await http.get(f"/api/sessions/{SID}/events")
+    assert response.status_code == 200
+    assert response.text == _ndjson(path)
+
+
+async def test_running_session_events_are_still_proxied(session_logs):
+    w = session_logs
+    backend = MagicMock(
+        status_code=200, content=b"from-agent\n", headers={"content-type": "application/x-ndjson"}
+    )
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(return_value=backend)
+    with (
+        serve(app, {SID: PORT}),
+        patch("archie_orchestrator.proxy.httpx.AsyncClient", return_value=client),
+    ):
+        w.write(SID, [w.user("hello")])
+        async with _client() as http:
+            response = await http.get(f"/api/sessions/{SID}/events", params={"after": "x"})
+    assert response.status_code == 200
+    assert response.content == b"from-agent\n"
+    client.get.assert_called_once_with(f"http://127.0.0.1:{PORT}/events?after=x", timeout=5.0)
+
+
+async def test_unknown_session_events_is_404():
+    with serve(app, records=_records()):
+        async with _client() as http:
+            response = await http.get("/api/sessions/nope-01kx77jkz8/events")
+    assert response.status_code == 404
+    assert response.json() == {"error": "No session with ID 'nope-01kx77jkz8'"}
+
+
+async def test_ended_session_events_store_failure_is_500(monkeypatch):
+    with serve(app) as tracker:
+        monkeypatch.setattr(
+            tracker.store,
+            "get",
+            lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+        )
+        async with _client() as http:
+            response = await http.get(f"/api/sessions/{ENDED}/events")
+    assert response.status_code == 500
+    assert response.json() == {"error": "Session store unavailable"}
 
 
 # ---------------------------------------------------------------------------

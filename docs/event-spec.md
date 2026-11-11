@@ -115,9 +115,10 @@ that generated each assistant message and derives its turn/iteration from the re
 `llm_request`, removes model-switch records while preserving IDs and order of remaining
 records, discards legacy shell records by discriminator, retains the source as `.legacy`,
 and writes each log through a same-directory temporary file and atomic rename. Logs
-declaring `session_started.schema_version == 2` are skipped. The command then archives
-and rebuilds the `<ARCHIE_HOME_DIR>/metrics.db` index from the migrated logs (all canonical
-event types; see [Architecture](architecture.md#orchestrator-metrics)). Requests deduplicate
+declaring `session_started.schema_version == 2` are skipped. The command then drops and
+rebuilds the metrics tables (`metrics_*`) in `<ARCHIE_HOME_DIR>/archie.db` from the migrated logs
+(all canonical event types; session records are kept; see
+[Architecture](architecture.md#orchestrator-metrics)). Requests deduplicate
 by `(session_id, event_id)`; the session log remains the source of truth.
 
 `tool_result.images` was added after schema version 2 and defaults to an empty list, so

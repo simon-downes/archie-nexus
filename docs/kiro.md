@@ -21,9 +21,9 @@ unchanged. The backend is chosen per session.
 
 ## How a session starts
 
-1. `archie start --kiro` posts `{"workspace": …, "backend": "kiro"}` to `POST /api/sessions`. The CLI displays a terminal-aware activity indicator while the existing blocking startup request is pending; it does not stream raw Kiro stderr or ACP frames.
-2. The orchestrator adds `-e ARCHIE_BACKEND=kiro` to `docker run` and waits up to 45 s for
-   `/status`. Native sessions wait 30 s.
+1. `archie start --kiro` posts `{"workspace": …, "backend": "kiro"}` to `POST /api/sessions`. The request is not a blocking start: it returns 202 with a `starting` session record, and the CLI polls `GET /api/sessions/{id}` behind a terminal-aware activity indicator until the status leaves `starting`; it does not stream raw Kiro stderr or ACP frames. A failed start ends as `failed`, and the CLI prints the record's `error`.
+2. In the background, the orchestrator adds `-e ARCHIE_BACKEND=kiro` to `docker run` and waits up to 45 s for
+   the agent's `/status`. Native sessions wait 30 s.
 3. The agent's lifespan loads the config and runs plugin startup hooks. It skips the native
    model, compaction-model and LLM-client setup, so a bad `global.model` doesn't block a
    Kiro session. It then starts `KiroHarness` (`agent/src/archie_agent/kiro/harness.py`).
@@ -45,9 +45,9 @@ built-in tool other than `read` (the skill category) stops the session. So do a 
 Kiro doesn't confirm, a default model Kiro doesn't offer, an MCP server that doesn't connect,
 Kiro exiting, or the deadline passing. The agent then writes the reason to
 `~/.nexus/logs/kiro/<session-id>.startup-error` and exits. The orchestrator stops the
-container and appends that reason to the error `archie start --kiro` prints. If a config
-error or a disallowed tool appears after startup, the agent kills Kiro and ends the active
-turn with `turn_error`.
+container, marks the session `failed` and appends that reason to the record's `error`, which
+`archie start --kiro` prints. If a config error or a disallowed tool appears after startup,
+the agent kills Kiro and ends the active turn with `turn_error`.
 
 ## Prompt, tools, skills and subagents
 
