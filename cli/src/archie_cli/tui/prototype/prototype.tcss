@@ -193,6 +193,48 @@ PaneView VerticalScroll {
     text-overflow: ellipsis;
 }
 
+/* Archie's replies: no coloured left rule and no "● Archie" header. The rule stays as
+ * a transparent column so reply text lines up with the tool rows. The activity line
+ * says when a reply is streaming, so the header's spinner isn't missed. */
+#views AssistantMessage,
+#views StreamingMessage {
+    border-left: thick transparent;
+}
+
+#views AssistantMessage > .header,
+#views StreamingMessage > .header {
+    display: none;
+}
+
+/* Spacing between transcript rows. Tool rows stack with no gaps, even across
+ * iterations; every other row (messages, notices, compaction, turn status) has a
+ * one-line margin above and below. Textual collapses adjacent margins, so any two
+ * neighbouring blocks are one blank line apart and a run of tool calls is solid. */
+#views IterationBlock,
+#views SubagentBlock {
+    margin: 0;
+}
+
+#views UserMessage,
+#views PromptMessage,
+#views AssistantMessage,
+#views StreamingMessage,
+#views ErrorMessage,
+#views CancelledMessage,
+#views ClientErrorMessage,
+#views ShellOutput,
+#views CompactionEntry,
+#views CompactionMarker,
+#views TurnStatus {
+    margin: 1 0;
+}
+
+/* A reply's last Markdown block would add its own bottom margin to the one above. */
+#views AssistantMessage Markdown > *:last-child,
+#views StreamingMessage Markdown > *:last-child {
+    margin-bottom: 0;
+}
+
 /* Three lines by default; MessageInput still grows to its max-height. */
 #input {
     min-height: 5;
