@@ -222,9 +222,12 @@ async def test_rename_shows_the_name_in_the_sidebar(home, monkeypatch):
         await pilot.pause(0.1)
         sidebar = app.query_one("#session-list", SessionList)
         prompt = sidebar.get_option(app.current.session_id).prompt
+        status_right = str(app.query_one("#status-right").render())
 
     assert app.current.name == "WAF review"
     assert "WAF review" in prompt.plain
+    # Named: the status bar shows the id instead (and never the version).
+    assert app.current.session_id in status_right and "v0." not in status_right
 
 
 def test_model_prices_align():

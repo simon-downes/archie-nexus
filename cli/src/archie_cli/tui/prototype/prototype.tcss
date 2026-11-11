@@ -99,13 +99,8 @@ SessionList {
 
 SessionHeader {
     height: auto;
-    padding: 1 2 1 1;
+    padding: 1 2;
     background: $surface;
-}
-
-SessionHeader #header-title {
-    height: 1;
-    padding: 0 0 0 1;
 }
 
 SessionHeader #header-left {
@@ -116,15 +111,12 @@ SessionHeader #header-right {
     width: auto;
 }
 
-/* The attach TUI's status bar, moved into the header under a muted rule. */
-SessionHeader #header-rule {
-    margin: 0;
-    color: $surface-lighten-1;
-}
-
-SessionHeader StatusBar {
+/* The attach TUI's status bar, directly under the input. The bottom margin lines it up
+ * with the key hints at the bottom of the sidebar. */
+#status {
     height: 1;
-    padding: 0;
+    margin: 0 0 1 0;
+    padding: 0 1;
 }
 
 /* The transcript and detail views sit on $pane (prototype/panes.py PANE_BG): a step

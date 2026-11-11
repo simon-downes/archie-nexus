@@ -6,9 +6,10 @@ from archie_shared.kiro import kiro_model_id
 from archie_shared.models import load_models
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import OptionList, Rule, Static
+from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from archie_cli.tui import theme
@@ -212,15 +213,24 @@ def key_hints(*pairs: tuple[str, str]) -> Text:
     return text
 
 
-class SessionHeader(Vertical):
-    """Above the transcript: state, name and badge, then the session status bar."""
+class SessionStatusBar(StatusBar):
+    """The attach TUI's status bar without the version, which the sidebar shows."""
+
+    def _refresh_display(self) -> None:
+        super()._refresh_display()
+        try:
+            right = self.query_one("#status-right", Static)
+        except NoMatches:
+            return  # not mounted yet
+        right.update(Text(f"{self.session_id} " if self.session_id else ""))
+
+
+class SessionHeader(Horizontal):
+    """Above the transcript: state glyph, name and badge."""
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="header-title"):
-            yield Static("", id="header-left")
-            yield Static("", id="header-right")
-        yield Rule(id="header-rule")
-        yield StatusBar(id="status")
+        yield Static("", id="header-left")
+        yield Static("", id="header-right")
 
     def show(self, session: MockSession | None, frame: int = 0) -> None:
         left = self.query_one("#header-left", Static)

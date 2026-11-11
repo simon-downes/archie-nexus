@@ -64,6 +64,7 @@ from archie_cli.tui.prototype.panes import (
 from archie_cli.tui.prototype.widgets import (
     SessionHeader,
     SessionList,
+    SessionStatusBar,
     key_hints,
     model_label,
     state_label,
@@ -153,6 +154,7 @@ class PrototypeApp(App):
                 yield ThrobberContainer(id="throbber-container")
                 yield QuestionPanel(id="question")
                 yield MessageInput(id="input")
+                yield SessionStatusBar(id="status")
 
     def _brand(self) -> Text:
         live = sum(1 for s in self.sessions if s.state != "ended")
@@ -531,6 +533,7 @@ class PrototypeApp(App):
                 session.name = name
                 self._refresh_sidebar()
                 self._q("#session-header", SessionHeader).show(session, self._frame)
+                self._update_status(session)  # a named session shows its id here
 
         self.push_screen(RenameDialog(session.name, session.session_id), renamed)
 
