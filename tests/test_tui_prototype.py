@@ -218,29 +218,101 @@ async def test_notifications_stack_in_the_sidebar_above_the_key_hints(home, monk
         assert not app.query(Notice)
 
 
-def test_compact_rows_put_shell_and_exec_on_one_line():
-    command = "cd /repo\ngit status\ngit log -3"
-    plain = ToolNode(id="a", tool_use_id="a", name="shell", input={"command": command})
-    described = ToolNode(
-        id="b",
-        tool_use_id="b",
-        name="exec",
-        input={"source": "x = 1\ny = 2", "description": "Count the open plans"},
-    )
+def _tool(name, tool_input, result=None, *, status="ok", ms=0):
+    tool = ToolNode(id="t", tool_use_id="t", name=name, input=tool_input)
+    if result is not None:
+        tool.result, tool.status, tool.duration_ms = result, status, ms
+    return tool
 
-    assert "\n" not in rows.render_compact_row(plain).plain
-    assert rows.render_compact_row(described).plain.endswith("Exec Count the open plans")
+
+def _lines(tool, width=100):
+    return rows.render_row(tool, width).plain.split("\n")
+
+
+def test_every_row_is_two_lines_with_a_connector():
+    for tool in (
+        _tool("read", {"path": "/workspace/a.py"}),
+        _tool("read", {"path": "/workspace/a.py"}, "File: a.py (80 lines)\n", ms=6),
+        _tool("grep", {"pattern": "x"}, "PathValidationError: no", status="error"),
+        _tool("mystery", {"q": "roadmap"}, "ok"),
+    ):
+        first, second = _lines(tool)
+        assert second.startswith("╰ ")
+
+
+def test_read_metrics_and_range():
+    tool = _tool(
+        "read",
+        {"path": "/workspace/repo/t.py", "offset": 120, "limit": 141},
+        "File: repo/t.py (880 lines)\nShowing lines 120-260 of 880\n",
+        ms=4,
+    )
+    assert _lines(tool) == ["● Read · 141 of 880 lines · 4ms", "╰ repo/t.py:120-260"]
+
+
+def test_errors_go_on_line_one_without_the_class_or_the_repeated_target():
+    tool = _tool(
+        "read",
+        {"path": "/tmp/x.png"},
+        "FileNotFoundError: File not found: /tmp/x.png",
+        status="error",
+        ms=6,
+    )
+    assert _lines(tool) == ["✕ Read · 6ms · File not found", "╰ /tmp/x.png"]
+
+    failed = _tool(
+        "exec", {"source": "x"}, "error: KeyError: 'team'\n\ntraceback:\n…", status="error"
+    )
+    assert _lines(failed)[0] == "✕ Exec · KeyError: 'team'"  # exec keeps the class
+
+
+def test_shell_rows_strip_workspace_and_keep_the_working_directory():
+    tool = _tool(
+        "shell",
+        {"command": "cd /workspace/repo && pytest -q " + "x " * 60, "cwd": "/workspace/repo"},
+        "[exit: 1]\n...\n1 failed, 10 passed in 8.91s\n",
+        status="error",
+        ms=9200,
+    )
+    first, second = _lines(tool, 80)
+    assert first == "✕ Shell · exit 1 · 2 lines · 9.2s · 1 failed, 10 passed in 8.91s"
+    assert second.startswith("╰ $ cd repo && pytest") and "/workspace" not in second
+    assert second.endswith("… · in repo") and len(second) <= 80  # cut, directory kept
+
+    at_root = _tool("shell", {"command": "ls", "cwd": "/workspace"}, "[exit: 0]\na\n")
+    assert _lines(at_root)[1] == "╰ $ ls"
+    described = _tool("shell", {"command": "ls", "description": "List the files"})
+    assert _lines(described) == ["○ Shell · running", "╰ List the files"]
+
+
+def test_long_paths_lose_their_middle():
+    path = "/workspace/archie-nexus/cli/src/archie_cli/tui/prototype/data.py"
+    second = _lines(_tool("edit", {"path": path}, "+a\n-b\n"), 40)[1]
+    assert len(second) == 40 and "…" in second and second.endswith("prototype/data.py")
+
+
+def test_question_and_task_rows():
+    question = _tool("question", {"question": "Which?"}, "User selected option 1: A coding choice")
+    assert _lines(question) == ["● Question · → A coding choice", "╰ Which?"]
+    waiting = _tool("question", {"question": "Which?"})
+    assert _lines(waiting)[0] == "? Question · waiting for you"
+
+    tasks = {"tasks": [{"agent": "archie-worker", "prompt": "a"}, {"agent": "archie-worker"}]}
+    assert _lines(_tool("task", tasks, "done", ms=155_000)) == [
+        "● Task · 2 agents · 2m35s",
+        "╰ 2 × archie-worker",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_compact_rows_are_restored_when_the_app_exits(home, monkeypatch):
+async def test_two_line_rows_are_restored_when_the_app_exits(home, monkeypatch):
     monkeypatch.setattr(proto_app, "BACKGROUND_FINISH_AFTER", 3600)
-    original = transcript_view.render_tool_row
+    original = transcript_view.ToolRow
     app = PrototypeApp(data.discover(home, limit=10))
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.2)
-        assert transcript_view.render_tool_row is rows.render_compact_row
-    assert transcript_view.render_tool_row is original
+        assert transcript_view.ToolRow is rows.TwoLineToolRow
+    assert transcript_view.ToolRow is original
 
 
 @pytest.mark.asyncio
