@@ -43,7 +43,7 @@ from archie_cli.tui.conversation import (
     format_cost,
 )
 from archie_cli.tui.input import MessageInput
-from archie_cli.tui.prototype import data, rows
+from archie_cli.tui.prototype import data, location, rows
 from archie_cli.tui.prototype.commands import MODEL_PLACEHOLDER, ModelCommands, SessionCommands
 from archie_cli.tui.prototype.data import MockSession
 from archie_cli.tui.prototype.dialogs import (
@@ -213,9 +213,23 @@ class PrototypeApp(App):
         self.set_interval(1 / 8, self._tick)
         self.set_interval(30, self._refresh_sidebar)
         self.set_timer(BACKGROUND_FINISH_AFTER, self._finish_background_session)
+        self.run_worker(self._locate_sessions(), group="locate")
         if self.sessions:
             await self.switch_to(self._sidebar().order[0])
         self._focus_pane()
+
+    async def _locate_sessions(self) -> None:
+        """Work out each session's repo, worktree and branch in a thread, then redraw."""
+
+        def scan() -> None:
+            for session in self.sessions:
+                if session.log_path is not None and session.location is None:
+                    session.location = location.locate(session.log_path, session.workspace)
+
+        await asyncio.to_thread(scan)
+        self._refresh_sidebar()
+        if self.current is not None:
+            self._q("#session-header", SessionHeader).show(self.current, self._frame)
 
     def on_unmount(self) -> None:
         self._restore_rows()
@@ -256,6 +270,9 @@ class PrototypeApp(App):
         return self._q("#session-list", SessionList)
 
     def _refresh_sidebar(self) -> None:
+        for session in self.sessions:
+            if session.location is not None:
+                session.location.refresh()  # pick up branch switches
         current = self.current.session_id if self.current else None
         self._sidebar().show(self.sessions, current)
         self._q("#brand-info", Static).update(self._brand_info())

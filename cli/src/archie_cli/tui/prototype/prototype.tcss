@@ -43,7 +43,7 @@ MessageInput {
 /* Under the banner; the profile name is a link to the web interface. */
 #brand-info {
     height: auto;
-    padding: 1 1 1 2;
+    padding: 0 1 0 2;
     link-color: #5fafff;
     link-style: none;
     link-color-hover: #5fafff;
@@ -54,7 +54,7 @@ MessageInput {
 /* The filter looks like the message input: a rounded border, purple when focused. */
 #filter {
     height: 3;
-    margin: 0 1 1 1;
+    margin: 0 1;
     padding: 0 1;
     background: $surface;
     border: round $surface-lighten-2;

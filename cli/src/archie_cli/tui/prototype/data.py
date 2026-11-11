@@ -19,6 +19,8 @@ from archie_shared.events import PendingQuestion, QuestionOption, decode_event
 from archie_shared.models import load_models
 from archie_shared.transcript import TranscriptBuilder
 
+from archie_cli.tui.prototype.location import Location
+
 type MockState = Literal["working", "blocked", "idle", "error", "ended"]
 
 # Mock states handed out in recency order, so a default run shows every case.
@@ -76,11 +78,19 @@ class MockSession:
     # While working: "thinking" (waiting on the model), "responding" (a reply is
     # streaming) or "working" (tool calls are running).
     activity: Literal["thinking", "responding", "working"] = "thinking"
+    location: Location | None = None  # repo, worktree and branch (prototype/location.py)
 
     @property
     def display_name(self) -> str:
-        """The user's name for the session, or its id. Never the first prompt: too long."""
-        return self.name or self.session_id
+        """The user's name, else the worktree's name, else the session id.
+
+        Never the first prompt: too long.
+        """
+        if self.name:
+            return self.name
+        if self.location is not None and self.location.worktree:
+            return self.location.worktree
+        return self.session_id
 
     @property
     def needs_attention(self) -> bool:

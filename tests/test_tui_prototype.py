@@ -159,8 +159,11 @@ async def test_sidebar_groups_by_workspace_oldest_first_live_only(tmp_path, monk
 
     # Workspaces by name, oldest first inside each; ended sessions aren't listed.
     assert order == ["alpha-01", "alpha-02", "zeta-01"]
-    # One line: glyph, the id without the workspace prefix (never the first prompt), age.
-    assert "\n" not in row and "01" in row and "alpha" not in row and "task" not in row
+    # Two lines: glyph, the id without the workspace prefix (never the first prompt) and
+    # the age; then where it works (no repo here: the test workspace isn't on disk).
+    first, second = row.split("\n")
+    assert "01" in first and "alpha" not in first and "task" not in first
+    assert second.strip("▌ ") == "no repo"  # ▌ marks the session on screen
 
 
 @pytest.mark.asyncio
@@ -338,7 +341,7 @@ async def test_profile_link_and_palette_entry_open_the_web_interface(home, monke
         plain = str(info.render())
         assert plain.endswith("running · local ↗") and "prototype" not in plain
 
-        await pilot.click("#brand-info", offset=(2 + plain.index("local") + 1, 1))
+        await pilot.click("#brand-info", offset=(2 + plain.index("local") + 1, 0))
         await pilot.pause(0.1)
         assert opened == ["http://127.0.0.1:7600/ui/sessions"]
 

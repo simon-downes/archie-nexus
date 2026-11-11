@@ -16,6 +16,9 @@ from archie_cli.tui import theme
 from archie_cli.tui.prototype.data import MockSession, age
 from archie_cli.tui.status import StatusBar
 
+# Repo names on a session's second line, between the muted text and normal text.
+TARGET_STYLE = "#9a9a9a"
+
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # The workspace header band: the theme primary at about 25% over the surface colour.
@@ -115,6 +118,7 @@ class SessionList(OptionList):
             or self._filter in s.title.lower()
             or self._filter in s.workspace.lower()
             or self._filter in s.session_id
+            or (s.location is not None and self._filter in f"{s.location.repo} {s.location.branch}")
         ]
 
     def _width(self) -> int:
@@ -154,24 +158,40 @@ class SessionList(OptionList):
             self.highlighted = self.get_option_index(target)
 
     def _prompt(self, session: MockSession) -> Text:
-        """``▌● name-or-id … 32m``: the age is time since the session last did anything."""
+        """Two lines: ``● name … 32m``, then ``⎇ repo · branch``.
+
+        The name is the user's name, else the worktree's, else the session id without
+        its workspace prefix. The age is the time since the session last did anything.
+        """
         width = self._width()
         current = session.session_id == self._current
+        bar = ("\u258c", theme.PRIMARY) if current else " "
         when = age(session.last_activity)
-        row = Text.assemble(
-            ("▌", theme.PRIMARY) if current else " ",
-            state_glyph(session, self._frame),
-            " ",
-        )
+        # A space after the bar (▌ on the session on screen) on both lines.
+        row = Text.assemble(bar, " ", state_glyph(session, self._frame), " ")
+        label = session.name or (session.location and session.location.worktree)
         name = Text(
-            session.name or _short_id(session),
+            label or _short_id(session),
             style="bold" if current or session.unseen else "",
         )
         name.truncate(width - row.cell_len - len(when) - 2, overflow="ellipsis")
         row.append_text(name)
         row.pad_right(width - row.cell_len - len(when))
         row.append(when, style=theme.MUTED)
-        return row
+        return Text("\n").join([row, self._where(session, bar, width)])
+
+    def _where(self, session: MockSession, bar, width: int) -> Text:
+        location = session.location
+        line = Text.assemble(bar, " ")
+        if location is None:
+            line.append("  no repo", style=theme.MUTED)  # lines up with a repo name
+        else:
+            line.append("\u2387 ", style=theme.MUTED)  # under the status glyph
+            line.append(location.repo, style=TARGET_STYLE)
+            line.append(" \u00b7 ", style=theme.MUTED)
+            line.append(location.branch, style=theme.MUTED)
+        line.truncate(width, overflow="ellipsis")
+        return line
 
     def tick(self) -> None:
         """Advance the working spinners without rebuilding the list."""
