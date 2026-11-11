@@ -126,7 +126,8 @@ def description(tool: ToolNode) -> str | None:
 @dataclass
 class RowParts:
     name: str
-    facts: list[str] = field(default_factory=list)  # metrics, then the duration
+    facts: list[str | Text] = field(default_factory=list)  # metrics, then the duration;
+    # plain strings are drawn muted, Text keeps its own colours
     error: str = ""
     target: str = ""
     suffix: str = ""  # kept whole when line 2 is cut (the shell working directory)
@@ -207,7 +208,9 @@ def _edit(tool: ToolNode) -> RowParts:
         lines = tool.result.splitlines()
         added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
         removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
-        parts.facts.append(f"+{added} −{removed}")
+        parts.facts.append(
+            Text.assemble((f"+{added}", theme.SUCCESS), " ", (f"−{removed}", theme.ERROR))
+        )
     return parts
 
 
@@ -457,7 +460,10 @@ def render_row(tool: ToolNode, width: int = 120) -> Text:
     line1 = Text.assemble(_glyph(tool, parts), " ", (parts.name, TOOL_NAME_STYLE))
     for fact in parts.facts:
         line1.append(" · ", style=theme.MUTED)
-        line1.append(fact, style=theme.MUTED)
+        if isinstance(fact, Text):
+            line1.append_text(fact)
+        else:
+            line1.append(fact, style=theme.MUTED)
     if parts.error.strip():
         line1.append(" · ", style=theme.MUTED)
         line1.append(parts.error, style=theme.ERROR)

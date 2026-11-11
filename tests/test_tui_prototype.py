@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from archie_cli.tui import transcript_view
+from archie_cli.tui import theme, transcript_view
 from archie_cli.tui.conversation import UserMessage as UserMessageRow
 from archie_cli.tui.prototype import app as proto_app
 from archie_cli.tui.prototype import data, rows
@@ -312,6 +312,18 @@ async def test_user_messages_have_no_header(home, monkeypatch):
 
     assert messages and all("You" not in text for text in texts)
     assert any(text.startswith("task number") for text in texts)
+
+
+def test_edit_counts_are_green_and_red():
+    line = rows.render_row(_tool("edit", {"path": "a.py"}, "+++ b\n+x\n+y\n-z\n"), 80)
+    assert line.plain.split("\n")[0] == "● Edit · +2 −1"
+
+    def colour_at(text):
+        index = line.plain.index(text)
+        return [str(s.style) for s in line.spans if s.start <= index < s.end]
+
+    assert theme.SUCCESS in colour_at("+2")
+    assert theme.ERROR in colour_at("−1")
 
 
 def test_question_and_task_rows():

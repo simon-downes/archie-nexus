@@ -83,14 +83,12 @@ No grouping of consecutive calls for now.
 ● Edit · +4 −1 · 7ms
 ╰ archie-nexus/cli/src/archie_cli/tui/prototype/data.py
 
-● Edit · +12 −12 · 6 replacements · 5ms
-╰ archie-nexus/cli/src/archie_cli/tui/prototype/app.py
-
 ✕ Edit · 2ms · Text not found in file
 ╰ core/platform-services/waf/tests/main.tftest.hcl
 ```
 
-The diff moves to the tool detail view.
+`+N` is green and `−N` red. The diff moves to the tool detail view. The edit result
+doesn't say how many places a `replace_all` edit changed, so there's no count.
 
 ### glob
 
