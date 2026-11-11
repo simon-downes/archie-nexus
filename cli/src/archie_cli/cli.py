@@ -553,6 +553,37 @@ def attach(session_id: str | None):
 
 
 @main.command()
+@click.option(
+    "--session",
+    "session_ids",
+    multiple=True,
+    help="Session id or prefix to include (repeatable). Default: the most recent sessions.",
+)
+@click.option("--limit", default=12, show_default=True, help="How many recent sessions to mock.")
+@click.option("--list", "list_only", is_flag=True, help="Print the mocked sessions and exit.")
+def tui(session_ids: tuple[str, ...], limit: int, list_only: bool):
+    """Prototype of the multi-session TUI, built from historical session logs.
+
+    Read-only: it replays logs from the Archie home directory and never contacts the
+    orchestrator or a running session. Live states (working, blocked, idle, error)
+    are mocked.
+    """
+    from archie_shared.config import home_dir
+
+    from archie_cli.tui.prototype import data
+    from archie_cli.tui.prototype.app import PrototypeApp, describe
+
+    sessions = data.discover(home_dir(), limit=limit, session_ids=session_ids)
+    if not sessions:
+        raise click.ClickException(f"No session logs found under {home_dir() / 'sessions'}")
+    if list_only:
+        for session in sessions:
+            click.echo(describe(session))
+        return
+    PrototypeApp(sessions).run()
+
+
+@main.command()
 @click.argument("session_id", required=False)
 def stop(session_id: str | None):
     """Stop a running agent session.

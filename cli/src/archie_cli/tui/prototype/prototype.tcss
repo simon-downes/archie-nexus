@@ -1,0 +1,258 @@
+/*
+ * prototype.tcss: layout and colours for the multi-session prototype.
+ * Loaded after archie.tcss, so the attach TUI's message and input styles still apply.
+ */
+
+#body {
+    height: 1fr;
+}
+
+/* --- Scrollbars ---
+ * One style for every scrolling area: a one-cell grey thumb on the area's own
+ * background (set per area below), purple while hovered or dragged. */
+SessionList,
+#views Conversation,
+#views TranscriptView,
+PaneView VerticalScroll,
+MessageInput {
+    scrollbar-size-vertical: 1;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
+}
+
+MessageInput {
+    scrollbar-background: $surface;
+    scrollbar-background-hover: $surface;
+    scrollbar-background-active: $surface;
+}
+
+/* --- Sidebar (fixed; dialogs.SIDEBAR_WIDTH must match the width) --- */
+#sidebar {
+    width: 38;
+    height: 1fr;
+    background: $surface;
+    border-right: tall $surface-lighten-1;
+}
+
+#brand {
+    height: auto;
+    padding: 1 1 1 2;
+}
+
+/* The filter looks like the message input: a rounded border, purple when focused. */
+#filter {
+    height: 3;
+    margin: 0 1 1 1;
+    padding: 0 1;
+    background: $surface;
+    border: round $surface-lighten-2;
+}
+
+#filter:focus {
+    border: round $primary;
+    background-tint: transparent;
+}
+
+SessionList {
+    height: 1fr;
+    padding: 0;
+    border: none;
+    background: $surface;
+    scrollbar-background: $surface;
+    scrollbar-background-hover: $surface;
+    scrollbar-background-active: $surface;
+
+    &:focus {
+        border: none;
+        background-tint: transparent;
+    }
+
+    & > .option-list--option-highlighted {
+        background: $surface-lighten-1;
+    }
+
+    &:focus > .option-list--option-highlighted {
+        background: $primary 30%;
+    }
+
+    & > .option-list--option-hover {
+        background: $surface-lighten-1;
+    }
+
+    & > .option-list--option-disabled {
+        padding: 0;
+    }
+}
+
+#sidebar-keys {
+    height: 1;
+    padding: 0 2;
+    margin: 1 0;
+}
+
+/* --- Session pane --- */
+#main {
+    width: 1fr;
+    height: 1fr;
+}
+
+SessionHeader {
+    height: auto;
+    padding: 1 2 1 1;
+    background: $surface;
+}
+
+SessionHeader #header-title {
+    height: 1;
+    padding: 0 0 0 1;
+}
+
+SessionHeader #header-left {
+    width: 1fr;
+}
+
+SessionHeader #header-right {
+    width: auto;
+}
+
+/* The attach TUI's status bar, moved into the header under a muted rule. */
+SessionHeader #header-rule {
+    margin: 0;
+    color: $surface-lighten-1;
+}
+
+SessionHeader StatusBar {
+    height: 1;
+    padding: 0;
+}
+
+/* The transcript and detail views sit on $pane (prototype/panes.py PANE_BG): a step
+ * darker than the surface around them, not black, so the edges don't glare. The
+ * scrollbars are drawn on the same colour with a quiet thumb. */
+#views,
+#loading,
+#views Conversation,
+#views TranscriptView,
+PaneView,
+ThrobberContainer,
+Throbber {
+    background: $pane;
+}
+
+#views Conversation,
+#views TranscriptView,
+PaneView VerticalScroll {
+    scrollbar-background: $pane;
+    scrollbar-background-hover: $pane;
+    scrollbar-background-active: $pane;
+}
+
+#views {
+    height: 1fr;
+}
+
+#loading {
+    height: 1fr;
+    padding: 1 2;
+}
+
+/* Tool rows stay on one line each (see prototype/rows.py). */
+#views ToolRow {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* Three lines by default; MessageInput still grows to its max-height. */
+#input {
+    min-height: 5;
+    max-height: 10;
+    margin: 0;
+}
+
+/* --- Detail views in the pane ---
+ * The status block is one line with room above and below. Each section starts with a
+ * full-width header band, which also divides it from the section before. */
+PaneView {
+    height: 1fr;
+}
+
+PaneView .pane-crumbs {
+    height: 1;
+    padding: 0 2;
+    margin: 1 0;
+}
+
+PaneView .pane-body {
+    height: 1fr;
+    padding: 0;
+}
+
+PaneView .tool-card {
+    height: auto;
+    padding: 1 2;
+    margin: 0 0 1 0;
+    background: $surface;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+PaneView .section {
+    height: auto;
+}
+
+PaneView .section-header {
+    height: 1;
+    padding: 0 2;
+    background: $surface-lighten-1;
+}
+
+PaneView .section-title {
+    width: 1fr;
+    color: $secondary;
+    text-style: bold;
+}
+
+PaneView .section-facts {
+    width: auto;
+    color: $muted;
+}
+
+PaneView .section-body {
+    height: auto;
+    padding: 1 2;
+}
+
+PaneView .section.-error .section-header {
+    background: $error 25%;
+}
+
+PaneView .section.-error .section-title {
+    color: $error;
+}
+
+/* --- Dialogs ---
+ * archie.tcss gives every Screen (modal ones included) an opaque $surface background,
+ * which beats a screen's DEFAULT_CSS. Restore the see-through backdrop here so the app
+ * stays visible, and live, behind a dialog.
+ */
+Dialog {
+    background: $background 60%;
+}
+
+Dialog.-pane {
+    /* Nearly transparent: the session pane dims itself instead (#main.-dimmed), so the
+     * sidebar stays bright and live. */
+    background: $background 1%;
+}
+
+/* Tint doesn't cascade, so every widget in the pane takes it. */
+#main.-dimmed, #main.-dimmed * {
+    tint: $background 60%;
+}
+
+/* --- Toasts, framed like the dialogs --- */
+Toast {
+    background: $surface;
+    border-left: thick $primary;
+}
