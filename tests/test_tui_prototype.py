@@ -9,7 +9,7 @@ from archie_cli.tui.conversation import UserMessage as UserMessageRow
 from archie_cli.tui.prototype import app as proto_app
 from archie_cli.tui.prototype import data, rows
 from archie_cli.tui.prototype.app import PrototypeApp
-from archie_cli.tui.prototype.commands import model_price
+from archie_cli.tui.prototype.commands import SessionCommands, model_price
 from archie_cli.tui.prototype.dialogs import ConfirmDialog
 from archie_cli.tui.prototype.panes import ToolDetailView
 from archie_cli.tui.prototype.widgets import ActivityLine, Notice, NoticeStack, SessionList
@@ -324,6 +324,26 @@ def test_edit_counts_are_green_and_red():
 
     assert theme.SUCCESS in colour_at("+2")
     assert theme.ERROR in colour_at("−1")
+
+
+@pytest.mark.asyncio
+async def test_profile_link_and_palette_entry_open_the_web_interface(home, monkeypatch):
+    monkeypatch.setattr(proto_app, "BACKGROUND_FINISH_AFTER", 3600)
+    app = PrototypeApp(data.discover(home, limit=10))
+    opened: list[str] = []
+    monkeypatch.setattr(app, "open_url", lambda url, **_: opened.append(url))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        info = app.query_one("#brand-info")
+        plain = str(info.render())
+        assert plain.endswith("running · local ↗") and "prototype" not in plain
+
+        await pilot.click("#brand-info", offset=(2 + plain.index("local") + 1, 1))
+        await pilot.pause(0.1)
+        assert opened == ["http://127.0.0.1:7600/ui/sessions"]
+
+        names = [name for name, _help, _cb in SessionCommands(app.screen)._commands()]
+        assert "Open web interface" in names
 
 
 def test_question_and_task_rows():

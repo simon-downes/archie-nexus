@@ -29,6 +29,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Input, Static
@@ -88,6 +89,39 @@ MOCK_REPLY = (
 BACKGROUND_FINISH_AFTER = 20.0
 
 
+# archie-og's start-up banner (archie-og/src/archie/output.py) and its blue gradient.
+BANNER = (
+    " █████╗ ██████╗  ██████╗██╗  ██╗██╗███████╗",
+    "██╔══██╗██╔══██╗██╔════╝██║  ██║██║██╔════╝",
+    "███████║██████╔╝██║     ███████║██║█████╗  ",
+    "██╔══██║██╔══██╗██║     ██╔══██║██║██╔══╝  ",
+    "██║  ██║██║  ██║╚██████╗██║  ██║██║███████╗",
+    "╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝╚══════╝",
+)
+BANNER_COLOURS = ("#a8d8ff", "#7bb8f0", "#4e98e0", "#2878d0", "#1060b8", "#0a4a9a")
+
+
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def web_target() -> tuple[str, str]:
+    """(label, url) for the default orchestrator profile's web interface.
+
+    The label is the profile name, or ``local`` for the default profile on a loopback
+    address. The URL is the profile's ``public_url`` (its browser-facing origin) when
+    set, else ``http://host:port``. The prototype doesn't check that it's running.
+    """
+    from archie_shared.schemas import OrchestratorProfile, get_profile, load_nexus_config
+
+    try:
+        profile = get_profile(load_nexus_config().orchestrator)
+    except Exception:  # noqa: BLE001 — a bad config still gets the default link
+        profile = OrchestratorProfile()
+    base = (profile.public_url or f"http://{profile.host}:{profile.port}").rstrip("/")
+    label = "local" if profile.host in LOOPBACK else "default"
+    return label, f"{base}/ui/sessions"
+
+
 def _view_id(session_id: str) -> str:
     return f"session-{session_id}"
 
@@ -127,6 +161,7 @@ class PrototypeApp(App):
         self._new_count = 0
         self._pane_count = 0
         self._restore_rows = lambda: None
+        self._web_label, self.web_url = web_target()
 
     # -- layout ----------------------------------------------------------------
 
@@ -141,6 +176,7 @@ class PrototypeApp(App):
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Static(self._brand(), id="brand")
+                yield Static(self._brand_info(), id="brand-info")
                 yield Input(placeholder="Filter sessions", id="filter")
                 yield SessionList(id="session-list")
                 yield NoticeStack(id="notices")
@@ -158,13 +194,18 @@ class PrototypeApp(App):
                 yield SessionStatusBar(id="status")
 
     def _brand(self) -> Text:
+        """archie-og's banner (archie/output.py), one blue shade per row."""
+        text = Text(no_wrap=True)
+        for n, (line, colour) in enumerate(zip(BANNER, BANNER_COLOURS, strict=True)):
+            text.append(line + ("\n" if n < len(BANNER) - 1 else ""), style=colour)
+        return text
+
+    def _brand_info(self) -> Content:
+        """``v0.1.0 · 12 running · local ↗``; the profile name opens the web interface."""
         live = sum(1 for s in self.sessions if s.state != "ended")
-        return Text.assemble(
-            ("◆ Archie", f"bold {theme.PRIMARY}"),
-            (f"  v{__version__}", theme.MUTED),
-            "\n",
-            (f"local · {live} running · prototype", theme.MUTED),
-        )
+        facts = Content.styled(f"v{__version__} · {live} running · ", theme.MUTED)
+        link = Content.from_markup("[@click=app.open_web]$label ↗[/]", label=self._web_label)
+        return facts + link
 
     async def on_mount(self) -> None:
         self._restore_rows = rows.install()
@@ -217,7 +258,7 @@ class PrototypeApp(App):
     def _refresh_sidebar(self) -> None:
         current = self.current.session_id if self.current else None
         self._sidebar().show(self.sessions, current)
-        self._q("#brand", Static).update(self._brand())
+        self._q("#brand-info", Static).update(self._brand_info())
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "filter":
@@ -563,6 +604,11 @@ class PrototypeApp(App):
         self._set_state(session, "idle")
 
     # -- palette and dialog actions --------------------------------------------
+
+    def action_open_web(self) -> None:
+        """Open the orchestrator's web interface in the default browser."""
+        self.open_url(self.web_url)
+        self.notify(self.web_url, title="Opening the web interface", timeout=3)
 
     def action_keys(self) -> None:
         self.push_screen(KeysDialog())

@@ -56,6 +56,7 @@ class SessionCommands(Provider):
                 ),
             ]
         commands += [
+            ("Open web interface", app.web_url, app.action_open_web),  # type: ignore[attr-defined]
             ("Keyboard shortcuts", "f1", app.action_keys),  # type: ignore[attr-defined]
             ("Quit", "Close this window; sessions keep running  ctrl+q", app.action_quit),
         ]

@@ -28,7 +28,7 @@ from archie_cli.tui import theme
 from archie_cli.tui.models_provider import model_entries
 
 # Matches #sidebar's width in prototype.tcss: pane dialogs leave this much uncovered.
-SIDEBAR_WIDTH = 38
+SIDEBAR_WIDTH = 48
 
 
 class Dialog[T](ModalScreen[T | None]):

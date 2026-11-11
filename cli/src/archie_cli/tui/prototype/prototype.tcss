@@ -29,7 +29,7 @@ MessageInput {
 
 /* --- Sidebar (fixed; dialogs.SIDEBAR_WIDTH must match the width) --- */
 #sidebar {
-    width: 38;
+    width: 48;
     height: 1fr;
     background: $surface;
     border-right: tall $surface-lighten-1;
@@ -37,7 +37,18 @@ MessageInput {
 
 #brand {
     height: auto;
+    padding: 1 1 0 2;
+}
+
+/* Under the banner; the profile name is a link to the web interface. */
+#brand-info {
+    height: auto;
     padding: 1 1 1 2;
+    link-color: #5fafff;
+    link-style: none;
+    link-color-hover: #5fafff;
+    link-background-hover: transparent;
+    link-style-hover: underline;
 }
 
 /* The filter looks like the message input: a rounded border, purple when focused. */
