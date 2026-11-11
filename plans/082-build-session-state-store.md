@@ -92,19 +92,22 @@ Codebase facts (main @ b13e411):
 | D7 | Imported timestamps and model | `started_at` = `session_started.sent_at`, else the id's ULID time, else the log's mtime; `last_activity_at` = `ended_at` = the log's mtime; `model_key` = the last root `llm_request` model, else `session_started.model_key`; `backend` = `kiro` when that model starts with `kiro/` | max request end time (today's `last_activity_at`) | The log's mtime is the last append, needs no event decoding, and works for logs with no requests | self |
 | D8 | Logs with no session row | The metrics sync skips the log and records `no session record` in `metrics_ingest_files.error` | insert a row from the sync | Keeps "metrics never writes `sessions`" absolute; after the import every orchestrator-started session has a row before its log exists | self |
 | D9 | How the tracker learns state | One read-only WebSocket per running session to the agent's `/stream`, like `web.py` `_live_events` | polling `/status`; reading logs | Push, already proven in the live viewer; carries `session_status` and turn events | self |
-| D10 | Status rules from events | Root `user_message` → `working`; `session_status` sets model, question and `idle`/`working`/`blocked` (`done` maps to `idle`); after a root `turn_error`, the following `idle` becomes `error` until the next root `user_message`; root `turn_complete` and `turn_error` set `unseen` | trusting `session_status` alone | Kiro sends no `working` status at turn start; the agent re-sends `idle` straight after a failed turn, which would hide the failure | self |
-| D11 | Write rate | Status, question, model, unseen and name changes are written and published at once; a change to `last_activity_at` alone is written and published at most every 10 s per session | write every event | Text deltas and tool events arrive many times a second; the feed would flood | self |
-| D12 | Database access from async code | Synchronous `sqlite3` in `store.py`, one short-lived connection per call, always called through `asyncio.to_thread` | `aiosqlite` (new dependency); calls on the event loop | A metrics file commit can hold the write lock for up to the 5 s busy timeout; no new dependency | self |
-| D13 | Startup order and reconcile | Migrate, then reconcile with one `docker ps`, then subscribe, then start the metrics loop. A running container makes its row live (`idle`, `ended_at` cleared), adopting it from its log if there is no row; a non-terminal row with no container becomes `exited` (`ended_at` = log mtime or now), or `failed` ("orchestrator restarted during startup") if it was `starting` | trusting stored status | Docker is the truth for whether a container exists; the import marks running sessions `stopped` and this revives them | self |
-| D14 | Ending detection | When a subscription closes: if the status is `stopping` or `stopped`, do nothing; else check `docker inspect`; running → resubscribe with 1, 2, 5 s back-off; gone → `exited` | treat every close as an end | The agent closes slow clients (queue overflow) and restarts drop sockets | self |
+| D10 | Status rules from events | Root `user_message` → `working`; `session_status` sets model, question and `idle`/`working`/`blocked` (`done` maps to `idle`); after a root `turn_error`, the following `idle` becomes `error` until the next root `user_message`; root `turn_complete` and `turn_error` set `unseen`; a root `turn_interrupted` clears a pending `error` and doesn't set `unseen` (the user caused it); a `session_status` model starting with `kiro/` sets `backend` to `kiro` | trusting `session_status` alone | Kiro sends no `working` status at turn start; the agent re-sends `idle` straight after a failed turn, which would hide the failure; an adopted container's backend is otherwise unknown | self |
+| D11 | Write rate | Status, question, model, unseen and name changes are written and published at once; a change to `last_activity_at` alone is written and published at most every 10 s per session, with a trailing flush at the end of the window so the last activity is never lost; every other write carries the latest `last_activity_at` | write every event | Text deltas and tool events arrive many times a second; the feed would flood | self |
+| D12 | Database access from async code | Synchronous `sqlite3` in `store.py`, one short-lived connection per call, always called through `asyncio.to_thread` | `aiosqlite` (new dependency); calls on the event loop | The metrics sync and the tracker share one SQLite write lock, so a tracker write can wait behind a metrics file commit (up to the 5 s busy timeout); no new dependency | self |
+| D12a | Read source | The tracker keeps every non-ended record in memory (loaded from the store at start) and is authoritative for them; `GET` routes and the feed snapshot read live records from memory and ended ones from the store. A failed store write is logged and retried with the next change | read everything from the store | Reads never wait on the SQLite lock, and the API and the feed can't disagree after a failed write | self |
+| D13 | Startup order and reconcile | Migrate, then reconcile with one `docker ps`, then subscribe, then start the metrics loop. A running container makes its row live (`idle`, `ended_at` cleared), adopting it from its log if there is no row (with no readable log: `workspace` from `split_id`, `started_at` from the id's ULID time else now, `backend` `native` until D10 corrects it); a non-terminal row with no container becomes `exited` (`ended_at` = log mtime or now), or `failed` ("orchestrator restarted during startup") if it was `starting` | trusting stored status | Docker is the truth for whether a container exists; the import marks running sessions `stopped` and this revives them | self |
+| D14 | Ending detection | When a subscription closes: if the status is `stopping` or `stopped`, do nothing; else check `docker inspect`; running → resubscribe with 1, 2, 5 s back-off; gone → `exited`. Cancellation by `SessionTracker.close()` (orchestrator shutdown) skips this check entirely | treat every close as an end | The agent closes slow clients (queue overflow) and restarts drop sockets | self |
 | D15 | Startup split | `lifecycle.prepare_start()` validates the workspace and image and builds the id and command, synchronously inside the POST; `lifecycle.run_start()` runs and waits in the background task; `start_session()` remains their composition | validate in the background | Bad input keeps its synchronous 400; only the slow part moves | self |
-| D16 | Docker access in the tracker | A small `Runtime` object (list running, prepare, run, stop, is running) with a Docker implementation; tests pass a fake | patching module functions | ~30 test files patch `list_sessions` today; one seam is easier to fake than many | self |
-| D17 | Agent port for proxying | The tracker keeps `session_id → port` in memory from `run_start` and reconcile; `resolve_session` and the live viewer use it | `docker ps` per request (today) | Removes N+1 Docker calls from every proxied request (architecture finding 5 for these paths) | self |
+| D16 | Docker access in the tracker | A small `Runtime` object (list running, prepare, run, stop, is running) with a `DockerRuntime` implementation; tests pass a fake, and the lifespan uses `app.state.runtime` when a test has set it, else `DockerRuntime()` | patching module functions | 15 test files reference `list_sessions` today; one seam is easier to fake than many | self |
+| D17 | Agent port for proxying | The tracker keeps `session_id → port` in memory from `run_start` and reconcile. `proxy.resolve_session(tracker, session_id) -> AgentEndpoint(session_id, port)` (new small struct in `proxy.py`) replaces the Docker lookup; `forward_http` takes the endpoint; handlers pass `request.app.state.tracker`; `web.py` `_resolve_live(tracker, session_id)` and `_active_ids()` → `tracker.live_ids()` follow | `docker ps` per request (today) | Removes N+1 Docker calls from every proxied request (architecture finding 5 for these paths) | self |
 | D18 | `PATCH` on ended sessions | Allowed for `name` and `unseen` | 409 | Names show in insights; renaming history is useful and touches no lifecycle state | self |
-| D19 | `DELETE` response | Waits for `stop_container`, returns 200 with the `stopped` record; 409 for `starting`, `stopping` and ended sessions; on a Docker failure the previous status is restored and 500 returned | 202 with `stopping` | Keeps `archie stop` simple; the feed still shows `stopping` in between | self |
+| D19 | `DELETE` response | `Runtime.stop` calls `docker.stop_container(container_name(id))` directly (no `docker ps`) and then today's `_remove_empty_session_log`. DELETE waits for it and returns 200 with the `stopped` record; 409 for `starting`, `stopping` and ended sessions. If `stop_container` fails and `container_running()` says the container is gone, the result is still `stopped`; if it is still running, the previous status is restored and 500 returned | 202 with `stopping`; `lifecycle.stop_session` (runs `docker ps`, raises `KeyError` on a vanished container) | Keeps `archie stop` simple; the feed still shows `stopping` in between; a container that vanished mid-stop is the outcome the user asked for | self |
+| D19a | A stopped session that never received a prompt | Its log is deleted as today, and its `sessions` row is deleted too; the DELETE response and the feed's terminal event still carry the `stopped` record, and later reads return 404 | keep the row without a log; stop deleting empty logs | Matches today's "a session with no prompt leaves no trace" without a canonical row pointing at a missing log | self |
+| D19b | Sessions in insights | Insights and `archie stats` list only sessions that have a `metrics_ingest_files` row (a log was indexed) | every `sessions` row | `failed` starts and never-prompted sessions have no log or metrics; before this change they never appeared | self |
 | D20 | Feed filter | `?include=ended` only changes the snapshot; every change event is forwarded, including a session's final terminal one | filter change events too | Clients drop a session on its terminal event; ended rows never change again, so nothing else leaks | self |
-| D21 | `GET /api/sessions/{id}/events` for ended sessions | Served from the log with `SessionLog(path).read(after)`; `CursorNotFound` → 409 as the agent does | 404 | Makes the record and its history consistent after the container goes, at little cost | self |
-| D22 | `archie start` waiting | Poll `GET /api/sessions/{id}` every 0.5 s while `starting`, up to 60 s, inside the existing 080 status indicator; `failed` prints the stored `error` | a `?wait` flag on POST | One contract for every client; the poll is cheap | self |
+| D21 | `GET /api/sessions/{id}/events` for ended sessions | Served from the log with `SessionLog(path).read(after)`; `CursorNotFound` → 409 as the agent does; an ended session with no log (a `failed` start) → 200 with an empty body | 404 | Makes the record and its history consistent after the container goes, at little cost | self |
+| D22 | `archie start` waiting | Poll `GET /api/sessions/{id}` every 0.5 s while `starting`, up to 60 s, inside the existing 080 status indicator; `failed` prints the stored `error`; another terminal status prints `Session ended during startup (<status>)`; a timeout prints `Session is still starting after 60 s; check archie ls` and sends no DELETE; all three exit 1 | a `?wait` flag on POST | One contract for every client; the poll is cheap | self |
 | D23 | Old `metrics.db` | Left untouched; nothing reads it; the docs say it can be deleted | delete it during migration | It's rebuildable and deleting user files unasked is irreversible | self |
 
 ## Requirements
@@ -120,9 +123,10 @@ Session record and store
   - AC: a test with three logs (with and without `session_started` and requests, one Kiro)
     asserts each imported column; a fourth log added after migration gets no row.
 - MUST never write the `sessions` table from the metrics sync, `archie stats` or
-  `archie migrate-sessions`.
-  - AC: a test runs `MetricsIndex.sync()` and `reset_and_backfill()` and asserts the
-    `sessions` rows are byte-identical before and after.
+  `archie migrate-sessions`, except the one-off canonical migration (D6), which runs in
+  whichever process opens `archie.db` first.
+  - AC: a test migrates first, then runs `MetricsIndex.sync()` and `reset_and_backfill()`
+    and asserts the `sessions` rows are identical before and after.
 
 Tracker and status
 
@@ -137,8 +141,9 @@ Tracker and status
   per D13 at startup.
   - AC: tracker tests: subscription close with container gone → `exited` with `ended_at`;
     close with container running → resubscribe; each D13 reconcile case.
-- MUST NOT call Docker in `GET /api/sessions`, `GET /api/sessions/{id}`, or when resolving a
-  session for `/events`, `/stream` or the live viewer.
+- MUST NOT call Docker in `GET /api/sessions`, `GET /api/sessions/{id}`, the pages `/`,
+  `/sessions` and `/sessions/{id}`, or when resolving a session for `/events`, `/stream` or the
+  live viewer.
   - AC: tests run those routes with a runtime whose Docker methods raise; they succeed.
 
 API
@@ -150,13 +155,15 @@ API
   body, workspace or backend, return 400 for an invalid `name` (not a string, blank after
   trimming, over 80 characters), and otherwise return 202 with a `starting` record.
   - AC: API tests for each 400 and the 202; `name` given → `name_fixed: true`.
-- MUST accept `PATCH /api/sessions/{id}` with `name` (string sets it and `name_fixed`; `null`
-  resets it to the id and clears `name_fixed`) and `unseen: false`; anything else is 400;
-  unknown id 404.
+- MUST accept `PATCH /api/sessions/{id}` with `name` (a string valid under POST's rule is
+  stored trimmed and sets `name_fixed`; `null` resets it to the id and clears `name_fixed`) and
+  `unseen: false`; anything else, including an invalid name, is 400; unknown id 404. POST
+  stores its `name` trimmed too.
   - AC: API tests for each field, `null`, an unknown key, `unseen: true`, and 404.
 - MUST stop a session with `DELETE /api/sessions/{id}` per D19.
   - AC: API tests: 200 with `stopped` and `ended_at`; 409 for `starting` and ended; 404; Docker
-    failure → 500 and the previous status restored.
+    failure with the container still running → 500 and the previous status restored; failure
+    with the container gone → 200 `stopped`; a never-prompted session's row is gone afterwards.
 - MUST serve `GET /api/sessions/feed` as `text/event-stream`: a `snapshot` event
   (`{"sessions": [...]}`, same filter as the list) on connect, a `session` event with the full
   record on each change per D11 and D20, and a `: ping` comment every 15 s.
@@ -165,7 +172,8 @@ API
 - MUST remove `GET /api/sessions/{id}/status`.
   - AC: the route test asserts it is absent (404).
 - MUST serve `GET /api/sessions/{id}/events` from the log once a session has ended (D21).
-  - AC: API test returns the log's events, honours `after`, 409 for an unknown cursor.
+  - AC: API test returns the log's events, honours `after`, 409 for an unknown cursor, empty
+    200 for a `failed` session with no log.
 
 Metrics
 
@@ -179,14 +187,16 @@ Metrics
   `archie migrate-sessions` (option renamed `--db`).
   - AC: test bumps the metrics version and asserts `sessions` is unchanged and metrics refill;
     CLI test for `migrate-sessions --db`.
-- MUST show the name in insights and `archie stats` only when `name_fixed` (D1).
-  - AC: insights page and stats tests: a fixed name appears; an unfixed one doesn't.
+- MUST show the name in insights and `archie stats` only when `name_fixed` (D1), and list only
+  sessions with indexed logs (D19b).
+  - AC: insights page and stats tests: a fixed name appears; an unfixed one doesn't; a
+    `failed` row with no log is not listed.
 
 CLI, web and prompt
 
 - MUST keep `archie start`, `ls`, `attach`, `stop`, `shell` and the TUI's quit-and-terminate
   working against the new API: `start` waits per D22 and reports a `failed` start's `error`;
-  `--detach` prints the session and container; `ls` shows id, workspace, status and the name
+  `--detach` prints the session and container (the `Agent: http://host:port` line is dropped); `ls` shows id, workspace, status and the name
   when fixed; `stop` reports 404 and 409; the TUI accepts 200, 404 and 409 on terminate.
   - AC: updated `tests/test_cli_start_stop.py`, `test_cli_attach.py`, `test_cli_profiles.py`,
     `test_cli_shell.py` pass, plus a new failed-start test.
@@ -240,11 +250,13 @@ the same file under `metrics_*` names and joins to `sessions`.
   `proxy_events` ended-session branch; `/status` route removed; `_query_metrics` reads
   `archie.db` `metrics_requests`. Route order puts `/sessions/feed` before
   `/sessions/{session_id}`.
-- `orchestrator/src/archie_orchestrator/proxy.py`: `resolve_session()` asks the tracker for the
-  port; `proxy_status` removed.
+- `orchestrator/src/archie_orchestrator/proxy.py`: `resolve_session(tracker, session_id)` and
+  `AgentEndpoint` (D17); `proxy_status` removed.
 - `orchestrator/src/archie_orchestrator/app.py`: lifespan runs D13's order, stores the tracker
   on `app.state.tracker`, closes it on shutdown.
-- `orchestrator/src/archie_orchestrator/metrics.py`, `insights.py`, `insights_web.py`,
+- `orchestrator/src/archie_orchestrator/metrics.py` (`schema_version`, `is_current` and
+  `_open_current` switch from `PRAGMA user_version` to the `meta` row), `insights.py`,
+  `insights_web.py`,
   `web.py` (`sessions_page`, `_active_ids`, `_resolve_live`), `templates/sessions.html`,
   `templates/insights/sessions.html`, `templates/insights/session.html`.
 - `cli/src/archie_cli/cli.py` (`start`, `ls`, `stop`, `migrate-sessions`, row formatting,
@@ -296,8 +308,11 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   `session_status` sets `idle`. Failure → `failed`, `error`, `ended_at`.
 - Turn: `user_message` → `working` (published); deltas and tool events touch
   `last_activity_at` (throttled); `turn_complete` → `unseen`; `session_status` → `idle`.
-- Stop: `DELETE` → `stopping` (published) → `stop_session` in a thread → `stopped`,
-  `ended_at`; the subscription's close is ignored because of the status.
+- Stop: `DELETE` → `stopping` (published) → `Runtime.stop` in a thread (D19) → `stopped`,
+  `ended_at` (row deleted per D19a when the log was removed); the subscription's close is
+  ignored because of the status.
+- Shutdown: `SessionTracker.close()` cancels subscriptions and flushes pending activity; no
+  status changes.
 - Feed: each subscriber has an `asyncio.Queue` (256); the tracker puts every published record
   on every queue; a full queue drops that subscriber, whose stream ends and whose client
   reconnects to a fresh snapshot.
@@ -310,8 +325,9 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   succeeds. `list_sessions()` today returns `[]` on a non-zero exit, so it gains a way to
   report failure (raise `DockerError`).
 - Subscription connect refused while the container runs: back-off per D14.
-- Store write fails (`sqlite3.Error`): logged; the in-memory state is kept and the next change
-  retries the write; the API returns 500 for writes it was serving.
+- Store write fails (`sqlite3.Error`): logged; the in-memory record (D12a) stays authoritative
+  and the next change retries the write. `POST` fails with 500 if its insert fails (nothing is
+  started); `PATCH` and `DELETE` return 500 if their write fails.
 - Start thread raises an unexpected exception: `failed` with `error` = the exception text.
 
 ### Non-functional
