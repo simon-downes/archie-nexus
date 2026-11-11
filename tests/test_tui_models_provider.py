@@ -53,8 +53,8 @@ def _status_name(model_key: str) -> str:
     from archie_cli.tui.app import ArchieApp
 
     app = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/p-01/stream",
-        api_url="http://127.0.0.1:7600/sessions/p-01",
+        ws_url="ws://127.0.0.1:7600/api/sessions/p-01/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/p-01",
         container_name="archie-p-01",
     )
     status = MagicMock()

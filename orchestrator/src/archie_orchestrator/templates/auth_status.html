@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-heading">
     <h2>Authentication status</h2>
-    <a href="/auth/status" class="button secondary">Refresh page</a>
+    <a href="/auth" class="button secondary">Refresh page</a>
 </div>
 {% for auth_type, items in grouped.items() %}
 <section class="credential-group">
@@ -50,7 +50,7 @@ async function action(button) {
     const action = button.dataset.action;
     button.disabled = true;
     try {
-        const response = await fetch(`/auth/${action}/${encodeURIComponent(provider)}`, {method: "POST"});
+        const response = await fetch(`/api/auth/${action}/${encodeURIComponent(provider)}`, {method: "POST"});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Request failed");
         if (action === "login") {

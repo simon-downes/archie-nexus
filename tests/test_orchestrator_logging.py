@@ -220,7 +220,7 @@ async def test_proxy_stream_logs_connect_disconnect(caplog):
         caplog.at_level(logging.INFO, logger="archie_orchestrator.proxy"),
     ):
         client = TestClient(app, raise_server_exceptions=False)
-        with client.websocket_connect(f"/sessions/{session.session_id}/stream"):
+        with client.websocket_connect(f"/api/sessions/{session.session_id}/stream"):
             pass
 
     messages = [r.message for r in caplog.records]

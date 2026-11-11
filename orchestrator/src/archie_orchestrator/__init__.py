@@ -24,6 +24,7 @@ _LEVEL_COLOURS = {
 }
 _SERVICE_COLOURS = {
     "archie_orchestrator.app": "\033[35m",  # magenta
+    "archie_orchestrator.api": "\033[35m",  # magenta
     "archie_orchestrator.auth": "\033[34m",  # blue
     "archie_orchestrator.credential_refresh": "\033[36m",  # cyan
     "archie_orchestrator.docker": "\033[33m",  # yellow

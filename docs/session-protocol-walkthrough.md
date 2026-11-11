@@ -82,7 +82,7 @@ The TUI uses both WebSocket and HTTP because they solve different problems.
 ### WebSocket: commands and live events
 
 ```text
-ws://<orchestrator>/sessions/<session-id>/stream
+ws://<orchestrator>/api/sessions/<session-id>/stream
 ```
 
 The WebSocket is bidirectional:
@@ -96,8 +96,8 @@ not translate the command or event schema.
 ### HTTP: persisted history
 
 ```text
-GET http://<orchestrator>/sessions/<session-id>/events
-GET http://<orchestrator>/sessions/<session-id>/events?after=<event-id>
+GET http://<orchestrator>/api/sessions/<session-id>/events
+GET http://<orchestrator>/api/sessions/<session-id>/events?after=<event-id>
 ```
 
 The HTTP endpoint reads persisted events as newline-delimited JSON (NDJSON), in session-log order.
@@ -176,7 +176,7 @@ When the user runs `archie start`, the CLI first creates the session:
 ```text
 TUI/CLI                    Orchestrator                  Agent container
    │                            │                              │
-   │ POST /sessions            │                              │
+   │ POST /api/sessions        │                              │
    │ {"workspace":"project"}  │                              │
    ├───────────────────────────▶│                              │
    │                            │ start Docker container       │
@@ -208,8 +208,8 @@ start time.
 Once the orchestrator returns a `SessionDescriptor`, the CLI starts the TUI with two URLs:
 
 ```text
-WebSocket: ws://<orchestrator>/sessions/<session-id>/stream
-HTTP base: http://<orchestrator>/sessions/<session-id>
+WebSocket: ws://<orchestrator>/api/sessions/<session-id>/stream
+HTTP base: http://<orchestrator>/api/sessions/<session-id>
 ```
 
 `archie attach` reaches the same connection flow for an already-running session.
@@ -283,7 +283,7 @@ time.
 While live events are buffered, the TUI requests:
 
 ```text
-GET /sessions/<session-id>/events
+GET /api/sessions/<session-id>/events
 ```
 
 For a new session, the response normally contains only `session_started`. For an existing session,
@@ -1029,7 +1029,7 @@ The following rules are useful when reading logs, debugging the TUI, or changing
 
 ```text
 NEW SESSION
-CLI ──POST /sessions──▶ orchestrator ──start container──▶ agent
+CLI ──POST /api/sessions──▶ orchestrator ──start container──▶ agent
 agent ──SessionLog.append(session_started)──▶ JSONL
 
 CONNECT

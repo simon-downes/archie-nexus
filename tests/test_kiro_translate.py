@@ -214,8 +214,8 @@ def test_tui_streams_both_text_segments_live():
     from archie_cli.tui.app import ArchieApp
 
     app = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/p-01/stream",
-        api_url="http://127.0.0.1:7600/sessions/p-01",
+        ws_url="ws://127.0.0.1:7600/api/sessions/p-01/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/p-01",
         container_name="archie-p-01",
     )
     events = [e for e in _run("run1_parallel_shell") if e.scope is None]

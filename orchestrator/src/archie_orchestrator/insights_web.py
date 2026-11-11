@@ -1,4 +1,4 @@
-"""Usage insights pages under ``/ui/insights``.
+"""Usage insights pages under ``/insights``.
 
 Each page syncs the metrics index (without waiting if another sync holds the
 lock), runs one :mod:`archie_orchestrator.insights` query, and renders it
@@ -28,12 +28,12 @@ FILTER_KEYS = ("since", "until", "workspace", "model", "scope")
 UPDATING = "Index is updating; figures may be incomplete."
 
 VIEWS = (
-    ("overview", "/ui/insights", "Overview"),
-    ("sessions", "/ui/insights/sessions", "Sessions"),
-    ("models", "/ui/insights/models", "Models"),
-    ("tools", "/ui/insights/tools", "Tools"),
-    ("subagents", "/ui/insights/subagents", "Subagents & skills"),
-    ("errors", "/ui/insights/errors", "Errors"),
+    ("overview", "/insights", "Overview"),
+    ("sessions", "/insights/sessions", "Sessions"),
+    ("models", "/insights/models", "Models"),
+    ("tools", "/insights/tools", "Tools"),
+    ("subagents", "/insights/subagents", "Subagents & skills"),
+    ("errors", "/insights/errors", "Errors"),
 )
 SINCE_PRESETS = (
     ("7d", "Last 7 days"),
@@ -129,12 +129,12 @@ async def _page(
 
 
 async def overview_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights — totals, daily cost by model, top workspaces and models."""
+    """GET /insights — totals, daily cost by model, top workspaces and models."""
     return await _page(request, "overview", "insights/overview.html", insights.overview)
 
 
 async def sessions_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights/sessions — sortable session table."""
+    """GET /insights/sessions — sortable session table."""
     sort = request.query_params.get("sort", "started")
     notices = []
     if sort not in insights.SESSION_SORTS:
@@ -152,7 +152,7 @@ async def sessions_page(request: Request) -> HTMLResponse:
 
 
 async def session_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights/sessions/{session_id} — one session's turns, tools and subagents."""
+    """GET /insights/sessions/{session_id} — one session's turns, tools and subagents."""
     session_id = request.path_params["session_id"]
     if not _SESSION_ID.match(session_id):
         return _not_found(request, session_id)
@@ -192,20 +192,20 @@ def _not_found(request: Request, session_id: str) -> HTMLResponse:
 
 
 async def models_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights/models — usage, latency and errors per model."""
+    """GET /insights/models — usage, latency and errors per model."""
     return await _page(request, "models", "insights/models.html", insights.models)
 
 
 async def tools_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights/tools — calls, errors, duration and size per tool."""
+    """GET /insights/tools — calls, errors, duration and size per tool."""
     return await _page(request, "tools", "insights/tools.html", insights.tools)
 
 
 async def subagents_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights/subagents — subagent types and skill loads."""
+    """GET /insights/subagents — subagent types and skill loads."""
     return await _page(request, "subagents", "insights/subagents.html", insights.subagents)
 
 
 async def errors_page(request: Request) -> HTMLResponse:
-    """GET /ui/insights/errors — request, turn and subagent errors."""
+    """GET /insights/errors — request, turn and subagent errors."""
     return await _page(request, "errors", "insights/errors.html", insights.errors)

@@ -15,6 +15,7 @@ import click
 import httpx
 from archie_shared.credentials import PROVIDERS
 from archie_shared.credentials.providers import StaticProvider, effective_provider
+from archie_shared.protocol import API_PREFIX
 from rich.console import Console
 from rich.table import Table
 
@@ -64,7 +65,7 @@ def _set_static_from_login(service: str) -> None:
     fields = _static_fields(service, provider)
     try:
         response = httpx.put(
-            f"{_orchestrator_url()}/auth/credential/{service}", json=fields, timeout=10
+            f"{_orchestrator_url()}{API_PREFIX}/auth/credential/{service}", json=fields, timeout=10
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -210,7 +211,7 @@ def _set_aws_from_chain(service: str, provider: StaticProvider) -> None:
         raise click.ClickException("AWS credentials could not be validated") from exc
     try:
         response = httpx.put(
-            f"{_orchestrator_url()}/auth/credential/{service}", json=fields, timeout=10
+            f"{_orchestrator_url()}{API_PREFIX}/auth/credential/{service}", json=fields, timeout=10
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -238,7 +239,7 @@ def login(service: str):
 
 def _oauth_login(service: str) -> None:
     try:
-        response = httpx.post(f"{_orchestrator_url()}/auth/login/{service}", timeout=10)
+        response = httpx.post(f"{_orchestrator_url()}{API_PREFIX}/auth/login/{service}", timeout=10)
         response.raise_for_status()
         data = response.json()
     except httpx.HTTPStatusError as exc:
@@ -265,7 +266,9 @@ def _oauth_login(service: str) -> None:
 
         time.sleep(1)
         try:
-            status = httpx.get(f"{_orchestrator_url()}/auth/flow/{flow_id}", timeout=10).json()
+            status = httpx.get(
+                f"{_orchestrator_url()}{API_PREFIX}/auth/flow/{flow_id}", timeout=10
+            ).json()
         except (httpx.HTTPError, ValueError) as exc:
             raise click.ClickException("Could not query orchestrator OAuth flow") from exc
         if status["status"] == "succeeded":
@@ -281,7 +284,9 @@ def _oauth_login(service: str) -> None:
 def refresh(service: str):
     """Refresh OAuth tokens through the local orchestrator."""
     try:
-        response = httpx.post(f"{_orchestrator_url()}/auth/refresh/{service}", timeout=10)
+        response = httpx.post(
+            f"{_orchestrator_url()}{API_PREFIX}/auth/refresh/{service}", timeout=10
+        )
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise click.ClickException("Could not refresh credentials through orchestrator") from exc
@@ -356,7 +361,7 @@ def _status_table(title: str, statuses: list[dict], *, oauth: bool) -> Table:
 def status():
     """Show redacted credential status from the local orchestrator."""
     try:
-        response = httpx.get(f"{_orchestrator_url()}/auth/status", timeout=10)
+        response = httpx.get(f"{_orchestrator_url()}{API_PREFIX}/auth/status", timeout=10)
         response.raise_for_status()
         statuses = response.json()
     except httpx.HTTPError as exc:

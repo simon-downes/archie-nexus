@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from archie_cli.auth import _response_error, _set_static_from_login, login
+from archie_cli.auth import _oauth_login, _response_error, _set_static_from_login, login, refresh
 from click.testing import CliRunner
 
 
@@ -30,7 +30,7 @@ def test_response_error_falls_back_to_status():
 
 
 def test_oauth_login_surfaces_orchestrator_configuration_error():
-    request = httpx.Request("POST", "http://test/auth/login/google")
+    request = httpx.Request("POST", "http://test/api/auth/login/google")
     response = httpx.Response(
         400,
         request=request,
@@ -65,7 +65,7 @@ def test_github_login_reads_both_tokens_from_json_stdin(monkeypatch):
     ):
         _set_static_from_login("github")
     put.assert_called_once_with(
-        "http://127.0.0.1:7600/auth/credential/github",
+        "http://127.0.0.1:7600/api/auth/credential/github",
         json={"personal_token": "p-secret", "work_token": "w-secret"},
         timeout=10,
     )
@@ -163,7 +163,7 @@ def test_login_datadog_takes_static_path():
 
 
 def test_login_slack_takes_oauth_path():
-    request = httpx.Request("POST", "http://test/auth/login/slack")
+    request = httpx.Request("POST", "http://test/api/auth/login/slack")
     with (
         patch("archie_cli.auth._set_static_from_login") as static,
         patch("archie_cli.auth._orchestrator_url", return_value="http://test"),
@@ -208,7 +208,9 @@ def test_aws_chain_providers_store_chain_credentials_in_field_order(service, exp
         patch("archie_cli.auth.httpx.put", return_value=_response()) as put,
     ):
         _set_static_from_login(service)
-    put.assert_called_once_with(f"http://test/auth/credential/{service}", json=expected, timeout=10)
+    put.assert_called_once_with(
+        f"http://test/api/auth/credential/{service}", json=expected, timeout=10
+    )
 
 
 def test_aws_chain_login_is_selected_by_provider_login_not_name(monkeypatch):
@@ -226,3 +228,35 @@ def test_aws_chain_login_is_selected_by_provider_login_not_name(monkeypatch):
         result = CliRunner().invoke(login, ["custom"])
     assert result.exit_code == 0, result.output
     assert put.call_args.kwargs["json"] == {"a": "AKIA", "b": "secret", "c": "tok"}
+
+
+def test_oauth_login_and_flow_poll_use_api_paths():
+    login_response = MagicMock()
+    login_response.json.return_value = {
+        "flow_id": "f1",
+        "authorization_url": "https://provider/authorize",
+        "redirect_uri": "http://test/auth/callback/slack",
+    }
+    flow_response = MagicMock()
+    flow_response.json.return_value = {"status": "succeeded"}
+    with (
+        patch("archie_cli.auth._orchestrator_url", return_value="http://test"),
+        patch("archie_cli.auth.httpx.post", return_value=login_response) as post,
+        patch("archie_cli.auth.httpx.get", return_value=flow_response) as get,
+        patch("archie_shared.credentials.oauth.open_browser", return_value=True),
+        patch("time.sleep"),
+    ):
+        _oauth_login("slack")
+    assert post.call_args.args[0] == "http://test/api/auth/login/slack"
+    assert get.call_args.args[0] == "http://test/api/auth/flow/f1"
+
+
+def test_refresh_uses_api_path():
+    response = MagicMock()
+    with (
+        patch("archie_cli.auth._orchestrator_url", return_value="http://test"),
+        patch("archie_cli.auth.httpx.post", return_value=response) as post,
+    ):
+        result = CliRunner().invoke(refresh, ["slack"])
+    assert result.exit_code == 0, result.output
+    assert post.call_args.args[0] == "http://test/api/auth/refresh/slack"

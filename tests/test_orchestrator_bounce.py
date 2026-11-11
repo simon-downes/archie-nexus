@@ -62,11 +62,11 @@ async def test_after_restart_sessions_rediscovered():
     """After orchestrator restart, GET /sessions returns same sessions (stateless)."""
     sessions = [_make_session("proj-01abc12345"), _make_session("proj-02def67890")]
 
-    with patch("archie_orchestrator.app.list_sessions", return_value=sessions):
+    with patch("archie_orchestrator.api.list_sessions", return_value=sessions):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             # Simulate a "restart" — the app is stateless, same docker ps result
-            resp1 = await client.get("/sessions")
-            resp2 = await client.get("/sessions")
+            resp1 = await client.get("/api/sessions")
+            resp2 = await client.get("/api/sessions")
 
     assert resp1.status_code == 200
     assert resp2.status_code == 200
@@ -101,8 +101,8 @@ async def test_tui_reconnect_uses_0_5s_initial_delay():
     from archie_cli.tui.app import ArchieApp
 
     app_instance = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/sessions/proj-01abc",
+        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
         container_name="archie-proj-01abc",
     )
 
@@ -141,8 +141,8 @@ async def test_tui_reconnect_4004_gives_up_immediately():
     from archie_cli.tui.app import ArchieApp
 
     app_instance = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/sessions/proj-01abc",
+        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
         container_name="archie-proj-01abc",
     )
 
@@ -177,8 +177,8 @@ async def test_tui_reconnect_deduplicates_history():
     )
 
     app_instance = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/sessions/proj-01abc",
+        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
         container_name="archie-proj-01abc",
     )
     # Pretend we already rendered up to event "e3".

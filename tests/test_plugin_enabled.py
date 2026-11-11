@@ -57,9 +57,9 @@ async def test_auth_providers_and_status_omit_disabled(monkeypatch):
     monkeypatch.setattr(app.state, "config", config, raising=False)
     monkeypatch.setattr(app.state, "auth_service", AuthService(config), raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
-        providers = (await http.get("/auth/providers")).json()
-        statuses = (await http.get("/auth/status")).json()
-        put = await http.put("/auth/credential/datadog", json={"api_key": "a", "app_key": "b"})
+        providers = (await http.get("/api/auth/providers")).json()
+        statuses = (await http.get("/api/auth/status")).json()
+        put = await http.put("/api/auth/credential/datadog", json={"api_key": "a", "app_key": "b"})
     names = {item["name"] for item in providers}
     assert "datadog" not in names and "jira" in names and "bedrock" in names
     assert "datadog" not in {item["provider"] for item in statuses}

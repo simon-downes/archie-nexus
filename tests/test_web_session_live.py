@@ -1,4 +1,4 @@
-"""Tests for GET /ui/sessions/{id}/live (SSE relay of the agent WebSocket)."""
+"""Tests for GET /sessions/{id}/live (SSE relay of the agent WebSocket)."""
 
 import asyncio
 import json
@@ -130,7 +130,7 @@ async def test_relays_events_after_cursor_once(session_logs):
     e4 = w.assistant("second reply", turn=2)
     agent = FakeAgent(_frames(e3, e4))
 
-    resp, messages = await _live(f"/ui/sessions/{SID}/live?after={e2.id}", agent=agent)
+    resp, messages = await _live(f"/sessions/{SID}/live?after={e2.id}", agent=agent)
 
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
@@ -154,7 +154,7 @@ async def test_last_event_id_header_wins(session_logs):
     agent = FakeAgent(_frames())
 
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={e1.id}", agent=agent, headers={"Last-Event-ID": e2.id}
+        f"/sessions/{SID}/live?after={e1.id}", agent=agent, headers={"Last-Event-ID": e2.id}
     )
     text = "\n".join(m["data"] for m in _fragments(messages))
     assert "three" in text and "two" not in text
@@ -164,7 +164,7 @@ async def test_last_event_id_header_wins(session_logs):
 async def test_no_cursor_sends_everything(session_logs):
     w = session_logs
     w.write(SID, [w.user("from the log")])
-    _, messages = await _live(f"/ui/sessions/{SID}/live", agent=FakeAgent(_frames()))
+    _, messages = await _live(f"/sessions/{SID}/live", agent=FakeAgent(_frames()))
     assert "from the log" in "\n".join(m["data"] for m in _fragments(messages))
 
 
@@ -173,7 +173,7 @@ async def test_unknown_cursor_asks_for_reload(session_logs):
     w = session_logs
     w.write(SID, [w.user("x")])
     agent = FakeAgent(_frames())
-    _, messages = await _live(f"/ui/sessions/{SID}/live?after=nope", agent=agent)
+    _, messages = await _live(f"/sessions/{SID}/live?after=nope", agent=agent)
     assert [m.get("event") for m in messages] == ["reload"]
     assert agent.sent == []
 
@@ -200,7 +200,7 @@ async def test_streaming_deltas_then_final_message(session_logs):
     final = w.assistant("Hello **there**")
     agent = FakeAgent(_frames(delta("Hel", 1), delta("lo <b>", 2), final))
 
-    _, messages = await _live(f"/ui/sessions/{SID}/live?after={user.id}", agent=agent)
+    _, messages = await _live(f"/sessions/{SID}/live?after={user.id}", agent=agent)
     frags = [m["data"] for m in _fragments(messages)]
 
     stream_id = "stream-1-1-r1"
@@ -225,7 +225,7 @@ async def test_final_message_without_local_stream_clears_stale_block(session_log
     w.write(SID, [user])
     final = w.assistant("complete text")
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(final))
+        f"/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(final))
     )
     text = "\n".join(m["data"] for m in _fragments(messages))
     assert "complete text" in text
@@ -239,7 +239,7 @@ async def test_usage_header_updates(session_logs):
     w.write(SID, [user, w.llm(input_tokens=1000, cost_usd=0.5)])
     req = w.llm(input_tokens=234, cost_usd=0.25)
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(req))
+        f"/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(req))
     )
     usage = [m["data"] for m in _fragments(messages) if 'id="session-usage"' in m["data"]]
     assert usage, "no usage fragment"
@@ -256,7 +256,7 @@ async def test_tool_result_replaces_row_and_children_nest(session_logs):
     child = w.assistant("child says", scope="tu-task", index=0)
     result = w.tool_result("done", tool_use_id="tu-task")
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child, result))
+        f"/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child, result))
     )
     frags = [m["data"] for m in _fragments(messages)]
     sub = next(f for f in frags if 'id="sub-tu-task-0"' in f and 'class="subagent"' in f)
@@ -274,7 +274,7 @@ async def test_top_level_turn_is_plain_fragment(session_logs):
     w.write(SID, [first])
     second = w.user("b", turn=2)
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={first.id}", agent=FakeAgent(_frames(second))
+        f"/sessions/{SID}/live?after={first.id}", agent=FakeAgent(_frames(second))
     )
     frag = next(m["data"] for m in _fragments(messages) if f'id="turn-{second.id}"' in m["data"])
     assert frag.lstrip().startswith('<section class="turn"')
@@ -288,7 +288,7 @@ async def test_undecodable_frames_are_skipped(session_logs):
     w.write(SID, [user])
     later = w.assistant("still relayed")
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={user.id}",
+        f"/sessions/{SID}/live?after={user.id}",
         agent=FakeAgent(_frames("not json", '{"type":"mystery"}', later)),
     )
     assert "still relayed" in "\n".join(m["data"] for m in _fragments(messages))
@@ -298,7 +298,7 @@ async def test_undecodable_frames_are_skipped(session_logs):
 async def test_socket_close_ends_stream(session_logs):
     w = session_logs
     w.write(SID, [w.user("x")])
-    _, messages = await _live(f"/ui/sessions/{SID}/live", agent=FakeAgent(_frames()))
+    _, messages = await _live(f"/sessions/{SID}/live", agent=FakeAgent(_frames()))
     assert messages[-1]["event"] == "end"
     assert "Session ended" in messages[-1]["data"]
 
@@ -327,7 +327,7 @@ async def test_not_running_cases(session_logs, case):
         yield  # pragma: no cover
 
     with patch("archie_orchestrator.web.websockets.connect", refusing):
-        resp, messages = await _live(f"/ui/sessions/{SID}/live", **kwargs)
+        resp, messages = await _live(f"/sessions/{SID}/live", **kwargs)
 
     assert resp.status_code == 200
     assert messages[-1]["event"] == "end"
@@ -336,7 +336,7 @@ async def test_not_running_cases(session_logs, case):
 
 @pytest.mark.asyncio
 async def test_unknown_session_404(session_logs):
-    resp, _ = await _live("/ui/sessions/nope-01k0000000/live", running=False)
+    resp, _ = await _live("/sessions/nope-01k0000000/live", running=False)
     assert resp.status_code == 404
 
 
@@ -348,7 +348,7 @@ async def test_idle_ping_keeps_relay_open(session_logs, monkeypatch):
     w.write(SID, [user])
     later = w.assistant("after the pause")
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(0.08, later))
+        f"/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(0.08, later))
     )
     kinds = [m.get("comment") or m.get("event") for m in messages]
     assert "ping" in kinds
@@ -380,7 +380,7 @@ async def test_first_child_event_is_sent_once(session_logs):
     w.write(SID, [user, call])
     child = w.user("child prompt", scope="tu-task", index=0)
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
+        f"/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
     )
     text = "\n".join(m["data"] for m in _fragments(messages))
     assert text.count("child prompt") == 1
@@ -396,7 +396,7 @@ async def test_each_event_is_one_sse_message(session_logs):
     w.write(SID, [user, call])
     child = w.assistant("child says", scope="tu-task", index=0)
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
+        f"/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
     )
     frags = _fragments(messages)
     carrying = [m for m in frags if "child says" in m["data"] or "sub-tu-task-0" in m["data"]]
@@ -411,9 +411,7 @@ async def test_carriage_returns_cannot_inject_sse_fields(session_logs):
     call = w.tool_call("shell", {"command": "x"}, tool_use_id="t1")
     w.write(SID, [user, call])
     result = w.tool_result("10%\rid: bogus\revent: reload\r\r\rdone\r\n", tool_use_id="t1")
-    resp, _ = await _live(
-        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(result))
-    )
+    resp, _ = await _live(f"/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(result)))
     # Parse as an EventSource does: CR, LF and CRLF all end a line.
     fields = [line for line in re.split(r"\r\n|\r|\n", resp.text) if line]
     assert "id: bogus" not in fields
@@ -441,7 +439,7 @@ async def test_resumed_stream_replaces_stale_block(session_logs):
         }
     )
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(delta))
+        f"/sessions/{SID}/live?after={user.id}", agent=FakeAgent(_frames(delta))
     )
     frag = next(m["data"] for m in _fragments(messages) if "more" in m["data"])
     # The first delta a builder sees deletes any block left by an earlier
@@ -457,7 +455,7 @@ async def test_unreadable_log_ends_stream(session_logs):
         '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"a"}\n'
         '{"type":"user_message","id":"x","turn":1,"scope":null,"content":"b"}\n'
     )
-    _, messages = await _live(f"/ui/sessions/{SID}/live", agent=FakeAgent(_frames()))
+    _, messages = await _live(f"/sessions/{SID}/live", agent=FakeAgent(_frames()))
     assert messages[-1]["event"] == "end"
     assert "could not be read" in messages[-1]["data"]
 
@@ -470,7 +468,7 @@ async def test_first_child_assistant_message_is_sent_once(session_logs):
     w.write(SID, [user, call])
     child = w.assistant("CHILDTEXT", scope="tu-task", index=0)
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
+        f"/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(child))
     )
     text = "\n".join(m["data"] for m in _fragments(messages))
     assert text.count("CHILDTEXT") == 1
@@ -496,7 +494,7 @@ async def test_resumed_child_stream_replaces_stale_group(session_logs):
         }
     )
     _, messages = await _live(
-        f"/ui/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(delta))
+        f"/sessions/{SID}/live?after={call.id}", agent=FakeAgent(_frames(delta))
     )
     frag = next(m["data"] for m in _fragments(messages) if "child streaming" in m["data"])
     marker = '<template data-remove-id="sub-tu-task-0"></template>'

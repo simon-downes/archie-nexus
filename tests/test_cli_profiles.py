@@ -170,7 +170,7 @@ def test_ls_no_profile_queries_default(monkeypatch, tmp_path):
     assert result.exit_code == 0
     mock_httpx.get.assert_called()
     url = mock_httpx.get.call_args[0][0]
-    assert "127.0.0.1:7600" in url
+    assert url == "http://127.0.0.1:7600/api/sessions"
 
 
 def test_ls_named_profile_queries_that_profile(monkeypatch, tmp_path):

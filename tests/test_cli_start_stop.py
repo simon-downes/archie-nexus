@@ -168,6 +168,7 @@ def test_start_sends_correct_workspace(monkeypatch, tmp_path):
 
     mock_httpx.post.assert_called_once()
     call_kwargs = mock_httpx.post.call_args
+    assert call_kwargs.args[0] == "http://127.0.0.1:7600/api/sessions"
     assert call_kwargs.kwargs["json"] == {"workspace": "my-app"}
 
 
@@ -222,8 +223,8 @@ def test_start_launches_tui_when_not_detached(monkeypatch, tmp_path):
             runner.invoke(main, ["start", "myproject"])
 
     mock_tui.assert_called_once_with(
-        ws_url="ws://127.0.0.1:7600/sessions/myproject-01abc12345/stream",
-        api_url="http://127.0.0.1:7600/sessions/myproject-01abc12345",
+        ws_url="ws://127.0.0.1:7600/api/sessions/myproject-01abc12345/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/myproject-01abc12345",
         container_name="archie-myproject-01abc12345",
     )
     mock_tui.return_value.run.assert_called_once()
@@ -247,7 +248,7 @@ def _make_sessions(*args) -> list[SessionDescriptor]:
 
 
 def test_stop_sends_delete_for_matching_session(monkeypatch, tmp_path):
-    """archie stop with prefix → resolves and sends DELETE /sessions/{id}."""
+    """archie stop with prefix → resolves and sends DELETE /api/sessions/{id}."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
 
     import httpx as real_httpx
@@ -269,7 +270,11 @@ def test_stop_sends_delete_for_matching_session(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "myproject-01abc12345" in result.output
     mock_httpx.delete.assert_called_once()
-    assert "myproject-01abc12345" in mock_httpx.delete.call_args[0][0]
+    assert mock_httpx.get.call_args[0][0] == "http://127.0.0.1:7600/api/sessions"
+    assert (
+        mock_httpx.delete.call_args[0][0]
+        == "http://127.0.0.1:7600/api/sessions/myproject-01abc12345"
+    )
 
 
 def test_stop_no_sessions(monkeypatch, tmp_path):
@@ -322,6 +327,8 @@ def test_start_kiro_posts_backend(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert mock_httpx.post.call_args.kwargs["json"] == {"workspace": "my-app", "backend": "kiro"}
+    status_url = mock_httpx.get.call_args.args[0]
+    assert status_url == "http://127.0.0.1:7600/api/sessions/myproject-01abc12345/status"
     mock_httpx.delete.assert_not_called()
 
 
@@ -348,4 +355,4 @@ def test_start_kiro_on_old_orchestrator_stops_native_session(monkeypatch, tmp_pa
 
     assert result.exit_code != 0
     assert "did not start on Kiro" in result.output
-    assert mock_httpx.delete.call_args.args[0].endswith("/sessions/myproject-01abc12345")
+    assert mock_httpx.delete.call_args.args[0].endswith("/api/sessions/myproject-01abc12345")

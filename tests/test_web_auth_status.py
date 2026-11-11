@@ -29,7 +29,7 @@ def _app_state():
 @pytest.mark.asyncio
 async def test_auth_status_browser_renders_html_and_actions():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/ui/auth")
+        response = await client.get("/auth")
 
     assert response.status_code == 200
     assert "Authentication status" in response.text
@@ -39,12 +39,15 @@ async def test_auth_status_browser_renders_html_and_actions():
     assert 'data-action="login"' in response.text
     assert "2026-01-01 00:00:00 UTC" in response.text
     assert "access_token" not in response.text
+    assert 'href="/auth"' in response.text
+    assert "fetch(`/api/auth/${action}/" in response.text
+    assert "/ui/" not in response.text
 
 
 @pytest.mark.asyncio
 async def test_auth_status_endpoint_remains_json():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/auth/status")
+        response = await client.get("/api/auth/status")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")

@@ -211,7 +211,7 @@ def start_session(
         session_id=session_id,
         container_name=cname,
         port=int(port_str),
-        raw_docker_status="",  # freshly started; real status available via GET /sessions
+        raw_docker_status="",  # freshly started; real status available via GET /api/sessions
     )
 
 

@@ -93,6 +93,8 @@ async def test_get_root_returns_html():
 
     assert resp.status_code == 200
     assert "text/html" in resp.headers.get("content-type", "")
+    assert 'href="/sessions"' in resp.text and 'href="/insights"' in resp.text
+    assert "/ui/" not in resp.text
 
 
 @pytest.mark.asyncio

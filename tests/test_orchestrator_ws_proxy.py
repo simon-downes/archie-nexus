@@ -1,4 +1,4 @@
-"""Tests for orchestrator WebSocket proxy (WS /sessions/{id}/stream)."""
+"""Tests for orchestrator WebSocket proxy (WS /api/sessions/{id}/stream)."""
 
 from contextlib import asynccontextmanager
 from unittest.mock import patch
@@ -39,8 +39,20 @@ def _running_session(session_id: str = "proj-01abc12345", port: int = 32771) -> 
 
 
 # ---------------------------------------------------------------------------
-# WS /sessions/{id}/stream
+# WS /api/sessions/{id}/stream
 # ---------------------------------------------------------------------------
+
+
+def test_ws_stream_former_root_path_is_refused(test_client):
+    """The relay lives only under the API prefix; the old root path has no route."""
+    from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
+
+    with patch("archie_orchestrator.proxy.list_sessions", return_value=[_running_session()]):
+        with pytest.raises(StarletteDisconnect) as exc_info:
+            with test_client.websocket_connect("/sessions/proj-01abc12345/stream"):
+                pass
+    # Starlette's no-route close (1000), not the relay's 4004/4002 from a reached handler.
+    assert exc_info.value.code == 1000
 
 
 def test_ws_stream_session_not_found(test_client):
@@ -50,7 +62,7 @@ def test_ws_stream_session_not_found(test_client):
         from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
 
         with pytest.raises(StarletteDisconnect) as exc_info:
-            with test_client.websocket_connect("/sessions/unknown-01abc12345/stream"):
+            with test_client.websocket_connect("/api/sessions/unknown-01abc12345/stream"):
                 pass
         assert exc_info.value.code == 4004
 
@@ -72,7 +84,7 @@ def test_ws_stream_backend_unreachable(test_client):
     ):
         # Server accepts the connection then closes with 4002 after failing to
         # connect to backend. TestClient raises WebSocketDisconnect on receive.
-        with test_client.websocket_connect("/sessions/proj-01abc12345/stream") as ws:
+        with test_client.websocket_connect("/api/sessions/proj-01abc12345/stream") as ws:
             with pytest.raises(StarletteDisconnect) as exc_info:
                 ws.receive_text()
         assert exc_info.value.code == 4002
@@ -101,7 +113,7 @@ def test_ws_stream_backend_protocol_loss_is_expected(test_client, caplog, handsh
         patch("archie_orchestrator.proxy.websockets.connect", invalid_connect),
         caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
     ):
-        with test_client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:
+        with test_client.websocket_connect(f"/api/sessions/{session.session_id}/stream") as ws:
             with pytest.raises(StarletteDisconnect) as exc_info:
                 ws.receive_text()
 
@@ -142,7 +154,7 @@ def test_ws_stream_backend_close_during_relay_is_expected(test_client, caplog):
         patch("archie_orchestrator.proxy.websockets.connect", closing_connect),
         caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
     ):
-        with test_client.websocket_connect(f"/sessions/{session.session_id}/stream") as ws:
+        with test_client.websocket_connect(f"/api/sessions/{session.session_id}/stream") as ws:
             with pytest.raises(StarletteDisconnect) as exc_info:
                 ws.receive_text()
 
@@ -180,6 +192,6 @@ def test_ws_stream_text_relay(test_client):
         patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
         patch("archie_orchestrator.proxy.websockets.connect", fake_connect),
     ):
-        with test_client.websocket_connect("/sessions/proj-01abc12345/stream") as ws:
+        with test_client.websocket_connect("/api/sessions/proj-01abc12345/stream") as ws:
             msg = ws.receive_text()
             assert msg == "hello from backend"

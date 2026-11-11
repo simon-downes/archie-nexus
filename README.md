@@ -49,7 +49,7 @@ archie start <profile>/<workspace>
 archie attach <profile>/<session-id-or-prefix>
 ```
 
-Usage insights come from the local metrics index and work without the orchestrator running. `archie stats` prints the overview; the subcommands are `sessions`, `session <id>`, `models`, `tools`, `subagents` and `errors`. Every view takes `--since` (`7d`, `all` or `YYYY-MM-DD`; default `30d`), `--until`, `--workspace`, `--model`, `--scope` (`all`, `root`, `subagent`) and `--json`. The same views, with charts and filters, are at `http://127.0.0.1:7600/ui/insights` while `archie serve` runs.
+Usage insights come from the local metrics index and work without the orchestrator running. `archie stats` prints the overview; the subcommands are `sessions`, `session <id>`, `models`, `tools`, `subagents` and `errors`. Every view takes `--since` (`7d`, `all` or `YYYY-MM-DD`; default `30d`), `--until`, `--workspace`, `--model`, `--scope` (`all`, `root`, `subagent`) and `--json`. The same views, with charts and filters, are at `http://127.0.0.1:7600/insights` while `archie serve` runs.
 
 ```bash
 archie stats --since 7d

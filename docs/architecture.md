@@ -44,10 +44,10 @@ AWS Bedrock / OpenAI API / Ollama / local workspace
 
 1. `archie build` builds `archie:latest` from `Dockerfile`.
 2. `archie serve` runs the host orchestrator; the default profile is `127.0.0.1:7600`.
-3. `archie start <workspace>` asks `POST /sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The CLI shows a terminal-aware activity status while this blocking request is in progress.
+3. `archie start <workspace>` asks `POST /api/sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The CLI shows a terminal-aware activity status while this blocking request is in progress.
 4. The orchestrator validates the single directory name, creates a session ID, runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`).
 5. The CLI connects through the orchestrator’s session routes. The orchestrator resolves the session by Docker container name and proxies to the mapped agent port.
-6. `archie stop` calls `DELETE /sessions/{session_id}` and stops the container. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
+6. `archie stop` calls `DELETE /api/sessions/{session_id}` and stops the container. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
 
 ### Container mounts
 
@@ -72,44 +72,56 @@ The system prompt's Environment section is the plain-markdown `persona/prompts/e
 
 ## Host HTTP API
 
-The orchestrator exposes these application routes:
+The orchestrator's route table has two parts. JSON routes (and the session WebSocket relay) live under `/api` (`API_PREFIX` in `archie_shared.protocol`), defined in `orchestrator/src/archie_orchestrator/api.py`; their callers are code: the CLI, the TUI and agents. Pages live at the root, defined in `orchestrator/src/archie_orchestrator/pages.py`; their callers are browsers. API handlers never render templates and page handlers never return JSON. An htmx fragment is served by its page: the page URL returns the fragment when `HX-Request` is set, and a fragment with no page of its own is a sub-path of its page (`/sessions/{id}/live`). The root also serves `/health` and `/static/*`.
+
+Pages:
 
 | Method | Route | Role |
 | --- | --- | --- |
-| `GET` | `/` | session web page |
-| `GET` | `/ui/auth` | credential status web page |
-| `GET` | `/ui/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search |
-| `GET` | `/ui/sessions/{id}` | session log viewer: transcript of one log |
-| `GET` | `/ui/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
-| `GET` | `/ui/insights` | usage insights overview; filters `since`, `from`, `until`, `workspace`, `model`, `scope` |
-| `GET` | `/ui/insights/sessions?sort=<key>` | insights: sortable session table |
-| `GET` | `/ui/insights/sessions/{id}` | insights: one session's turns, requests, tools and subagents |
-| `GET` | `/ui/insights/models` | insights: usage, latency and errors per model |
-| `GET` | `/ui/insights/tools` | insights: calls, errors, duration and result size per tool |
-| `GET` | `/ui/insights/subagents` | insights: subagent types and skill loads |
-| `GET` | `/ui/insights/errors` | insights: request, turn and subagent errors |
+| `GET` | `/` | running sessions web page |
+| `GET` | `/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search (`HX-Request` gets the results fragment) |
+| `GET` | `/sessions/{id}` | session log viewer: transcript of one log |
+| `GET` | `/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
+| `GET` | `/insights` | usage insights overview; filters `since`, `from`, `until`, `workspace`, `model`, `scope` |
+| `GET` | `/insights/sessions?sort=<key>` | insights: sortable session table |
+| `GET` | `/insights/sessions/{id}` | insights: one session's turns, requests, tools and subagents |
+| `GET` | `/insights/models` | insights: usage, latency and errors per model |
+| `GET` | `/insights/tools` | insights: calls, errors, duration and result size per tool |
+| `GET` | `/insights/subagents` | insights: subagent types and skill loads |
+| `GET` | `/insights/errors` | insights: request, turn and subagent errors |
+| `GET` | `/auth` | credential status web page |
+| `GET` | `/auth/callback/{provider}` | complete browser OAuth callback (registered as the provider redirect URI) |
+
+JSON API:
+
+| Method | Route | Role |
+| --- | --- | --- |
+| `GET` | `/api/sessions` | list running sessions |
+| `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` |
+| `DELETE` | `/api/sessions/{id}` | stop a session |
+| `GET` | `/api/sessions/{id}/status` | proxy agent status |
+| `GET` | `/api/sessions/{id}/events?after=<id>` | proxy session history read |
+| `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
+| WebSocket | `/api/sessions/{id}/stream` | bidirectional client/session stream |
+| `GET` | `/api/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
+| `GET` | `/api/auth/providers` | typed, secret-free provider definitions |
+| `GET` | `/api/auth/status` | redacted credential status |
+| `PUT` | `/api/auth/credential/{provider}` | replace one static provider credential |
+| `DELETE` | `/api/auth/credential/{provider}` | remove one provider credential |
+| `POST` | `/api/auth/login/{provider}` | start orchestrator-owned OAuth |
+| `GET` | `/api/auth/flow/{flow_id}` | query redacted OAuth flow status |
+| `POST` | `/api/auth/refresh/{provider}` | refresh OAuth credentials |
+
+Other root routes:
+
+| Method | Route | Role |
+| --- | --- | --- |
 | `GET` | `/health` | orchestrator liveness (`{"status":"ok"}`) |
-| `GET` | `/sessions` | list running sessions |
-| `POST` | `/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` |
-| `DELETE` | `/sessions/{id}` | stop a session |
-| `GET` | `/sessions/{id}/status` | proxy agent status |
-| `GET` | `/sessions/{id}/events?after=<id>` | proxy session history read |
-| `GET` | `/sessions/{id}/metrics` | metrics for one session |
-| `GET` | `/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
-| `GET` | `/auth/providers` | typed, secret-free provider definitions |
-| `GET` | `/auth/status` | redacted credential status |
-| `PUT` | `/auth/credential/{provider}` | replace one static provider credential |
-| `DELETE` | `/auth/credential/{provider}` | remove one provider credential |
-| `POST` | `/auth/login/{provider}` | start orchestrator-owned OAuth |
-| `GET` | `/auth/callback/{provider}` | complete browser OAuth callback |
-| `GET` | `/auth/flow/{flow_id}` | query redacted OAuth flow status |
-| `POST` | `/auth/refresh/{provider}` | refresh OAuth credentials |
-| WebSocket | `/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/static/*` | static assets for the web pages (vendored nimble.css, htmx and Chart.js under `/static/vendor/`) |
 
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
 
-The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/ui/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only the metrics index; each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
+The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only the metrics index; each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
 
 ### Authentication API security
 
@@ -229,7 +241,7 @@ At startup, an existing file is moved to the matching `.1` path (one backup gene
 
 No other message content, tool input or tool output is stored. Sync is incremental and idempotent: unchanged files are skipped by size and mtime, a trailing partial line waits for the next sync, and a log that shrank or whose first line changed is re-ingested from the start. Rows for deleted logs are kept. Invalid lines are counted and skipped; an unreadable file records its error and the sync moves on.
 
-The orchestrator syncs every 15 seconds; `/ui/insights` pages and `archie stats` sync before they query. All syncs, schema checks and archives hold an exclusive `flock` on `metrics.db.lock`. A database with another schema version is archived (WAL checkpointed, renamed with its `-wal`/`-shm` files to `metrics.db.legacy.<UTC>[-N]`) and rebuilt from the logs. `archie migrate-sessions` archives the index and rebuilds it from the migrated logs in strict mode, so a file or SQLite error fails the command. Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
+The orchestrator syncs every 15 seconds; `/insights` pages and `archie stats` sync before they query. All syncs, schema checks and archives hold an exclusive `flock` on `metrics.db.lock`. A database with another schema version is archived (WAL checkpointed, renamed with its `-wal`/`-shm` files to `metrics.db.legacy.<UTC>[-N]`) and rebuilt from the logs. `archie migrate-sessions` archives the index and rebuilds it from the migrated logs in strict mode, so a file or SQLite error fails the command. Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
 
 ## Configuration, security, and ownership
 

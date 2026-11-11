@@ -1,4 +1,4 @@
-"""Read-only queries over the metrics index for ``archie stats`` and ``/ui/insights``.
+"""Read-only queries over the metrics index for ``archie stats`` and ``/insights``.
 
 Each view is a function ``(conn, filters, ...) -> dict`` returning plain,
 JSON-serialisable data, so the CLI and the web pages share one implementation.

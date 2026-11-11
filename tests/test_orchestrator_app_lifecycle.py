@@ -37,9 +37,9 @@ async def test_post_sessions_success(http_client):
         raw_docker_status="Up",
     )
 
-    with patch("archie_orchestrator.app.start_session", return_value=fake_descriptor):
+    with patch("archie_orchestrator.api.start_session", return_value=fake_descriptor):
         async with http_client as client:
-            response = await client.post("/sessions", json={"workspace": "myproject"})
+            response = await client.post("/api/sessions", json={"workspace": "myproject"})
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
@@ -52,7 +52,7 @@ async def test_post_sessions_success(http_client):
 async def test_post_sessions_missing_workspace_key(http_client):
     """POST /sessions with no workspace key → 400."""
     async with http_client as client:
-        response = await client.post("/sessions", json={"other": "value"})
+        response = await client.post("/api/sessions", json={"other": "value"})
 
     assert response.status_code == 400
     assert "workspace" in response.json()["error"].lower()
@@ -61,11 +61,11 @@ async def test_post_sessions_missing_workspace_key(http_client):
 async def test_post_sessions_workspace_not_found(http_client):
     """POST /sessions when workspace dir missing → 400 from ValueError."""
     with patch(
-        "archie_orchestrator.app.start_session",
+        "archie_orchestrator.api.start_session",
         side_effect=ValueError("Workspace 'bad' not found"),
     ):
         async with http_client as client:
-            response = await client.post("/sessions", json={"workspace": "bad"})
+            response = await client.post("/api/sessions", json={"workspace": "bad"})
 
     assert response.status_code == 400
     assert "not found" in response.json()["error"].lower()
@@ -74,11 +74,11 @@ async def test_post_sessions_workspace_not_found(http_client):
 async def test_post_sessions_docker_failure(http_client):
     """POST /sessions when Docker fails → 500 from RuntimeError."""
     with patch(
-        "archie_orchestrator.app.start_session",
+        "archie_orchestrator.api.start_session",
         side_effect=RuntimeError("docker run failed"),
     ):
         async with http_client as client:
-            response = await client.post("/sessions", json={"workspace": "myproject"})
+            response = await client.post("/api/sessions", json={"workspace": "myproject"})
 
     assert response.status_code == 500
     assert "docker run failed" in response.json()["error"]
@@ -88,7 +88,7 @@ async def test_post_sessions_invalid_json(http_client):
     """POST /sessions with non-JSON body → 400."""
     async with http_client as client:
         response = await client.post(
-            "/sessions",
+            "/api/sessions",
             content=b"not json",
             headers={"content-type": "application/json"},
         )
@@ -103,9 +103,9 @@ async def test_post_sessions_invalid_json(http_client):
 
 async def test_delete_session_success(http_client):
     """DELETE /sessions/{id} for existing session → 200 + {"stopped": id}."""
-    with patch("archie_orchestrator.app.stop_session"):
+    with patch("archie_orchestrator.api.stop_session"):
         async with http_client as client:
-            response = await client.delete("/sessions/myproject-01abc12345")
+            response = await client.delete("/api/sessions/myproject-01abc12345")
 
     assert response.status_code == 200
     assert response.json() == {"stopped": "myproject-01abc12345"}
@@ -114,11 +114,11 @@ async def test_delete_session_success(http_client):
 async def test_delete_session_not_found(http_client):
     """DELETE /sessions/{id} for non-existent session → 404."""
     with patch(
-        "archie_orchestrator.app.stop_session",
+        "archie_orchestrator.api.stop_session",
         side_effect=KeyError("myproject-01abc12345"),
     ):
         async with http_client as client:
-            response = await client.delete("/sessions/myproject-01abc12345")
+            response = await client.delete("/api/sessions/myproject-01abc12345")
 
     assert response.status_code == 404
     assert "myproject-01abc12345" in response.json()["error"]
@@ -129,9 +129,11 @@ async def test_post_sessions_kiro_backend(http_client):
     fake = SessionDescriptor(
         session_id="p-01", container_name="archie-p-01", port=1, raw_docker_status=""
     )
-    with patch("archie_orchestrator.app.start_session", return_value=fake) as mock_start:
+    with patch("archie_orchestrator.api.start_session", return_value=fake) as mock_start:
         async with http_client as client:
-            response = await client.post("/sessions", json={"workspace": "p", "backend": "kiro"})
+            response = await client.post(
+                "/api/sessions", json={"workspace": "p", "backend": "kiro"}
+            )
     assert response.status_code == 200
     assert mock_start.call_args.kwargs == {"backend": "kiro"}
 
@@ -140,14 +142,14 @@ async def test_post_sessions_default_backend_is_native(http_client):
     fake = SessionDescriptor(
         session_id="p-01", container_name="archie-p-01", port=1, raw_docker_status=""
     )
-    with patch("archie_orchestrator.app.start_session", return_value=fake) as mock_start:
+    with patch("archie_orchestrator.api.start_session", return_value=fake) as mock_start:
         async with http_client as client:
-            await client.post("/sessions", json={"workspace": "p"})
+            await client.post("/api/sessions", json={"workspace": "p"})
     assert mock_start.call_args.kwargs == {"backend": "native"}
 
 
 async def test_post_sessions_invalid_backend(http_client):
     async with http_client as client:
-        response = await client.post("/sessions", json={"workspace": "p", "backend": "x"})
+        response = await client.post("/api/sessions", json={"workspace": "p", "backend": "x"})
     assert response.status_code == 400
     assert response.json() == {"error": "Invalid backend 'x': expected 'native' or 'kiro'"}

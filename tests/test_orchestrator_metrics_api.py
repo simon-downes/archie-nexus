@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from archie_orchestrator.app import _query_metrics, app
+from archie_orchestrator.api import _query_metrics
+from archie_orchestrator.app import app
 from archie_shared.schemas import NexusConfig
 from httpx import ASGITransport, AsyncClient
 
@@ -188,9 +189,9 @@ def test_unknown_session_raises_key_error(tmp_path):
 @pytest.mark.asyncio
 async def test_get_metrics_empty_db(tmp_path):
     """GET /metrics with missing database → 200 with zero response."""
-    with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
+    with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/metrics")
+            resp = await client.get("/api/metrics")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -211,9 +212,9 @@ async def test_get_metrics_populated(tmp_path):
         ],
     )
 
-    with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
+    with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/metrics")
+            resp = await client.get("/api/metrics")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -235,9 +236,9 @@ async def test_get_metrics_since_param(tmp_path):
         ],
     )
 
-    with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
+    with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/metrics", params={"since": "2026-07-01"})
+            resp = await client.get("/api/metrics", params={"since": "2026-07-01"})
 
     assert resp.status_code == 200
     assert resp.json()["total_requests"] == 1
@@ -256,9 +257,9 @@ async def test_get_session_metrics(tmp_path):
         ],
     )
 
-    with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
+    with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get(f"/sessions/{sid}/metrics")
+            resp = await client.get(f"/api/sessions/{sid}/metrics")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -272,9 +273,9 @@ async def test_get_session_metrics_not_found(tmp_path):
     db = tmp_path / "metrics.db"
     _seed_db(db, [_row(session_id="other-session")])
 
-    with patch("archie_orchestrator.app.home_dir", return_value=tmp_path):
+    with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/sessions/nonexistent/metrics")
+            resp = await client.get("/api/sessions/nonexistent/metrics")
 
     assert resp.status_code == 404
     assert "No metrics found" in resp.json()["error"]
