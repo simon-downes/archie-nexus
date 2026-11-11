@@ -6,6 +6,7 @@ are relative to the mount:
 
   GET    /sessions                        — session records (?include=ended for all)
   POST   /sessions                        — start a new session (202, starting)
+  GET    /sessions/feed                   — SSE: a snapshot, then every session change
   GET    /sessions/{session_id}           — one session record
   PATCH  /sessions/{session_id}           — rename a session or mark it seen
   DELETE /sessions/{session_id}           — stop a running session (200, stopped)
@@ -25,14 +26,16 @@ are relative to the mount:
 import asyncio
 import logging
 import sqlite3
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 
 import httpx
 import msgspec
 from archie_shared.config import ConfigError, home_dir
+from archie_shared.session import SessionDescriptor
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
 from archie_orchestrator.auth import AuthError
@@ -40,7 +43,7 @@ from archie_orchestrator.config_source import config_source
 from archie_orchestrator.docker import DockerError
 from archie_orchestrator.lifecycle import BACKENDS
 from archie_orchestrator.proxy import proxy_events, proxy_stream
-from archie_orchestrator.tracker import SessionConflictError
+from archie_orchestrator.tracker import FeedSubscription, SessionConflictError
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,8 @@ log = logging.getLogger(__name__)
 
 NAME_MAX_CHARS = 80
 PATCH_FIELDS = ("name", "unseen")
+FEED_PING_INTERVAL = 15.0
+"""Seconds without an event before the sessions feed sends a ``: ping`` comment."""
 _INVALID_NAME = (
     f"Invalid 'name': expected a non-blank string of at most {NAME_MAX_CHARS} characters"
 )
@@ -87,6 +92,64 @@ async def sessions_get(request: Request) -> Response:
         log.error("Session store read failed: %s", exc)
         return JSONResponse({"error": "Session store unavailable"}, status_code=500)
     return _json(records)
+
+
+async def sessions_feed(request: Request) -> Response:
+    """Stream session records as server-sent events (082 D20).
+
+    On connect one ``snapshot`` event, ``data: {"sessions": [...]}``, holds what
+    ``GET /api/sessions`` would return for the same ``include``. Then every change the
+    tracker publishes (D11) is one ``session`` event with the full SessionDescriptor,
+    whatever the filter, so a client sees a session's final terminal record. A ``: ping``
+    comment is sent after :data:`FEED_PING_INTERVAL` seconds without an event. The stream
+    ends if the client falls too far behind; it reconnects to a fresh snapshot.
+
+    Returns:
+        200 ``text/event-stream``; 400 for an ``include`` other than ``ended``; 500 if
+        the store can't be read for the snapshot.
+    """
+    include = request.query_params.get("include")
+    if include not in (None, "ended"):
+        return JSONResponse({"error": "Invalid 'include': expected 'ended'"}, status_code=400)
+    tracker = request.app.state.tracker
+    # Subscribe first, so a change made while the snapshot is read isn't lost (D20).
+    subscription = tracker.subscribe_feed()
+    try:
+        records = await tracker.list(include_ended=include == "ended")
+    except sqlite3.Error as exc:
+        subscription.close()
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    return StreamingResponse(
+        _feed_events(subscription, records),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _feed_message(event: str, value: object) -> str:
+    # Compact JSON escapes every line break, so the data is always a single line.
+    return f"event: {event}\ndata: {msgspec.json.encode(value).decode()}\n\n"
+
+
+async def _feed_events(
+    subscription: FeedSubscription, records: list[SessionDescriptor]
+) -> AsyncIterator[str]:
+    """The feed body; closes the subscription when the stream ends or is cancelled."""
+    try:
+        yield _feed_message("snapshot", {"sessions": records})
+        while True:
+            try:
+                record = await asyncio.wait_for(subscription.get(), FEED_PING_INTERVAL)
+            except TimeoutError:
+                yield ": ping\n\n"
+                continue
+            if record is None:
+                log.info("Sessions feed: subscriber dropped after falling behind")
+                return
+            yield _feed_message("session", record)
+    finally:
+        subscription.close()
 
 
 async def session_get(request: Request) -> Response:
@@ -458,6 +521,7 @@ async def auth_credential_delete(request: Request) -> Response:
 routes = [
     Route("/sessions", sessions_get, methods=["GET"]),
     Route("/sessions", sessions_post, methods=["POST"]),
+    Route("/sessions/feed", sessions_feed, methods=["GET"]),  # before /sessions/{session_id}
     Route("/sessions/{session_id}", session_get, methods=["GET"]),
     Route("/sessions/{session_id}", session_patch, methods=["PATCH"]),
     Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),

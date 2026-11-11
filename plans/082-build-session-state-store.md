@@ -478,7 +478,7 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   40 times in a row with no failure; `scripts/dev ruff check .` clean; `ruff format --check`
   on the 14 touched files clean.
 
-### [ ] M4 — Sessions feed
+### [x] M4 — Sessions feed
 
 - **Approach:** `GET /api/sessions/feed` as a `StreamingResponse` (follow `web.py` `_sse` and
   `session_live`), with `tracker.subscribe_feed()` queues (256, a full queue drops the
@@ -486,7 +486,36 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 - **Test seam:** the ASGI app with a tracker; read the stream with `httpx` streaming.
 - **Deliverable:** a client receives a snapshot and then each change.
 - **Verify:** `tests/test_sessions_feed.py` passes; full suite passes; Ruff clean.
-- **Outcome:**
+- **Outcome:** `tracker.subscribe_feed(maxsize=FEED_QUEUE_SIZE)` returns a `FeedSubscription`
+  (context manager or `close()`, idempotent) whose `asyncio.Queue(256)` is registered as a
+  tracker listener, so it gets every record `_publish` emits, D11's throttle included. A full
+  queue drops that subscriber: it unregisters, its backlog is replaced by an end marker and
+  `get()` returns None. `GET /api/sessions/feed` (`api.sessions_feed`, routed before
+  `/sessions/{session_id}`) validates `include` with the list's 400, subscribes, then builds the
+  snapshot with `tracker.list()` (D20; a store failure → 500 and the subscription closed), and
+  streams `event: snapshot` `{"sessions": [...]}`, one `event: session` per published record
+  whatever the filter, and `: ping` after `FEED_PING_INTERVAL` (15 s, module constant) idle;
+  `Cache-Control: no-cache` and `X-Accel-Buffering: no` as the live view sends. Descriptors are
+  encoded with `msgspec.json.encode` as the list route does (compact JSON, so data is one line;
+  no `_sse` import from `web.py`). The generator closes the subscription when it ends or is
+  cancelled on disconnect; a response whose body never starts is dropped at its first overflow.
+  `httpx.ASGITransport` (0.28.1) collects the whole body before returning, so it can't read an
+  endless stream; the feed tests drive the ASGI app directly (`Feed` in the test file: body
+  chunks as sent, a gate on `send` to stall the client, `http.disconnect` to close). Tests
+  (14, `tests/test_sessions_feed.py`): snapshot equals the list for both filters plus headers;
+  empty snapshot; 400; 500 with no subscriber left; PATCH → `session` event equal to the PATCH
+  body; PATCH of an ended session sent with `include=ended` off; DELETE → `stopping` then the
+  terminal `stopped` record and a fresh snapshot without it; a change published while the
+  snapshot is read arrives after it (D20); pings with a 0.05 s interval and an event after them;
+  disconnect unsubscribes; a stalled client is dropped when its queue overflows behind the record
+  it is sending, gets that record and then the end of the body; `/feed` doesn't shadow
+  `GET /api/sessions/{id}`; and two
+  `FeedSubscription` unit tests (order; overflow drops only the slow subscriber). Evidence: the
+  full suite → 4991 passed (M3: 4977); `scripts/dev ruff check .` clean; `ruff format --check` on
+  the 3 touched files clean; feed + API + tracker tests run 40 times in a row with no failure or
+  hang (every wait in the feed tests is bounded by `asyncio.wait_for`). Checks ran on HEAD plus
+  the M4 changes only: an M5 edit in progress in the same worktree broke collection of
+  `tests/test_orchestrator_metrics.py` at the time.
 
 ### [ ] M5 — Metrics in archie.db
 

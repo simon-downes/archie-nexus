@@ -6,6 +6,7 @@ agent's ``/stream`` read-only (as the live viewer does) and folds the events int
 record (082 D10). Records of sessions that have not ended are kept in memory and are
 authoritative (D12a); reads of ended sessions go to the store. Every change is passed to
 the registered listeners; changes to ``last_activity_at`` alone are throttled (D11).
+:meth:`SessionTracker.subscribe_feed` queues those changes for one sessions-feed client.
 
 At start the stored records are reconciled with ``docker ps`` (D13), and a closed stream
 is followed again while the container runs, or ends the session when it has gone (D14).
@@ -64,6 +65,8 @@ ACTIVITY_INTERVAL = 10.0
 """Minimum seconds between writes of one session that change only ``last_activity_at`` (D11)."""
 RESTARTED_DURING_STARTUP = "orchestrator restarted during startup"
 """The ``error`` of a session that was ``starting`` when the orchestrator stopped (D13)."""
+FEED_QUEUE_SIZE = 256
+"""Records a feed subscriber may fall behind before it is dropped."""
 
 _UNSET: object = object()
 """Default of :meth:`SessionTracker.patch` arguments that were not given."""
@@ -80,6 +83,53 @@ def resubscribe_delay(attempt: int) -> float:
 
 class SessionConflictError(Exception):
     """The session's status doesn't allow the operation (``starting``, ``stopping`` or ended)."""
+
+
+class FeedSubscription:
+    """One sessions-feed client: every record the tracker publishes, in order, until closed.
+
+    Created by :meth:`SessionTracker.subscribe_feed`; use it as a context manager or call
+    :meth:`close`. A subscriber that falls ``maxsize`` records behind is dropped: its
+    backlog is discarded, :meth:`get` returns None and the client is expected to reconnect
+    to a fresh snapshot.
+    """
+
+    def __init__(self, tracker: SessionTracker, maxsize: int) -> None:
+        self._tracker = tracker
+        self._queue: asyncio.Queue[SessionDescriptor | None] = asyncio.Queue(maxsize=maxsize)
+        self.dropped = False
+
+    def __enter__(self) -> FeedSubscription:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    async def get(self) -> SessionDescriptor | None:
+        """The next published record, or None once the subscriber has been dropped."""
+        return await self._queue.get()
+
+    def close(self) -> None:
+        """Stop receiving records. Safe to call more than once."""
+        self._tracker.remove_listener(self._offer)
+
+    def _offer(self, record: SessionDescriptor) -> None:
+        """The tracker listener: queue ``record``, or drop the subscriber when full."""
+        if self.dropped:
+            return
+        try:
+            self._queue.put_nowait(record)
+        except asyncio.QueueFull:
+            self._drop()
+
+    def _drop(self) -> None:
+        log.warning("Sessions feed subscriber fell %d records behind; dropped", self._queue.maxsize)
+        self.dropped = True
+        self.close()
+        # Replace the backlog with the end marker so the reader stops at once.
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        self._queue.put_nowait(None)
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +392,16 @@ class SessionTracker:
         """Stop calling a listener added with :meth:`add_listener`."""
         if listener in self._listeners:
             self._listeners.remove(listener)
+
+    def subscribe_feed(self, maxsize: int = FEED_QUEUE_SIZE) -> FeedSubscription:
+        """Start queueing every published record for one feed client (D20).
+
+        Subscribe before reading the snapshot: a change made while the snapshot is read
+        is then queued as well, so none is lost (a client may see a record twice).
+        """
+        subscription = FeedSubscription(self, maxsize)
+        self.add_listener(subscription._offer)
+        return subscription
 
     def _publish(self, record: SessionDescriptor) -> None:
         for listener in list(self._listeners):
