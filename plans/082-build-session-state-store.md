@@ -398,7 +398,7 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
   (baseline 4818); `scripts/dev ruff check .` clean; `ruff format --check` on the 39 touched
   files clean; no `archie.db` appeared in the real `~/.nexus` after the run.
 
-### [ ] M2 — Turn status, reconcile and ending
+### [x] M2 — Turn status, reconcile and ending
 
 - **Approach:** in `tracker.py`, the full D10 frame rules, D11 throttling with the trailing
   flush, D13's remaining reconcile cases with the 30 s retry when Docker fails, D14 end
@@ -413,7 +413,29 @@ tracker until a terminal status, and afterwards only through `PATCH` (`name`, `u
 - **Deliverable:** records follow turns and endings without a client attached.
 - **Verify:** full test command passes, including the D10, D13 and D14 tracker tests and
   `tests/test_web_console.py`; Ruff clean.
-- **Outcome:**
+- **Outcome:** `tracker.py` now folds the full D10 rules (root `user_message` → `working` and
+  clears the failed-turn flag; root `turn_error` → flag + `unseen`, the next `idle` stored as
+  `error` until the next root message; root `turn_complete` → `unseen`; root
+  `turn_interrupted` clears the flag; `kiro/` models set `backend`; subagent events are
+  activity only). D11: every event other than handshake/status/notice is activity, held in
+  `_pending_activity` and merged into the next write; activity-only changes are written at
+  most every `activity_interval` (default `ACTIVITY_INTERVAL` 10 s, injectable with `clock`)
+  with a trailing flush task; `close()` writes pending activity and gives pending terminal
+  writes one last attempt (D12a). D13: `start()` reconciles the loaded rows (stopping →
+  `stopped`, starting → `failed` "orchestrator restarted during startup", other → `exited`,
+  `ended_at` = log mtime or now); on a Docker failure nothing ends and reconcile retries
+  every `RECONCILE_RETRY_INTERVAL` (30 s), touching only rows loaded at start and unknown
+  containers, so sessions created meanwhile are left alone. D14: `resubscribe_delay()` gives
+  1, 2, 5, 5… s, reset once a stream delivers a frame; cancellation skips the end check.
+  `GET /api/sessions/{id}/status` and `proxy_status` removed (route test asserts the 404);
+  `/` shows Session ID, Name (only when `name_fixed`), Workspace, Status and Last activity
+  (UTC). Tests: 25 new tracker tests (each D10 sequence, D11 throttle/trailing flush/carry/
+  close/end, each D13 case plus Docker failing and retry, D14 back-off, stopping, shutdown),
+  a `/` columns test, the `/status` proxy tests moved to `/events`; `test_web_console.py`
+  now sets `app.state.start_time` itself (it failed when run alone before). Evidence:
+  `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` → 4927 passed (M1: 4900);
+  `tests/test_session_tracker.py` run 40 times in a row with no failure; `scripts/dev ruff check .`
+  clean; `ruff format --check` on the touched files clean.
 
 ### [ ] M3 — Stop, rename and seen
 

@@ -3,9 +3,12 @@
 :class:`SessionTracker` owns every write to the ``sessions`` table. It creates the row on
 ``POST /api/sessions``, runs the container start in the background, follows each running
 agent's ``/stream`` read-only (as the live viewer does) and folds the events into the
-record. Records of sessions that have not ended are kept in memory and are authoritative
-(D12a); reads of ended sessions go to the store. Every change is passed to the registered
-listeners.
+record (082 D10). Records of sessions that have not ended are kept in memory and are
+authoritative (D12a); reads of ended sessions go to the store. Every change is passed to
+the registered listeners; changes to ``last_activity_at`` alone are throttled (D11).
+
+At start the stored records are reconciled with ``docker ps`` (D13), and a closed stream
+is followed again while the container runs, or ends the session when it has gone (D14).
 
 Docker is reached only through a :class:`Runtime`, so tests can substitute a fake.
 """
@@ -15,12 +18,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 import msgspec
 import websockets
-from archie_shared.events import SessionStatus, decode_event
+from archie_shared.events import (
+    ErrorNotice,
+    Handshake,
+    SessionStatus,
+    TurnComplete,
+    TurnError,
+    TurnInterrupted,
+    UserMessage,
+    decode_event,
+)
+from archie_shared.kiro import KIRO_MODEL_PREFIX
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor, container_name, split_id
 from websockets.exceptions import WebSocketException
@@ -32,12 +48,29 @@ from archie_orchestrator.store import SessionStore, id_start_time, import_log, n
 
 log = logging.getLogger(__name__)
 
-RESUBSCRIBE_DELAY = 1.0
-"""Seconds before following a session's stream again after it closed while running."""
+RESUBSCRIBE_DELAYS = (1.0, 2.0, 5.0)
+"""Seconds before following a stream again after it closed while the container runs (D14).
+
+The last delay repeats for as long as the container runs; a stream that delivered a frame
+starts the sequence again.
+"""
 TERMINAL_RETRY_INTERVAL = 5.0
 """Seconds between retries of a failed terminal write (D12a)."""
+RECONCILE_RETRY_INTERVAL = 30.0
+"""Seconds between reconcile attempts while ``docker ps`` fails (D13)."""
+ACTIVITY_INTERVAL = 10.0
+"""Minimum seconds between writes of one session that change only ``last_activity_at`` (D11)."""
+RESTARTED_DURING_STARTUP = "orchestrator restarted during startup"
+"""The ``error`` of a session that was ``starting`` when the orchestrator stopped (D13)."""
 
 _STREAM_ERRORS = (OSError, TimeoutError, WebSocketException)
+# Events that are not agent activity: connect frames, status and targeted notices.
+_NOT_ACTIVITY = (Handshake, SessionStatus, ErrorNotice)
+
+
+def resubscribe_delay(attempt: int) -> float:
+    """The back-off before resubscribe attempt ``attempt`` (0-based) of one session (D14)."""
+    return RESUBSCRIBE_DELAYS[min(attempt, len(RESUBSCRIBE_DELAYS) - 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -96,11 +129,22 @@ class SessionTracker:
     Args:
         store: The migrated (or about to be, by :meth:`start`) session store.
         runtime: Container operations; :class:`DockerRuntime` in production.
+        activity_interval: Minimum seconds between activity-only writes of one session.
+        clock: Monotonic seconds, used to space activity-only writes.
     """
 
-    def __init__(self, store: SessionStore, runtime: Runtime) -> None:
+    def __init__(
+        self,
+        store: SessionStore,
+        runtime: Runtime,
+        *,
+        activity_interval: float = ACTIVITY_INTERVAL,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.store = store
         self.runtime = runtime
+        self.activity_interval = activity_interval
+        self.clock = clock
         # Every record that hasn't ended, plus ended ones whose terminal write is pending.
         self._records: dict[str, SessionDescriptor] = {}
         self._ports: dict[str, int] = {}
@@ -108,52 +152,122 @@ class SessionTracker:
         self._background: set[asyncio.Task] = set()
         self._write_locks: dict[str, asyncio.Lock] = {}
         self._listeners: list[Callable[[SessionDescriptor], None]] = []
+        # Stored records not yet checked against ``docker ps`` (D13).
+        self._unreconciled: set[str] = set()
+        # Sessions whose last root turn failed: their next ``idle`` is ``error`` (D10).
+        self._turn_failed: set[str] = set()
+        # Activity not yet written, the clock time activity was last written, and the
+        # trailing writes scheduled for the end of the window (D11).
+        self._pending_activity: dict[str, str] = {}
+        self._activity_written: dict[str, float] = {}
+        self._flush_tasks: dict[str, asyncio.Task] = {}
 
     # -- lifecycle -----------------------------------------------------------
 
     async def start(self) -> None:
-        """Migrate the store, load live records, reconcile with Docker and follow sessions."""
+        """Migrate the store, load live records, reconcile with Docker and follow sessions.
+
+        If ``docker ps`` fails, the stored records are kept as they are and reconcile is
+        retried every :data:`RECONCILE_RETRY_INTERVAL` seconds until it succeeds.
+        """
         await asyncio.to_thread(self.store.migrate)
         for record in await asyncio.to_thread(self.store.list, False):
             self._records[record.session_id] = record
-        await self._reconcile()
-        for session_id in list(self._ports):
-            self._spawn(session_id, self._follow(session_id))
+        self._unreconciled = set(self._records)
+        if not await self._reconcile():
+            self._background_task(self._retry_reconcile())
 
     async def close(self) -> None:
-        """Cancel every background task. Records keep their status (the sessions run on)."""
-        tasks = [*self._tasks.values(), *self._background]
+        """Stop every background task and write what is pending; statuses are kept.
+
+        Sessions run on without the orchestrator, so nothing is marked ended: followed
+        streams are cancelled without the end check (D14), pending activity is written
+        (D11) and pending terminal writes get one last attempt (D12a).
+        """
+        tasks = [*self._tasks.values(), *self._background, *self._flush_tasks.values()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._background.clear()
+        self._flush_tasks.clear()
+        for session_id in list(self._pending_activity):
+            await self._update(session_id)
+        for session_id, record in list(self._records.items()):
+            if record.ended:
+                await self._persist(session_id)
 
-    async def _reconcile(self) -> None:
-        """Make every running container's record live (D13), adopting unknown ones.
+    async def _reconcile(self) -> bool:
+        """Match the stored records against ``docker ps`` (D13); False if Docker failed.
 
-        A Docker failure is logged and leaves the records as they are.
+        A running container makes its record live (``idle``, ``ended_at`` cleared, followed
+        when it has a port), adopting containers with no row. A stored record that is
+        still live with no container ends: ``stopping`` becomes ``stopped``, ``starting``
+        becomes ``failed`` and anything else ``exited``, with ``ended_at`` the log's mtime
+        (or now). Records this tracker created or already revived are left alone, so a
+        retry after a Docker failure can't end a session that started meanwhile. On a
+        Docker failure nothing is ended, since "cannot list" is not "nothing runs".
         """
         try:
             running = await asyncio.to_thread(self.runtime.list_running)
         except (DockerError, OSError) as exc:
             log.warning("Cannot list running sessions: %s", exc)
-            return
+            return False
+        found: set[str] = set()
         for container in running:
             session_id = container.session_id
+            found.add(session_id)
+            if session_id in self._records and session_id not in self._unreconciled:
+                continue
             record = self._records.get(session_id)
             if record is None:
                 record = await asyncio.to_thread(self.store.get, session_id)
             if record is None:
                 record = await asyncio.to_thread(self._adopt, session_id)
                 log.info("Adopted running session %s", session_id)
+            self._unreconciled.discard(session_id)
             if container.port is not None:
                 self._ports[session_id] = container.port
             await self._put(msgspec.structs.replace(record, status="idle", ended_at=None))
+            if session_id in self._ports and session_id not in self._tasks:
+                self._spawn(session_id, self._follow(session_id))
+        for session_id in sorted(self._unreconciled - found):
+            record = self._records.get(session_id)
+            if record is None or record.ended:
+                continue
+            ended_at = await asyncio.to_thread(self._log_mtime, session_id) or now_iso()
+            if record.status == "stopping":
+                changes: dict[str, object] = {"status": "stopped"}
+            elif record.status == "starting":
+                changes = {"status": "failed", "error": RESTARTED_DURING_STARTUP}
+            else:
+                changes = {"status": "exited"}
+            log.info("Session %s has no container: %s", session_id, changes["status"])
+            await self._update(session_id, **changes, ended_at=ended_at)
+        self._unreconciled.clear()
+        return True
+
+    async def _retry_reconcile(self) -> None:
+        while True:
+            await asyncio.sleep(RECONCILE_RETRY_INTERVAL)
+            if await self._reconcile():
+                log.info("Reconciled sessions with Docker")
+                return
+
+    def _log_path(self, session_id: str) -> Path:
+        return self.store.db.parent / "sessions" / f"{session_id}.jsonl"
+
+    def _log_mtime(self, session_id: str) -> str | None:
+        """The session log's mtime as an ISO 8601 UTC string, or None without a log."""
+        try:
+            mtime = self._log_path(session_id).stat().st_mtime
+        except OSError:
+            return None
+        return datetime.fromtimestamp(mtime, UTC).isoformat()
 
     def _adopt(self, session_id: str) -> SessionDescriptor:
         """A record for a running container with no row: from its log, else from its ID."""
-        path = self.store.db.parent / "sessions" / f"{session_id}.jsonl"
+        path = self._log_path(session_id)
         record = import_log(path) if path.is_file() else None
         if record is not None:
             return record
@@ -271,7 +385,13 @@ class SessionTracker:
     # -- following the agent stream ------------------------------------------
 
     async def _follow(self, session_id: str) -> None:
-        """Fold the agent's ``/stream`` into the record until the session ends."""
+        """Fold the agent's ``/stream`` into the record until the session ends.
+
+        When the stream closes or can't be opened, the session ends if its container has
+        gone; otherwise it is followed again after :func:`resubscribe_delay` (D14).
+        Cancellation (:meth:`close`) skips that check.
+        """
+        attempt = 0
         while True:
             port = self._ports.get(session_id)
             if port is None:
@@ -282,15 +402,25 @@ class SessionTracker:
                 ) as backend:
                     log.info("Tracking session %s", session_id)
                     async for frame in backend:
+                        attempt = 0
                         if isinstance(frame, str):
                             await self._on_frame(session_id, frame)
             except _STREAM_ERRORS as exc:
                 log.info("Session %s stream closed: %s", session_id, exc)
             if not await self._still_running(session_id):
                 return
-            await asyncio.sleep(RESUBSCRIBE_DELAY)
+            await asyncio.sleep(resubscribe_delay(attempt))
+            attempt += 1
 
     async def _on_frame(self, session_id: str, frame: str) -> None:
+        """Apply one agent event to the record (D10) and note activity (D11).
+
+        Only root events (``scope is None``) change the status: a ``user_message`` starts
+        work, ``turn_complete`` and ``turn_error`` set ``unseen``, and after a
+        ``turn_error`` the next ``idle`` is stored as ``error`` until the next
+        ``user_message``; ``turn_interrupted`` drops that pending error. ``session_status``
+        sets status, model and question, and a ``kiro/`` model marks the backend.
+        """
         try:
             event = decode_event(frame)
         except (msgspec.DecodeError, msgspec.ValidationError, ValueError) as exc:
@@ -299,19 +429,32 @@ class SessionTracker:
         record = self._records.get(session_id)
         if record is None or record.ended:
             return
+        root = getattr(event, "scope", "") is None
+        changes: dict[str, object] = {}
         if isinstance(event, SessionStatus):
             status = "idle" if event.state == "done" else event.state
-            changes = {
-                key: value
-                for key, value in (
-                    ("status", status),
-                    ("model_key", event.model_key),
-                    ("question", event.question),
-                )
-                if getattr(record, key) != value
-            }
-            if changes:
-                await self._update(session_id, **changes)
+            if status == "idle" and session_id in self._turn_failed:
+                status = "error"
+            changes = {"status": status, "model_key": event.model_key, "question": event.question}
+            if event.model_key.startswith(KIRO_MODEL_PREFIX):
+                changes["backend"] = "kiro"
+        elif root and isinstance(event, UserMessage):
+            self._turn_failed.discard(session_id)
+            changes = {"status": "working"}
+        elif root and isinstance(event, TurnError):
+            self._turn_failed.add(session_id)
+            changes = {"unseen": True}
+        elif root and isinstance(event, TurnComplete):
+            changes = {"unseen": True}
+        elif root and isinstance(event, TurnInterrupted):
+            self._turn_failed.discard(session_id)
+        changes = {key: value for key, value in changes.items() if getattr(record, key) != value}
+        if not isinstance(event, _NOT_ACTIVITY):
+            self._pending_activity[session_id] = now_iso()
+        if changes:
+            await self._update(session_id, **changes)
+        elif session_id in self._pending_activity:
+            await self._note_activity(session_id)
 
     async def _still_running(self, session_id: str) -> bool:
         """After the stream closed: True to follow again; False (``exited`` if gone) to stop."""
@@ -332,10 +475,38 @@ class SessionTracker:
     # -- writes --------------------------------------------------------------
 
     async def _update(self, session_id: str, **changes: object) -> SessionDescriptor | None:
+        """Apply ``changes`` plus any pending activity to the live record, then write it."""
         record = self._records.get(session_id)
         if record is None:
             return None
+        activity = self._pending_activity.pop(session_id, None)
+        if activity is not None:
+            changes.setdefault("last_activity_at", activity)
+            flush = self._flush_tasks.pop(session_id, None)
+            if flush is not None:
+                flush.cancel()
+        if "last_activity_at" in changes:
+            self._activity_written[session_id] = self.clock()
         return await self._put(msgspec.structs.replace(record, **changes))
+
+    async def _note_activity(self, session_id: str) -> None:
+        """Write pending activity now, or at the end of the session's window (D11)."""
+        if session_id in self._flush_tasks:
+            return
+        written = self._activity_written.get(session_id)
+        wait = 0.0 if written is None else written + self.activity_interval - self.clock()
+        if wait <= 0:
+            await self._update(session_id)
+            return
+        self._flush_tasks[session_id] = asyncio.create_task(
+            self._flush_activity(session_id, wait), name=f"activity-{session_id}"
+        )
+
+    async def _flush_activity(self, session_id: str, delay: float) -> None:
+        await asyncio.sleep(delay)
+        self._flush_tasks.pop(session_id, None)
+        if session_id in self._pending_activity:
+            await self._update(session_id)
 
     async def _put(self, record: SessionDescriptor) -> SessionDescriptor:
         """Make ``record`` current in memory, publish it and write it to the store."""
@@ -343,11 +514,11 @@ class SessionTracker:
         self._records[session_id] = record
         if record.ended:
             self._ports.pop(session_id, None)
+            self._turn_failed.discard(session_id)
+            self._activity_written.pop(session_id, None)
         self._publish(record)
         if not await self._persist(session_id) and record.ended:
-            task = asyncio.create_task(self._retry_terminal(session_id))
-            self._background.add(task)
-            task.add_done_callback(self._background.discard)
+            self._background_task(self._retry_terminal(session_id))
         return record
 
     async def _persist(self, session_id: str) -> bool:
@@ -374,6 +545,12 @@ class SessionTracker:
                 return
 
     # -- tasks ---------------------------------------------------------------
+
+    def _background_task(self, coro: Coroutine) -> None:
+        """Run ``coro`` as a task that :meth:`close` cancels."""
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def _spawn(self, session_id: str, coro: Coroutine) -> None:
         task = asyncio.create_task(coro, name=f"session-{session_id}")

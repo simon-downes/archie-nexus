@@ -81,7 +81,7 @@ async def forward_http(
 
     Args:
         session: The resolved agent endpoint.
-        path: URL path on the agent (e.g. "/status").
+        path: URL path on the agent (e.g. "/events").
         method: HTTP method ("GET" or "POST").
         body: Request body bytes (for POST).
         content_type: Content-Type header to forward with POST requests.
@@ -120,18 +120,6 @@ async def forward_http(
 # ---------------------------------------------------------------------------
 # HTTP route handlers
 # ---------------------------------------------------------------------------
-
-
-async def proxy_status(request: Request) -> Response:
-    """GET /api/sessions/{session_id}/status — proxy to session /status."""
-    session_id = request.path_params["session_id"]
-    try:
-        session = resolve_session(request.app.state.tracker, session_id)
-    except KeyError:
-        return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    return await forward_http(session, "/status")
 
 
 async def proxy_events(request: Request) -> Response:

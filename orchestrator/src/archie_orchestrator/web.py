@@ -156,16 +156,36 @@ async def auth_status_page(request: Request) -> HTMLResponse:
     )
 
 
+def _fmt_activity(value: str | None) -> str:
+    """Format a record's ISO 8601 ``last_activity_at`` for the sessions page."""
+    if not value:
+        return "—"
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 async def sessions_page(request: Request) -> HTMLResponse:
     """GET / — render the session list as HTML.
 
-    Lists every session that has not ended with its workspace and status, from the
-    tracker's records (no Docker call). Auto-refreshes every 5 seconds via
-    <meta http-equiv="refresh">.
+    Lists every session that has not ended with its name (when the user set one),
+    workspace, status and last activity, from the tracker's records (no Docker call).
+    Auto-refreshes every 5 seconds via <meta http-equiv="refresh">.
     """
     records = await request.app.state.tracker.list()
     session_data = [
-        {"session_id": r.session_id, "workspace": r.workspace, "status": r.status} for r in records
+        {
+            "session_id": r.session_id,
+            "name": r.name if r.name_fixed else "",
+            "workspace": r.workspace,
+            "status": r.status,
+            "last_activity": _fmt_activity(r.last_activity_at),
+        }
+        for r in records
     ]
 
     return templates.TemplateResponse(

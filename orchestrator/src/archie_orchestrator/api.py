@@ -8,7 +8,6 @@ are relative to the mount:
   POST   /sessions                        — start a new session (202, starting)
   GET    /sessions/{session_id}           — one session record
   DELETE /sessions/{session_id}           — stop a running session
-  GET    /sessions/{session_id}/status    — proxy to session /status
   GET    /sessions/{session_id}/events    — proxy to session /events
   GET    /sessions/{session_id}/metrics   — metrics for one session
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
@@ -39,7 +38,7 @@ from archie_orchestrator.auth import AuthError
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.docker import DockerError
 from archie_orchestrator.lifecycle import BACKENDS, stop_session
-from archie_orchestrator.proxy import proxy_events, proxy_status, proxy_stream
+from archie_orchestrator.proxy import proxy_events, proxy_stream
 
 log = logging.getLogger(__name__)
 
@@ -404,7 +403,6 @@ routes = [
     Route("/sessions", sessions_post, methods=["POST"]),
     Route("/sessions/{session_id}", session_get, methods=["GET"]),
     Route("/sessions/{session_id}", session_delete, methods=["DELETE"]),
-    Route("/sessions/{session_id}/status", proxy_status, methods=["GET"]),
     Route("/sessions/{session_id}/events", proxy_events, methods=["GET"]),
     Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
     WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),

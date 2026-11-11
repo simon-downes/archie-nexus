@@ -135,6 +135,38 @@ def handshake_frame(session_id: str = SID) -> str:
     )
 
 
+def user_frame(scope: str | None = None, content: str = "hi") -> str:
+    """An encoded ``user_message`` frame (root unless ``scope`` is given)."""
+    return json.dumps(
+        {"type": "user_message", "id": "u", "turn": 1, "scope": scope, "content": content}
+    )
+
+
+def delta_frame(text: str = "x", scope: str | None = None) -> str:
+    """An encoded ``text_delta`` frame: activity only."""
+    return json.dumps(
+        {
+            "type": "text_delta",
+            "id": "d",
+            "turn": 1,
+            "iteration": 1,
+            "scope": scope,
+            "request_id": "r",
+            "text": text,
+        }
+    )
+
+
+def turn_frame(kind: str, scope: str | None = None) -> str:
+    """An encoded turn end: ``complete``, ``error`` or ``interrupted``."""
+    frame: dict = {"type": f"turn_{kind}", "id": "t", "turn": 1, "scope": scope}
+    if kind == "complete":
+        frame["stop_reason"] = "end_turn"
+    elif kind == "error":
+        frame["message"] = "boom"
+    return json.dumps(frame)
+
+
 class FakeAgent:
     """Fake agent ``/stream`` sockets, one script per connection.
 

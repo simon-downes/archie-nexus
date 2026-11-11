@@ -1,15 +1,24 @@
-"""Tests for archie_orchestrator.tracker — records, background start and reconcile (082 M1)."""
+"""Tests for archie_orchestrator.tracker — records, start, turn status, reconcile, ending (082)."""
 
 import asyncio
+import itertools
+import os
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
 from archie_orchestrator import tracker as tracker_module
 from archie_orchestrator.docker import DockerError
 from archie_orchestrator.store import SessionStore, db_path, id_start_time
-from archie_orchestrator.tracker import DockerRuntime, SessionTracker
+from archie_orchestrator.tracker import (
+    RESTARTED_DURING_STARTUP,
+    DockerRuntime,
+    SessionTracker,
+    resubscribe_delay,
+)
 from archie_shared.config import home_dir
 from archie_shared.events import PendingQuestion, QuestionOption
 from archie_shared.schemas import NexusConfig
@@ -19,11 +28,14 @@ from tests.session_fakes import (
     SID,
     FakeAgent,
     FakeRuntime,
+    delta_frame,
     handshake_frame,
     make_tracker,
     record,
     running,
     status_frame,
+    turn_frame,
+    user_frame,
 )
 
 QUESTION = {"id": "tu1", "question": "Which?", "options": [{"label": "a"}], "recommended": 0}
@@ -48,7 +60,7 @@ def _tracker(runtime: FakeRuntime | None = None) -> SessionTracker:
 
 @pytest.fixture
 def fast_retry(monkeypatch):
-    monkeypatch.setattr(tracker_module, "RESUBSCRIBE_DELAY", 0.01)
+    monkeypatch.setattr(tracker_module, "RESUBSCRIBE_DELAYS", (0.01,))
     monkeypatch.setattr(tracker_module, "TERMINAL_RETRY_INTERVAL", 0.01)
 
 
@@ -156,7 +168,7 @@ async def test_create_insert_failure_starts_nothing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Following the agent stream (session_status only in M1)
+# Following the agent stream: session_status
 # ---------------------------------------------------------------------------
 
 
@@ -230,15 +242,334 @@ async def test_stream_close_with_container_running_resubscribes(fast_retry):
 
 
 async def test_close_cancels_following_without_status_change():
-    tracker = make_tracker({SID: PORT})
+    runtime = FakeRuntime(alive=False)
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
     agent = FakeAgent([status_frame("working"), 30.0])
     with _patch_agent(agent):
         tracker._spawn(SID, tracker._follow(SID))
         await until(lambda: tracker.live(SID).status == "working")
+        await until(lambda: tracker.store.get(SID).status == "working")
         await tracker.close()
+    # Shutdown skips the end check (D14): the container is never asked about.
+    assert runtime.checked == []
     assert tracker.live(SID).status == "working"
     assert tracker.store.get(SID).status == "working"
     assert tracker._tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# Turn status from the stream (D10)
+# ---------------------------------------------------------------------------
+
+
+def _turns(snapshots):
+    """(status, unseen) of each published record before the final ``exited``."""
+    assert snapshots[-1].status == "exited"
+    return [(s.status, s.unseen) for s in snapshots[:-1]]
+
+
+async def test_native_turn_working_then_unseen_and_idle():
+    tracker, snapshots, _ = await _follow(
+        [
+            status_frame("idle"),
+            user_frame(),
+            status_frame("working"),
+            delta_frame(),
+            # Subagent events are activity only.
+            user_frame(scope="sub-1"),
+            turn_frame("error", scope="sub-1"),
+            turn_frame("complete", scope="sub-1"),
+            turn_frame("complete"),
+            status_frame("idle"),
+        ],
+        alive=False,
+    )
+    assert _turns(snapshots) == [
+        ("idle", False),
+        ("working", False),
+        ("working", True),
+        ("idle", True),
+    ]
+    assert snapshots[2].last_activity_at is not None
+    assert snapshots[0].backend == "native"
+    assert tracker.store.get(SID).unseen is True
+    await tracker.close()
+
+
+async def test_kiro_turn_without_working_status():
+    kiro = "kiro/auto"
+    tracker, snapshots, _ = await _follow(
+        [
+            status_frame("idle", model_key=kiro),
+            user_frame(),  # Kiro sends no working status at turn start
+            delta_frame(),
+            turn_frame("complete"),
+            status_frame("idle", model_key=kiro),
+        ],
+        alive=False,
+    )
+    assert _turns(snapshots) == [
+        ("idle", False),
+        ("working", False),
+        ("working", True),
+        ("idle", True),
+    ]
+    # The model marks an adopted session's backend (it started as native).
+    assert (snapshots[0].backend, snapshots[0].model_key) == ("kiro", kiro)
+    assert tracker.store.get(SID).backend == "kiro"
+    await tracker.close()
+
+
+async def test_failed_turn_then_idle_is_error_until_the_next_message():
+    tracker, snapshots, _ = await _follow(
+        [
+            status_frame("idle"),
+            user_frame(),
+            status_frame("working"),
+            turn_frame("error"),
+            status_frame("idle"),  # sent straight after the failed turn
+            status_frame("idle"),  # e.g. on reconnect: still error
+            user_frame(),
+            turn_frame("complete"),
+            status_frame("idle"),
+        ],
+        alive=False,
+    )
+    assert _turns(snapshots) == [
+        ("idle", False),
+        ("working", False),
+        ("working", True),
+        ("error", True),
+        ("working", True),
+        ("idle", True),
+    ]
+    assert all(s.error is None for s in snapshots)  # ``error`` is for start failures
+    await tracker.close()
+
+
+@pytest.mark.parametrize(
+    ("frames", "expected"),
+    [
+        (
+            [user_frame(), turn_frame("interrupted"), status_frame("idle")],
+            [("idle", False), ("working", False), ("idle", False)],
+        ),
+        (
+            [user_frame(), turn_frame("error"), turn_frame("interrupted"), status_frame("idle")],
+            [("idle", False), ("working", False), ("working", True), ("idle", True)],
+        ),
+    ],
+    ids=["interrupted", "interrupt-clears-pending-error"],
+)
+async def test_interrupted_turn_sets_no_unseen_and_clears_a_pending_error(frames, expected):
+    tracker, snapshots, _ = await _follow([status_frame("idle"), *frames], alive=False)
+    assert _turns(snapshots) == expected
+    await tracker.close()
+
+
+async def test_pending_question_blocks_then_clears():
+    tracker, snapshots, _ = await _follow(
+        [
+            status_frame("idle"),
+            user_frame(),
+            status_frame("working"),
+            status_frame("blocked", question=QUESTION),
+            status_frame("working"),  # answered
+            turn_frame("complete"),
+            status_frame("idle"),
+        ],
+        alive=False,
+    )
+    assert [(s.status, s.question is not None, s.unseen) for s in snapshots[:-1]] == [
+        ("idle", False, False),
+        ("working", False, False),
+        ("blocked", True, False),
+        ("working", False, False),
+        ("working", False, True),
+        ("idle", False, True),
+    ]
+    assert snapshots[2].question.id == "tu1"
+    await tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# Activity throttling (D11)
+# ---------------------------------------------------------------------------
+
+
+def _tick(n: int) -> str:
+    return f"2026-07-01T10:00:{n:02d}+00:00"
+
+
+@pytest.fixture
+def ticks(monkeypatch):
+    """The tracker's ``now_iso`` returns ``_tick(1)``, ``_tick(2)``, ... in call order."""
+    counter = itertools.count(1)
+    monkeypatch.setattr(tracker_module, "now_iso", lambda: _tick(next(counter)))
+
+
+class FakeClock:
+    """A monotonic clock that only moves when a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@asynccontextmanager
+async def _tracking(frames, *, interval: float):
+    """Follow ``frames`` (then an open stream) with a frozen clock and an activity window."""
+    tracker = make_tracker({SID: PORT})
+    clock = FakeClock()
+    tracker.activity_interval = interval
+    tracker.clock = clock
+    snapshots = []
+    tracker.add_listener(snapshots.append)
+    with _patch_agent(FakeAgent([*frames, 30.0])):
+        tracker._spawn(SID, tracker._follow(SID))
+        try:
+            yield tracker, snapshots, clock
+        finally:
+            await tracker.close()
+
+
+async def test_activity_only_changes_are_throttled_with_a_trailing_flush(ticks):
+    frames = [user_frame(), delta_frame(), delta_frame(), delta_frame()]
+    async with _tracking(frames, interval=0.05) as (tracker, snapshots, _):
+        await until(lambda: len(snapshots) == 2)
+        await until(lambda: tracker.store.get(SID).last_activity_at == _tick(4))
+        await asyncio.sleep(0.15)
+        # The message is written at once; the three deltas once, at the end of the window.
+        assert [(s.status, s.last_activity_at) for s in snapshots] == [
+            ("working", _tick(1)),
+            ("working", _tick(4)),
+        ]
+        assert tracker._flush_tasks == {}
+
+
+async def test_activity_after_the_window_is_written_at_once(ticks):
+    async with _tracking([user_frame(), 0.5, delta_frame()], interval=10.0) as (
+        tracker,
+        snapshots,
+        clock,
+    ):
+        await until(lambda: len(snapshots) == 1)
+        clock.now += 10.0
+        await until(lambda: len(snapshots) == 2)  # well before a 10 s trailing flush
+        assert snapshots[1].last_activity_at == _tick(2)
+        assert tracker._flush_tasks == {}
+
+
+async def test_status_change_carries_the_latest_activity(ticks):
+    frames = [user_frame(), delta_frame(), status_frame("blocked", question=QUESTION)]
+    async with _tracking(frames, interval=0.05) as (tracker, snapshots, _):
+        await until(lambda: len(snapshots) == 2)
+        await asyncio.sleep(0.15)
+        # The blocked write took the delta's activity, so no trailing write follows.
+        assert [(s.status, s.last_activity_at) for s in snapshots] == [
+            ("working", _tick(1)),
+            ("blocked", _tick(2)),
+        ]
+        assert tracker._flush_tasks == {}
+
+
+async def test_close_writes_pending_activity(ticks):
+    async with _tracking([user_frame(), delta_frame()], interval=10.0) as (tracker, snapshots, _):
+        await until(lambda: SID in tracker._flush_tasks)
+        assert len(snapshots) == 1
+        await tracker.close()
+        assert tracker.store.get(SID).last_activity_at == _tick(2)
+        assert [s.last_activity_at for s in snapshots] == [_tick(1), _tick(2)]
+        assert tracker.live(SID).status == "working"
+
+
+async def test_session_end_takes_pending_activity(ticks):
+    tracker, snapshots, _ = await _follow([user_frame(), delta_frame()], alive=False)
+    assert [(s.status, s.last_activity_at) for s in snapshots] == [
+        ("working", _tick(1)),
+        ("exited", _tick(2)),
+    ]
+    assert tracker.store.get(SID).ended_at == _tick(3)
+    assert tracker._flush_tasks == {}
+    await tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# Ending (D14)
+# ---------------------------------------------------------------------------
+
+
+def test_resubscribe_delay_backs_off_1_2_5_and_stays_at_5():
+    assert [resubscribe_delay(n) for n in range(6)] == [1.0, 2.0, 5.0, 5.0, 5.0, 5.0]
+
+
+async def test_resubscribe_backs_off_while_running_and_resets_after_a_frame(monkeypatch):
+    delays = []
+    real = tracker_module.resubscribe_delay
+
+    def spy(attempt):
+        delays.append(real(attempt))
+        return 0.001
+
+    monkeypatch.setattr(tracker_module, "resubscribe_delay", spy)
+    runtime = FakeRuntime(alive=True)
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+    snapshots = []
+    tracker.add_listener(snapshots.append)
+    # Four streams that close without a frame, one that delivers a frame, then refusals.
+    agent = FakeAgent([], [], [], [], [status_frame("working")])
+    with _patch_agent(agent):
+        task = asyncio.create_task(tracker._follow(SID))
+        await until(lambda: len(delays) >= 8)
+        runtime.alive = False
+        await asyncio.wait_for(task, 2)
+    assert delays[:8] == [1.0, 2.0, 5.0, 5.0, 1.0, 2.0, 5.0, 5.0]
+    # Backing off never changes the status; the container going away ends the session.
+    assert [s.status for s in snapshots] == ["working", "exited"]
+    assert len(runtime.checked) == len(delays) + 1
+    await tracker.close()
+
+
+async def test_stream_close_while_stopping_does_nothing():
+    runtime = FakeRuntime(alive=False)
+    tracker = make_tracker(records=[record(SID, status="stopping")], runtime=runtime)
+    tracker._ports[SID] = PORT
+    with _patch_agent(FakeAgent([handshake_frame()])):
+        await asyncio.wait_for(tracker._follow(SID), 2)
+    assert runtime.checked == []
+    assert tracker.live(SID).status == "stopping"
+    await tracker.close()
+
+
+async def test_close_during_back_off_changes_nothing():
+    runtime = FakeRuntime(alive=True)
+    tracker = make_tracker({SID: PORT}, runtime=runtime)
+    with _patch_agent(FakeAgent([status_frame("working")])):
+        tracker._spawn(SID, tracker._follow(SID))
+        await until(lambda: runtime.checked == [SID])  # now waiting 1 s to resubscribe
+        await tracker.close()
+    assert runtime.checked == [SID]
+    assert tracker.live(SID).status == "working"
+
+
+async def test_close_retries_a_pending_terminal_write(monkeypatch):
+    tracker = make_tracker({SID: PORT})
+    real_save = tracker.store.save
+    failures = [sqlite3.OperationalError("locked")]
+
+    def flaky(item):
+        if failures:
+            raise failures.pop()
+        real_save(item)
+
+    monkeypatch.setattr(tracker.store, "save", flaky)
+    await tracker._update(SID, status="exited", ended_at="2026-07-01T10:00:00+00:00")
+    assert SID in tracker._records  # the retry waits TERMINAL_RETRY_INTERVAL (5 s)
+    await tracker.close()
+    assert SID not in tracker._records
+    assert tracker.store.get(SID).status == "exited"
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +611,7 @@ async def test_failed_terminal_write_is_retried(monkeypatch, fast_retry):
 
 
 # ---------------------------------------------------------------------------
-# start(): migrate and minimal reconcile (D13)
+# start(): migrate and reconcile (D13)
 # ---------------------------------------------------------------------------
 
 
@@ -345,6 +676,57 @@ async def test_start_keeps_live_rows_from_the_store():
     await restarted.close()
 
 
+@pytest.mark.parametrize(
+    ("stored", "expected", "error"),
+    [
+        ("idle", "exited", None),
+        ("working", "exited", None),
+        ("blocked", "exited", None),
+        ("error", "exited", None),
+        ("stopping", "stopped", None),
+        ("starting", "failed", RESTARTED_DURING_STARTUP),
+    ],
+)
+async def test_start_ends_a_live_row_without_a_container(session_logs, stored, expected, error):
+    tracker = make_tracker(records=[record(SID, status=stored)])
+    w = session_logs
+    w.write(SID, [w.user("hi")])
+    mtime = datetime(2026, 7, 1, 11, 30, tzinfo=UTC).timestamp()
+    os.utime(w.dir / f"{SID}.jsonl", (mtime, mtime))
+    restarted = SessionTracker(tracker.store, FakeRuntime([]))
+    published = []
+    restarted.add_listener(published.append)
+
+    await restarted.start()
+
+    row = restarted.store.get(SID)
+    assert (row.status, row.error) == (expected, error)
+    assert row.ended_at == "2026-07-01T11:30:00+00:00"  # the log's mtime
+    assert restarted.live_ids() == set()
+    assert published == [row]
+    await restarted.close()
+
+
+async def test_start_ends_a_live_row_without_container_or_log_now():
+    tracker = make_tracker(records=[record(SID, status="working")])
+    restarted = SessionTracker(tracker.store, FakeRuntime([]))
+    before = datetime.now(UTC)
+    await restarted.start()
+    row = restarted.store.get(SID)
+    assert row.status == "exited"
+    assert datetime.fromisoformat(row.ended_at) >= before
+    await restarted.close()
+
+
+async def test_start_leaves_ended_rows_alone():
+    ended = record(SID, status="stopped", ended_at="2026-07-01T10:00:00+00:00")
+    tracker = make_tracker(records=[ended])
+    restarted = SessionTracker(tracker.store, FakeRuntime([]))
+    await restarted.start()
+    assert restarted.store.get(SID) == ended
+    await restarted.close()
+
+
 async def test_start_when_docker_fails_leaves_records(caplog):
     tracker = make_tracker(records=[record(SID, status="working")])
     restarted = SessionTracker(
@@ -354,6 +736,42 @@ async def test_start_when_docker_fails_leaves_records(caplog):
     assert restarted.live(SID).status == "working"
     assert any("Cannot list running sessions" in r.message for r in caplog.records)
     await restarted.close()
+
+
+async def test_reconcile_retries_while_docker_fails(monkeypatch):
+    monkeypatch.setattr(tracker_module, "RECONCILE_RETRY_INTERVAL", 0.01)
+    gone, back = "gone-01abc12345", SID
+    base = make_tracker(records=[record(gone, status="working"), record(back, status="blocked")])
+    runtime = FakeRuntime(list_error=DockerError("docker ps", "daemon down", 1))
+    runtime.run_gate = threading.Event()
+    restarted = SessionTracker(base.store, runtime)
+    agent = FakeAgent([status_frame("idle"), 30.0])
+
+    with _patch_agent(agent):
+        try:
+            await restarted.start()
+            await until(lambda: runtime.list_calls >= 3)
+            # While Docker fails nothing ends: "cannot list" is not "nothing runs".
+            assert restarted.live(gone).status == "working"
+            assert restarted.live(back).status == "blocked"
+            # A session started during the outage isn't a stale row; reconcile leaves it be.
+            created = await restarted.create(
+                "proj", backend="native", name=None, config=NexusConfig()
+            )
+
+            runtime.containers = [running(back, PORT)]
+            runtime.list_error = None
+            await until(lambda: gone not in restarted._records)  # ended and written
+            assert restarted.store.get(gone).status == "exited"
+            assert restarted.live(back).status == "idle"
+            assert restarted.live(created.session_id).status == "starting"
+            await until(lambda: agent.urls == [f"ws://127.0.0.1:{PORT}/stream"])
+            calls = runtime.list_calls
+            await asyncio.sleep(0.05)
+            assert runtime.list_calls == calls  # retrying stopped once reconcile succeeded
+        finally:
+            runtime.run_gate.set()
+            await restarted.close()
 
 
 # ---------------------------------------------------------------------------

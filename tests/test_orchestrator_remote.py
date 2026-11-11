@@ -89,7 +89,7 @@ async def test_response_bodies_contain_no_hardcoded_localhost():
 def test_proxy_backend_always_uses_loopback_not_bind_address():
     """Proxy backend URL uses 127.0.0.1 for sessions, not any orchestrator bind address.
 
-    This complements test_proxy_status_forwards_to_loopback which validates the
+    This complements test_proxy_events_forwards_to_loopback which validates the
     actual HTTP call. Together they confirm sessions are always accessed via loopback.
     """
     # The backend target construction in proxy_stream must use 127.0.0.1.
@@ -104,8 +104,8 @@ def test_proxy_backend_always_uses_loopback_not_bind_address():
 
 
 @pytest.mark.asyncio
-async def test_proxy_status_forwards_to_loopback(tmp_path):
-    """GET /sessions/{id}/status proxies to 127.0.0.1:{port}, not the bind address."""
+async def test_proxy_events_forwards_to_loopback(tmp_path):
+    """GET /sessions/{id}/events proxies to 127.0.0.1:{port}, not the bind address."""
     session = _make_session(port=32771)
     captured_urls = []
 
@@ -120,7 +120,7 @@ async def test_proxy_status_forwards_to_loopback(tmp_path):
 
         async def get(self, url, **kwargs):
             captured_urls.append(url)
-            mock = real_httpx.Response(200, content=b'{"status":"ok"}')
+            mock = real_httpx.Response(200, content=b"")
             return mock
 
     with (
@@ -128,7 +128,7 @@ async def test_proxy_status_forwards_to_loopback(tmp_path):
         patch("archie_orchestrator.proxy.httpx.AsyncClient", _FakeAsyncClient),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            await client.get(f"/api/sessions/{session.session_id}/status")
+            await client.get(f"/api/sessions/{session.session_id}/events")
 
     assert len(captured_urls) == 1
     assert captured_urls[0].startswith("http://127.0.0.1:32771")

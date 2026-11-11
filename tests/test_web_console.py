@@ -1,5 +1,7 @@
 """Tests for the orchestrator web console (GET / and static files)."""
 
+import re
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +20,7 @@ from tests.session_fakes import record, serve
 @pytest.fixture(autouse=True)
 def _app_state():
     app.state.config = NexusConfig()
+    app.state.start_time = datetime.now(UTC)
     yield
 
 
@@ -123,6 +126,39 @@ async def test_sessions_page_shows_status():
     assert "<td>blocked</td>" in resp.text
 
 
+@pytest.mark.asyncio
+async def test_sessions_page_columns_name_and_last_activity():
+    """GET / shows the name only when user-set, and the last activity in UTC (082)."""
+    sessions = [
+        record(
+            "named-01abc12345",
+            name="Review PR",
+            name_fixed=True,
+            last_activity_at="2026-07-01T12:34:56+02:00",
+        ),
+        record("plain-01abc12345"),
+    ]
+
+    with serve(app, records=sessions):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/")
+
+    html = resp.text
+    headers = re.findall(r"<th>([^<]*)</th>", html)
+    assert headers == ["Session ID", "Name", "Workspace", "Status", "Last activity"]
+    rows = {
+        cells[0]: cells[1:]
+        for cells in (
+            re.findall(r"<td>([^<]*)</td>", row)
+            for row in re.findall(r"<tr>(.*?)</tr>", html, re.S)
+        )
+        if cells
+    }
+    assert rows["named-01abc12345"] == ["Review PR", "named", "idle", "2026-07-01 10:34:56 UTC"]
+    # An unfixed name is the session ID; it isn't repeated, and no activity shows a dash.
+    assert rows["plain-01abc12345"] == ["", "plain", "idle", "—"]
+
+
 # ---------------------------------------------------------------------------
 # Sessions page — empty state
 # ---------------------------------------------------------------------------
@@ -170,8 +206,6 @@ async def test_page_contains_uptime():
 
     html = resp.text
     # Uptime appears inside the <p class="meta"> element as e.g. "0m" or "2h 15m"
-    import re
-
     meta_match = re.search(r'class="meta"[^>]*>Up\s+(\d+[hm])', html)
     assert meta_match is not None, f"No uptime pattern found in meta element. HTML: {html[:500]}"
 
