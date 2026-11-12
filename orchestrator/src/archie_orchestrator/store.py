@@ -341,6 +341,14 @@ class SessionStore:
             ).fetchall()
         return [_from_row(row) for row in rows]
 
+    def last_started_by_workspace(self) -> dict[str, str]:
+        """The newest ``started_at`` of each workspace that has a session row."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT workspace, MAX(started_at) FROM sessions GROUP BY workspace"
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
     def update(self, session_id: str, **fields: object) -> SessionDescriptor:
         """Change some columns of one row and return the updated record.
 

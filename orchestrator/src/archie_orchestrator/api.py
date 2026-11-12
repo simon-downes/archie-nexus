@@ -14,6 +14,8 @@ are relative to the mount:
   GET    /sessions/{session_id}/metrics   — metrics for one session
   WS     /sessions/{session_id}/stream    — bidirectional WebSocket relay
   GET    /metrics                         — aggregate metrics
+  GET    /workspaces                      — workspaces and their git repos
+  GET    /workspaces/{name}               — one workspace and its git repos
   GET    /auth/providers                  — provider definitions
   GET    /auth/status                     — redacted credential status
   GET    /auth/flow/{flow_id}             — OAuth flow status
@@ -34,12 +36,14 @@ from pathlib import Path
 import httpx
 import msgspec
 from archie_shared.config import ConfigError, home_dir
+from archie_shared.schemas import expand_workspace_root
 from archie_shared.session import SessionDescriptor
+from archie_shared.workspaces import Workspace
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
-from archie_orchestrator import store
+from archie_orchestrator import store, workspaces
 from archie_orchestrator.auth import AuthError
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.docker import DockerError
@@ -458,6 +462,69 @@ async def get_session_metrics(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+
+async def _with_sessions(request: Request, items: list[Workspace]) -> list[Workspace]:
+    """Fill ``live_sessions`` and ``last_session_at`` from the tracker and the store."""
+    tracker = request.app.state.tracker
+    live = await tracker.list()
+    last = await tracker.last_started_by_workspace()
+    for item in items:
+        item.live_sessions = sum(1 for record in live if record.workspace == item.name)
+        item.last_session_at = last.get(item.name)
+    return items
+
+
+async def workspaces_get(request: Request) -> Response:
+    """Return every workspace under ``workspace_root`` with its repos, sorted by name.
+
+    Read from the filesystem on every request; git is never run.
+
+    Returns:
+        200 + a JSON array of Workspaces; 500 for a config error or an unreadable store.
+    """
+    try:
+        root = expand_workspace_root(config_source.get())
+    except ConfigError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    items = await asyncio.to_thread(workspaces.list_workspaces, root)
+    try:
+        return _json(await _with_sessions(request, items))
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+
+
+async def workspace_get(request: Request) -> Response:
+    """Return one workspace with its repos.
+
+    Returns:
+        200 + the Workspace; 404 for a name that isn't a workspace (missing, hidden,
+        or resolving outside ``workspace_root``); 500 for a config error or an
+        unreadable store.
+    """
+    name = request.path_params["name"]
+    try:
+        root = expand_workspace_root(config_source.get())
+    except ConfigError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    try:
+        if name.startswith("."):
+            raise ValueError(name)
+        item = await asyncio.to_thread(workspaces.read_workspace, root, name)
+    except (ValueError, OSError):  # OSError: a name too long for the filesystem
+        return JSONResponse({"error": f"No workspace named '{name}'"}, status_code=404)
+    try:
+        [item] = await _with_sessions(request, [item])
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    return _json(item)
+
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 
@@ -540,6 +607,8 @@ routes = [
     Route("/sessions/{session_id}/metrics", get_session_metrics, methods=["GET"]),
     WebSocketRoute("/sessions/{session_id}/stream", proxy_stream),
     Route("/metrics", get_metrics, methods=["GET"]),
+    Route("/workspaces", workspaces_get, methods=["GET"]),
+    Route("/workspaces/{name}", workspace_get, methods=["GET"]),
     Route("/auth/providers", auth_providers, methods=["GET"]),
     Route("/auth/status", auth_status, methods=["GET"]),
     Route("/auth/flow/{flow_id}", auth_flow, methods=["GET"]),
