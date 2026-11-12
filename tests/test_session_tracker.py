@@ -83,7 +83,7 @@ async def test_create_records_starting_then_idle_when_ready():
         created = await tracker.create("proj", backend="native", name=None, config=NexusConfig())
         sid = created.session_id
         assert created.status == "starting"
-        assert (created.name, created.name_fixed, created.workspace) == (sid, False, "proj")
+        assert (created.name, created.name_source, created.workspace) == (sid, "id", "proj")
         assert created.container_name == f"archie-{sid}"
         assert tracker.store.get(sid) == created  # inserted before the start runs
         assert tracker.live_ids() == {sid}
@@ -103,10 +103,10 @@ async def test_create_records_starting_then_idle_when_ready():
     assert runtime.prepared == [("proj", "native")]
 
 
-async def test_create_with_name_sets_name_fixed():
+async def test_create_with_name_sets_name_source_user():
     tracker = _tracker(FakeRuntime(run_error=DockerError("docker run", "x", 1)))
     created = await tracker.create("proj", backend="kiro", name="Review", config=NexusConfig())
-    assert (created.name, created.name_fixed, created.backend) == ("Review", True, "kiro")
+    assert (created.name, created.name_source, created.backend) == ("Review", "user", "kiro")
     await tracker.close()
 
 
@@ -1054,11 +1054,11 @@ async def test_patch_live_session_name_and_unseen():
     tracker.add_listener(published.append)
 
     renamed = await tracker.patch(SID, name="Review")
-    assert (renamed.name, renamed.name_fixed, renamed.unseen) == ("Review", True, True)
+    assert (renamed.name, renamed.name_source, renamed.unseen) == ("Review", "user", True)
     seen = await tracker.patch(SID, unseen=False)
     assert (seen.name, seen.unseen) == ("Review", False)
     reset = await tracker.patch(SID, name=None)
-    assert (reset.name, reset.name_fixed) == (SID, False)
+    assert (reset.name, reset.name_source) == (SID, "id")
 
     assert published == [renamed, seen, reset]
     assert tracker.live(SID) == reset
@@ -1073,7 +1073,7 @@ async def test_patch_ended_session_updates_the_store_and_publishes():
 
     updated = await tracker.patch(SID, name="Old work", unseen=False)
 
-    assert (updated.name, updated.name_fixed, updated.unseen) == ("Old work", True, False)
+    assert (updated.name, updated.name_source, updated.unseen) == ("Old work", "user", False)
     assert (updated.status, updated.ended_at) == ("stopped", ended.ended_at)
     assert tracker.store.get(SID) == updated
     assert published == [updated]

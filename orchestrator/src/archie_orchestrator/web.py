@@ -172,7 +172,7 @@ def _fmt_activity(value: str | None) -> str:
 async def sessions_page(request: Request) -> HTMLResponse:
     """GET / — render the session list as HTML.
 
-    Lists every session that has not ended with its name (when the user set one),
+    Lists every session that has not ended with its name (unless it is only the ID),
     workspace, status and last activity, from the tracker's records (no Docker call).
     Auto-refreshes every 5 seconds via <meta http-equiv="refresh">.
     """
@@ -180,7 +180,7 @@ async def sessions_page(request: Request) -> HTMLResponse:
     session_data = [
         {
             "session_id": r.session_id,
-            "name": r.name if r.name_fixed else "",
+            "name": r.name if r.name_source != "id" else "",
             "workspace": r.workspace,
             "status": r.status,
             "last_activity": _fmt_activity(r.last_activity_at),

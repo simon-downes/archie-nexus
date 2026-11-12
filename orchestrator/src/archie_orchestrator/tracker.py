@@ -504,7 +504,7 @@ class SessionTracker:
             workspace=split_id(session_id)[0],
             backend="kiro" if backend == "kiro" else "native",
             name=name if name is not None else session_id,
-            name_fixed=name is not None,
+            name_source="user" if name is not None else "id",
             status="starting",
             started_at=now_iso(),
         )
@@ -599,8 +599,9 @@ class SessionTracker:
 
         Args:
             session_id: The session.
-            name: A validated, trimmed name (sets ``name_fixed``), or None to reset the
-                name to the session ID; leave out to keep the name.
+            name: A validated, trimmed name (``name_source`` becomes ``user``), or None
+                to reset the name to the session ID (``name_source`` ``id``); leave out
+                to keep the name.
             unseen: The new ``unseen`` flag; None keeps it.
 
         Returns:
@@ -614,7 +615,7 @@ class SessionTracker:
         changes: dict[str, object] = {}
         if name is not _UNSET:
             changes["name"] = session_id if name is None else name
-            changes["name_fixed"] = name is not None
+            changes["name_source"] = "user" if name is not None else "id"
         if unseen is not None:
             changes["unseen"] = unseen
         if session_id in self._records:

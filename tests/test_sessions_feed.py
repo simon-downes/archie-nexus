@@ -228,7 +228,7 @@ async def test_patch_is_sent_as_a_session_event():
             event = await _session_event(feed)
     assert response.status_code == 200
     assert event == response.json()
-    assert event["name"] == "Docs pass" and event["name_fixed"] is True
+    assert event["name"] == "Docs pass" and event["name_source"] == "user"
     assert msgspec.convert(event, SessionDescriptor).status == "working"
 
 

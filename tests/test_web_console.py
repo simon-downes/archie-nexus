@@ -133,10 +133,11 @@ async def test_sessions_page_columns_name_and_last_activity():
         record(
             "named-01abc12345",
             name="Review PR",
-            name_fixed=True,
+            name_source="user",
             last_activity_at="2026-07-01T12:34:56+02:00",
         ),
         record("plain-01abc12345"),
+        record("titled-01abc12345", name="Model title", name_source="model"),
     ]
 
     with serve(app, records=sessions):
@@ -157,6 +158,7 @@ async def test_sessions_page_columns_name_and_last_activity():
     assert rows["named-01abc12345"] == ["Review PR", "named", "idle", "2026-07-01 10:34:56 UTC"]
     # An unfixed name is the session ID; it isn't repeated, and no activity shows a dash.
     assert rows["plain-01abc12345"] == ["", "plain", "idle", "—"]
+    assert rows["titled-01abc12345"][0] == "Model title"
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ never rebuilt: once a session ends its row stops changing, so it is the historic
 record too. The schema is versioned with ``PRAGMA user_version`` and changed only by the
 ordered migrations in :data:`MIGRATIONS`, which run under an exclusive ``flock`` on
 ``archie.db.lock``. Migration 1 imports every existing session log once as a ``stopped``
-row.
+row; migration 2 replaces ``name_fixed`` with ``name_source``.
 
 Everything here is synchronous ``sqlite3`` with one short-lived connection per call;
 async callers use ``asyncio.to_thread``.
@@ -40,7 +40,7 @@ COLUMNS = (
     "workspace",
     "backend",
     "name",
-    "name_fixed",
+    "name_source",
     "status",
     "error",
     "question",
@@ -160,6 +160,21 @@ def import_log(path: Path) -> SessionDescriptor | None:
 # ---------------------------------------------------------------------------
 
 
+# Migration 1 writes the version 1 table, so it keeps that version's columns: the
+# current ``COLUMNS`` would name ``name_source``, which only migration 2 adds.
+_V1_COLUMNS = tuple("name_fixed" if column == "name_source" else column for column in COLUMNS)
+_V1_INSERT_SQL = (
+    f"INSERT INTO sessions ({', '.join(_V1_COLUMNS)}) VALUES ({', '.join('?' * len(_V1_COLUMNS))})"
+)
+
+
+def _v1_row_values(record: SessionDescriptor) -> tuple:
+    return tuple(
+        0 if column == "name_fixed" else _column_value(column, getattr(record, column))
+        for column in _V1_COLUMNS
+    )
+
+
 def _migration_1(conn: sqlite3.Connection, sessions_dir: Path) -> None:
     """Create ``sessions`` and ``meta``, then import every existing session log."""
     conn.execute(
@@ -177,12 +192,20 @@ def _migration_1(conn: sqlite3.Connection, sessions_dir: Path) -> None:
         record = import_log(path)
         if record is None:
             continue
-        conn.execute(_INSERT_SQL, _row_values(record))
+        conn.execute(_V1_INSERT_SQL, _v1_row_values(record))
         imported += 1
     log.info("Imported %d session logs into %s", imported, DB_NAME)
 
 
-MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (_migration_1,)
+def _migration_2(conn: sqlite3.Connection, sessions_dir: Path) -> None:
+    """Replace ``name_fixed`` (0/1) with ``name_source`` (``id``, ``model``, ``user``)."""
+    del sessions_dir
+    conn.execute("ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT 'id'")
+    conn.execute("UPDATE sessions SET name_source = 'user' WHERE name_fixed = 1")
+    conn.execute("ALTER TABLE sessions DROP COLUMN name_fixed")
+
+
+MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (_migration_1, _migration_2)
 """Canonical schema migrations; migration N brings ``user_version`` to N."""
 
 
@@ -251,7 +274,7 @@ _SAVE_SQL = (
 
 
 def _column_value(column: str, value: object) -> object:
-    if column in ("name_fixed", "unseen"):
+    if column == "unseen":
         return int(bool(value))
     if column == "question" and value is not None:
         return msgspec.json.encode(value).decode("utf-8")
@@ -276,7 +299,7 @@ def _from_row(row: sqlite3.Row) -> SessionDescriptor:
         name=row["name"],
         status=row["status"],
         started_at=row["started_at"],
-        name_fixed=bool(row["name_fixed"]),
+        name_source=row["name_source"],
         error=row["error"],
         question=question,
         unseen=bool(row["unseen"]),

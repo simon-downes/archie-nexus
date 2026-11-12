@@ -39,7 +39,7 @@ def _full_record(session_id: str = SID, **fields):
         "workspace": "proj",
         "backend": "kiro",
         "name": "My session",
-        "name_fixed": True,
+        "name_source": "user",
         "error": "boom",
         "question": PendingQuestion(
             id="tu1", question="Which?", options=[QuestionOption("a", "first")], recommended=0
@@ -65,8 +65,8 @@ def test_db_path_is_archie_db_in_home(tmp_path):
 def test_migrate_creates_schema_wal_and_lock(tmp_path):
     db = db_path(tmp_path)
     assert schema_version(db) is None
-    assert migrate(db) == 1
-    assert schema_version(db) == 1
+    assert migrate(db) == 2
+    assert schema_version(db) == 2
     assert (tmp_path / "archie.db.lock").exists()
     conn = sqlite3.connect(db)
     try:
@@ -78,7 +78,7 @@ def test_migrate_creates_schema_wal_and_lock(tmp_path):
         conn.close()
     assert {"sessions", "meta"} <= tables
     assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
-    assert columns == list(store_module.COLUMNS)
+    assert sorted(columns) == sorted(store_module.COLUMNS)  # migration 2 appends name_source
     assert mode == "wal"
 
 
@@ -86,7 +86,7 @@ def test_migrate_is_idempotent(tmp_path):
     db = db_path(tmp_path)
     migrate(db)
     SessionStore(db).insert(record(SID))
-    assert migrate(db) == 1
+    assert migrate(db) == 2
     assert [r.session_id for r in SessionStore(db).list()] == [SID]
 
 
@@ -98,6 +98,38 @@ def test_migrate_rejects_a_newer_schema(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError, match="schema version 99"):
         migrate(db)
+
+
+def test_migration_2_maps_name_fixed_to_name_source(tmp_path, monkeypatch):
+    db = db_path(tmp_path)
+    monkeypatch.setattr(store_module, "MIGRATIONS", store_module.MIGRATIONS[:1])
+    assert migrate(db) == 1
+    conn = sqlite3.connect(db)
+    with conn:
+        for session_id, fixed in (("proj-01kx77jkz8", 1), ("proj-01kx77jkz9", 0)):
+            conn.execute(
+                "INSERT INTO sessions (session_id, workspace, backend, name, name_fixed, "
+                "status, started_at) VALUES (?, 'proj', 'native', ?, ?, 'stopped', "
+                "'2026-07-01T10:00:00+00:00')",
+                (session_id, "Named" if fixed else session_id, fixed),
+            )
+    conn.close()
+    monkeypatch.undo()
+
+    assert migrate(db) == 2
+
+    rows = {r.session_id: r for r in SessionStore(db).list(include_ended=True)}
+    assert (rows["proj-01kx77jkz8"].name, rows["proj-01kx77jkz8"].name_source) == (
+        "Named",
+        "user",
+    )
+    assert rows["proj-01kx77jkz9"].name_source == "id"
+    conn = sqlite3.connect(db)
+    try:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+    finally:
+        conn.close()
+    assert "name_fixed" not in columns
 
 
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):
@@ -144,7 +176,7 @@ def test_migration_imports_each_log_once(session_logs, tmp_path):
     for path in paths:
         _touch(path)
 
-    migrate(db_path(tmp_path))
+    assert migrate(db_path(tmp_path)) == 2  # migration 1 imports, then 2 runs on the rows
     store = SessionStore(db_path(tmp_path))
     mtime = MTIME.isoformat()
 
@@ -153,7 +185,7 @@ def test_migration_imports_each_log_once(session_logs, tmp_path):
     assert store.list() == []  # every imported row has ended
 
     a = rows[native]
-    assert (a.workspace, a.backend, a.name, a.name_fixed) == ("alpha", "native", native, False)
+    assert (a.workspace, a.backend, a.name, a.name_source) == ("alpha", "native", native, "id")
     assert (a.status, a.error, a.question, a.unseen) == ("stopped", None, None, False)
     assert a.started_at == "2026-07-01T09:59:00+00:00"
     assert a.model_key == "m-last"  # last root request, not the subagent's
@@ -267,8 +299,8 @@ def test_list_filters_ended_and_orders_newest_first(store):
 def test_update_changes_fields_and_returns_record(store):
     store.insert(record(SID))
     question = PendingQuestion(id="q", question="?", options=[])
-    updated = store.update(SID, name="Renamed", name_fixed=True, unseen=True, question=question)
-    assert (updated.name, updated.name_fixed, updated.unseen) == ("Renamed", True, True)
+    updated = store.update(SID, name="Renamed", name_source="user", unseen=True, question=question)
+    assert (updated.name, updated.name_source, updated.unseen) == ("Renamed", "user", True)
     assert updated.question == question
     assert store.get(SID) == updated
     assert store.update(SID, question=None).question is None

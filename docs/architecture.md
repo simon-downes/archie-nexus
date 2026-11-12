@@ -57,7 +57,7 @@ The orchestrator keeps one record per session in the `sessions` table of `archie
 | --- | --- |
 | `session_id`, `workspace` | the ID (`{workspace}-{ulid_prefix}`) and its workspace directory name |
 | `backend` | `native` or `kiro` |
-| `name`, `name_fixed` | display name, the session ID unless the user set one (`name_fixed: true`) |
+| `name`, `name_source` | display name and where it came from: `user` (set with `POST`/`PATCH`; never overwritten), `model` (a title from the title model, see [Session titles](#session-titles)) or `id` (the session ID) |
 | `status` | one of the statuses below |
 | `error` | the start failure message of a `failed` session |
 | `question` | the pending question while `blocked` |
@@ -130,7 +130,7 @@ JSON API:
 | `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` and `"name"` (non-blank, at most 80 characters, no control characters, stored trimmed); 202 with the `starting` record |
 | `GET` | `/api/sessions/feed?include=ended` | server-sent events: a `snapshot` event (`{"sessions": [...]}`, filtered like the list), then one `session` event with the full record per change, whatever the filter; `: ping` after 15 s idle |
 | `GET` | `/api/sessions/{id}` | one session record, live or ended |
-| `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it and `name_fixed`; `null` resets it to the ID) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
+| `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it with `name_source: user`; `null` resets it to the ID with `name_source: id`) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
 | `DELETE` | `/api/sessions/{id}` | stop a running session and wait; 200 with the `stopped` record, 409 while `starting` or `stopping` or once ended, 500 if the container is still running (previous status restored) |
 | `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting` |
 | `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
@@ -271,7 +271,7 @@ At startup, an existing file is moved to the matching `.1` path (one backup gene
 
 `<ARCHIE_HOME_DIR>/archie.db` (`orchestrator/src/archie_orchestrator/store.py`) is the orchestrator's datastore. It holds canonical tables, which are never rebuilt, and the rebuildable metrics tables described below. The canonical tables are:
 
-- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`name_fixed` and `unseen` as 0/1, `question` as JSON), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
+- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`unseen` as 0/1, `question` as JSON; schema version 2 replaced `name_fixed` with `name_source`), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
 - `meta`: key/value rows; `metrics_version` holds the metrics schema version.
 
 The canonical schema is versioned by `PRAGMA user_version` and changed only by the ordered migrations in `store.MIGRATIONS`, each in its own transaction under an exclusive `flock` on `archie.db.lock`. A database newer than the code is refused. Migration 1 creates both tables and imports every log already in `<ARCHIE_HOME_DIR>/sessions` once, as a `stopped` row whose `name` is the session ID: `started_at` is the `session_started` time, else the ID's ULID time, else the log's mtime; `last_activity_at` and `ended_at` are the log's mtime; `model_key` is the last root request's model, else the `session_started` model; `backend` is `kiro` for a `kiro/` model. Whichever process opens the database first (the orchestrator, `archie stats` or `archie migrate-sessions`) runs it. After that, a session gets its row from the tracker when it is created or when reconcile adopts its running container.
@@ -291,7 +291,7 @@ The metrics index is the `metrics_*` tables of `archie.db`: a derived, metadata-
 - `metrics_subagents`: one row per `task` entry with its agent name, parent scope, and outcome from the child's terminal turn event.
 - `metrics_ingest_files`: offset, size, mtime, first-line hash, invalid-line count and last error per log.
 
-The tables join to `sessions` on `session_id` (no foreign key) for workspace, start time, last activity and name; the metrics sync never writes `sessions`. A log whose session has no `sessions` row is skipped and recorded in `metrics_ingest_files` with the error `no session record`; it is checked again on every sync and is not an error in strict mode. Insights and `archie stats` list only sessions whose log was indexed without error, and show a session's name only when the user set it (`name_fixed`).
+The tables join to `sessions` on `session_id` (no foreign key) for workspace, start time, last activity and name; the metrics sync never writes `sessions`. A log whose session has no `sessions` row is skipped and recorded in `metrics_ingest_files` with the error `no session record`; it is checked again on every sync and is not an error in strict mode. Insights and `archie stats` list only sessions whose log was indexed without error, and show a session's name unless it is only the ID (`name_source` is `user` or `model`).
 
 No other message content, tool input or tool output is stored. Sync is incremental and idempotent: unchanged files are skipped by size and mtime, a trailing partial line waits for the next sync, and a log that shrank or whose first line changed is re-ingested from the start. Rows for deleted logs are kept. Invalid lines are counted and skipped; an unreadable file records its error and the sync moves on.
 

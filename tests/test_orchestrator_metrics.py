@@ -120,7 +120,7 @@ def test_full_session_indexes_every_table(session_logs, tmp_path):
     assert stats.files_changed == 1 and stats.errors == 0 and stats.skipped == 0
     # The session row is the one-off import's (082 D7); the fold doesn't write it.
     session = _rows(tmp_path, "SELECT * FROM sessions")[0]
-    assert (session["workspace"], session["name"], session["name_fixed"]) == ("proj", SID, 0)
+    assert (session["workspace"], session["name"], session["name_source"]) == ("proj", SID, "id")
     assert session["started_at"] == "2026-07-01T09:59:00+00:00"
 
     assert _count(tmp_path, "metrics_requests") == 4
@@ -395,7 +395,7 @@ def test_version_lives_in_meta_not_user_version(session_logs, tmp_path):
     assert _rows(tmp_path, "SELECT value FROM meta WHERE key = 'metrics_version'") == [
         {"value": str(METRICS_VERSION)}
     ]
-    assert _rows(tmp_path, "PRAGMA user_version")[0]["user_version"] == 1
+    assert _rows(tmp_path, "PRAGMA user_version")[0]["user_version"] == 2
 
 
 def test_no_old_metrics_tables(session_logs, tmp_path):
@@ -429,7 +429,7 @@ def test_sync_and_reset_never_write_sessions(session_logs, tmp_path):
             "live-01k0000001",
             status="working",
             name="Named",
-            name_fixed=True,
+            name_source="user",
             unseen=True,
             model_key="m9",
             last_activity_at="2026-07-09T10:00:00+00:00",
