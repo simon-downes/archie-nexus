@@ -41,6 +41,13 @@ def _invoke(*args):
     return CliRunner(env={"COLUMNS": "200"}).invoke(main, ["stats", *args])
 
 
+def test_stats_sessions_show_model_titles(home):
+    migrated_store(home).update("other-01k0000001", name="Model title", name_source="model")
+    result = _invoke("sessions", "--since", "all")
+    assert result.exit_code == 0, result.output
+    assert "Model title" in result.output
+
+
 def test_stats_json_prints_overview(home):
     result = _invoke("--since", "all", "--json")
     assert result.exit_code == 0, result.output

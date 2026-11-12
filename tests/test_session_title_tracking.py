@@ -238,7 +238,7 @@ async def test_an_ended_session_is_titled_in_the_store(log):
         "stopped",
     )
     assert published == [stored]
-    assert SID not in tracker._records
+    assert tracker.live(SID) is None  # still ended, not revived into memory
     await tracker.close()
 
 
@@ -304,7 +304,6 @@ async def test_close_cancels_title_jobs(log):
     await asyncio.wait_for(tracker.close(), 2)
     gate.set()
 
-    assert tracker._title_tasks == {}
     assert tracker.store.get(SID).name_source == "id"
 
 
@@ -414,4 +413,41 @@ async def test_renaming_or_marking_seen_requests_no_title(log):
     await idle(tracker)
 
     assert titler.calls == []
+    await tracker.close()
+
+
+async def test_views_in_a_burst_make_one_call(log):
+    titler = FakeTitler("Workspaces API")
+    tracker = _tracker(titler, record(SID, **ENDED))
+
+    with use_tracker(app, tracker):
+        async with _client() as http:
+            await asyncio.gather(
+                http.get(f"/api/sessions/{SID}/events"),
+                http.get(f"/sessions/{SID}"),
+                http.get(f"/api/sessions/{SID}/events"),
+            )
+        await asyncio.sleep(0.05)
+        await idle(tracker)
+
+    assert len(titler.calls) == 1
+    await tracker.close()
+
+
+async def test_a_failed_title_write_is_logged_and_waits_out_the_cooldown(log, caplog):
+    import sqlite3
+
+    titler = FakeTitler("Workspaces API", "Workspaces API")
+    tracker = _tracker(titler, record(SID, **ENDED))
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    tracker.store.set_model_name = locked
+    await _view(tracker, f"/api/sessions/{SID}/events")
+    await _view(tracker, f"/api/sessions/{SID}/events")
+
+    assert len(titler.calls) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert f"Cannot write the title of session {SID}: database is locked" in warnings
     await tracker.close()

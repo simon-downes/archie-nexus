@@ -5,7 +5,7 @@ never rebuilt: once a session ends its row stops changing, so it is the historic
 record too. The schema is versioned with ``PRAGMA user_version`` and changed only by the
 ordered migrations in :data:`MIGRATIONS`, which run under an exclusive ``flock`` on
 ``archie.db.lock``. Migration 1 imports every existing session log once as a ``stopped``
-row; migration 2 replaces ``name_fixed`` with ``name_source``.
+row; migration 2 adds ``name_source``, which replaces the now unused ``name_fixed``.
 
 Everything here is synchronous ``sqlite3`` with one short-lived connection per call;
 async callers use ``asyncio.to_thread``.
@@ -160,9 +160,23 @@ def import_log(path: Path) -> SessionDescriptor | None:
 # ---------------------------------------------------------------------------
 
 
-# Migration 1 writes the version 1 table, so it keeps that version's columns: the
-# current ``COLUMNS`` would name ``name_source``, which only migration 2 adds.
-_V1_COLUMNS = tuple("name_fixed" if column == "name_source" else column for column in COLUMNS)
+# Migration 1 writes the version 1 table, so it keeps that version's columns, spelled
+# out: ``COLUMNS`` follows the current schema (``name_source`` arrived in migration 2).
+_V1_COLUMNS = (
+    "session_id",
+    "workspace",
+    "backend",
+    "name",
+    "name_fixed",
+    "status",
+    "error",
+    "question",
+    "unseen",
+    "model_key",
+    "started_at",
+    "last_activity_at",
+    "ended_at",
+)
 _V1_INSERT_SQL = (
     f"INSERT INTO sessions ({', '.join(_V1_COLUMNS)}) VALUES ({', '.join('?' * len(_V1_COLUMNS))})"
 )
@@ -198,11 +212,15 @@ def _migration_1(conn: sqlite3.Connection, sessions_dir: Path) -> None:
 
 
 def _migration_2(conn: sqlite3.Connection, sessions_dir: Path) -> None:
-    """Replace ``name_fixed`` (0/1) with ``name_source`` (``id``, ``model``, ``user``)."""
+    """Add ``name_source`` (``id``, ``model``, ``user``), set from ``name_fixed``.
+
+    ``name_fixed`` stays as an unused column (default 0): an orchestrator from before
+    this change may still be running when ``archie stats`` migrates the database, and it
+    reads and writes that column until it restarts.
+    """
     del sessions_dir
     conn.execute("ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT 'id'")
     conn.execute("UPDATE sessions SET name_source = 'user' WHERE name_fixed = 1")
-    conn.execute("ALTER TABLE sessions DROP COLUMN name_fixed")
 
 
 MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (_migration_1, _migration_2)

@@ -85,7 +85,7 @@ Sessions the user hasn't named are titled by `orchestrator.title_model` (default
 
 A title job reads the session log (root prompts and each turn's last uninterrupted reply only, never tool calls or results) and sends one request with no tools or reasoning (`orchestrator/src/archie_orchestrator/titles.py`). The request carries the workspace, the current model title (when there is one), the first prompt and reply, the last three prompts and the latest reply, each cut to 400–600 characters. The model answers with a title of at most 48 characters or `KEEP`. The reply is cleaned (first line, no quotes or trailing punctuation, no control characters, no refusals, cut on a word boundary) and written as `name` with `name_source: model` unless the user renamed the session during the call; the change is published on the feed. A failure, a rejected reply or `KEEP` leave the record as it was, so a session keeps its ID until the first title succeeds and its last title after that. One job runs per session at a time (later requests coalesce into one rerun), and at most two calls run at once, each with a 15 s timeout and one retry.
 
-Each call writes one orchestrator log line with the session ID, model, input and output tokens, cost in USD and `ok`, `keep` or the error; no conversation content is logged, and the calls are not counted in insights. The orchestrator calls the model itself (not through the agent's LLM clients) with the `bedrock` credential, or the `openai` key for `openai-*` models.
+Each call writes one orchestrator log line with the session ID, model, input and output tokens, cost in USD and `ok`, `keep` or the error; no conversation content is logged, and the calls are not counted in insights. The orchestrator calls the model itself (not through the agent's LLM clients) with the stored `bedrock` credential, or the `openai` key for `openai-*` models. Unlike the agent it never falls back to the default AWS chain, which on the host is the user's own profiles: without a stored `bedrock` credential, Bedrock title calls fail and sessions keep their ID.
 
 ### Container mounts
 
@@ -279,7 +279,7 @@ At startup, an existing file is moved to the matching `.1` path (one backup gene
 
 `<ARCHIE_HOME_DIR>/archie.db` (`orchestrator/src/archie_orchestrator/store.py`) is the orchestrator's datastore. It holds canonical tables, which are never rebuilt, and the rebuildable metrics tables described below. The canonical tables are:
 
-- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`unseen` as 0/1, `question` as JSON; schema version 2 replaced `name_fixed` with `name_source`), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
+- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`unseen` as 0/1, `question` as JSON; schema version 2 added `name_source`, and the old `name_fixed` column stays unused so an orchestrator from before it keeps working until it restarts), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
 - `meta`: key/value rows; `metrics_version` holds the metrics schema version.
 
 The canonical schema is versioned by `PRAGMA user_version` and changed only by the ordered migrations in `store.MIGRATIONS`, each in its own transaction under an exclusive `flock` on `archie.db.lock`. A database newer than the code is refused. Migration 1 creates both tables and imports every log already in `<ARCHIE_HOME_DIR>/sessions` once, as a `stopped` row whose `name` is the session ID: `started_at` is the `session_started` time, else the ID's ULID time, else the log's mtime; `last_activity_at` and `ended_at` are the log's mtime; `model_key` is the last root request's model, else the `session_started` model; `backend` is `kiro` for a `kiro/` model. Whichever process opens the database first (the orchestrator, `archie stats` or `archie migrate-sessions`) runs it. After that, a session gets its row from the tracker when it is created or when reconcile adopts its running container.
@@ -324,6 +324,7 @@ orchestrator:
     default:
       host: 127.0.0.1
       port: 7600
+  title_model: bedrock-openai-gpt-5-6-luna
 plugins: {}
 ```
 

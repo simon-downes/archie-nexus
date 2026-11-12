@@ -272,6 +272,7 @@ class SessionTracker:
         self._title_tasks: dict[str, asyncio.Task] = {}
         self._title_again: set[str] = set()
         self._title_failed_at: dict[str, float] = {}
+        self._title_viewed: set[str] = set()  # view checks not yet finished
         self._title_slots = asyncio.Semaphore(TITLE_CONCURRENCY)
 
     # -- lifecycle -----------------------------------------------------------
@@ -803,9 +804,12 @@ class SessionTracker:
         running = self._title_tasks.get(session_id)
         if running is not None and not running.done():
             return
+        if session_id in self._title_viewed:
+            return
         failed = self._title_failed_at.get(session_id)
         if failed is not None and self.clock() - failed < TITLE_VIEW_COOLDOWN:
             return
+        self._title_viewed.add(session_id)
         self._background_task(self._title_if_untitled(session_id))
 
     async def _title_if_untitled(self, session_id: str) -> None:
@@ -814,6 +818,11 @@ class SessionTracker:
         except sqlite3.Error as exc:
             log.debug("No title for viewed session %s: %s", session_id, exc)
             return
+        finally:
+            self._title_viewed.discard(session_id)
+        running = self._title_tasks.get(session_id)
+        if running is not None and not running.done():
+            return  # a job started meanwhile; a rerun would make a second call
         if record is not None and record.name_source == "id":
             self.request_title(session_id)
 
@@ -853,8 +862,14 @@ class SessionTracker:
             if not result.keep and current is None:
                 self._title_failed_at[session_id] = self.clock()
             return
+        try:
+            await self._apply_title(session_id, result.title)
+        except sqlite3.Error as exc:
+            log.warning("Cannot write the title of session %s: %s", session_id, exc)
+            if current is None:
+                self._title_failed_at[session_id] = self.clock()
+            return
         self._title_failed_at.pop(session_id, None)
-        await self._apply_title(session_id, result.title)
 
     async def _apply_title(self, session_id: str, title: str) -> None:
         """Write a model title unless the user has named the session meanwhile (083 D17)."""

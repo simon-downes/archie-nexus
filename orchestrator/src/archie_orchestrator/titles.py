@@ -11,14 +11,17 @@ Every call writes one log line with the session ID, the model, the tokens in and
 the cost and the outcome, and never any conversation content (D5).
 
 The orchestrator may not import the agent's LLM clients (host/container boundary), so
-the one-shot calls here follow ``agent/.../llm/bedrock_openai.py`` for credentials and
-endpoints.
+the one-shot calls here follow ``agent/.../llm/bedrock_openai.py`` for endpoints. Unlike
+the agent, they never fall back to the default AWS chain: on the host that is the user's
+own profiles, which may point at any account. Bedrock title models need the stored
+``bedrock`` credential.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import unicodedata
 from collections.abc import Callable
@@ -51,6 +54,8 @@ REQUEST_TIMEOUT = 15.0
 RESPONSES_MAX_OUTPUT_TOKENS = 64
 CONVERSE_MAX_TOKENS = 40
 ERROR_MAX_CHARS = 300
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+_NO_BEDROCK_CREDENTIAL = "No bedrock credential: run `archie auth login bedrock`"
 
 SYSTEM_PROMPT = """\
 You name coding-assistant sessions for a sidebar. Reply with the title only.
@@ -251,29 +256,37 @@ class TitleResult:
     error: str | None = None
 
 
-def _stored_bedrock_credentials():
-    """A botocore credential provider reading Archie's ``bedrock`` credential.
+def _bedrock_keys():
+    """The stored ``bedrock`` credential with both keys.
 
-    Falls back to the default AWS chain, as the agent's Bedrock clients do
-    (``agent/.../llm/bedrock_openai.py`` ``_StoredBedrockCredentialProvider``). Built on
-    demand so botocore is only imported when a Bedrock title model is used.
+    Raises:
+        RuntimeError: There is none. The host's default AWS chain is never used.
     """
     from archie_shared.credentials import get_credential
+
+    credential = get_credential("bedrock")
+    if not (credential and credential.aws_access_key_id and credential.aws_secret_access_key):
+        raise RuntimeError(_NO_BEDROCK_CREDENTIAL)
+    return credential
+
+
+def _stored_bedrock_credentials():
+    """A botocore credential provider reading only the stored ``bedrock`` credential.
+
+    Built on demand so botocore is only imported when a Bedrock title model is used.
+    """
     from botocore.credentials import CredentialProvider, Credentials
-    from botocore.session import Session
 
     class StoredBedrockCredentials(CredentialProvider):
         METHOD = "archie"
 
-        def load(self) -> Credentials | None:
-            credential = get_credential("bedrock")
-            if credential and credential.aws_access_key_id and credential.aws_secret_access_key:
-                return Credentials(
-                    credential.aws_access_key_id,
-                    credential.aws_secret_access_key,
-                    credential.aws_session_token,
-                )
-            return Session().get_credentials()
+        def load(self) -> Credentials:
+            credential = _bedrock_keys()
+            return Credentials(
+                credential.aws_access_key_id,
+                credential.aws_secret_access_key,
+                credential.aws_session_token,
+            )
 
     return StoredBedrockCredentials()
 
@@ -319,6 +332,7 @@ def _bedrock_openai(model_id: str, region: str, system: str, user: str) -> Compl
     from aws_bedrock_token_generator import provide_token
     from openai import BedrockOpenAI
 
+    _bedrock_keys()  # fail before building a client when there is no stored credential
     client = BedrockOpenAI(
         aws_region=region,
         base_url=_bedrock_runtime_url(region),
@@ -334,10 +348,9 @@ def _bedrock_openai(model_id: str, region: str, system: str, user: str) -> Compl
 def _openai(model_id: str, system: str, user: str) -> Completion:
     """The public OpenAI Responses API with the stored ``openai`` key or ``OPENAI_API_KEY``.
 
-    As ``agent/.../llm/openai_api.py`` ``_api_key``; these requests leave AWS.
+    As ``agent/.../llm/openai_api.py`` ``_api_key``, with the base URL pinned (not taken
+    from ``OPENAI_BASE_URL``); these requests leave AWS.
     """
-    import os
-
     from archie_shared.credentials import get_credential
     from openai import OpenAI
 
@@ -346,20 +359,22 @@ def _openai(model_id: str, system: str, user: str) -> Completion:
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("No OpenAI API key: run `archie auth login openai`")
-    client = OpenAI(api_key=api_key, max_retries=1, timeout=REQUEST_TIMEOUT)
+    client = OpenAI(
+        api_key=api_key, base_url=OPENAI_BASE_URL, max_retries=1, timeout=REQUEST_TIMEOUT
+    )
     return _responses_call(client, model_id, system, user)
 
 
 def _converse(model_id: str, region: str, system: str, user: str) -> Completion:
-    """One Bedrock Converse request with the stored ``bedrock`` keys or the AWS chain.
+    """One Bedrock Converse request with the stored ``bedrock`` keys.
 
-    As ``agent/.../llm/bedrock.py`` ``_create_client``, with this module's timeout and
-    one retry.
+    As ``agent/.../llm/bedrock.py`` ``_create_client``, but with no default-chain
+    fallback, this module's timeout and one retry.
     """
     import boto3
-    from archie_shared.credentials import get_credential
     from botocore.config import Config
 
+    credential = _bedrock_keys()
     kwargs: dict = {
         "region_name": region,
         "config": Config(
@@ -368,12 +383,10 @@ def _converse(model_id: str, region: str, system: str, user: str) -> Completion:
             retries={"max_attempts": 2, "mode": "standard"},
         ),
     }
-    credential = get_credential("bedrock")
-    if credential and credential.aws_access_key_id and credential.aws_secret_access_key:
-        kwargs["aws_access_key_id"] = credential.aws_access_key_id
-        kwargs["aws_secret_access_key"] = credential.aws_secret_access_key
-        if credential.aws_session_token:
-            kwargs["aws_session_token"] = credential.aws_session_token
+    kwargs["aws_access_key_id"] = credential.aws_access_key_id
+    kwargs["aws_secret_access_key"] = credential.aws_secret_access_key
+    if credential.aws_session_token:
+        kwargs["aws_session_token"] = credential.aws_session_token
     client = boto3.client("bedrock-runtime", **kwargs)
     response = client.converse(
         modelId=model_id,

@@ -336,8 +336,21 @@ class _FakeClient:
         _FakeClient.instances.append(self)
 
 
+BEDROCK_KEYS = SimpleNamespace(
+    aws_access_key_id="AKIA", aws_secret_access_key="secret", aws_session_token="tok"
+)
+
+
 @pytest.fixture
-def fake_bedrock_openai(monkeypatch):
+def bedrock_keys(monkeypatch):
+    monkeypatch.setattr(
+        "archie_shared.credentials.get_credential",
+        lambda name: BEDROCK_KEYS if name == "bedrock" else None,
+    )
+
+
+@pytest.fixture
+def fake_bedrock_openai(monkeypatch, bedrock_keys):
     import openai
 
     _FakeClient.instances = []
@@ -366,6 +379,54 @@ def test_bedrock_openai_sends_one_responses_request(fake_bedrock_openai):
     }
     # 900 raw input tokens of which 100 were cached: 800 billable input + 100 cache reads.
     assert (result.title, result.input_tokens, result.output_tokens) == ("Workspaces API", 900, 7)
+    rate = load_models()[LUNA].cost.rates[0]
+    assert result.cost == pytest.approx(
+        (800 * rate.input + 100 * rate.cache_read + 7 * rate.output) / 1e6
+    )
+
+
+@pytest.mark.title_calls
+def test_bedrock_openai_tokens_come_from_the_stored_credential(fake_bedrock_openai, monkeypatch):
+    import aws_bedrock_token_generator
+
+    seen = []
+
+    def provide_token(*, region, aws_credentials_provider):
+        seen.append((region, aws_credentials_provider.load()))
+        return "token"
+
+    monkeypatch.setattr(aws_bedrock_token_generator, "provide_token", provide_token)
+    Titler(lambda: _config()).generate(SID, UNTITLED)
+
+    token = fake_bedrock_openai.instances[0].kwargs["bedrock_token_provider"]()
+    assert token == "token"
+    [(region, credentials)] = seen
+    assert region == "us-east-1"
+    assert (credentials.access_key, credentials.secret_key, credentials.token) == (
+        "AKIA",
+        "secret",
+        "tok",
+    )
+
+
+@pytest.mark.title_calls
+@pytest.mark.parametrize("model", [LUNA, "bedrock-claude-haiku-4-5"])
+def test_bedrock_models_never_use_the_default_aws_chain(monkeypatch, model):
+    import boto3
+    import openai
+
+    def no_client(*args, **kwargs):
+        raise AssertionError("no client may be built without a stored credential")
+
+    monkeypatch.setattr(openai, "BedrockOpenAI", no_client)
+    monkeypatch.setattr(boto3, "client", no_client)
+    monkeypatch.setattr("archie_shared.credentials.get_credential", lambda name: None)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-AMBIENT")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient")
+
+    result = Titler(lambda: _config(model=model)).generate(SID, UNTITLED)
+
+    assert result.error == ("RuntimeError: No bedrock credential: run `archie auth login bedrock`")
 
 
 @pytest.mark.title_calls
@@ -393,13 +454,19 @@ def test_openai_uses_the_stored_key(fake_bedrock_openai, monkeypatch):
         "archie_shared.credentials.get_credential",
         lambda name: SimpleNamespace(api_key="sk-test") if name == "openai" else None,
     )
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://elsewhere.invalid/v1")
     model = "openai-gpt-6-luna"
     assert model in load_models()
 
     result = Titler(lambda: _config(model=model)).generate(SID, UNTITLED)
 
     [client] = _FakeClient.instances
-    assert client.kwargs == {"api_key": "sk-test", "max_retries": 1, "timeout": 15.0}
+    assert client.kwargs == {
+        "api_key": "sk-test",
+        "base_url": "https://api.openai.com/v1",  # never OPENAI_BASE_URL
+        "max_retries": 1,
+        "timeout": 15.0,
+    }
     assert client.requests[0]["model"] == "gpt-6-luna"
     assert client.requests[0]["reasoning"] == {"effort": "none"}
     assert result.title == "Workspaces API"

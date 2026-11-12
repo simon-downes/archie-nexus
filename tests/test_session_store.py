@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 
 import pytest
@@ -78,7 +79,8 @@ def test_migrate_creates_schema_wal_and_lock(tmp_path):
         conn.close()
     assert {"sessions", "meta"} <= tables
     assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
-    assert sorted(columns) == sorted(store_module.COLUMNS)  # migration 2 appends name_source
+    # Migration 2 appends name_source and leaves the unused name_fixed in place.
+    assert sorted(columns) == sorted((*store_module.COLUMNS, "name_fixed"))
     assert mode == "wal"
 
 
@@ -129,7 +131,37 @@ def test_migration_2_maps_name_fixed_to_name_source(tmp_path, monkeypatch):
         columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
     finally:
         conn.close()
-    assert "name_fixed" not in columns
+    assert columns[-1] == "name_source"  # name_fixed stays, unused, for older readers
+
+
+def test_migration_1_alone_imports_logs_into_the_version_1_table(session_logs, tmp_path):
+    w = session_logs
+    w.write("alpha-01kx77jkz8", [w.user("hello")])
+    db = db_path(tmp_path)
+    with closing(store_module.connect(db, create=True)) as conn:
+        store_module._migration_1(conn, tmp_path / "sessions")
+        columns = tuple(r[1] for r in conn.execute("PRAGMA table_info(sessions)"))
+        rows = conn.execute("SELECT session_id, name_fixed FROM sessions").fetchall()
+    assert columns == store_module._V1_COLUMNS
+    assert [tuple(r) for r in rows] == [("alpha-01kx77jkz8", 0)]
+
+
+def test_a_pre_083_reader_and_writer_still_work_after_migration_2(tmp_path):
+    db = db_path(tmp_path)
+    migrate(db)
+    SessionStore(db).insert(record(SID, name="Mine", name_source="user"))
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO sessions (session_id, workspace, backend, name, name_fixed, status, "
+            "started_at) VALUES ('proj-01kx77jkz9', 'proj', 'native', 'Old', 1, 'idle', "
+            "'2026-07-01T10:00:00+00:00')"
+        )
+        conn.commit()
+        old_reads = conn.execute("SELECT name, name_fixed FROM sessions").fetchall()
+    finally:
+        conn.close()
+    assert sorted(old_reads) == [("Mine", 0), ("Old", 1)]
 
 
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):
