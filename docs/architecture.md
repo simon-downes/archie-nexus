@@ -57,7 +57,7 @@ The orchestrator keeps one record per session in the `sessions` table of `archie
 | --- | --- |
 | `session_id`, `workspace` | the ID (`{workspace}-{ulid_prefix}`) and its workspace directory name |
 | `backend` | `native` or `kiro` |
-| `name`, `name_fixed` | display name, the session ID unless the user set one (`name_fixed: true`) |
+| `name`, `name_source` | display name and where it came from: `user` (set with `POST`/`PATCH`; never overwritten), `llm` (a title from the title model, see [Session titles](#session-titles)) or `id` (the session ID) |
 | `status` | one of the statuses below |
 | `error` | the start failure message of a `failed` session |
 | `question` | the pending question while `blocked` |
@@ -78,6 +78,14 @@ The orchestrator keeps one record per session in the `sessions` table of `archie
 A failed write is logged and retried with the next change; a record leaves memory only once its ended state is written (retried every 5 s). On startup the orchestrator migrates `archie.db`, loads the live records and reconciles them with one `docker ps`: a running container makes its record `idle` again (a container with no record is adopted, from its log if there is one), and a record with no container ends as `stopped` (was `stopping`), `failed` (was `starting`, error `orchestrator restarted during startup`) or `exited`, with `ended_at` the log's mtime (or now). If `docker ps` fails, nothing is ended and reconcile is retried every 30 s. Reconcile also starts following each running session; the metrics loop starts after this first attempt. On shutdown the tracker closes its streams and writes pending activity without changing any status, since sessions keep running without the orchestrator.
 
 No read or proxy path calls Docker: the session list and record routes, the session pages, and the port lookups for `/events`, `/stream` and the live viewer all read the tracker. The tracker also publishes every change to the feed's subscribers, each with a 256-record queue; a subscriber that falls behind is dropped and reconnects to a fresh snapshot.
+
+### Session titles
+
+Sessions the user hasn't named are titled by `orchestrator.title_model` (default `bedrock-openai-gpt-5-6-luna`; `null` turns titles off), so clients can tell them apart without asking for a name. The tracker requests a title on the root `user_message` of turn 1, at the end of root turns 1, 3, 8 and 15 and every 10th turn after that, and at every root turn end while `name_source` is still `id`. Opening a session that still has only its ID also requests one: `GET /api/sessions/{id}/events` without `after` (how the TUI loads a session) and the web transcript `/sessions/{id}`, for live and ended sessions alike, at most once per 5 minutes after a failed call. Sessions nobody opens are never backfilled. `PATCH name: null` requests a title straight away. A session whose `name_source` is `user` is never titled.
+
+A title job reads the session log (root prompts and each turn's last uninterrupted reply only, never tool calls or results) and sends one request with no tools or reasoning (`orchestrator/src/archie_orchestrator/titles.py`). The request carries the workspace, the current model title (when there is one), the first prompt and reply, the last three prompts and the latest reply, each cut to 400–600 characters. The model answers with a title of at most 48 characters or `KEEP`. The reply is cleaned (first line, no quotes or trailing punctuation, no control characters, no refusals, cut on a word boundary) and written as `name` with `name_source: llm` unless the user renamed the session during the call; the change is published on the feed. A failure, a rejected reply or `KEEP` leave the record as it was, so a session keeps its ID until the first title succeeds and its last title after that. One job runs per session at a time (later requests coalesce into one rerun), and at most two calls run at once, each with a 15 s timeout and one retry.
+
+Each call writes one orchestrator log line with the session ID, model, input and output tokens, cost in USD and `ok`, `keep` or the error; no conversation content is logged, and the calls are not counted in insights. The orchestrator calls the model itself (not through the agent's LLM clients) with the stored `bedrock` credential, or the `openai` key for `openai-*` models. Unlike the agent it never falls back to the default AWS chain, which on the host is the user's own profiles: without a stored `bedrock` credential, Bedrock title calls fail and sessions keep their ID.
 
 ### Container mounts
 
@@ -110,7 +118,7 @@ Pages:
 | --- | --- | --- |
 | `GET` | `/` | running sessions web page (status, name when set, last activity) |
 | `GET` | `/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search (`HX-Request` gets the results fragment) |
-| `GET` | `/sessions/{id}` | session log viewer: transcript of one log |
+| `GET` | `/sessions/{id}` | session log viewer: transcript of one log; titles a session that has only its ID ([Session titles](#session-titles)) |
 | `GET` | `/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
 | `GET` | `/insights` | usage insights overview; filters `since`, `from`, `until`, `workspace`, `model`, `scope` |
 | `GET` | `/insights/sessions?sort=<key>` | insights: sortable session table |
@@ -130,9 +138,9 @@ JSON API:
 | `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` and `"name"` (non-blank, at most 80 characters, no control characters, stored trimmed); 202 with the `starting` record |
 | `GET` | `/api/sessions/feed?include=ended` | server-sent events: a `snapshot` event (`{"sessions": [...]}`, filtered like the list), then one `session` event with the full record per change, whatever the filter; `: ping` after 15 s idle |
 | `GET` | `/api/sessions/{id}` | one session record, live or ended |
-| `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it and `name_fixed`; `null` resets it to the ID) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
+| `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it with `name_source: user`; `null` resets it to the ID with `name_source: id`) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
 | `DELETE` | `/api/sessions/{id}` | stop a running session and wait; 200 with the `stopped` record, 409 while `starting` or `stopping` or once ended, 500 if the container is still running (previous status restored) |
-| `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting` |
+| `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting`. Without `after`, also titles a session that has only its ID ([Session titles](#session-titles)) |
 | `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
 | WebSocket | `/api/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/api/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
@@ -271,7 +279,7 @@ At startup, an existing file is moved to the matching `.1` path (one backup gene
 
 `<ARCHIE_HOME_DIR>/archie.db` (`orchestrator/src/archie_orchestrator/store.py`) is the orchestrator's datastore. It holds canonical tables, which are never rebuilt, and the rebuildable metrics tables described below. The canonical tables are:
 
-- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`name_fixed` and `unseen` as 0/1, `question` as JSON), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
+- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`unseen` as 0/1, `question` as JSON, and `name` and `name_source` together as one `name` column holding `<source>:<name>`: `id:proj-01kx77jkz8`, `user:Review PR 26`, `llm:Workspaces API`; schema version 2 introduced the prefix and dropped `name_fixed`), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
 - `meta`: key/value rows; `metrics_version` holds the metrics schema version.
 
 The canonical schema is versioned by `PRAGMA user_version` and changed only by the ordered migrations in `store.MIGRATIONS`, each in its own transaction under an exclusive `flock` on `archie.db.lock`. A database newer than the code is refused. Migration 1 creates both tables and imports every log already in `<ARCHIE_HOME_DIR>/sessions` once, as a `stopped` row whose `name` is the session ID: `started_at` is the `session_started` time, else the ID's ULID time, else the log's mtime; `last_activity_at` and `ended_at` are the log's mtime; `model_key` is the last root request's model, else the `session_started` model; `backend` is `kiro` for a `kiro/` model. Whichever process opens the database first (the orchestrator, `archie stats` or `archie migrate-sessions`) runs it. After that, a session gets its row from the tracker when it is created or when reconcile adopts its running container.
@@ -291,7 +299,7 @@ The metrics index is the `metrics_*` tables of `archie.db`: a derived, metadata-
 - `metrics_subagents`: one row per `task` entry with its agent name, parent scope, and outcome from the child's terminal turn event.
 - `metrics_ingest_files`: offset, size, mtime, first-line hash, invalid-line count and last error per log.
 
-The tables join to `sessions` on `session_id` (no foreign key) for workspace, start time, last activity and name; the metrics sync never writes `sessions`. A log whose session has no `sessions` row is skipped and recorded in `metrics_ingest_files` with the error `no session record`; it is checked again on every sync and is not an error in strict mode. Insights and `archie stats` list only sessions whose log was indexed without error, and show a session's name only when the user set it (`name_fixed`).
+The tables join to `sessions` on `session_id` (no foreign key) for workspace, start time, last activity and name; the metrics sync never writes `sessions`. A log whose session has no `sessions` row is skipped and recorded in `metrics_ingest_files` with the error `no session record`; it is checked again on every sync and is not an error in strict mode. Insights and `archie stats` list only sessions whose log was indexed without error, and show a session's name unless it is only the ID (the stored name doesn't start with `id:`).
 
 No other message content, tool input or tool output is stored. Sync is incremental and idempotent: unchanged files are skipped by size and mtime, a trailing partial line waits for the next sync, and a log that shrank or whose first line changed is re-ingested from the start. Rows for deleted logs are kept. Invalid lines are counted and skipped; an unreadable file records its error and the sync moves on.
 
@@ -316,6 +324,7 @@ orchestrator:
     default:
       host: 127.0.0.1
       port: 7600
+  title_model: bedrock-openai-gpt-5-6-luna
 plugins: {}
 ```
 

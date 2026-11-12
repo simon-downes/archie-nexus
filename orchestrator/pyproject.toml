@@ -6,9 +6,12 @@ description = "Archie orchestrator — host-side control plane"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "archie-shared",
+    "aws-bedrock-token-generator>=1.1,<2",
+    "boto3>=1.35",
     "httpx>=0.27",
     "jinja2>=3.1",
     "markdown-it-py>=3",
+    "openai>=2.45,<3",
     "pygments>=2.17",
     "starlette>=0.40",
     "uvicorn>=0.30",

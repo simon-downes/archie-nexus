@@ -10,6 +10,7 @@ from archie_shared.session.accounting import (
 )
 from archie_shared.session.descriptor import (
     TERMINAL_STATUSES,
+    NameSource,
     SessionBackend,
     SessionDescriptor,
     SessionRecordStatus,
@@ -28,6 +29,7 @@ __all__ = [
     "CONTAINER_PREFIX",
     "SESSION_PATTERN",
     "TERMINAL_STATUSES",
+    "NameSource",
     "SessionBackend",
     "SessionDescriptor",
     "SessionRecordStatus",

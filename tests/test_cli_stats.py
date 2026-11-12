@@ -30,7 +30,7 @@ def home(session_logs, tmp_path):
     )
     w.write("other-01k0000001", [w.user("x"), w.llm(model_key="m1", cost_usd=0.5)])
     store = migrated_store(tmp_path)  # imports both logs
-    store.update("proj-01k0000000", name="Fix the parser", name_fixed=True)
+    store.update("proj-01k0000000", name="Fix the parser", name_source="user")
     store.update("other-01k0000001", name="unfixed-name")
     store.save(record("ghost-01k0000002", status="failed", ended_at="2026-07-01T00:00:00Z"))
     return tmp_path
@@ -39,6 +39,13 @@ def home(session_logs, tmp_path):
 def _invoke(*args):
     # A wide terminal so table cells aren't truncated in assertions.
     return CliRunner(env={"COLUMNS": "200"}).invoke(main, ["stats", *args])
+
+
+def test_stats_sessions_show_model_titles(home):
+    migrated_store(home).update("other-01k0000001", name="Model title", name_source="llm")
+    result = _invoke("sessions", "--since", "all")
+    assert result.exit_code == 0, result.output
+    assert "Model title" in result.output
 
 
 def test_stats_json_prints_overview(home):
@@ -175,7 +182,7 @@ def test_session_name_with_markup_prints_literally(session_logs, tmp_path):
     w = session_logs
     w.write("mk-01k0000000", [w.user("hi"), w.llm()])
     migrated_store(tmp_path).update(
-        "mk-01k0000000", name="fix [/] and [exit: 2] now", name_fixed=True
+        "mk-01k0000000", name="fix [/] and [exit: 2] now", name_source="user"
     )
     result = _invoke("session", "mk-01k0000000")
     assert result.exit_code == 0, result.output

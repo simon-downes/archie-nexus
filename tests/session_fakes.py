@@ -22,6 +22,7 @@ from pathlib import Path
 from archie_orchestrator.docker import RunningContainer
 from archie_orchestrator.lifecycle import PreparedStart
 from archie_orchestrator.store import SessionStore, db_path, id_start_time
+from archie_orchestrator.titles import TitleInput, TitleResult
 from archie_orchestrator.tracker import Runtime, SessionTracker
 from archie_shared.config import home_dir
 from archie_shared.session import SessionDescriptor, container_name, split_id
@@ -187,10 +188,10 @@ def handshake_frame(session_id: str = SID) -> str:
     )
 
 
-def user_frame(scope: str | None = None, content: str = "hi") -> str:
+def user_frame(scope: str | None = None, content: str = "hi", *, turn: int = 1) -> str:
     """An encoded ``user_message`` frame (root unless ``scope`` is given)."""
     return json.dumps(
-        {"type": "user_message", "id": "u", "turn": 1, "scope": scope, "content": content}
+        {"type": "user_message", "id": "u", "turn": turn, "scope": scope, "content": content}
     )
 
 
@@ -209,14 +210,72 @@ def delta_frame(text: str = "x", scope: str | None = None) -> str:
     )
 
 
-def turn_frame(kind: str, scope: str | None = None) -> str:
+def turn_frame(kind: str, scope: str | None = None, *, turn: int = 1) -> str:
     """An encoded turn end: ``complete``, ``error`` or ``interrupted``."""
-    frame: dict = {"type": f"turn_{kind}", "id": "t", "turn": 1, "scope": scope}
+    frame: dict = {"type": f"turn_{kind}", "id": "t", "turn": turn, "scope": scope}
     if kind == "complete":
         frame["stop_reason"] = "end_turn"
     elif kind == "error":
         frame["message"] = "boom"
     return json.dumps(frame)
+
+
+class FakeTitler:
+    """A session titler with scripted results (plan 083).
+
+    Each call takes the next result: a ``str`` is a title, ``"KEEP"`` keeps the title,
+    None is a failure, and a :class:`TitleResult` is returned as is. With no results
+    left, calls return the title ``"Default title"``. ``gate``, when given, makes every
+    call wait for it (at most 5 s), so tests can hold calls open.
+    """
+
+    def __init__(self, *results, enabled: bool = True, gate: threading.Event | None = None):
+        self.results = list(results)
+        self.is_enabled = enabled
+        self.gate = gate
+        self.calls: list[tuple[str, TitleInput]] = []
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def enabled(self) -> bool:
+        return self.is_enabled
+
+    def generate(self, session_id: str, title_input: TitleInput) -> TitleResult:
+        with self._lock:
+            self.calls.append((session_id, title_input))
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            result = self.results.pop(0) if self.results else "Default title"
+        try:
+            if self.gate is not None:
+                self.gate.wait(5)
+            if isinstance(result, TitleResult):
+                return result
+            if result is None:
+                return TitleResult(model_key="fake", error="boom")
+            if result == "KEEP":
+                return TitleResult(model_key="fake", keep=True)
+            return TitleResult(model_key="fake", title=result)
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+def assistant_frame(content: str = "done", *, turn: int = 1, interrupted: bool = False) -> str:
+    """An encoded root ``assistant_message`` frame."""
+    return json.dumps(
+        {
+            "type": "assistant_message",
+            "id": "a",
+            "turn": turn,
+            "iteration": 1,
+            "scope": None,
+            "request_id": "r",
+            "content": content,
+            "interrupted": interrupted,
+        }
+    )
 
 
 class FakeAgent:
@@ -269,6 +328,7 @@ def make_tracker(
     records: Iterable[SessionDescriptor] = (),
     runtime: Runtime | None = None,
     home: Path | None = None,
+    titler: FakeTitler | None = None,
 ) -> SessionTracker:
     """A tracker over a migrated store, with records already in place.
 
@@ -277,10 +337,11 @@ def make_tracker(
         records: Extra records written to the store; ones that haven't ended are live.
         runtime: The runtime (a fresh :class:`FakeRuntime` by default).
         home: Archie home (the test's ARCHIE_HOME_DIR by default).
+        titler: Session titler (none by default: no titles).
     """
     store = SessionStore(db_path(home or home_dir()))
     store.migrate()
-    tracker = SessionTracker(store, runtime or FakeRuntime())
+    tracker = SessionTracker(store, runtime or FakeRuntime(), titler=titler)
     for item in records:
         store.save(item)
         if not item.ended:

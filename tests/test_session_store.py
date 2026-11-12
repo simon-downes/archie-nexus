@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 
 import pytest
@@ -39,7 +40,7 @@ def _full_record(session_id: str = SID, **fields):
         "workspace": "proj",
         "backend": "kiro",
         "name": "My session",
-        "name_fixed": True,
+        "name_source": "user",
         "error": "boom",
         "question": PendingQuestion(
             id="tu1", question="Which?", options=[QuestionOption("a", "first")], recommended=0
@@ -65,8 +66,8 @@ def test_db_path_is_archie_db_in_home(tmp_path):
 def test_migrate_creates_schema_wal_and_lock(tmp_path):
     db = db_path(tmp_path)
     assert schema_version(db) is None
-    assert migrate(db) == 1
-    assert schema_version(db) == 1
+    assert migrate(db) == 2
+    assert schema_version(db) == 2
     assert (tmp_path / "archie.db.lock").exists()
     conn = sqlite3.connect(db)
     try:
@@ -78,7 +79,7 @@ def test_migrate_creates_schema_wal_and_lock(tmp_path):
         conn.close()
     assert {"sessions", "meta"} <= tables
     assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
-    assert columns == list(store_module.COLUMNS)
+    assert columns == list(store_module.COLUMNS)  # migration 2 dropped name_fixed
     assert mode == "wal"
 
 
@@ -86,7 +87,7 @@ def test_migrate_is_idempotent(tmp_path):
     db = db_path(tmp_path)
     migrate(db)
     SessionStore(db).insert(record(SID))
-    assert migrate(db) == 1
+    assert migrate(db) == 2
     assert [r.session_id for r in SessionStore(db).list()] == [SID]
 
 
@@ -98,6 +99,95 @@ def test_migrate_rejects_a_newer_schema(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError, match="schema version 99"):
         migrate(db)
+
+
+def test_migration_2_prefixes_names_and_drops_name_fixed(tmp_path, monkeypatch):
+    db = db_path(tmp_path)
+    monkeypatch.setattr(store_module, "MIGRATIONS", store_module.MIGRATIONS[:1])
+    assert migrate(db) == 1
+    conn = sqlite3.connect(db)
+    with conn:
+        for session_id, fixed in (("proj-01kx77jkz8", 1), ("proj-01kx77jkz9", 0)):
+            conn.execute(
+                "INSERT INTO sessions (session_id, workspace, backend, name, name_fixed, "
+                "status, started_at) VALUES (?, 'proj', 'native', ?, ?, 'stopped', "
+                "'2026-07-01T10:00:00+00:00')",
+                (session_id, "Named" if fixed else session_id, fixed),
+            )
+    conn.close()
+    monkeypatch.undo()
+
+    assert migrate(db) == 2
+
+    rows = {r.session_id: r for r in SessionStore(db).list(include_ended=True)}
+    assert (rows["proj-01kx77jkz8"].name, rows["proj-01kx77jkz8"].name_source) == (
+        "Named",
+        "user",
+    )
+    assert (rows["proj-01kx77jkz9"].name, rows["proj-01kx77jkz9"].name_source) == (
+        "proj-01kx77jkz9",
+        "id",
+    )
+    conn = sqlite3.connect(db)
+    try:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+        stored = conn.execute("SELECT name FROM sessions ORDER BY session_id").fetchall()
+    finally:
+        conn.close()
+    assert "name_fixed" not in columns and "name_source" not in columns
+    assert stored == [("user:Named",), ("id:proj-01kx77jkz9",)]
+
+
+def test_migration_1_alone_imports_logs_into_the_version_1_table(session_logs, tmp_path):
+    w = session_logs
+    w.write("alpha-01kx77jkz8", [w.user("hello")])
+    db = db_path(tmp_path)
+    with closing(store_module.connect(db, create=True)) as conn:
+        store_module._migration_1(conn, tmp_path / "sessions")
+        columns = tuple(r[1] for r in conn.execute("PRAGMA table_info(sessions)"))
+        rows = conn.execute("SELECT session_id, name_fixed FROM sessions").fetchall()
+    assert columns == store_module._V1_COLUMNS
+    assert [tuple(r) for r in rows] == [("alpha-01kx77jkz8", 0)]
+
+
+@pytest.mark.parametrize(
+    ("name", "source", "stored"),
+    [
+        (SID, "id", f"id:{SID}"),
+        ("Review PR 26", "user", "user:Review PR 26"),
+        ("Workspaces API", "llm", "llm:Workspaces API"),
+        ("llm: my notes", "user", "user:llm: my notes"),  # only the first prefix counts
+    ],
+)
+def test_names_are_stored_with_their_source_prefix(store, name, source, stored):
+    store.insert(record(SID, name=name, name_source=source))
+
+    with closing(sqlite3.connect(store.db)) as conn:
+        assert conn.execute("SELECT name FROM sessions").fetchone() == (stored,)
+    got = store.get(SID)
+    assert (got.name, got.name_source) == (name, source)
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [(SID, (SID, "id")), ("Old name", ("Old name", "user")), ("x:y", ("x:y", "user"))],
+)
+def test_names_without_a_known_prefix_still_read(store, stored, expected):
+    store.insert(record(SID))
+    with closing(sqlite3.connect(store.db)) as conn, conn:
+        conn.execute("UPDATE sessions SET name = ?", (stored,))
+    got = store.get(SID)
+    assert (got.name, got.name_source) == expected
+
+
+def test_update_keeps_the_stored_half_of_a_name(store):
+    store.insert(record(SID, name="Mine", name_source="user"))
+    renamed = store.update(SID, name="Renamed")
+    assert (renamed.name, renamed.name_source) == ("Renamed", "user")
+    resourced = store.update(SID, name_source="llm")
+    assert (resourced.name, resourced.name_source) == ("Renamed", "llm")
+    with pytest.raises(KeyError):
+        store.update("proj-01kx77jkz9", name="Nobody")
 
 
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):
@@ -144,7 +234,7 @@ def test_migration_imports_each_log_once(session_logs, tmp_path):
     for path in paths:
         _touch(path)
 
-    migrate(db_path(tmp_path))
+    assert migrate(db_path(tmp_path)) == 2  # migration 1 imports, then 2 runs on the rows
     store = SessionStore(db_path(tmp_path))
     mtime = MTIME.isoformat()
 
@@ -153,7 +243,7 @@ def test_migration_imports_each_log_once(session_logs, tmp_path):
     assert store.list() == []  # every imported row has ended
 
     a = rows[native]
-    assert (a.workspace, a.backend, a.name, a.name_fixed) == ("alpha", "native", native, False)
+    assert (a.workspace, a.backend, a.name, a.name_source) == ("alpha", "native", native, "id")
     assert (a.status, a.error, a.question, a.unseen) == ("stopped", None, None, False)
     assert a.started_at == "2026-07-01T09:59:00+00:00"
     assert a.model_key == "m-last"  # last root request, not the subagent's
@@ -267,8 +357,8 @@ def test_list_filters_ended_and_orders_newest_first(store):
 def test_update_changes_fields_and_returns_record(store):
     store.insert(record(SID))
     question = PendingQuestion(id="q", question="?", options=[])
-    updated = store.update(SID, name="Renamed", name_fixed=True, unseen=True, question=question)
-    assert (updated.name, updated.name_fixed, updated.unseen) == ("Renamed", True, True)
+    updated = store.update(SID, name="Renamed", name_source="user", unseen=True, question=question)
+    assert (updated.name, updated.name_source, updated.unseen) == ("Renamed", "user", True)
     assert updated.question == question
     assert store.get(SID) == updated
     assert store.update(SID, question=None).question is None

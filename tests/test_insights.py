@@ -8,6 +8,7 @@ import pytest
 from archie_orchestrator import insights
 from archie_orchestrator.insights import InsightsError, parse_filters, percentile
 from archie_orchestrator.metrics import MetricsIndex, connect
+from archie_orchestrator.store import SessionStore, db_path
 
 from tests.session_fakes import migrated_store, record, set_mtime
 
@@ -114,7 +115,7 @@ def db(session_logs, tmp_path):
     )
     set_mtime(alpha, "2026-07-02T10:00:02+00:00")  # imported as its last activity (D7)
     store = migrated_store(tmp_path)
-    store.update("alpha-01k0000000", name="Alpha session title", name_fixed=True)
+    store.update("alpha-01k0000000", name="Alpha session title", name_source="user")
     store.save(
         record(
             "ghost-01k0000002",
@@ -310,6 +311,15 @@ def test_session_detail_name_only_when_fixed(db):
         "Alpha session title"
     )
     assert insights.session_detail(db, "beta-01k0000001")["session"]["name"] is None
+
+
+def test_a_model_title_is_shown_like_a_user_name(db, tmp_path):
+    SessionStore(db_path(tmp_path)).update(
+        "beta-01k0000001", name="Beta model title", name_source="llm"
+    )
+    assert insights.session_detail(db, "beta-01k0000001")["session"]["name"] == ("Beta model title")
+    names = {s["session_id"]: s["name"] for s in insights.sessions(db, ALL)["sessions"]}
+    assert names["beta-01k0000001"] == "Beta model title"
 
 
 # ---------------------------------------------------------------------------

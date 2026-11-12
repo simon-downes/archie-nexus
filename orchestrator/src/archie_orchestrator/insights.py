@@ -9,8 +9,9 @@ Listed sessions (plan 082 D19b): a session appears in session lists, session cou
 the workspace filter options and the per-session view only when it is *indexed*: it
 has a ``metrics_ingest_files`` row whose ``error`` is NULL, i.e. its log was read
 successfully. Records with no log (a ``failed`` start, a never-prompted session) and
-logs that could not be indexed are left out. A session's name is shown only when it
-was set by the user (``name_fixed``, D1); otherwise ``name`` is None.
+logs that could not be indexed are left out. A session's name is shown when it came
+from the user or the title model (a stored name not prefixed ``id:``, plan 083 D16);
+otherwise ``name`` is None.
 
 Filters (plan 075 D15/D16):
 
@@ -364,7 +365,9 @@ SESSION_SORTS = tuple(_SESSION_SORTS)
 def _session_select(request_where: str) -> str:
     return (
         "SELECT s.session_id, s.workspace, s.started_at, s.last_activity_at, "
-        "CASE WHEN s.name_fixed THEN s.name END AS name, "
+        # Stored names are ``<source>:<name>`` (store.py); ID-only names aren't shown.
+        "CASE WHEN substr(s.name, 1, 3) != 'id:' "
+        "THEN substr(s.name, instr(s.name, ':') + 1) END AS name, "
         "COALESCE(u.requests, 0) AS requests, COALESCE(u.cost, 0.0) AS cost, "
         "COALESCE(u.input_tokens, 0) AS input_tokens, "
         "COALESCE(u.output_tokens, 0) AS output_tokens, "

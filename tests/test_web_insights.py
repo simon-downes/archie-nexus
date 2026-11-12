@@ -66,7 +66,7 @@ def home(session_logs, tmp_path):
     )
     w.write("other-01k0000001", [w.llm(model_key="m1", cost_usd=0.1)])
     store = migrated_store(tmp_path)  # imports both logs
-    store.update(SID, name="Fix <b>the</b> parser", name_fixed=True)
+    store.update(SID, name="Fix <b>the</b> parser", name_source="user")
     store.update("other-01k0000001", name="unfixed-name")
     store.save(record(GHOST, status="failed", error="no image", ended_at="2026-07-01T00:00:00Z"))
     return tmp_path

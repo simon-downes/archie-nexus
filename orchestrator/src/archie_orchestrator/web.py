@@ -172,7 +172,7 @@ def _fmt_activity(value: str | None) -> str:
 async def sessions_page(request: Request) -> HTMLResponse:
     """GET / — render the session list as HTML.
 
-    Lists every session that has not ended with its name (when the user set one),
+    Lists every session that has not ended with its name (unless it is only the ID),
     workspace, status and last activity, from the tracker's records (no Docker call).
     Auto-refreshes every 5 seconds via <meta http-equiv="refresh">.
     """
@@ -180,7 +180,7 @@ async def sessions_page(request: Request) -> HTMLResponse:
     session_data = [
         {
             "session_id": r.session_id,
-            "name": r.name if r.name_fixed else "",
+            "name": r.name if r.name_source != "id" else "",
             "workspace": r.workspace,
             "status": r.status,
             "last_activity": _fmt_activity(r.last_activity_at),
@@ -323,12 +323,14 @@ async def session_detail_page(request: Request) -> HTMLResponse:
     """GET /sessions/{session_id} — structured transcript of one session log.
 
     Markdown, highlighting and template rendering of a large log take a few
-    hundred milliseconds, so the whole render runs off the event loop.
+    hundred milliseconds, so the whole render runs off the event loop. Opening a
+    session that still has only its ID titles it in the background (plan 083 D4).
     """
     session_id = request.path_params["session_id"]
     path = session_log_path(session_id)
     if path is None:
         return _not_found(request, session_id)
+    request.app.state.tracker.title_if_untitled(session_id)
     active = session_id in _active_ids(request.app.state.tracker)
     body = await asyncio.to_thread(_render_detail, session_id, path, active)
     return HTMLResponse(body, headers={"Content-Security-Policy": VIEWER_CSP})

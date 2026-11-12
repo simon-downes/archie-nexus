@@ -243,7 +243,8 @@ async def session_patch(request: Request) -> Response:
     """Rename a session or mark it seen; allowed on ended sessions too (082 D18).
 
     Request body: a JSON object with ``name`` and/or ``unseen``. ``name`` is a string
-    (stored trimmed; sets ``name_fixed``) or null (resets the name to the session ID);
+    (stored trimmed; ``name_source`` becomes ``user``) or null (resets the name to the
+    session ID and ``name_source`` to ``id``, so the title model may name it again);
     ``unseen`` must be false.
 
     Returns:

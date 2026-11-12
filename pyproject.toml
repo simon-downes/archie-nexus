@@ -33,3 +33,6 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "plugins"]
 asyncio_mode = "auto"
+markers = [
+    "title_calls: allow archie_orchestrator.titles to call its (patched) model clients",
+]

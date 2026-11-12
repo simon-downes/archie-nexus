@@ -5,7 +5,11 @@ never rebuilt: once a session ends its row stops changing, so it is the historic
 record too. The schema is versioned with ``PRAGMA user_version`` and changed only by the
 ordered migrations in :data:`MIGRATIONS`, which run under an exclusive ``flock`` on
 ``archie.db.lock``. Migration 1 imports every existing session log once as a ``stopped``
-row.
+row; migration 2 moves a name's source into the name itself and drops ``name_fixed``.
+
+A stored ``name`` is ``<source>:<name>`` (``id:proj-01kx77jkz8``, ``user:Review PR 26``,
+``llm:Workspaces API``), so queries show where a name came from. Only this module knows
+the prefix: records and the API carry ``name`` and ``name_source`` separately.
 
 Everything here is synchronous ``sqlite3`` with one short-lived connection per call;
 async callers use ``asyncio.to_thread``.
@@ -40,7 +44,6 @@ COLUMNS = (
     "workspace",
     "backend",
     "name",
-    "name_fixed",
     "status",
     "error",
     "question",
@@ -160,6 +163,57 @@ def import_log(path: Path) -> SessionDescriptor | None:
 # ---------------------------------------------------------------------------
 
 
+# Migration 1 writes the version 1 table, so it keeps that version's columns and plain
+# names, spelled out: ``COLUMNS`` follows the current schema (migration 2 dropped
+# ``name_fixed`` and prefixed the names).
+_V1_COLUMNS = (
+    "session_id",
+    "workspace",
+    "backend",
+    "name",
+    "name_fixed",
+    "status",
+    "error",
+    "question",
+    "unseen",
+    "model_key",
+    "started_at",
+    "last_activity_at",
+    "ended_at",
+)
+_V1_INSERT_SQL = (
+    f"INSERT INTO sessions ({', '.join(_V1_COLUMNS)}) VALUES ({', '.join('?' * len(_V1_COLUMNS))})"
+)
+
+
+def _v1_row_values(record: SessionDescriptor) -> tuple:
+    return tuple(
+        0 if column == "name_fixed" else _column_value(column, getattr(record, column))
+        for column in _V1_COLUMNS
+    )
+
+
+NAME_SOURCES = ("id", "llm", "user")
+"""The prefixes of a stored ``name``, one per ``NameSource``."""
+
+
+def encode_name(source: str, name: str) -> str:
+    """The stored form of a name: ``<source>:<name>``."""
+    return f"{source}:{name}"
+
+
+def decode_name(stored: str, session_id: str) -> tuple[str, str]:
+    """``(name, source)`` from a stored name.
+
+    A value without a known prefix wasn't written by this version (an orchestrator from
+    before migration 2 still running after it): it is the session ID or a user's name.
+    """
+    source, sep, name = stored.partition(":")
+    if sep and source in NAME_SOURCES:
+        return name, source
+    return stored, "id" if stored == session_id else "user"
+
+
 def _migration_1(conn: sqlite3.Connection, sessions_dir: Path) -> None:
     """Create ``sessions`` and ``meta``, then import every existing session log."""
     conn.execute(
@@ -177,12 +231,27 @@ def _migration_1(conn: sqlite3.Connection, sessions_dir: Path) -> None:
         record = import_log(path)
         if record is None:
             continue
-        conn.execute(_INSERT_SQL, _row_values(record))
+        conn.execute(_V1_INSERT_SQL, _v1_row_values(record))
         imported += 1
     log.info("Imported %d session logs into %s", imported, DB_NAME)
 
 
-MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (_migration_1,)
+def _migration_2(conn: sqlite3.Connection, sessions_dir: Path) -> None:
+    """Prefix each name with its source (``user:`` when ``name_fixed``, else ``id:``)
+    and drop ``name_fixed``.
+
+    An orchestrator from before this change that is still running when ``archie stats``
+    migrates the database can't write sessions until it restarts.
+    """
+    del sessions_dir
+    conn.execute(
+        "UPDATE sessions SET name = CASE WHEN name_fixed = 1 THEN 'user:' || name "
+        "ELSE 'id:' || session_id END"
+    )
+    conn.execute("ALTER TABLE sessions DROP COLUMN name_fixed")
+
+
+MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (_migration_1, _migration_2)
 """Canonical schema migrations; migration N brings ``user_version`` to N."""
 
 
@@ -251,7 +320,7 @@ _SAVE_SQL = (
 
 
 def _column_value(column: str, value: object) -> object:
-    if column in ("name_fixed", "unseen"):
+    if column == "unseen":
         return int(bool(value))
     if column == "question" and value is not None:
         return msgspec.json.encode(value).decode("utf-8")
@@ -259,7 +328,12 @@ def _column_value(column: str, value: object) -> object:
 
 
 def _row_values(record: SessionDescriptor) -> tuple:
-    return tuple(_column_value(column, getattr(record, column)) for column in COLUMNS)
+    return tuple(
+        encode_name(record.name_source, record.name)
+        if column == "name"
+        else _column_value(column, getattr(record, column))
+        for column in COLUMNS
+    )
 
 
 def _from_row(row: sqlite3.Row) -> SessionDescriptor:
@@ -269,14 +343,15 @@ def _from_row(row: sqlite3.Row) -> SessionDescriptor:
             question = msgspec.json.decode(row["question"], type=PendingQuestion)
         except (msgspec.DecodeError, msgspec.ValidationError):
             log.warning("Ignoring an unreadable question for session %s", row["session_id"])
+    name, name_source = decode_name(row["name"], row["session_id"])
     return SessionDescriptor(
         session_id=row["session_id"],
         workspace=row["workspace"],
         backend=row["backend"],
-        name=row["name"],
+        name=name,
         status=row["status"],
         started_at=row["started_at"],
-        name_fixed=bool(row["name_fixed"]),
+        name_source=name_source,
         error=row["error"],
         question=question,
         unseen=bool(row["unseen"]),
@@ -349,17 +424,48 @@ class SessionStore:
             ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    def set_model_name(self, session_id: str, name: str) -> SessionDescriptor | None:
+        """Set a model-written name unless the user named the session (plan 083 D17).
+
+        Returns:
+            The updated record, or None when there is no row or the user's name stands.
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE sessions SET name = ? "
+                "WHERE session_id = ? AND substr(name, 1, 5) != 'user:'",
+                (encode_name("llm", name), session_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return _from_row(row) if row is not None else None
+
     def update(self, session_id: str, **fields: object) -> SessionDescriptor:
-        """Change some columns of one row and return the updated record.
+        """Change some fields of one row and return the updated record.
+
+        ``name`` and ``name_source`` share the ``name`` column: giving one keeps the
+        stored value of the other.
 
         Raises:
             KeyError: If there is no row for ``session_id``.
-            ValueError: If a field is not a ``sessions`` column.
+            ValueError: If a field is not a record field stored in ``sessions``.
         """
-        unknown = set(fields) - set(COLUMNS[1:])
+        unknown = set(fields) - {*COLUMNS[1:], "name_source"}
         if unknown:
             raise ValueError(f"Unknown session fields: {', '.join(sorted(unknown))}")
         with self._conn() as conn:
+            if "name" in fields or "name_source" in fields:
+                stored = conn.execute(
+                    "SELECT name FROM sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if stored is None:
+                    raise KeyError(session_id)
+                name, source = decode_name(stored["name"], session_id)
+                source = str(fields.pop("name_source", source))
+                fields["name"] = encode_name(source, str(fields.get("name", name)))
             if fields:
                 assignments = ", ".join(f"{column} = ?" for column in fields)
                 values = [_column_value(column, value) for column, value in fields.items()]

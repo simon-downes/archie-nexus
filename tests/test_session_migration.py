@@ -343,7 +343,7 @@ def test_migrate_sessions_cli_db_rebuilds_metrics_and_keeps_sessions(tmp_path):
     sessions_dir.mkdir()
     _write_legacy_log(sessions_dir / "session-7.jsonl")
     store = migrated_store(tmp_path)
-    store.update("session-7", name="Kept", name_fixed=True)
+    store.update("session-7", name="Kept", name_source="user")
     db = tmp_path / "archie.db"
     MetricsIndex(db, sessions_dir).sync()
     before = sessions_rows(db)

@@ -167,10 +167,15 @@ async def proxy_events(request: Request) -> Response:
     The ``after`` cursor is forwarded unchanged; an ended session answers like the agent
     (NDJSON, 409 ``cursor_not_found`` for an unknown cursor). 404 for an unknown ID and
     503 for a session still starting.
+
+    A load without ``after`` (a client opening the session, not resuming) titles a
+    session that still has only its ID, in the background (plan 083 D4).
     """
     session_id = request.path_params["session_id"]
     tracker = request.app.state.tracker
     after = request.query_params.get("after")
+    if after is None:
+        tracker.title_if_untitled(session_id)
     try:
         session = resolve_session(tracker, session_id)
     except KeyError:

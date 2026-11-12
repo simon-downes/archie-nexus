@@ -26,6 +26,7 @@ orchestrator:
     default:
       host: 127.0.0.1
       port: 7600
+  title_model: bedrock-openai-gpt-5-6-luna
 plugins: {}
 ```
 
@@ -48,6 +49,10 @@ restarting it:
   last valid config and the orchestrator logs one warning per invalid version.
 - `orchestrator.profiles` host and port are read once by `archie serve` when it binds;
   changing them needs an orchestrator restart.
+- `orchestrator.title_model` is the catalogue model that titles sessions the user hasn't
+  named (see [Session titles](architecture.md#session-titles)); `null` turns titles off.
+  Each title call reads it, with `global.region` for models whose catalogue entry has no
+  region. If the file becomes invalid, titles keep using the last valid config.
 
 The file is parsed again only when its modification time, size or inode changes.
 

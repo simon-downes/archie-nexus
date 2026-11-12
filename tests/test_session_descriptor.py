@@ -17,7 +17,7 @@ def test_session_descriptor_defaults_and_container_name():
         started_at="2026-07-01T10:00:00+00:00",
     )
     assert desc.container_name == "archie-my-app-01j3abcdef"
-    assert (desc.name_fixed, desc.unseen, desc.ended) == (False, False, False)
+    assert (desc.name_source, desc.unseen, desc.ended) == ("id", False, False)
     assert desc.error is desc.question is desc.model_key is None
     assert desc.last_activity_at is desc.ended_at is None
 
@@ -50,7 +50,7 @@ def test_session_descriptor_json_round_trip_recomputes_container_name():
         name="Named",
         status="blocked",
         started_at="2026-07-01T10:00:00+00:00",
-        name_fixed=True,
+        name_source="user",
         question=PendingQuestion(id="q", question="?", options=[QuestionOption("a")]),
     )
     data = msgspec.json.decode(msgspec.json.encode(desc))

@@ -31,6 +31,9 @@ type SessionRecordStatus = Literal[
 
 type SessionBackend = Literal["native", "kiro"]
 
+type NameSource = Literal["id", "llm", "user"]
+"""Where a session's ``name`` came from: its ID, the title model, or the user."""
+
 TERMINAL_STATUSES: frozenset[str] = frozenset({"stopped", "exited", "failed"})
 """Statuses of an ended session; its record no longer changes except name and unseen."""
 
@@ -42,10 +45,14 @@ class SessionDescriptor(msgspec.Struct):
         session_id: The session identifier ({workspace}-{ulid_prefix}).
         workspace: Workspace directory name (from ``split_id`` at creation).
         backend: ``native`` (Archie's own loop) or ``kiro``.
-        name: Display name; the session ID unless the user set one.
+        name: Display name: the user's name, else a model-written title, else the
+            session ID (see ``name_source``).
         status: Lifecycle and turn state (see ``SessionRecordStatus``).
         started_at: ISO 8601 UTC start time.
-        name_fixed: True when ``name`` was set by the user.
+        name_source: Where ``name`` came from: ``id`` (the session ID), ``llm`` (a title
+            from the orchestrator's title model) or ``user`` (never overwritten by the
+            model). ``archie.db`` stores both as one prefixed ``name``; the record and
+            the API keep them apart.
         error: Start failure message, for ``failed`` sessions.
         question: The pending question while ``blocked``.
         unseen: True when a root turn ended since a client last cleared it.
@@ -62,7 +69,7 @@ class SessionDescriptor(msgspec.Struct):
     name: str
     status: SessionRecordStatus
     started_at: str
-    name_fixed: bool = False
+    name_source: NameSource = "id"
     error: str | None = None
     question: PendingQuestion | None = None
     unseen: bool = False

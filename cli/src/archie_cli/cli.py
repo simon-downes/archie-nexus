@@ -652,7 +652,7 @@ def stop(session_id: str | None):
 
 def _format_session_row(session: SessionDescriptor, prefix: str = "") -> str:
     """Format one session consistently for lists and selection prompts."""
-    name = session.name if session.name_fixed else ""
+    name = session.name if session.name_source != "id" else ""
     return (
         f"{prefix}{session.session_id:<40} {session.workspace:<20} {session.status:<10} {name}"
     ).rstrip()

@@ -19,7 +19,7 @@ def _make_sessions(*args) -> list[SessionDescriptor]:
             workspace=split_id(sid)[0],
             backend="native",
             name=name or sid,
-            name_fixed=name is not None,
+            name_source="user" if name is not None else "id",
             status=status,
             started_at="2026-07-01T10:00:00+00:00",
         )
@@ -37,6 +37,14 @@ def _http_response(sessions: list[SessionDescriptor], status_code: int = 200) ->
 
 
 # --- archie ls ---
+
+
+def test_session_rows_show_model_titles():
+    from archie_cli.cli import _format_session_row
+
+    [titled] = _make_sessions(("myproject-01abc12345", "idle", "Model title"))
+    titled.name_source = "llm"
+    assert _format_session_row(titled).split()[-2:] == ["Model", "title"]
 
 
 def test_ls_displays_sessions(monkeypatch, tmp_path):

@@ -150,10 +150,10 @@ async def test_post_returns_202_starting_and_the_session_reaches_idle():
             assert response.status_code == 202
             created = msgspec.json.decode(response.content, type=SessionDescriptor)
             assert created.status == "starting"
-            assert (created.workspace, created.backend, created.name_fixed) == (
+            assert (created.workspace, created.backend, created.name_source) == (
                 "proj",
                 "native",
-                False,
+                "id",
             )
             await until(lambda: tracker.live(created.session_id).status == "idle")
             listed = (await http.get("/api/sessions")).json()
@@ -182,7 +182,7 @@ async def test_post_with_name_and_backend():
         await tracker.close()
     assert response.status_code == 202
     body = response.json()
-    assert (body["name"], body["name_fixed"], body["backend"]) == ("Review PR", True, "kiro")
+    assert (body["name"], body["name_source"], body["backend"]) == ("Review PR", "user", "kiro")
     assert runtime.prepared == [("proj", "kiro")]
 
 
@@ -193,7 +193,7 @@ async def test_post_null_name_is_the_default():
         await tracker.close()
     body = response.json()
     assert response.status_code == 202
-    assert (body["name"], body["name_fixed"]) == (body["session_id"], False)
+    assert (body["name"], body["name_source"]) == (body["session_id"], "id")
 
 
 @pytest.mark.parametrize(
@@ -664,17 +664,17 @@ async def test_patch_name_is_trimmed_and_fixed():
     response, after, tracker = await _patch({"name": "  Review PR  "})
     assert response.status_code == 200
     body = response.json()
-    assert (body["name"], body["name_fixed"], body["status"]) == ("Review PR", True, "working")
+    assert (body["name"], body["name_source"], body["status"]) == ("Review PR", "user", "working")
     assert after.json() == body
     assert tracker.store.get(SID).name == "Review PR"
 
 
 async def test_patch_null_name_resets_to_the_id():
     response, _, _ = await _patch(
-        {"name": None}, records=[record(SID, name="Review", name_fixed=True)]
+        {"name": None}, records=[record(SID, name="Review", name_source="user")]
     )
     assert response.status_code == 200
-    assert (response.json()["name"], response.json()["name_fixed"]) == (SID, False)
+    assert (response.json()["name"], response.json()["name_source"]) == (SID, "id")
 
 
 async def test_patch_unseen_false_clears_it():
@@ -689,14 +689,14 @@ async def test_patch_name_and_unseen_together():
         {"name": "Both", "unseen": False}, records=[record(SID, unseen=True)]
     )
     body = response.json()
-    assert (body["name"], body["name_fixed"], body["unseen"]) == ("Both", True, False)
+    assert (body["name"], body["name_source"], body["unseen"]) == ("Both", "user", False)
 
 
 async def test_patch_ended_session_is_allowed():
     response, after, tracker = await _patch({"name": "History"}, session_id=ENDED)
     assert response.status_code == 200
     body = response.json()
-    assert (body["name"], body["name_fixed"], body["status"]) == ("History", True, "stopped")
+    assert (body["name"], body["name_source"], body["status"]) == ("History", "user", "stopped")
     assert after.json() == body
     assert tracker.store.get(ENDED).name == "History"
 

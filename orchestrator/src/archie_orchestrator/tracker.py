@@ -14,6 +14,13 @@ is followed again while the container runs, or ends the session when it has gone
 :meth:`SessionTracker.stop` stops a container for ``DELETE`` (D19, D19a) and
 :meth:`SessionTracker.patch` renames a session or marks it seen for ``PATCH`` (D18).
 
+Sessions the user hasn't named get titles from a :class:`Titler` (plan 083): on the first
+root prompt, at the end of root turns 1, 3, 8, 15 and every 10 after, and at every root
+turn end while the session still has only its ID. Viewing a session that still has only
+its ID (:meth:`SessionTracker.title_if_untitled`) and resetting a name also request one.
+One title job runs per session at a time, later requests coalesce into one rerun, and at
+most :data:`TITLE_CONCURRENCY` calls run at once.
+
 Docker is reached only through a :class:`Runtime`, so tests can substitute a fake.
 """
 
@@ -49,6 +56,7 @@ from archie_orchestrator import docker, lifecycle
 from archie_orchestrator.docker import DockerError, RunningContainer
 from archie_orchestrator.lifecycle import PreparedStart
 from archie_orchestrator.store import SessionStore, id_start_time, import_log, now_iso
+from archie_orchestrator.titles import TitleInput, TitleResult, read_title_input
 
 log = logging.getLogger(__name__)
 
@@ -70,12 +78,33 @@ RESTARTED_DURING_STARTUP = "orchestrator restarted during startup"
 FEED_QUEUE_SIZE = 256
 """Records a feed subscriber may fall behind before it is dropped."""
 
+TITLE_TURNS = frozenset({1, 3, 8, 15})
+"""Root turns whose end refreshes the title; after turn 15, every 10th turn does (083 D3)."""
+TITLE_EVERY = 10
+TITLE_CONCURRENCY = 2
+"""Most title calls running at once, across all sessions (083 D14)."""
+TITLE_VIEW_COOLDOWN = 300.0
+"""Seconds after a failed title call before viewing the session tries again (083 D15)."""
+
 _UNSET: object = object()
 """Default of :meth:`SessionTracker.patch` arguments that were not given."""
 
 _STREAM_ERRORS = (OSError, TimeoutError, WebSocketException)
 # Events that are not agent activity: connect frames, status and targeted notices.
 _NOT_ACTIVITY = (Handshake, SessionStatus, ErrorNotice)
+
+
+def title_due(turn: int) -> bool:
+    """Whether the end of root turn ``turn`` refreshes a session's title (083 D3)."""
+    return turn in TITLE_TURNS or (turn > 15 and (turn - 15) % TITLE_EVERY == 0)
+
+
+class SessionTitler(Protocol):
+    """What the tracker needs from :class:`archie_orchestrator.titles.Titler`."""
+
+    def enabled(self) -> bool: ...
+
+    def generate(self, session_id: str, title_input: TitleInput) -> TitleResult: ...
 
 
 def resubscribe_delay(attempt: int) -> float:
@@ -200,6 +229,7 @@ class SessionTracker:
         runtime: Container operations; :class:`DockerRuntime` in production.
         activity_interval: Minimum seconds between activity-only writes of one session.
         clock: Monotonic seconds, used to space activity-only writes.
+        titler: Writes session titles; None turns titles off.
     """
 
     def __init__(
@@ -209,8 +239,10 @@ class SessionTracker:
         *,
         activity_interval: float = ACTIVITY_INTERVAL,
         clock: Callable[[], float] = time.monotonic,
+        titler: SessionTitler | None = None,
     ) -> None:
         self.store = store
+        self.titler = titler
         self.runtime = runtime
         self.activity_interval = activity_interval
         self.clock = clock
@@ -235,6 +267,13 @@ class SessionTracker:
         self._flush_tasks: dict[str, asyncio.Task] = {}
         # Stopped sessions whose log was removed: their terminal write deletes the row (D19a).
         self._discard: set[str] = set()
+        # Title jobs by session, sessions asked for a title while their job ran, and the
+        # clock time of each untitled session's last failed title call (083 D14, D15).
+        self._title_tasks: dict[str, asyncio.Task] = {}
+        self._title_again: set[str] = set()
+        self._title_failed_at: dict[str, float] = {}
+        self._title_viewed: set[str] = set()  # view checks not yet finished
+        self._title_slots = asyncio.Semaphore(TITLE_CONCURRENCY)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -504,7 +543,7 @@ class SessionTracker:
             workspace=split_id(session_id)[0],
             backend="kiro" if backend == "kiro" else "native",
             name=name if name is not None else session_id,
-            name_fixed=name is not None,
+            name_source="user" if name is not None else "id",
             status="starting",
             started_at=now_iso(),
         )
@@ -599,8 +638,9 @@ class SessionTracker:
 
         Args:
             session_id: The session.
-            name: A validated, trimmed name (sets ``name_fixed``), or None to reset the
-                name to the session ID; leave out to keep the name.
+            name: A validated, trimmed name (``name_source`` becomes ``user``), or None
+                to reset the name to the session ID (``name_source`` ``id``) and request
+                a title; leave out to keep the name.
             unseen: The new ``unseen`` flag; None keeps it.
 
         Returns:
@@ -614,16 +654,18 @@ class SessionTracker:
         changes: dict[str, object] = {}
         if name is not _UNSET:
             changes["name"] = session_id if name is None else name
-            changes["name_fixed"] = name is not None
+            changes["name_source"] = "user" if name is not None else "id"
         if unseen is not None:
             changes["unseen"] = unseen
+        updated = None
         if session_id in self._records:
             updated = await self._update(session_id, strict=True, **changes)
-            if updated is not None:
-                return updated
-        # Ended sessions are not held in memory: change the stored row directly.
-        updated = await asyncio.to_thread(self.store.update, session_id, **changes)
-        self._publish(updated)
+        if updated is None:
+            # Ended sessions are not held in memory: change the stored row directly.
+            updated = await asyncio.to_thread(self.store.update, session_id, **changes)
+            self._publish(updated)
+        if name is None:
+            self.request_title(session_id)  # the model may name it again (083 D9)
         return updated
 
     # -- following the agent stream ------------------------------------------
@@ -663,7 +705,8 @@ class SessionTracker:
         work, ``turn_complete`` and ``turn_error`` set ``unseen``, and after a
         ``turn_error`` the next ``idle`` is stored as ``error`` until the next
         ``user_message``; ``turn_interrupted`` drops that pending error. ``session_status``
-        sets status, model and question, and a ``kiro/`` model marks the backend.
+        sets status, model and question, and a ``kiro/`` model marks the backend. The
+        turn-1 ``user_message`` and scheduled ``turn_complete`` events request a title.
         """
         try:
             event = decode_event(frame)
@@ -701,6 +744,12 @@ class SessionTracker:
             await self._update(session_id, **changes)
         elif session_id in self._pending_activity:
             await self._note_activity(session_id)
+        if root and isinstance(event, UserMessage) and event.turn == 1:
+            self.request_title(session_id)
+        elif root and isinstance(event, TurnComplete):
+            current = self._records.get(session_id, record)
+            if title_due(event.turn) or current.name_source == "id":
+                self.request_title(session_id)
 
     async def _still_running(self, session_id: str) -> bool:
         """After the stream closed: True to follow again; False (``exited`` if gone) to stop."""
@@ -720,6 +769,122 @@ class SessionTracker:
         log.info("Session %s exited", session_id)
         await self._update(session_id, status="exited", ended_at=now_iso())
         return False
+
+    # -- titles --------------------------------------------------------------
+
+    def request_title(self, session_id: str) -> None:
+        """Start a title job for the session, or have the running one run again."""
+        if self.titler is None:
+            return
+        running = self._title_tasks.get(session_id)
+        if running is not None and not running.done():
+            self._title_again.add(session_id)
+            return
+        task = asyncio.create_task(self._title_job(session_id), name=f"title-{session_id}")
+        self._title_tasks[session_id] = task
+        self._background.add(task)
+
+        def _done(done: asyncio.Task) -> None:
+            self._background.discard(done)
+            if self._title_tasks.get(session_id) is done:
+                del self._title_tasks[session_id]
+
+        task.add_done_callback(_done)
+
+    def title_if_untitled(self, session_id: str) -> None:
+        """Title a viewed session that still has only its ID (083 D4); returns at once.
+
+        Nothing happens while a title job runs for the session, or within
+        :data:`TITLE_VIEW_COOLDOWN` seconds of its last failed call. The record is read
+        (from memory, else the store) in a background task, so a page or API response
+        never waits for it.
+        """
+        if self.titler is None:
+            return
+        running = self._title_tasks.get(session_id)
+        if running is not None and not running.done():
+            return
+        if session_id in self._title_viewed:
+            return
+        failed = self._title_failed_at.get(session_id)
+        if failed is not None and self.clock() - failed < TITLE_VIEW_COOLDOWN:
+            return
+        self._title_viewed.add(session_id)
+        self._background_task(self._title_if_untitled(session_id))
+
+    async def _title_if_untitled(self, session_id: str) -> None:
+        try:
+            record = await self.get(session_id)
+        except sqlite3.Error as exc:
+            log.debug("No title for viewed session %s: %s", session_id, exc)
+            return
+        finally:
+            self._title_viewed.discard(session_id)
+        running = self._title_tasks.get(session_id)
+        if running is not None and not running.done():
+            return  # a job started meanwhile; a rerun would make a second call
+        if record is not None and record.name_source == "id":
+            self.request_title(session_id)
+
+    async def _title_job(self, session_id: str) -> None:
+        while True:
+            self._title_again.discard(session_id)
+            try:
+                await self._title_once(session_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a failed title must not stop the tracker
+                log.exception("Title job for session %s failed", session_id)
+            if session_id not in self._title_again:
+                return
+
+    async def _title_once(self, session_id: str) -> None:
+        """One title call for a session the user hasn't named (083 data flow, step 2)."""
+        titler = self.titler
+        if titler is None or not titler.enabled():
+            return
+        record = await self.get(session_id)
+        if record is None or record.name_source == "user":
+            return
+        current = record.name if record.name_source == "llm" else None
+        try:
+            title_input = await asyncio.to_thread(
+                read_title_input, self.log_path(session_id), record.workspace, current
+            )
+        except OSError as exc:
+            log.debug("No title for session %s: cannot read its log: %s", session_id, exc)
+            return
+        if title_input is None:
+            return
+        async with self._title_slots:
+            result = await asyncio.to_thread(titler.generate, session_id, title_input)
+        if result.title is None:
+            if not result.keep and current is None:
+                self._title_failed_at[session_id] = self.clock()
+            return
+        try:
+            await self._apply_title(session_id, result.title)
+        except sqlite3.Error as exc:
+            log.warning("Cannot write the title of session %s: %s", session_id, exc)
+            if current is None:
+                self._title_failed_at[session_id] = self.clock()
+            return
+        self._title_failed_at.pop(session_id, None)
+
+    async def _apply_title(self, session_id: str, title: str) -> None:
+        """Write a model title unless the user has named the session meanwhile (083 D17)."""
+        record = self._records.get(session_id)
+        if record is not None:
+            # No await between this check and the in-memory change in ``_update``.
+            if record.name_source == "user" or (
+                record.name_source == "llm" and record.name == title
+            ):
+                return
+            await self._update(session_id, name=title, name_source="llm")
+            return
+        updated = await asyncio.to_thread(self.store.set_model_name, session_id, title)
+        if updated is not None:
+            self._publish(updated)
 
     # -- writes --------------------------------------------------------------
 
