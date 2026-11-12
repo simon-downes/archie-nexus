@@ -509,7 +509,7 @@ Live: 20 titles from 10 real session logs with 5.6 and 6 Luna (M2), Haiku via Co
 Not verified: titling against real agent containers (no Docker here; frames and logs are
 faked), and the orchestrator running on the macOS host.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/27
 CI: pending
 
 ## Follow-ups
