@@ -510,6 +510,6 @@ Not verified: titling against real agent containers (no Docker here; frames and 
 faked), and the orchestrator running on the macOS host.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/27
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
