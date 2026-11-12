@@ -28,6 +28,7 @@ from archie_orchestrator.credential_refresh import credential_refresh_loop
 from archie_orchestrator.metrics import MetricsIndex, default_index
 from archie_orchestrator.proxy import get_active_ws_connections
 from archie_orchestrator.store import SessionStore, db_path
+from archie_orchestrator.titles import Titler
 from archie_orchestrator.tracker import DockerRuntime, SessionTracker
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -77,7 +78,10 @@ async def lifespan(app: Starlette):
     # Migrate archie.db, reconcile with Docker and follow running sessions before the
     # metrics loop takes its lock (D13). Tests inject a fake runtime (D16).
     runtime = getattr(app.state, "runtime", None) or DockerRuntime()
-    tracker = SessionTracker(SessionStore(db_path(home_dir())), runtime)
+    # Titles read the last valid config, so an invalid edit doesn't stop them (083 D10).
+    tracker = SessionTracker(
+        SessionStore(db_path(home_dir())), runtime, titler=Titler(config_source.latest)
+    )
     await tracker.start()
     app.state.tracker = tracker
     log.info("Discovered %d running sessions", len(tracker.live_ids()))

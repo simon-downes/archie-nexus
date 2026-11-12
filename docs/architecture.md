@@ -79,6 +79,14 @@ A failed write is logged and retried with the next change; a record leaves memor
 
 No read or proxy path calls Docker: the session list and record routes, the session pages, and the port lookups for `/events`, `/stream` and the live viewer all read the tracker. The tracker also publishes every change to the feed's subscribers, each with a 256-record queue; a subscriber that falls behind is dropped and reconnects to a fresh snapshot.
 
+### Session titles
+
+Sessions the user hasn't named are titled by `orchestrator.title_model` (default `bedrock-openai-gpt-5-6-luna`; `null` turns titles off), so clients can tell them apart without asking for a name. The tracker requests a title on the root `user_message` of turn 1, at the end of root turns 1, 3, 8 and 15 and every 10th turn after that, and at every root turn end while `name_source` is still `id`. A session whose `name_source` is `user` is never titled.
+
+A title job reads the session log (root prompts and each turn's last uninterrupted reply only, never tool calls or results) and sends one request with no tools or reasoning (`orchestrator/src/archie_orchestrator/titles.py`). The request carries the workspace, the current model title (when there is one), the first prompt and reply, the last three prompts and the latest reply, each cut to 400–600 characters. The model answers with a title of at most 48 characters or `KEEP`. The reply is cleaned (first line, no quotes or trailing punctuation, no control characters, no refusals, cut on a word boundary) and written as `name` with `name_source: model` unless the user renamed the session during the call; the change is published on the feed. A failure, a rejected reply or `KEEP` leave the record as it was, so a session keeps its ID until the first title succeeds and its last title after that. One job runs per session at a time (later requests coalesce into one rerun), and at most two calls run at once, each with a 15 s timeout and one retry.
+
+Each call writes one orchestrator log line with the session ID, model, input and output tokens, cost in USD and `ok`, `keep` or the error; no conversation content is logged, and the calls are not counted in insights. The orchestrator calls the model itself (not through the agent's LLM clients) with the `bedrock` credential, or the `openai` key for `openai-*` models.
+
 ### Container mounts
 
 The complete configuration reference, including additional host bind mounts and wildcard

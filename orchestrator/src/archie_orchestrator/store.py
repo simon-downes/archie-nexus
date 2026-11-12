@@ -372,6 +372,25 @@ class SessionStore:
             ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    def set_model_name(self, session_id: str, name: str) -> SessionDescriptor | None:
+        """Set a model-written name unless the user named the session (plan 083 D17).
+
+        Returns:
+            The updated record, or None when there is no row or the user's name stands.
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE sessions SET name = ?, name_source = 'model' "
+                "WHERE session_id = ? AND name_source != 'user'",
+                (name, session_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return _from_row(row) if row is not None else None
+
     def update(self, session_id: str, **fields: object) -> SessionDescriptor:
         """Change some columns of one row and return the updated record.
 

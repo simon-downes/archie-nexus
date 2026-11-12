@@ -37,6 +37,22 @@ def _isolated_archie_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path_factory.mktemp("archie-home")))
 
 
+@pytest.fixture(autouse=True)
+def _no_title_model_calls(request, monkeypatch):
+    """Fail every session-title model call unless a test is marked ``title_calls``.
+
+    The orchestrator lifespan titles sessions with the configured model (plan 083); no
+    test may reach a real provider. Tests marked ``title_calls`` patch the SDK clients.
+    """
+    if request.node.get_closest_marker("title_calls") is not None:
+        return
+
+    def _blocked(*args, **kwargs):
+        raise RuntimeError("title model calls are disabled in tests")
+
+    monkeypatch.setattr("archie_orchestrator.titles._complete", _blocked)
+
+
 @pytest.fixture
 def make_llm_request() -> Callable[..., LLMRequest]:
     """Factory for `LLMRequest` events with defaults.
@@ -202,6 +218,7 @@ class SessionLogWriter:
         request_id: str = "r1",
         scope=None,
         index=None,
+        interrupted: bool = False,
     ) -> AssistantMessage:
         return AssistantMessage(
             id=self._id("am"),
@@ -210,7 +227,7 @@ class SessionLogWriter:
             scope=scope,
             request_id=request_id,
             content=content,
-            interrupted=False,
+            interrupted=interrupted,
             subagent_index=index,
         )
 

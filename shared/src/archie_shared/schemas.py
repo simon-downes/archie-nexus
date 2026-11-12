@@ -74,14 +74,20 @@ class OrchestratorProfile(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
 
 
 class OrchestratorConfig(msgspec.Struct, forbid_unknown_fields=True):
-    """Orchestrator configuration — profiles keyed by name.
+    """Orchestrator configuration — profiles keyed by name, and session titles.
 
     Named profiles are resolved by the CLI for multi-host addressing.
     The 'default' profile (or OrchestratorProfile() if absent) is used
     for commands that don't specify a profile.
+
+    Attributes:
+        profiles: Orchestrator addresses keyed by profile name.
+        title_model: Catalogue key of the model that writes session titles; null
+            turns titles off (sessions keep their ID unless renamed).
     """
 
     profiles: dict[str, OrchestratorProfile] = msgspec.field(default_factory=dict)
+    title_model: str | None = "bedrock-openai-gpt-5-6-luna"
 
 
 def get_profile(config: OrchestratorConfig, name: str = "default") -> OrchestratorProfile:
