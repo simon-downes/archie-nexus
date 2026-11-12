@@ -81,7 +81,7 @@ No read or proxy path calls Docker: the session list and record routes, the sess
 
 ### Session titles
 
-Sessions the user hasn't named are titled by `orchestrator.title_model` (default `bedrock-openai-gpt-5-6-luna`; `null` turns titles off), so clients can tell them apart without asking for a name. The tracker requests a title on the root `user_message` of turn 1, at the end of root turns 1, 3, 8 and 15 and every 10th turn after that, and at every root turn end while `name_source` is still `id`. A session whose `name_source` is `user` is never titled.
+Sessions the user hasn't named are titled by `orchestrator.title_model` (default `bedrock-openai-gpt-5-6-luna`; `null` turns titles off), so clients can tell them apart without asking for a name. The tracker requests a title on the root `user_message` of turn 1, at the end of root turns 1, 3, 8 and 15 and every 10th turn after that, and at every root turn end while `name_source` is still `id`. Opening a session that still has only its ID also requests one: `GET /api/sessions/{id}/events` without `after` (how the TUI loads a session) and the web transcript `/sessions/{id}`, for live and ended sessions alike, at most once per 5 minutes after a failed call. Sessions nobody opens are never backfilled. `PATCH name: null` requests a title straight away. A session whose `name_source` is `user` is never titled.
 
 A title job reads the session log (root prompts and each turn's last uninterrupted reply only, never tool calls or results) and sends one request with no tools or reasoning (`orchestrator/src/archie_orchestrator/titles.py`). The request carries the workspace, the current model title (when there is one), the first prompt and reply, the last three prompts and the latest reply, each cut to 400–600 characters. The model answers with a title of at most 48 characters or `KEEP`. The reply is cleaned (first line, no quotes or trailing punctuation, no control characters, no refusals, cut on a word boundary) and written as `name` with `name_source: model` unless the user renamed the session during the call; the change is published on the feed. A failure, a rejected reply or `KEEP` leave the record as it was, so a session keeps its ID until the first title succeeds and its last title after that. One job runs per session at a time (later requests coalesce into one rerun), and at most two calls run at once, each with a 15 s timeout and one retry.
 
@@ -118,7 +118,7 @@ Pages:
 | --- | --- | --- |
 | `GET` | `/` | running sessions web page (status, name when set, last activity) |
 | `GET` | `/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search (`HX-Request` gets the results fragment) |
-| `GET` | `/sessions/{id}` | session log viewer: transcript of one log |
+| `GET` | `/sessions/{id}` | session log viewer: transcript of one log; titles a session that has only its ID ([Session titles](#session-titles)) |
 | `GET` | `/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
 | `GET` | `/insights` | usage insights overview; filters `since`, `from`, `until`, `workspace`, `model`, `scope` |
 | `GET` | `/insights/sessions?sort=<key>` | insights: sortable session table |
@@ -140,7 +140,7 @@ JSON API:
 | `GET` | `/api/sessions/{id}` | one session record, live or ended |
 | `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it with `name_source: user`; `null` resets it to the ID with `name_source: id`) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
 | `DELETE` | `/api/sessions/{id}` | stop a running session and wait; 200 with the `stopped` record, 409 while `starting` or `stopping` or once ended, 500 if the container is still running (previous status restored) |
-| `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting` |
+| `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting`. Without `after`, also titles a session that has only its ID ([Session titles](#session-titles)) |
 | `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
 | WebSocket | `/api/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/api/metrics` | aggregate metrics; optional `since=<ISO-8601>` |

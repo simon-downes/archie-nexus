@@ -323,12 +323,14 @@ async def session_detail_page(request: Request) -> HTMLResponse:
     """GET /sessions/{session_id} — structured transcript of one session log.
 
     Markdown, highlighting and template rendering of a large log take a few
-    hundred milliseconds, so the whole render runs off the event loop.
+    hundred milliseconds, so the whole render runs off the event loop. Opening a
+    session that still has only its ID titles it in the background (plan 083 D4).
     """
     session_id = request.path_params["session_id"]
     path = session_log_path(session_id)
     if path is None:
         return _not_found(request, session_id)
+    request.app.state.tracker.title_if_untitled(session_id)
     active = session_id in _active_ids(request.app.state.tracker)
     body = await asyncio.to_thread(_render_detail, session_id, path, active)
     return HTMLResponse(body, headers={"Content-Security-Policy": VIEWER_CSP})

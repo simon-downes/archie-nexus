@@ -16,9 +16,10 @@ is followed again while the container runs, or ends the session when it has gone
 
 Sessions the user hasn't named get titles from a :class:`Titler` (plan 083): on the first
 root prompt, at the end of root turns 1, 3, 8, 15 and every 10 after, and at every root
-turn end while the session still has only its ID. One title job runs per session at a
-time, later requests coalesce into one rerun, and at most :data:`TITLE_CONCURRENCY` calls
-run at once.
+turn end while the session still has only its ID. Viewing a session that still has only
+its ID (:meth:`SessionTracker.title_if_untitled`) and resetting a name also request one.
+One title job runs per session at a time, later requests coalesce into one rerun, and at
+most :data:`TITLE_CONCURRENCY` calls run at once.
 
 Docker is reached only through a :class:`Runtime`, so tests can substitute a fake.
 """
@@ -82,6 +83,8 @@ TITLE_TURNS = frozenset({1, 3, 8, 15})
 TITLE_EVERY = 10
 TITLE_CONCURRENCY = 2
 """Most title calls running at once, across all sessions (083 D14)."""
+TITLE_VIEW_COOLDOWN = 300.0
+"""Seconds after a failed title call before viewing the session tries again (083 D15)."""
 
 _UNSET: object = object()
 """Default of :meth:`SessionTracker.patch` arguments that were not given."""
@@ -635,8 +638,8 @@ class SessionTracker:
         Args:
             session_id: The session.
             name: A validated, trimmed name (``name_source`` becomes ``user``), or None
-                to reset the name to the session ID (``name_source`` ``id``); leave out
-                to keep the name.
+                to reset the name to the session ID (``name_source`` ``id``) and request
+                a title; leave out to keep the name.
             unseen: The new ``unseen`` flag; None keeps it.
 
         Returns:
@@ -653,13 +656,15 @@ class SessionTracker:
             changes["name_source"] = "user" if name is not None else "id"
         if unseen is not None:
             changes["unseen"] = unseen
+        updated = None
         if session_id in self._records:
             updated = await self._update(session_id, strict=True, **changes)
-            if updated is not None:
-                return updated
-        # Ended sessions are not held in memory: change the stored row directly.
-        updated = await asyncio.to_thread(self.store.update, session_id, **changes)
-        self._publish(updated)
+        if updated is None:
+            # Ended sessions are not held in memory: change the stored row directly.
+            updated = await asyncio.to_thread(self.store.update, session_id, **changes)
+            self._publish(updated)
+        if name is None:
+            self.request_title(session_id)  # the model may name it again (083 D9)
         return updated
 
     # -- following the agent stream ------------------------------------------
@@ -784,6 +789,33 @@ class SessionTracker:
                 del self._title_tasks[session_id]
 
         task.add_done_callback(_done)
+
+    def title_if_untitled(self, session_id: str) -> None:
+        """Title a viewed session that still has only its ID (083 D4); returns at once.
+
+        Nothing happens while a title job runs for the session, or within
+        :data:`TITLE_VIEW_COOLDOWN` seconds of its last failed call. The record is read
+        (from memory, else the store) in a background task, so a page or API response
+        never waits for it.
+        """
+        if self.titler is None:
+            return
+        running = self._title_tasks.get(session_id)
+        if running is not None and not running.done():
+            return
+        failed = self._title_failed_at.get(session_id)
+        if failed is not None and self.clock() - failed < TITLE_VIEW_COOLDOWN:
+            return
+        self._background_task(self._title_if_untitled(session_id))
+
+    async def _title_if_untitled(self, session_id: str) -> None:
+        try:
+            record = await self.get(session_id)
+        except sqlite3.Error as exc:
+            log.debug("No title for viewed session %s: %s", session_id, exc)
+            return
+        if record is not None and record.name_source == "id":
+            self.request_title(session_id)
 
     async def _title_job(self, session_id: str) -> None:
         while True:

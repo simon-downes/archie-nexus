@@ -5,7 +5,10 @@ import threading
 from unittest.mock import patch
 
 import pytest
+from archie_orchestrator import tracker as tracker_module
+from archie_orchestrator.app import app
 from archie_orchestrator.tracker import TITLE_CONCURRENCY, title_due
+from httpx import ASGITransport, AsyncClient
 
 from tests.session_fakes import (
     PORT,
@@ -17,8 +20,11 @@ from tests.session_fakes import (
     make_tracker,
     record,
     turn_frame,
+    use_tracker,
     user_frame,
 )
+
+ENDED = {"status": "stopped", "ended_at": "2026-07-01T10:00:00+00:00"}
 
 
 async def until(predicate, timeout: float = 3.0):
@@ -300,3 +306,112 @@ async def test_close_cancels_title_jobs(log):
 
     assert tracker._title_tasks == {}
     assert tracker.store.get(SID).name_source == "id"
+
+
+# ---------------------------------------------------------------------------
+# Viewing and resetting
+# ---------------------------------------------------------------------------
+
+
+def _client() -> AsyncClient:
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def _view(tracker, path: str):
+    with use_tracker(app, tracker):
+        async with _client() as http:
+            response = await http.get(path)
+        await asyncio.sleep(0.05)  # let the background read start the job
+        await idle(tracker)
+    return response
+
+
+async def test_loading_an_untitled_ended_session_titles_it(log):
+    titler = FakeTitler("Workspaces API")
+    tracker = _tracker(titler, record(SID, **ENDED))
+
+    response = await _view(tracker, f"/api/sessions/{SID}/events")
+
+    assert response.status_code == 200
+    stored = tracker.store.get(SID)
+    assert (stored.name, stored.name_source) == ("Workspaces API", "model")
+    await tracker.close()
+
+
+async def test_opening_the_web_transcript_titles_an_untitled_session(log):
+    titler = FakeTitler("Workspaces API")
+    tracker = _tracker(titler, record(SID, **ENDED))
+
+    response = await _view(tracker, f"/sessions/{SID}")
+
+    assert response.status_code == 200
+    assert tracker.store.get(SID).name == "Workspaces API"
+    await tracker.close()
+
+
+@pytest.mark.parametrize("source", ["model", "user"])
+async def test_viewing_a_named_session_makes_no_call(log, source):
+    titler = FakeTitler()
+    tracker = _tracker(titler, record(SID, name="Named", name_source=source, **ENDED))
+
+    await _view(tracker, f"/api/sessions/{SID}/events")
+
+    assert titler.calls == []
+    await tracker.close()
+
+
+async def test_resuming_with_a_cursor_makes_no_call(session_logs):
+    w = session_logs
+    first = w.user("add a workspace api", turn=1)
+    w.write(SID, [first])
+    titler = FakeTitler()
+    tracker = _tracker(titler, record(SID, **ENDED))
+
+    response = await _view(tracker, f"/api/sessions/{SID}/events?after={first.id}")
+
+    assert response.status_code == 200
+    assert titler.calls == []
+    await tracker.close()
+
+
+async def test_a_failed_view_title_waits_out_the_cooldown(log):
+    clock = [1000.0]
+    titler = FakeTitler(None, "Workspaces API")
+    tracker = _tracker(titler, record(SID, **ENDED))
+    tracker.clock = lambda: clock[0]
+
+    await _view(tracker, f"/api/sessions/{SID}/events")
+    await _view(tracker, f"/api/sessions/{SID}/events")
+    assert len(titler.calls) == 1  # the second view is inside the cool-down
+
+    clock[0] += tracker_module.TITLE_VIEW_COOLDOWN + 1
+    await _view(tracker, f"/api/sessions/{SID}/events")
+
+    assert len(titler.calls) == 2
+    assert tracker.store.get(SID).name == "Workspaces API"
+    await tracker.close()
+
+
+async def test_resetting_a_name_requests_a_title(log):
+    titler = FakeTitler("Workspaces API")
+    tracker = _tracker(titler, record(SID, name="Mine", name_source="user"))
+
+    reset = await tracker.patch(SID, name=None)
+    assert (reset.name, reset.name_source) == (SID, "id")
+    await idle(tracker)
+
+    current = tracker.live(SID)
+    assert (current.name, current.name_source) == ("Workspaces API", "model")
+    await tracker.close()
+
+
+async def test_renaming_or_marking_seen_requests_no_title(log):
+    titler = FakeTitler()
+    tracker = _tracker(titler)
+
+    await tracker.patch(SID, name="Mine")
+    await tracker.patch(SID, unseen=False)
+    await idle(tracker)
+
+    assert titler.calls == []
+    await tracker.close()
