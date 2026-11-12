@@ -7,7 +7,7 @@
 <section class="chrome session-head">
     <p class="crumbs"><a href="{{ link('/insights/sessions') }}">Sessions</a> /</p>
     <h1 class="session-id">{{ s.session_id }} <a class="dim transcript" href="/sessions/{{ s.session_id }}">transcript</a></h1>
-    {% if s.title %}<p class="title">{{ s.title }}</p>{% endif %}
+    {% if s.name %}<p class="title">{{ s.name }}</p>{% endif %}
     <p class="facts">
         <span><span class="dim">workspace</span> {{ s.workspace }}</span>
         <span><span class="dim">started</span> {{ m.when(s.started_at) }} UTC</span>

@@ -12,8 +12,9 @@ from archie_shared.config import ConfigError, home_dir
 from archie_shared.credentials.runtime import runtime_environment
 from archie_shared.credentials.store import replace_credential
 from archie_shared.schemas import load_nexus_config
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import FakeRuntime, serve
 
 SCALR = "plugins:\n  scalr:\n    settings: {hostname: %s, account: acct}\n"
 
@@ -130,35 +131,39 @@ async def test_credential_refresh_reads_current_enabled_set(monkeypatch):
     assert await refresh_expiring_credentials(service, now=now) == ["slack"]
 
 
+class _ConfigRecordingRuntime(FakeRuntime):
+    def __init__(self) -> None:
+        super().__init__(run_error=RuntimeError("not started in this test"))
+        self.hostnames: list[str] = []
+
+    def prepare(self, workspace, config, backend):
+        self.hostnames.append(config.plugins["scalr"].settings["hostname"])
+        return super().prepare(workspace, config, backend)
+
+
 @pytest.mark.asyncio
 async def test_post_sessions_uses_config_as_of_the_request():
-    seen = []
-    descriptor = SessionDescriptor(
-        session_id="ws-01", container_name="archie-ws-01", port=1, raw_docker_status="Up"
-    )
-
-    def fake_start(workspace, config, *, backend="native"):
-        seen.append(config.plugins["scalr"].settings["hostname"])
-        return descriptor
-
-    with patch("archie_orchestrator.api.start_session", side_effect=fake_start):
+    runtime = _ConfigRecordingRuntime()
+    with serve(app, runtime=runtime) as tracker:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
             _write(SCALR % "first.example")
-            assert (await http.post("/api/sessions", json={"workspace": "ws"})).status_code == 200
+            assert (await http.post("/api/sessions", json={"workspace": "ws"})).status_code == 202
             _write(SCALR % "second.example")
-            assert (await http.post("/api/sessions", json={"workspace": "ws"})).status_code == 200
-    assert seen == ["first.example", "second.example"]
+            assert (await http.post("/api/sessions", json={"workspace": "ws"})).status_code == 202
+        await tracker.close()
+    assert runtime.hostnames == ["first.example", "second.example"]
 
 
 @pytest.mark.asyncio
 async def test_post_sessions_reports_invalid_config():
     _write("plugins:\n  nope: {}\n")
-    with patch("archie_orchestrator.api.start_session") as start:
+    runtime = FakeRuntime()
+    with serve(app, runtime=runtime):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
             response = await http.post("/api/sessions", json={"workspace": "ws"})
     assert response.status_code == 500
     assert "nope" in response.json()["error"]
-    start.assert_not_called()
+    assert runtime.prepared == []
 
 
 def test_module_source_resolves_home_per_call():

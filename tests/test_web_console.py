@@ -1,5 +1,7 @@
 """Tests for the orchestrator web console (GET / and static files)."""
 
+import re
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -7,6 +9,8 @@ from archie_orchestrator.app import app
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import record, serve
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -16,21 +20,14 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture(autouse=True)
 def _app_state():
     app.state.config = NexusConfig()
+    app.state.start_time = datetime.now(UTC)
     yield
 
 
 def _make_session(
-    session_id: str = "myproject-01abc12345",
-    container_name: str = "archie-myproject-01abc12345",
-    port: int = 32771,
-    status: str = "Up 5 minutes",
+    session_id: str = "myproject-01abc12345", status: str = "idle"
 ) -> SessionDescriptor:
-    return SessionDescriptor(
-        session_id=session_id,
-        container_name=container_name,
-        port=port,
-        raw_docker_status=status,
-    )
+    return record(session_id, status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +84,7 @@ async def test_static_css_contains_design_tokens():
 @pytest.mark.asyncio
 async def test_get_root_returns_html():
     """GET / returns 200 with text/html content type."""
-    with patch("archie_orchestrator.web.list_sessions", return_value=[]):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
@@ -102,34 +99,64 @@ async def test_sessions_page_shows_session_ids():
     """GET / with sessions → HTML contains session IDs and workspace names."""
     sessions = [
         _make_session("myproject-01abc12345"),
-        _make_session("otherapp-02def67890", "archie-otherapp-02def67890", port=32772),
+        _make_session("otherapp-02def67890"),
     ]
 
-    with patch("archie_orchestrator.web.list_sessions", return_value=sessions):
+    with serve(app, records=sessions):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     html = resp.text
     assert "myproject-01abc12345" in html
     assert "otherapp-02def67890" in html
-    # Workspace names extracted from session IDs
-    assert "myproject" in html
-    assert "otherapp" in html
-    # Ports
-    assert "32771" in html
-    assert "32772" in html
+    # Workspace names from the records
+    assert "<td>myproject</td>" in html
+    assert "<td>otherapp</td>" in html
 
 
 @pytest.mark.asyncio
 async def test_sessions_page_shows_status():
-    """GET / includes docker status in session rows."""
-    sessions = [_make_session(status="Up 10 minutes")]
+    """GET / shows the record's status in session rows."""
+    sessions = [_make_session(status="blocked")]
 
-    with patch("archie_orchestrator.web.list_sessions", return_value=sessions):
+    with serve(app, records=sessions):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
-    assert "Up 10 minutes" in resp.text
+    assert "<td>blocked</td>" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_sessions_page_columns_name_and_last_activity():
+    """GET / shows the name only when user-set, and the last activity in UTC (082)."""
+    sessions = [
+        record(
+            "named-01abc12345",
+            name="Review PR",
+            name_fixed=True,
+            last_activity_at="2026-07-01T12:34:56+02:00",
+        ),
+        record("plain-01abc12345"),
+    ]
+
+    with serve(app, records=sessions):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/")
+
+    html = resp.text
+    headers = re.findall(r"<th>([^<]*)</th>", html)
+    assert headers == ["Session ID", "Name", "Workspace", "Status", "Last activity"]
+    rows = {
+        cells[0]: cells[1:]
+        for cells in (
+            re.findall(r"<td>([^<]*)</td>", row)
+            for row in re.findall(r"<tr>(.*?)</tr>", html, re.S)
+        )
+        if cells
+    }
+    assert rows["named-01abc12345"] == ["Review PR", "named", "idle", "2026-07-01 10:34:56 UTC"]
+    # An unfixed name is the session ID; it isn't repeated, and no activity shows a dash.
+    assert rows["plain-01abc12345"] == ["", "plain", "idle", "—"]
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +167,7 @@ async def test_sessions_page_shows_status():
 @pytest.mark.asyncio
 async def test_sessions_page_no_sessions_shows_empty_message():
     """GET / with no sessions → 'No running sessions' message."""
-    with patch("archie_orchestrator.web.list_sessions", return_value=[]):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
@@ -156,7 +183,7 @@ async def test_sessions_page_no_sessions_shows_empty_message():
 @pytest.mark.asyncio
 async def test_page_contains_auto_refresh_meta():
     """GET / HTML includes <meta http-equiv='refresh'> for auto-refresh."""
-    with patch("archie_orchestrator.web.list_sessions", return_value=[]):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
@@ -173,14 +200,12 @@ async def test_page_contains_auto_refresh_meta():
 @pytest.mark.asyncio
 async def test_page_contains_uptime():
     """GET / HTML includes the uptime string in the meta element."""
-    with patch("archie_orchestrator.web.list_sessions", return_value=[]):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
     html = resp.text
     # Uptime appears inside the <p class="meta"> element as e.g. "0m" or "2h 15m"
-    import re
-
     meta_match = re.search(r'class="meta"[^>]*>Up\s+(\d+[hm])', html)
     assert meta_match is not None, f"No uptime pattern found in meta element. HTML: {html[:500]}"
 
@@ -189,7 +214,7 @@ async def test_page_contains_uptime():
 async def test_page_contains_version():
     """GET / HTML includes the package version string."""
     with (
-        patch("archie_orchestrator.web.list_sessions", return_value=[]),
+        serve(app),
         patch("archie_orchestrator.web._get_version", return_value="1.2.3"),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -208,28 +233,36 @@ async def test_get_version_uses_shared_product_version():
 
 
 # ---------------------------------------------------------------------------
-# Session with no port
+# Starting and ended sessions
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_session_with_no_port_shows_dash():
-    """Session with port=None renders '—' in the port column."""
-    sessions = [
-        SessionDescriptor(
-            session_id="myproject-01abc12345",
-            container_name="archie-myproject-01abc12345",
-            port=None,
-            raw_docker_status="Starting",
-        )
-    ]
+async def test_starting_session_shows_status_and_no_port_column():
+    """A session still starting is listed with its status; the page has no Port column."""
+    sessions = [_make_session(status="starting")]
 
-    with patch("archie_orchestrator.web.list_sessions", return_value=sessions):
+    with serve(app, records=sessions):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 
-    # Jinja2 renders "—" (the em-dash fallback) for None ports
-    assert "—" in resp.text
+    assert "<td>starting</td>" in resp.text
+    assert "<th>Port</th>" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_ended_sessions_are_not_listed():
+    sessions = [
+        _make_session("live-01abc12345"),
+        record("gone-01abc12345", status="exited", ended_at="2026-07-01T00:00:00+00:00"),
+    ]
+
+    with serve(app, records=sessions):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/")
+
+    assert "live-01abc12345" in resp.text
+    assert "gone-01abc12345" not in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +273,7 @@ async def test_session_with_no_port_shows_dash():
 @pytest.mark.asyncio
 async def test_page_includes_base_template_structure():
     """GET / HTML includes base template elements (header, title)."""
-    with patch("archie_orchestrator.web.list_sessions", return_value=[]):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/")
 

@@ -79,7 +79,7 @@ def _sync_and_query(query: Callable) -> tuple[object, list[str]]:
         return None, notices
     try:
         conn = connect(index.db_path)
-    except sqlite3.OperationalError:  # archived since the sync (migrate-sessions)
+    except sqlite3.OperationalError:  # the database file is gone
         return None, [*notices, UPDATING]
     try:
         return query(conn), notices

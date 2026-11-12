@@ -992,7 +992,7 @@ class ArchieApp(App):
             try:
                 async with httpx.AsyncClient() as client:
                     response = await client.delete(self._api_url, timeout=15.0)
-                if response.status_code not in {200, 404}:
+                if response.status_code not in {200, 404, 409}:
                     self._show_client_error(f"Failed to terminate session: {response.status_code}")
             except httpx.HTTPError as exc:
                 self._show_client_error(f"Failed to terminate session: {exc}")

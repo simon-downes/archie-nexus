@@ -77,11 +77,11 @@ def test_canonical_metrics_are_idempotent(tmp_path):
     sessions.mkdir()
     log = SessionLog(sessions / "s-01k0000000.jsonl")
     log.append(request())
-    index = MetricsIndex(tmp_path / "metrics.db", sessions)
+    index = MetricsIndex(tmp_path / "archie.db", sessions)
     index.sync()
     index.sync()
-    conn = sqlite3.connect(tmp_path / "metrics.db")
-    assert conn.execute("select count(*) from requests").fetchone()[0] == 1
+    conn = sqlite3.connect(tmp_path / "archie.db")
+    assert conn.execute("select count(*) from metrics_requests").fetchone()[0] == 1
     conn.close()
 
 

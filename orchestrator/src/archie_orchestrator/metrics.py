@@ -1,15 +1,23 @@
 """SQLite metrics index built by tailing the canonical session logs.
 
-``<ARCHIE_HOME_DIR>/metrics.db`` is a derived, metadata-only index of every
-session log under ``<ARCHIE_HOME_DIR>/sessions``. :class:`MetricsIndex` reads
-each log from a stored byte offset, decodes canonical events, and folds them
-into the tables described in ``docs/architecture.md`` (sessions, requests,
-turns, tool calls, compactions, subagents). The logs remain the source of
-truth: the index can always be archived and rebuilt from them.
+The index lives in ``<ARCHIE_HOME_DIR>/archie.db`` as the ``metrics_*`` tables: a
+derived, metadata-only index of every session log under ``<ARCHIE_HOME_DIR>/sessions``.
+:class:`MetricsIndex` reads each log from a stored byte offset, decodes canonical
+events, and folds them into the tables described in ``docs/architecture.md``
+(requests, turns, tool calls, compactions, subagents). They join to the canonical
+``sessions`` table (:mod:`archie_orchestrator.store`) for workspace, start time, last
+activity and name; the index never writes ``sessions``. A log whose session has no
+``sessions`` row is skipped and recorded as ``no session record`` (082 D8).
 
-Every schema check, archive and sync runs under an exclusive ``flock`` on
-``metrics.db.lock`` so the orchestrator's background loop, web requests and
-``archie stats`` never write concurrently or race on an archive.
+The logs remain the source of truth: the ``metrics_*`` tables can always be dropped
+and rebuilt from them. Their schema version is the ``meta`` row ``metrics_version``
+(082 D5); a mismatch drops and recreates only the ``metrics_*`` tables, leaving the
+canonical tables alone.
+
+Every schema check, rebuild and sync runs under an exclusive ``flock`` on
+``archie.db.lock`` (the lock the canonical migrations use), so the orchestrator's
+background loop, web requests and ``archie stats`` never write concurrently or race
+on a rebuild. The canonical migrations run first, outside that lock.
 """
 
 from __future__ import annotations
@@ -22,9 +30,8 @@ import os
 import re
 import sqlite3
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import msgspec
@@ -33,7 +40,6 @@ from archie_shared.events import (
     CompactionStart,
     ContextCompacted,
     LLMRequest,
-    SessionStarted,
     ToolCall,
     ToolResult,
     TurnComplete,
@@ -43,26 +49,40 @@ from archie_shared.events import (
     decode_event,
 )
 from archie_shared.kiro import KIRO_MODEL_PREFIX
-from archie_shared.session import split_id
 
-from archie_orchestrator.session_index import session_start
+from archie_orchestrator import store
+from archie_orchestrator.store import connect
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
-TITLE_CHARS = 120
+__all__ = [
+    "METRICS_VERSION",
+    "MetricsIndex",
+    "SyncStats",
+    "connect",
+    "default_index",
+    "is_current",
+    "reset_and_backfill",
+    "schema_version",
+]
+
+METRICS_VERSION = 5
+"""Version of the ``metrics_*`` schema, kept in the ``meta`` row ``metrics_version``.
+
+Versions 1-4 were ``PRAGMA user_version`` of the old ``metrics.db``; 5 is the first
+``archie.db`` layout.
+"""
+META_KEY = "metrics_version"
+NO_SESSION_RECORD = "no session record"
 ERROR_SUMMARY_CHARS = 200
 ERROR_CHARS = 500
 
 _SCHEMA = (
-    """CREATE TABLE IF NOT EXISTS ingest_files (
+    """CREATE TABLE metrics_ingest_files (
  session_id TEXT PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER NOT NULL,
  mtime_ns INTEGER NOT NULL, head_sha TEXT NOT NULL, invalid_lines INTEGER NOT NULL DEFAULT 0,
  error TEXT)""",
-    """CREATE TABLE IF NOT EXISTS sessions (
- session_id TEXT PRIMARY KEY, workspace TEXT NOT NULL, started_at TEXT, initial_model TEXT,
- title TEXT, last_activity_at TEXT)""",
-    """CREATE TABLE IF NOT EXISTS requests (
+    """CREATE TABLE metrics_requests (
  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
  timestamp TEXT NOT NULL, turn INTEGER NOT NULL, iteration INTEGER NOT NULL, scope TEXT,
  model_key TEXT NOT NULL, status TEXT NOT NULL, input_tokens INTEGER NOT NULL,
@@ -70,33 +90,39 @@ _SCHEMA = (
  cache_write_tokens INTEGER NOT NULL, context_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL,
  duration_ms INTEGER NOT NULL, stop_reason TEXT, error TEXT, subagent_index INTEGER,
  purpose TEXT NOT NULL, UNIQUE (session_id, event_id))""",
-    """CREATE TABLE IF NOT EXISTS turns (
+    """CREATE TABLE metrics_turns (
  session_id TEXT NOT NULL, turn INTEGER NOT NULL, status TEXT NOT NULL, stop_reason TEXT,
  error TEXT, started_at TEXT, ended_at TEXT, PRIMARY KEY (session_id, turn))""",
-    """CREATE TABLE IF NOT EXISTS tool_calls (
+    """CREATE TABLE metrics_tool_calls (
  session_id TEXT NOT NULL, tool_use_id TEXT NOT NULL, event_id TEXT NOT NULL,
  turn INTEGER NOT NULL, iteration INTEGER NOT NULL, scope TEXT, subagent_index INTEGER,
  request_id TEXT NOT NULL, timestamp TEXT, model_key TEXT, name TEXT NOT NULL, skill TEXT,
  is_error INTEGER, duration_ms INTEGER, result_bytes INTEGER, result_lines INTEGER,
  error_summary TEXT, UNIQUE (session_id, tool_use_id))""",
-    """CREATE TABLE IF NOT EXISTS compactions (
+    """CREATE TABLE metrics_compactions (
  session_id TEXT NOT NULL, request_id TEXT NOT NULL, turn INTEGER NOT NULL, scope TEXT,
  reason TEXT NOT NULL, model_key TEXT, timestamp TEXT, status TEXT, tokens_before INTEGER,
  tokens_after INTEGER, cost_saved_usd REAL, duration_ms INTEGER, error TEXT,
  UNIQUE (session_id, request_id))""",
-    """CREATE TABLE IF NOT EXISTS subagents (
+    """CREATE TABLE metrics_subagents (
  session_id TEXT NOT NULL, scope TEXT NOT NULL, subagent_index INTEGER NOT NULL,
  agent TEXT NOT NULL, parent_scope TEXT, turn INTEGER NOT NULL,
  status TEXT NOT NULL DEFAULT 'open', error TEXT,
  PRIMARY KEY (session_id, scope, subagent_index))""",
-    "CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id)",
-    "CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp)",
-    "CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model_key)",
-    "CREATE INDEX IF NOT EXISTS idx_tool_calls_name ON tool_calls(name)",
-    "CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp)",
-    "CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at)",
+    "CREATE INDEX idx_metrics_requests_session ON metrics_requests(session_id)",
+    "CREATE INDEX idx_metrics_requests_timestamp ON metrics_requests(timestamp)",
+    "CREATE INDEX idx_metrics_requests_model ON metrics_requests(model_key)",
+    "CREATE INDEX idx_metrics_tool_calls_name ON metrics_tool_calls(name)",
+    "CREATE INDEX idx_metrics_tool_calls_timestamp ON metrics_tool_calls(timestamp)",
 )
-_SESSION_TABLES = ("requests", "turns", "tool_calls", "compactions", "subagents", "sessions")
+# Per-session rows cleared when a log is rewritten (ingest state is updated, not cleared).
+_SESSION_TABLES = (
+    "metrics_requests",
+    "metrics_turns",
+    "metrics_tool_calls",
+    "metrics_compactions",
+    "metrics_subagents",
+)
 _REQUEST_COLUMNS = (
     "timestamp",
     "turn",
@@ -120,7 +146,11 @@ _REQUEST_COLUMNS = (
 
 @dataclass
 class SyncStats:
-    """What one sync did; ``files_changed`` counts logs that were read."""
+    """What one sync did; ``files_changed`` counts logs that were read.
+
+    ``skipped`` counts logs left unindexed because their session has no ``sessions``
+    row (D8); they are not errors.
+    """
 
     files_seen: int = 0
     files_changed: int = 0
@@ -128,80 +158,83 @@ class SyncStats:
     invalid_lines: int = 0
     errors: int = 0
     reset: int = 0
+    skipped: int = 0
 
 
-def connect(db_path: Path, *, create: bool = False) -> sqlite3.Connection:
-    """Open the index with WAL, a busy timeout and ``sqlite3.Row`` rows.
-
-    Readers pass ``create=False`` (the default), so a database archived since the
-    last sync raises ``sqlite3.OperationalError`` instead of being recreated empty.
-    """
-    uri = f"{Path(db_path).resolve().as_uri()}?mode={'rwc' if create else 'rw'}"
-    conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+def _read_version(conn: sqlite3.Connection) -> int | None:
+    """The ``metrics_version`` meta row, or None when it (or ``meta``) is missing or junk."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (META_KEY,)).fetchone()
+    except sqlite3.OperationalError:  # no meta table: not migrated yet
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def schema_version(db_path: Path) -> int | None:
-    """Return the DB's ``user_version``, or None when there is no database file."""
+    """Return the metrics schema version (the ``meta`` row), or None when there is none.
+
+    None covers a missing database file, an unmigrated one and one whose metrics tables
+    were never created. ``PRAGMA user_version`` belongs to the canonical schema and is
+    never read here.
+    """
+    db_path = Path(db_path)
     if not db_path.exists():
         return None
-    conn = sqlite3.connect(str(db_path))
-    try:
-        return conn.execute("PRAGMA user_version").fetchone()[0]
-    finally:
-        conn.close()
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        return _read_version(conn)
 
 
 def is_current(db_path: Path) -> bool:
-    """True when the index exists with the current schema (safe to query)."""
+    """True when the metrics tables exist at the current version (safe to query)."""
     try:
-        return schema_version(db_path) == SCHEMA_VERSION
+        return schema_version(db_path) == METRICS_VERSION
     except sqlite3.Error:
         return False
 
 
-def _archive_database(db_path: Path) -> Path | None:
-    """Rename the DB (and its WAL/SHM files) to ``<name>.legacy.<UTC>[-N]``."""
-    if not db_path.exists():
-        return None
+def _metrics_tables(conn: sqlite3.Connection) -> list[str]:
+    """Every table named ``metrics_*`` (``_`` is escaped: it is a LIKE wildcard)."""
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name LIKE 'metrics!_%' ESCAPE '!'"
+        )
+    ]
+
+
+def _rebuild_tables(conn: sqlite3.Connection) -> None:
+    """Drop every ``metrics_*`` table and create the current ones, in one transaction.
+
+    Indexes go with their tables. ``sessions`` and every other canonical table are left
+    alone. Sets the ``metrics_version`` meta row in the same transaction.
+    """
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        log.warning("Metrics WAL checkpoint before archive failed: %s", exc)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    base = db_path.with_name(f"{db_path.name}.legacy.{stamp}")
-    destination = base
-    suffix = 0
-    while destination.exists():
-        suffix += 1
-        destination = base.with_name(f"{base.name}-{suffix}")
-    db_path.rename(destination)
-    for extra in ("-wal", "-shm"):
-        side = db_path.with_name(db_path.name + extra)
-        if side.exists():
-            side.rename(destination.with_name(destination.name + extra))
-    return destination
+        for table in _metrics_tables(conn):
+            conn.execute(f'DROP TABLE "{table}"')
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (META_KEY, str(METRICS_VERSION)),
+        )
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 def _clip(text: str | None, limit: int) -> str | None:
     if text is None:
         return None
     return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _first_line(text: str, limit: int) -> str | None:
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            return _clip(line, limit)
-    return None
 
 
 _EXIT_LINE = re.compile(r"^\[exit: -?\d+\]$")
@@ -215,14 +248,6 @@ def _error_summary(text: str) -> str | None:
     if _EXIT_LINE.match(lines[0]) and len(lines) > 1:
         return _clip(f"{lines[0]} {lines[1]}", ERROR_SUMMARY_CHARS)
     return _clip(lines[0], ERROR_SUMMARY_CHARS)
-
-
-def _end_time(sent_at: str, duration_ms: int) -> str:
-    try:
-        start = datetime.fromisoformat(sent_at)
-    except ValueError:
-        return sent_at
-    return (start + timedelta(milliseconds=duration_ms)).isoformat()
 
 
 def _task_agents(tool_input: dict) -> list[str] | None:
@@ -250,15 +275,6 @@ class _Folder:
         self.conn = conn
         self.session_id = session_id
         self.request_times: dict[str, tuple[str, str]] = {}
-        self._ensure_session()
-
-    def _ensure_session(self) -> None:
-        workspace, _ = split_id(self.session_id)
-        start = session_start(self.session_id)
-        self.conn.execute(
-            "INSERT OR IGNORE INTO sessions (session_id, workspace, started_at) VALUES (?,?,?)",
-            (self.session_id, workspace, start.isoformat() if start else None),
-        )
 
     def _request_info(self, request_id: str) -> tuple[str | None, str | None]:
         """Return ``(sent_at, model_key)`` for a request, from memory or the DB."""
@@ -266,40 +282,31 @@ class _Folder:
         if info is not None:
             return info
         row = self.conn.execute(
-            "SELECT timestamp, model_key FROM requests WHERE session_id = ? AND event_id = ?",
+            "SELECT timestamp, model_key FROM metrics_requests "
+            "WHERE session_id = ? AND event_id = ?",
             (self.session_id, request_id),
         ).fetchone()
         return (row[0], row[1]) if row else (None, None)
 
     def _touch_turn(self, turn: int, when: str | None) -> None:
         self.conn.execute(
-            "INSERT OR IGNORE INTO turns (session_id, turn, status) VALUES (?, ?, 'open')",
+            "INSERT OR IGNORE INTO metrics_turns (session_id, turn, status) VALUES (?, ?, 'open')",
             (self.session_id, turn),
         )
         if when is not None:
             self.conn.execute(
-                "UPDATE turns SET started_at = CASE WHEN started_at IS NULL OR started_at > ?1 "
-                "THEN ?1 ELSE started_at END, ended_at = CASE WHEN ended_at IS NULL OR "
-                "ended_at < ?2 THEN ?2 ELSE ended_at END WHERE session_id = ?3 AND turn = ?4",
+                "UPDATE metrics_turns SET started_at = CASE WHEN started_at IS NULL OR "
+                "started_at > ?1 THEN ?1 ELSE started_at END, ended_at = CASE WHEN ended_at "
+                "IS NULL OR ended_at < ?2 THEN ?2 ELSE ended_at END "
+                "WHERE session_id = ?3 AND turn = ?4",
                 (when, when, self.session_id, turn),
             )
 
     def apply(self, event) -> None:  # noqa: C901 — one branch per event type
         sid = self.session_id
-        if isinstance(event, SessionStarted):
-            self.conn.execute(
-                "UPDATE sessions SET started_at = ?, initial_model = ? WHERE session_id = ?",
-                (event.sent_at, event.model_key, sid),
-            )
-        elif isinstance(event, UserMessage):
+        if isinstance(event, UserMessage):
             if event.scope is None:
                 self._touch_turn(event.turn, None)
-                title = _first_line(event.content, TITLE_CHARS)
-                if title:
-                    self.conn.execute(
-                        "UPDATE sessions SET title = ? WHERE session_id = ? AND title IS NULL",
-                        (title, sid),
-                    )
         elif isinstance(event, LLMRequest):
             self._apply_request(event)
         elif isinstance(event, ToolCall):
@@ -308,7 +315,7 @@ class _Folder:
             duration = event.duration_ms or None
             summary = _error_summary(event.content) if event.is_error else None
             self.conn.execute(
-                "UPDATE tool_calls SET is_error = ?, duration_ms = ?, result_bytes = ?, "
+                "UPDATE metrics_tool_calls SET is_error = ?, duration_ms = ?, result_bytes = ?, "
                 "result_lines = ?, error_summary = ? WHERE session_id = ? AND tool_use_id = ?",
                 (
                     int(event.is_error),
@@ -324,8 +331,8 @@ class _Folder:
             self._apply_turn_end(event)
         elif isinstance(event, CompactionStart):
             self.conn.execute(
-                "INSERT OR IGNORE INTO compactions (session_id, request_id, turn, scope, reason, "
-                "model_key, timestamp, tokens_before) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO metrics_compactions (session_id, request_id, turn, scope, "
+                "reason, model_key, timestamp, tokens_before) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     sid,
                     event.request_id,
@@ -339,8 +346,8 @@ class _Folder:
             )
         elif isinstance(event, CompactionComplete):
             self.conn.execute(
-                "INSERT INTO compactions (session_id, request_id, turn, scope, reason, status, "
-                "tokens_before, tokens_after, cost_saved_usd, duration_ms, error) "
+                "INSERT INTO metrics_compactions (session_id, request_id, turn, scope, reason, "
+                "status, tokens_before, tokens_after, cost_saved_usd, duration_ms, error) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (session_id, request_id) DO UPDATE "
                 "SET status = excluded.status, tokens_before = excluded.tokens_before, "
                 "tokens_after = excluded.tokens_after, cost_saved_usd = excluded.cost_saved_usd, "
@@ -361,8 +368,8 @@ class _Folder:
             )
         elif isinstance(event, ContextCompacted):
             self.conn.execute(
-                "INSERT OR IGNORE INTO compactions (session_id, request_id, turn, scope, reason, "
-                "model_key, status, tokens_before, tokens_after, duration_ms) "
+                "INSERT OR IGNORE INTO metrics_compactions (session_id, request_id, turn, scope, "
+                "reason, model_key, status, tokens_before, tokens_after, duration_ms) "
                 "VALUES (?,?,?,?,?,?,'success',?,?,?)",
                 (
                     sid,
@@ -400,13 +407,14 @@ class _Folder:
             event.purpose,
         )
         cursor = self.conn.execute(
-            f"INSERT OR IGNORE INTO requests (session_id, event_id, {','.join(_REQUEST_COLUMNS)}) "
+            f"INSERT OR IGNORE INTO metrics_requests (session_id, event_id, "
+            f"{','.join(_REQUEST_COLUMNS)}) "
             f"VALUES ({','.join('?' * (len(_REQUEST_COLUMNS) + 2))})",
             (sid, event.id, *values),
         )
         if cursor.rowcount == 0:
             existing = self.conn.execute(
-                f"SELECT {','.join(_REQUEST_COLUMNS)} FROM requests "
+                f"SELECT {','.join(_REQUEST_COLUMNS)} FROM metrics_requests "
                 "WHERE session_id = ? AND event_id = ?",
                 (sid, event.id),
             ).fetchone()
@@ -414,12 +422,6 @@ class _Folder:
                 log.error("Metrics conflicting duplicate request %s in %s", event.id, sid)
             return
         self.request_times[event.id] = (event.sent_at, event.model_key)
-        end = _end_time(event.sent_at, event.duration_ms)
-        self.conn.execute(
-            "UPDATE sessions SET last_activity_at = ?1 WHERE session_id = ?2 AND "
-            "(last_activity_at IS NULL OR last_activity_at < ?1)",
-            (end, sid),
-        )
         self._touch_turn(event.turn, event.sent_at)
         if (
             event.scope is None
@@ -430,7 +432,7 @@ class _Folder:
             # segment request ids never match it; give those rows the turn's request
             # time and model. Native rows already resolved at insert and are untouched.
             self.conn.execute(
-                "UPDATE tool_calls SET timestamp = ?, model_key = ? "
+                "UPDATE metrics_tool_calls SET timestamp = ?, model_key = ? "
                 "WHERE session_id = ? AND turn = ? AND timestamp IS NULL",
                 (event.sent_at, event.model_key, sid, event.turn),
             )
@@ -441,7 +443,7 @@ class _Folder:
         if event.name == "skill" and isinstance(event.input.get("name"), str):
             skill = event.input["name"]
         self.conn.execute(
-            "INSERT OR IGNORE INTO tool_calls (session_id, tool_use_id, event_id, turn, "
+            "INSERT OR IGNORE INTO metrics_tool_calls (session_id, tool_use_id, event_id, turn, "
             "iteration, scope, subagent_index, request_id, timestamp, model_key, name, skill) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
@@ -463,8 +465,8 @@ class _Folder:
             agents = _task_agents(event.input)
             for index, agent in enumerate(agents or []):
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO subagents (session_id, scope, subagent_index, agent, "
-                    "parent_scope, turn) VALUES (?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO metrics_subagents (session_id, scope, subagent_index, "
+                    "agent, parent_scope, turn) VALUES (?,?,?,?,?,?)",
                     (self.session_id, event.tool_use_id, index, agent, event.scope, event.turn),
                 )
 
@@ -478,25 +480,31 @@ class _Folder:
         if event.scope is None:
             self._touch_turn(event.turn, None)
             self.conn.execute(
-                "UPDATE turns SET status = ?, stop_reason = ?, error = ? "
+                "UPDATE metrics_turns SET status = ?, stop_reason = ?, error = ? "
                 "WHERE session_id = ? AND turn = ?",
                 (status, stop, error, self.session_id, event.turn),
             )
         elif event.subagent_index is not None:
             self.conn.execute(
-                "UPDATE subagents SET status = ?, error = ? "
+                "UPDATE metrics_subagents SET status = ?, error = ? "
                 "WHERE session_id = ? AND scope = ? AND subagent_index = ?",
                 (status, error, self.session_id, event.scope, event.subagent_index),
             )
 
 
 class MetricsIndex:
-    """Incrementally index session logs into ``metrics.db``."""
+    """Incrementally index session logs into the ``metrics_*`` tables of ``archie.db``.
+
+    Args:
+        db_path: The database (``<home>/archie.db``); its lock is ``<db_path>.lock``.
+        sessions_dir: Logs indexed when ``sync()`` is given no paths. The one-off
+            canonical import always reads ``<db_path dir>/sessions`` (D8).
+    """
 
     def __init__(self, db_path: Path, sessions_dir: Path) -> None:
         self.db_path = Path(db_path)
         self.sessions_dir = Path(sessions_dir)
-        self.lock_path = self.db_path.with_name(self.db_path.name + ".lock")
+        self.lock_path = self.db_path.with_name(self.db_path.name + store.LOCK_SUFFIX)
 
     @contextmanager
     def _locked(self, wait: bool) -> Iterator[bool]:
@@ -520,19 +528,37 @@ class MetricsIndex:
         with self._locked(wait=False) as acquired:
             return acquired
 
-    def _open_current(self) -> sqlite3.Connection:
-        """Archive a stale-schema DB, then open (and create) the current schema."""
-        version = schema_version(self.db_path)
-        if version is not None and version != SCHEMA_VERSION:
-            dest = _archive_database(self.db_path)
-            log.info(
-                "Metrics database schema v%s != v%s; archived to %s", version, SCHEMA_VERSION, dest
-            )
-        conn = connect(self.db_path, create=True)
-        for statement in _SCHEMA:
-            conn.execute(statement)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
+    def _migrate(self) -> None:
+        """Bring the canonical schema up to date; call before taking the sync lock.
+
+        ``store.migrate`` takes the same ``archie.db.lock`` flock, and a second flock
+        in one process blocks, so this must never run under :meth:`_locked`. A database
+        already at the latest canonical version is not locked at all, so a
+        ``sync(wait=False)`` doesn't wait behind a running sync.
+        """
+        if store.schema_version(self.db_path) != len(store.MIGRATIONS):
+            store.migrate(self.db_path)
+
+    def _open_current(self, *, rebuild: bool = False) -> sqlite3.Connection:
+        """Open the database, recreating the ``metrics_*`` tables if stale or ``rebuild``."""
+        conn = connect(self.db_path)
+        try:
+            version = _read_version(conn)
+            if rebuild or version != METRICS_VERSION:
+                if rebuild:
+                    log.info("Rebuilding the metrics tables in %s", self.db_path)
+                elif version is None:
+                    log.info("Creating the metrics tables in %s", self.db_path)
+                else:
+                    log.info(
+                        "Metrics schema v%s != v%s; rebuilding the metrics tables",
+                        version,
+                        METRICS_VERSION,
+                    )
+                _rebuild_tables(conn)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def sync(
@@ -541,31 +567,34 @@ class MetricsIndex:
         """Index new log content. Returns None when ``wait=False`` and the lock is held.
 
         ``paths`` defaults to every ``*.jsonl`` in the sessions directory. In
-        strict mode a file or SQLite error raises instead of being logged.
+        strict mode a file or SQLite error raises instead of being logged; a log with
+        no session record is skipped either way.
         """
+        self._migrate()
         with self._locked(wait) as acquired:
             if not acquired:
                 return None
             return self._sync_locked(paths, strict=strict)
 
     def reset_and_backfill(self, paths: Iterable[Path]) -> SyncStats:
-        """Archive the current DB and rebuild it from ``paths``, raising on any failure."""
-        with self._locked(wait=True):
-            archived = _archive_database(self.db_path)
-            if archived is not None:
-                log.info("Archived metrics database to %s", archived)
-            stats = self._sync_locked(paths, strict=True)
-            assert stats is not None
-            return stats
+        """Recreate the ``metrics_*`` tables and refill them from ``paths``, raising on failure.
 
-    def _sync_locked(self, paths: Iterable[Path] | None, *, strict: bool) -> SyncStats:
+        ``sessions`` and the other canonical tables are untouched.
+        """
+        self._migrate()
+        with self._locked(wait=True):
+            return self._sync_locked(paths, strict=True, rebuild=True)
+
+    def _sync_locked(
+        self, paths: Iterable[Path] | None, *, strict: bool, rebuild: bool = False
+    ) -> SyncStats:
         stats = SyncStats()
         if paths is None:
             try:
                 paths = sorted(self.sessions_dir.glob("*.jsonl"))
             except OSError:
                 paths = []
-        conn = self._open_current()
+        conn = self._open_current(rebuild=rebuild)
         try:
             for path in paths:
                 stats.files_seen += 1
@@ -592,11 +621,13 @@ class MetricsIndex:
         return stats
 
     def _record_error(self, conn: sqlite3.Connection, path: Path, error: str) -> None:
+        """Store ``error`` for a log with size -1, so the next sync reads it again."""
         try:
             conn.execute(
-                "INSERT INTO ingest_files (session_id, offset, size, mtime_ns, head_sha, error) "
-                "VALUES (?, 0, -1, -1, '', ?) ON CONFLICT (session_id) DO UPDATE SET error = ?",
-                (path.stem, error, error),
+                "INSERT INTO metrics_ingest_files (session_id, offset, size, mtime_ns, head_sha, "
+                "error) VALUES (?, 0, -1, -1, '', ?) ON CONFLICT (session_id) DO UPDATE "
+                "SET error = excluded.error, size = -1",
+                (path.stem, error),
             )
             conn.commit()
         except sqlite3.Error:
@@ -604,9 +635,17 @@ class MetricsIndex:
 
     def _sync_file(self, conn: sqlite3.Connection, path: Path, stats: SyncStats) -> None:
         session_id = path.stem
+        if (
+            conn.execute("SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+            is None
+        ):
+            # D8: the index never creates session records; recheck on every sync.
+            stats.skipped += 1
+            self._record_error(conn, path, NO_SESSION_RECORD)
+            return
         stat = path.stat()
         row = conn.execute(
-            "SELECT offset, size, mtime_ns, head_sha, invalid_lines FROM ingest_files "
+            "SELECT offset, size, mtime_ns, head_sha, invalid_lines FROM metrics_ingest_files "
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -639,7 +678,7 @@ class MetricsIndex:
             folder.apply(event)
             stats.events += 1
         conn.execute(
-            "INSERT INTO ingest_files (session_id, offset, size, mtime_ns, head_sha, "
+            "INSERT INTO metrics_ingest_files (session_id, offset, size, mtime_ns, head_sha, "
             "invalid_lines, error) VALUES (?,?,?,?,?,?,NULL) ON CONFLICT (session_id) DO UPDATE "
             "SET offset = excluded.offset, size = excluded.size, mtime_ns = excluded.mtime_ns, "
             "head_sha = excluded.head_sha, invalid_lines = excluded.invalid_lines, error = NULL",
@@ -649,10 +688,11 @@ class MetricsIndex:
 
 
 def reset_and_backfill(db_path: Path, session_log_paths: Iterable[Path]) -> SyncStats:
-    """Archive the metrics index and rebuild it from ``session_log_paths``.
+    """Recreate the ``metrics_*`` tables of ``db_path`` and refill them from the logs.
 
-    Used by ``archie migrate-sessions``. Logs are only read, so a failure
-    raises and a later run can archive the partial index and retry.
+    Used by ``archie migrate-sessions``. Logs are only read and ``sessions`` is never
+    written (apart from the one-off canonical import if the database is new), so a
+    failure raises and a later run can rebuild again.
     """
     db_path = Path(db_path)
     return MetricsIndex(db_path, db_path.parent / "sessions").reset_and_backfill(
@@ -661,8 +701,8 @@ def reset_and_backfill(db_path: Path, session_log_paths: Iterable[Path]) -> Sync
 
 
 def default_index() -> MetricsIndex:
-    """The index for ``<home_dir()>/metrics.db`` over ``<home_dir()>/sessions``."""
+    """The index in ``<home_dir()>/archie.db`` over ``<home_dir()>/sessions``."""
     from archie_shared.config import home_dir
 
     home = home_dir()
-    return MetricsIndex(home / "metrics.db", home / "sessions")
+    return MetricsIndex(store.db_path(home), home / "sessions")

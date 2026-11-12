@@ -5,12 +5,14 @@ from unittest.mock import patch
 
 import pytest
 from archie_orchestrator.app import app
+from archie_orchestrator.docker import RunningContainer
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from starlette.testclient import TestClient
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidMessage, InvalidStatus
 from websockets.http11 import Response as HandshakeResponse
+
+from tests.session_fakes import serve
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -29,12 +31,11 @@ def test_client():
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _running_session(session_id: str = "proj-01abc12345", port: int = 32771) -> SessionDescriptor:
-    return SessionDescriptor(
+def _running_session(session_id: str = "proj-01abc12345", port: int = 32771) -> RunningContainer:
+    return RunningContainer(
         session_id=session_id,
         container_name=f"archie-{session_id}",
         port=port,
-        raw_docker_status="Up",
     )
 
 
@@ -47,7 +48,7 @@ def test_ws_stream_former_root_path_is_refused(test_client):
     """The relay lives only under the API prefix; the old root path has no route."""
     from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
 
-    with patch("archie_orchestrator.proxy.list_sessions", return_value=[_running_session()]):
+    with serve(app, {"proj-01abc12345": 32771}):
         with pytest.raises(StarletteDisconnect) as exc_info:
             with test_client.websocket_connect("/sessions/proj-01abc12345/stream"):
                 pass
@@ -57,7 +58,7 @@ def test_ws_stream_former_root_path_is_refused(test_client):
 
 def test_ws_stream_session_not_found(test_client):
     """WS connect for unknown session → server closes with code 4004."""
-    with patch("archie_orchestrator.proxy.list_sessions", return_value=[]):
+    with serve(app):
         # TestClient raises WebSocketDisconnect when the server closes before accept
         from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
 
@@ -79,7 +80,7 @@ def test_ws_stream_backend_unreachable(test_client):
     from starlette.websockets import WebSocketDisconnect as StarletteDisconnect
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", refusing_connect),
     ):
         # Server accepts the connection then closes with 4002 after failing to
@@ -109,7 +110,7 @@ def test_ws_stream_backend_protocol_loss_is_expected(test_client, caplog, handsh
         yield  # pragma: no cover
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", invalid_connect),
         caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
     ):
@@ -150,7 +151,7 @@ def test_ws_stream_backend_close_during_relay_is_expected(test_client, caplog):
         yield ClosingBackend()
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", closing_connect),
         caplog.at_level("ERROR", logger="archie_orchestrator.proxy"),
     ):
@@ -189,7 +190,7 @@ def test_ws_stream_text_relay(test_client):
         yield FakeBackend()
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", fake_connect),
     ):
         with test_client.websocket_connect("/api/sessions/proj-01abc12345/stream") as ws:

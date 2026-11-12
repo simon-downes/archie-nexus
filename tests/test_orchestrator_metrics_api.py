@@ -21,7 +21,7 @@ def _app_state():
     yield
 
 
-_SEED_TABLE = """CREATE TABLE IF NOT EXISTS requests (
+_SEED_TABLE = """CREATE TABLE IF NOT EXISTS metrics_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
     timestamp TEXT NOT NULL, turn INTEGER NOT NULL, iteration INTEGER NOT NULL, scope TEXT, model_key TEXT NOT NULL,
     status TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
@@ -33,13 +33,12 @@ _next_event_id = 0
 
 
 def _seed_db(db_path: Path, rows: list[dict]) -> None:
-    """Insert schema-v2 canonical rows into the requests table for testing."""
+    """Insert canonical rows into the ``metrics_requests`` table for testing."""
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_SEED_TABLE)
-    conn.execute("PRAGMA user_version = 3")
     conn.executemany(
-        "INSERT INTO requests (session_id, event_id, timestamp, turn, iteration, scope, "
+        "INSERT INTO metrics_requests (session_id, event_id, timestamp, turn, iteration, scope, "
         "model_key, status, input_tokens, output_tokens, cache_read_tokens, "
         "cache_write_tokens, context_tokens, cost_usd, duration_ms) "
         "VALUES (:session_id, :event_id, :timestamp, :turn, :iteration, :scope, "
@@ -101,9 +100,35 @@ def test_empty_db_returns_zeroes(tmp_path):
     assert result["by_model"] == {}
 
 
+def test_db_without_metrics_tables_returns_zeroes(tmp_path):
+    """A migrated archie.db that hasn't been indexed yet → all-zero response."""
+    from tests.session_fakes import migrated_store
+
+    migrated_store(tmp_path)
+    assert _query_metrics(tmp_path / "archie.db")["total_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_metrics_reads_archie_db_not_metrics_db(tmp_path):
+    """The old ``metrics.db`` is never read."""
+    _seed_db(tmp_path / "archie.db", [_row(cost=0.25)])
+    conn = sqlite3.connect(tmp_path / "metrics.db")
+    conn.execute(_SEED_TABLE.replace("metrics_requests", "requests"))
+    conn.commit()
+    conn.close()
+    before = (tmp_path / "metrics.db").read_bytes()
+
+    with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/metrics")
+
+    assert resp.json()["total_cost"] == 0.25
+    assert (tmp_path / "metrics.db").read_bytes() == before
+
+
 def test_populated_db_correct_totals(tmp_path):
     """Populated database → correct totals."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(
         db,
         [
@@ -121,7 +146,7 @@ def test_populated_db_correct_totals(tmp_path):
 
 def test_by_model_breakdown(tmp_path):
     """Multiple models produce correct by_model dict."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(
         db,
         [
@@ -140,7 +165,7 @@ def test_by_model_breakdown(tmp_path):
 
 def test_since_filter(tmp_path):
     """?since= filters to rows on or after the date."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(
         db,
         [
@@ -157,7 +182,7 @@ def test_since_filter(tmp_path):
 
 def test_per_session_scoped(tmp_path):
     """session_id filter returns only that session's rows."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(
         db,
         [
@@ -174,7 +199,7 @@ def test_per_session_scoped(tmp_path):
 
 def test_unknown_session_raises_key_error(tmp_path):
     """Querying a session with no rows raises KeyError."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(db, [_row(session_id="session-a")])
 
     with pytest.raises(KeyError):
@@ -203,7 +228,7 @@ async def test_get_metrics_empty_db(tmp_path):
 @pytest.mark.asyncio
 async def test_get_metrics_populated(tmp_path):
     """GET /metrics with data → correct aggregates."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(
         db,
         [
@@ -227,7 +252,7 @@ async def test_get_metrics_populated(tmp_path):
 @pytest.mark.asyncio
 async def test_get_metrics_since_param(tmp_path):
     """GET /metrics?since= filters correctly."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(
         db,
         [
@@ -247,7 +272,7 @@ async def test_get_metrics_since_param(tmp_path):
 @pytest.mark.asyncio
 async def test_get_session_metrics(tmp_path):
     """GET /sessions/{id}/metrics → correct scoped response."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     sid = "proj-01abc12345"
     _seed_db(
         db,
@@ -270,7 +295,7 @@ async def test_get_session_metrics(tmp_path):
 @pytest.mark.asyncio
 async def test_get_session_metrics_not_found(tmp_path):
     """GET /sessions/{id}/metrics with no data → 404."""
-    db = tmp_path / "metrics.db"
+    db = tmp_path / "archie.db"
     _seed_db(db, [_row(session_id="other-session")])
 
     with patch("archie_orchestrator.api.home_dir", return_value=tmp_path):

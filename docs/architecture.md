@@ -19,7 +19,7 @@ This document describes the implementation currently in the repository. Code and
 Nexus has four Python workspace packages:
 
 - **CLI (`cli/`)** — host-side `archie` command, Textual TUI, authentication commands, and clients for the orchestrator.
-- **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, discovers sessions, proxies session HTTP/WebSocket traffic, serves the session page, log viewer and usage insights pages, and keeps the metrics index in step with the session logs.
+- **Orchestrator (`orchestrator/`)** — host-side Starlette control plane. It starts/stops Docker containers, keeps a record of every session, proxies session HTTP/WebSocket traffic, serves the session page, log viewer and usage insights pages, and keeps the metrics index in step with the session logs.
 - **Agent (`agent/`)** — container-side Starlette application. It owns one session, the agent loop, model client, tools, skills, subagents, and session event log.
 - **Shared (`shared/`)** — cross-boundary types and contracts: configuration, model catalog, credentials, client commands, public events, session-log storage, accounting, and the transcript model (`archie_shared.transcript`) that both the TUI and the web viewer render from.
 
@@ -44,10 +44,40 @@ AWS Bedrock / OpenAI API / Ollama / local workspace
 
 1. `archie build` builds `archie:latest` from `Dockerfile`.
 2. `archie serve` runs the host orchestrator; the default profile is `127.0.0.1:7600`.
-3. `archie start <workspace>` asks `POST /api/sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The CLI shows a terminal-aware activity status while this blocking request is in progress.
-4. The orchestrator validates the single directory name, creates a session ID, runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`).
-5. The CLI connects through the orchestrator’s session routes. The orchestrator resolves the session by Docker container name and proxies to the mapped agent port.
-6. `archie stop` calls `DELETE /api/sessions/{session_id}` and stops the container. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or SQLite metrics. After an orchestrator restart, discovery includes only currently running containers.
+3. `archie start <workspace>` asks `POST /api/sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The request returns 202 with a `starting` session record; the CLI then polls `GET /api/sessions/{id}` every 0.5 s, up to 60 s, behind a terminal-aware activity status until the status leaves `starting`. A `failed` start prints the stored `error`, another ended status prints `Session ended during startup (<status>)`, and a timeout leaves the session running; all three exit 1.
+4. Before responding, the orchestrator validates the single directory name and the image, creates a session ID and inserts the `starting` record, so bad input (400) and a missing image (500) are still reported synchronously. In the background it runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for the agent's `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`). The session tracker then follows the agent's `/stream`, and the agent's first `session_status` makes the record `idle`. A start that fails or times out makes it `failed`, with the message in `error`.
+5. The CLI connects through the orchestrator’s session routes. The orchestrator looks up the session's agent port in the tracker's memory, without calling Docker, and proxies to it.
+6. `archie stop` calls `DELETE /api/sessions/{session_id}`. The record becomes `stopping`, the container is stopped by name, and the response is the `stopped` record. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or the session record, except that a session that never received a prompt leaves neither. A container that goes away without a `DELETE` makes the record `exited`. After an orchestrator restart, the tracker reconciles the stored records with the running containers (see [Session records and the tracker](#session-records-and-the-tracker)).
+
+### Session records and the tracker
+
+The orchestrator keeps one record per session in the `sessions` table of `archie.db` (see [Orchestrator datastore](#orchestrator-datastore)). On the wire it is `SessionDescriptor` (`shared/src/archie_shared/session/descriptor.py`), served by every `/api/sessions` route and the feed:
+
+| Field | Meaning |
+| --- | --- |
+| `session_id`, `workspace` | the ID (`{workspace}-{ulid_prefix}`) and its workspace directory name |
+| `backend` | `native` or `kiro` |
+| `name`, `name_fixed` | display name, the session ID unless the user set one (`name_fixed: true`) |
+| `status` | one of the statuses below |
+| `error` | the start failure message of a `failed` session |
+| `question` | the pending question while `blocked` |
+| `unseen` | set when a root turn completes or fails; cleared by a client with `PATCH` |
+| `model_key` | the model the agent last reported; null until the first `session_status` |
+| `started_at`, `last_activity_at`, `ended_at` | ISO 8601 UTC times; `ended_at` is set with an ended status |
+| `container_name` | `archie-{session_id}`, or null once the session has ended; computed, not stored |
+
+`status` merges the orchestrator's lifecycle with the agent's turn state: `starting` (container starting), `idle`, `working`, `blocked` (waiting on a `question`), `error` (the last root turn failed; cleared by the next root message), `stopping`, and the ended statuses `stopped` (by `DELETE`), `exited` (the container went away by itself) and `failed` (the start failed). An ended record changes only through `PATCH` (`name`, `unseen`).
+
+`SessionTracker` (`orchestrator/src/archie_orchestrator/tracker.py`) owns every write to `sessions`. It keeps every record that hasn't ended in memory and is authoritative for them; reads of ended records go to the store. Container operations go through a small `Runtime` interface (`DockerRuntime` in production, a fake in tests). For each running session the tracker holds one read-only WebSocket to the agent's `/stream`, as the live viewer does, and folds the events into the record:
+
+- A root `user_message` sets `working`; `session_status` sets `idle`, `working` or `blocked`, the model and the question, and a `kiro/` model sets `backend` to `kiro`.
+- A root `turn_complete` or `turn_error` sets `unseen`. After a root `turn_error` the next `idle` is stored as `error`; a root `turn_interrupted` drops that pending error.
+- Other events only move `last_activity_at`. A change to `last_activity_at` alone is written and published at most every 10 s per session, with a trailing write at the end of the window; every other change is written and published at once.
+- When the stream closes, the tracker asks Docker whether the container still runs: gone makes the record `exited`; running reconnects after 1, 2, then 5 s. A `stopping` record is left to the stop.
+
+A failed write is logged and retried with the next change; a record leaves memory only once its ended state is written (retried every 5 s). On startup the orchestrator migrates `archie.db`, loads the live records and reconciles them with one `docker ps`: a running container makes its record `idle` again (a container with no record is adopted, from its log if there is one), and a record with no container ends as `stopped` (was `stopping`), `failed` (was `starting`, error `orchestrator restarted during startup`) or `exited`, with `ended_at` the log's mtime (or now). If `docker ps` fails, nothing is ended and reconcile is retried every 30 s. Reconcile also starts following each running session; the metrics loop starts after this first attempt. On shutdown the tracker closes its streams and writes pending activity without changing any status, since sessions keep running without the orchestrator.
+
+No read or proxy path calls Docker: the session list and record routes, the session pages, and the port lookups for `/events`, `/stream` and the live viewer all read the tracker. The tracker also publishes every change to the feed's subscribers, each with a 256-record queue; a subscriber that falls behind is dropped and reconnects to a fresh snapshot.
 
 ### Container mounts
 
@@ -78,7 +108,7 @@ Pages:
 
 | Method | Route | Role |
 | --- | --- | --- |
-| `GET` | `/` | running sessions web page |
+| `GET` | `/` | running sessions web page (status, name when set, last activity) |
 | `GET` | `/sessions?q=<query>` | session log viewer: persisted logs, newest first, with search (`HX-Request` gets the results fragment) |
 | `GET` | `/sessions/{id}` | session log viewer: transcript of one log |
 | `GET` | `/sessions/{id}/live?after=<event id>` | server-sent HTML fragments relayed read-only from the agent `/stream` |
@@ -96,11 +126,13 @@ JSON API:
 
 | Method | Route | Role |
 | --- | --- | --- |
-| `GET` | `/api/sessions` | list running sessions |
-| `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` |
-| `DELETE` | `/api/sessions/{id}` | stop a session |
-| `GET` | `/api/sessions/{id}/status` | proxy agent status |
-| `GET` | `/api/sessions/{id}/events?after=<id>` | proxy session history read |
+| `GET` | `/api/sessions?include=ended` | session records, newest first; only sessions that haven't ended unless `include=ended` |
+| `POST` | `/api/sessions` | start a session; body `{"workspace":"name"}`, optional `"backend": "native" \| "kiro"` and `"name"` (non-blank, at most 80 characters, no control characters, stored trimmed); 202 with the `starting` record |
+| `GET` | `/api/sessions/feed?include=ended` | server-sent events: a `snapshot` event (`{"sessions": [...]}`, filtered like the list), then one `session` event with the full record per change, whatever the filter; `: ping` after 15 s idle |
+| `GET` | `/api/sessions/{id}` | one session record, live or ended |
+| `PATCH` | `/api/sessions/{id}` | `name` (a string, validated as for `POST`, sets it and `name_fixed`; `null` resets it to the ID) and/or `unseen: false`; allowed on ended sessions; any other body is 400 |
+| `DELETE` | `/api/sessions/{id}` | stop a running session and wait; 200 with the `stopped` record, 409 while `starting` or `stopping` or once ended, 500 if the container is still running (previous status restored) |
+| `GET` | `/api/sessions/{id}/events?after=<id>` | session history read: proxied to the agent while it runs, read from the session log once the session has ended (an ended session with no log returns an empty body); 503 while `starting` |
 | `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
 | WebSocket | `/api/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/api/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
@@ -119,9 +151,9 @@ Other root routes:
 | `GET` | `/health` | orchestrator liveness (`{"status":"ok"}`) |
 | `GET` | `/static/*` | static assets for the web pages (vendored nimble.css, htmx and Chart.js under `/static/vendor/`) |
 
-The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface.
+The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface; it does not proxy the agent's `/status`, since the session record carries the status, model and pending question. Ended-session history from `/api/sessions/{id}/events` has the agent's format: the same NDJSON lines and the same 409 `{"error": "cursor_not_found", "cursor": ...}` for an unknown cursor.
 
-The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only the metrics index; each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
+The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only `archie.db` (the metrics tables joined to the session records); each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
 
 ### Authentication API security
 
@@ -145,7 +177,7 @@ A user message follows this path:
    (Converse `image` blocks; Responses `input_image` data URLs) and otherwise substitute a fixed
    "image omitted" note. Ollama is always text-only. Inside exec, `read` returns the caption text.
 5. The orchestrator's metrics sync (every 15 s, plus on each insights page and `archie stats`
-   run) tails the session logs into the SQLite metrics index. It never touches the relay.
+   run) tails the session logs into the metrics tables of `archie.db`. It never touches the relay.
 6. The TUI applies live and stored events through one `_apply_event(event)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity. Behind that path, the shared `TranscriptBuilder` (`archie_shared.transcript`), which the web viewer also uses, reduces events into the transcript model; see [How the TUI applies the events](session-protocol-walkthrough.md#10-how-the-tui-applies-the-events).
 
 On a Kiro session (`ARCHIE_BACKEND=kiro`), step 4 runs in `KiroHarness` instead: Kiro CLI calls
@@ -227,21 +259,35 @@ The host orchestrator writes coloured terminal output plus two files under `<ARC
 
 At startup, an existing file is moved to the matching `.1` path (one backup generation). Log level and service/logger name are colourised in terminal and file output. `LOG_LEVEL` controls the minimum level and defaults to `INFO`.
 
+### Orchestrator datastore
+
+`<ARCHIE_HOME_DIR>/archie.db` (`orchestrator/src/archie_orchestrator/store.py`) is the orchestrator's datastore. It holds canonical tables, which are never rebuilt, and the rebuildable metrics tables described below. The canonical tables are:
+
+- `sessions`: one row per session with the `SessionDescriptor` fields except the computed `container_name` (`name_fixed` and `unseen` as 0/1, `question` as JSON), indexed on `status` and `started_at`. A row stops changing once its session ends, apart from `PATCH`, so it is also the historical record. Only the session tracker writes it.
+- `meta`: key/value rows; `metrics_version` holds the metrics schema version.
+
+The canonical schema is versioned by `PRAGMA user_version` and changed only by the ordered migrations in `store.MIGRATIONS`, each in its own transaction under an exclusive `flock` on `archie.db.lock`. A database newer than the code is refused. Migration 1 creates both tables and imports every log already in `<ARCHIE_HOME_DIR>/sessions` once, as a `stopped` row whose `name` is the session ID: `started_at` is the `session_started` time, else the ID's ULID time, else the log's mtime; `last_activity_at` and `ended_at` are the log's mtime; `model_key` is the last root request's model, else the `session_started` model; `backend` is `kiro` for a `kiro/` model. Whichever process opens the database first (the orchestrator, `archie stats` or `archie migrate-sessions`) runs it. After that, a session gets its row from the tracker when it is created or when reconcile adopts its running container.
+
+Access is synchronous `sqlite3` with one short-lived connection per call (WAL, 5 s busy timeout); the orchestrator calls it through `asyncio.to_thread`, and the API reads live records from the tracker's memory, so requests don't wait on the SQLite lock.
+
+The old `<ARCHIE_HOME_DIR>/metrics.db` (with its `-wal`, `-shm`, `.lock` and `.legacy.*` files) is no longer read or written, and can be deleted.
+
 ### Orchestrator metrics
 
-`<ARCHIE_HOME_DIR>/metrics.db` (schema `PRAGMA user_version = 4`) is a derived, metadata-only index of every log in `<ARCHIE_HOME_DIR>/sessions`. `MetricsIndex` (`orchestrator/src/archie_orchestrator/metrics.py`) reads each log from a byte offset stored in `ingest_files` and folds the canonical events into tables:
+The metrics index is the `metrics_*` tables of `archie.db`: a derived, metadata-only index of every log in `<ARCHIE_HOME_DIR>/sessions`. `MetricsIndex` (`orchestrator/src/archie_orchestrator/metrics.py`) reads each log from a byte offset stored in `metrics_ingest_files` and folds the canonical events into tables:
 
-- `sessions`: workspace, start time, initial model, title (first line of the first user message, ≤120 characters), last activity.
-- `requests`: one row per `llm_request`, including `status`, `stop_reason`, `error`, `subagent_index` and `purpose`. Recorded cost is never repriced.
-- `turns`: root turns with status (`open`, `completed`, `error`, `interrupted`) and first/last request times.
-- `tool_calls`: name, skill name for `skill` calls, request time and model, error flag, duration (`0` stored as NULL), result size, and the first line of an error result (≤200 characters).
-- `compactions`: reason, status, tokens before and after, saving and duration.
-- `subagents`: one row per `task` entry with its agent name, parent scope, and outcome from the child's terminal turn event.
-- `ingest_files`: offset, size, mtime, first-line hash, invalid-line count and last error per log.
+- `metrics_requests`: one row per `llm_request`, including `status`, `stop_reason`, `error`, `subagent_index` and `purpose`. Recorded cost is never repriced.
+- `metrics_turns`: root turns with status (`open`, `completed`, `error`, `interrupted`) and first/last request times.
+- `metrics_tool_calls`: name, skill name for `skill` calls, request time and model, error flag, duration (`0` stored as NULL), result size, and the first line of an error result (≤200 characters).
+- `metrics_compactions`: reason, status, tokens before and after, saving and duration.
+- `metrics_subagents`: one row per `task` entry with its agent name, parent scope, and outcome from the child's terminal turn event.
+- `metrics_ingest_files`: offset, size, mtime, first-line hash, invalid-line count and last error per log.
+
+The tables join to `sessions` on `session_id` (no foreign key) for workspace, start time, last activity and name; the metrics sync never writes `sessions`. A log whose session has no `sessions` row is skipped and recorded in `metrics_ingest_files` with the error `no session record`; it is checked again on every sync and is not an error in strict mode. Insights and `archie stats` list only sessions whose log was indexed without error, and show a session's name only when the user set it (`name_fixed`).
 
 No other message content, tool input or tool output is stored. Sync is incremental and idempotent: unchanged files are skipped by size and mtime, a trailing partial line waits for the next sync, and a log that shrank or whose first line changed is re-ingested from the start. Rows for deleted logs are kept. Invalid lines are counted and skipped; an unreadable file records its error and the sync moves on.
 
-The orchestrator syncs every 15 seconds; `/insights` pages and `archie stats` sync before they query. All syncs, schema checks and archives hold an exclusive `flock` on `metrics.db.lock`. A database with another schema version is archived (WAL checkpointed, renamed with its `-wal`/`-shm` files to `metrics.db.legacy.<UTC>[-N]`) and rebuilt from the logs. `archie migrate-sessions` archives the index and rebuilds it from the migrated logs in strict mode, so a file or SQLite error fails the command. Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
+The orchestrator syncs every 15 seconds; `/insights` pages and `archie stats` sync before they query. Each sync and rebuild first runs any pending canonical migrations, then holds the exclusive `flock` on `archie.db.lock`. The metrics schema version is the `meta` row `metrics_version` (currently 5); when it is missing or different, every `metrics_*` table is dropped and recreated, with the new version row, in one transaction and refilled from the logs, and the canonical tables are left alone. `archie migrate-sessions` rebuilds the metrics tables the same way from the migrated logs in strict mode, so a file or SQLite error fails the command; `--db` chooses the database (default `<ARCHIE_HOME_DIR>/archie.db`). Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
 
 ## Configuration, security, and ownership
 
@@ -269,13 +315,14 @@ plugins: {}
 
 Use `profile/value` CLI arguments to select a named orchestrator profile for workspace or session commands. `archie serve` binds to the configured default profile. Profiles with non-loopback hosts and these unauthenticated auth endpoints require private-network controls.
 
-The agent owns the session process, provider requests, tool execution, and canonical log. The orchestrator owns Docker/session lifecycle and the metrics index. The CLI owns presentation and user commands; it must consume server-provided accounting rather than reconstructing prices. Containers receive read-write access to the selected workspace, the configured home directory, and persona content, so agent code and tools can modify those host-backed locations.
+The agent owns the session process, provider requests, tool execution, and canonical log. The orchestrator owns Docker/session lifecycle, the session records and the metrics index. The CLI owns presentation and user commands; it must consume server-provided accounting rather than reconstructing prices. Containers receive read-write access to the selected workspace, the configured home directory, and persona content, so agent code and tools can modify those host-backed locations.
 
 ## Change impact guide
 
 - **Changing `shared/events.py`** affects persisted logs, replay, agent writes, orchestrator metrics, and clients. Add compatibility tests, update [event-spec.md](event-spec.md), and update this document.
 - **Changing `shared/commands.py`** affects client commands, agent WebSocket dispatch, and protocol versioning.
 - **Changing mounts, ports, or lifecycle** affects `Dockerfile`, orchestrator lifecycle, readiness checks, security assumptions, and local setup instructions.
+- **Changing the `sessions` table or `SessionDescriptor`** affects the API, the feed, the CLI and existing databases: add a migration to `store.MIGRATIONS` (never edit an applied one) and update this document. Changing a `metrics_*` table needs a `METRICS_VERSION` bump, which rebuilds the metrics tables from the logs.
 - **Changing accounting** requires tests for model switches, interruptions/errors, duplicate ingestion, and nested scopes.
 - **Changing `persona/`** changes runtime prompts or capabilities without changing package APIs; review the resulting agent behavior and relevant skill/agent metadata.
 - **Changing `plugins/<id>/`** changes one integration; `plugin.yaml` changes also affect host-side credential providers and `config.yaml` validation. Follow [Plugins](plugins.md) and run the contract tests in `tests/test_plugin_layout.py`.

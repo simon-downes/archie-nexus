@@ -9,17 +9,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import websockets
-from archie_shared.session import SessionDescriptor
+from archie_shared.events import encode_event
+from archie_shared.session import TERMINAL_STATUSES
+from archie_shared.session.log import (
+    CursorNotFound,
+    EventIdConflict,
+    LogAppendError,
+    SessionLog,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from archie_orchestrator.docker import list_sessions
+if TYPE_CHECKING:
+    from archie_orchestrator.tracker import SessionTracker
 
 log = logging.getLogger(__name__)
 
@@ -40,20 +52,27 @@ def get_active_ws_connections() -> int:
 # ---------------------------------------------------------------------------
 
 
-def resolve_session(session_id: str) -> SessionDescriptor:
-    """Find a running session by exact ID.
+@dataclass(frozen=True)
+class AgentEndpoint:
+    """Where a running session's agent listens on the host loopback."""
+
+    session_id: str
+    port: int
+
+
+def resolve_session(tracker: SessionTracker, session_id: str) -> AgentEndpoint:
+    """Find a running session's agent by exact ID, from the tracker's memory (no Docker).
 
     Raises:
         KeyError: No session with that ID is running.
         ValueError: Session is running but has no port yet (still starting).
     """
-    sessions = list_sessions()
-    for s in sessions:
-        if s.session_id == session_id:
-            if s.port is None:
-                raise ValueError(f"Session '{session_id}' has no port (still starting?)")
-            return s
-    raise KeyError(f"No session with ID '{session_id}'")
+    if tracker.live(session_id) is None:
+        raise KeyError(f"No session with ID '{session_id}'")
+    port = tracker.port(session_id)
+    if port is None:
+        raise ValueError(f"Session '{session_id}' has no port (still starting?)")
+    return AgentEndpoint(session_id=session_id, port=port)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +81,7 @@ def resolve_session(session_id: str) -> SessionDescriptor:
 
 
 async def forward_http(
-    session: SessionDescriptor,
+    session: AgentEndpoint,
     path: str,
     method: str = "GET",
     body: bytes = b"",
@@ -71,8 +90,8 @@ async def forward_http(
     """Forward an HTTP request to a session container and return the response.
 
     Args:
-        session: Resolved SessionDescriptor (must have a port).
-        path: URL path on the agent (e.g. "/status").
+        session: The resolved agent endpoint.
+        path: URL path on the agent (e.g. "/events").
         method: HTTP method ("GET" or "POST").
         body: Request body bytes (for POST).
         content_type: Content-Type header to forward with POST requests.
@@ -113,28 +132,54 @@ async def forward_http(
 # ---------------------------------------------------------------------------
 
 
-async def proxy_status(request: Request) -> Response:
-    """GET /api/sessions/{session_id}/status — proxy to session /status."""
-    session_id = request.path_params["session_id"]
+def _read_log(path: Path, after: str | None) -> str:
+    """A session log's canonical events after ``after`` as NDJSON, as the agent serves them."""
+    return "".join(encode_event(event) + "\n" for event in SessionLog(path).read(after))
+
+
+async def _ended_events(
+    tracker: SessionTracker, session_id: str, after: str | None
+) -> Response | None:
+    """Replay an ended session's events from its log (082 D21); None if it hasn't ended.
+
+    A session with no log (a ``failed`` start) has no events: 200 with an empty body.
+    """
     try:
-        session = resolve_session(session_id)
-    except KeyError:
-        return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    return await forward_http(session, "/status")
+        record = await tracker.get(session_id)
+    except sqlite3.Error as exc:
+        log.error("Session store read failed: %s", exc)
+        return JSONResponse({"error": "Session store unavailable"}, status_code=500)
+    if record is None or record.status not in TERMINAL_STATUSES:
+        return None
+    try:
+        body = await asyncio.to_thread(_read_log, tracker.log_path(session_id), after)
+    except CursorNotFound:
+        return JSONResponse({"error": "cursor_not_found", "cursor": after}, status_code=409)
+    except (LogAppendError, EventIdConflict) as exc:
+        log.warning("Failed to replay the log of %s: %s", session_id, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return Response(body, media_type="application/x-ndjson")
 
 
 async def proxy_events(request: Request) -> Response:
-    """Proxy canonical event replay, forwarding the cursor unchanged."""
+    """Replay canonical events: proxied to a running agent, from the log once ended.
+
+    The ``after`` cursor is forwarded unchanged; an ended session answers like the agent
+    (NDJSON, 409 ``cursor_not_found`` for an unknown cursor). 404 for an unknown ID and
+    503 for a session still starting.
+    """
     session_id = request.path_params["session_id"]
+    tracker = request.app.state.tracker
+    after = request.query_params.get("after")
     try:
-        session = resolve_session(session_id)
+        session = resolve_session(tracker, session_id)
     except KeyError:
+        ended = await _ended_events(tracker, session_id, after)
+        if ended is not None:
+            return ended
         return JSONResponse({"error": f"No session with ID '{session_id}'"}, status_code=404)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
-    after = request.query_params.get("after")
     path = "/events" + (f"?after={after}" if after is not None else "")
     return await forward_http(session, path)
 
@@ -149,7 +194,7 @@ async def proxy_stream(websocket: WebSocket) -> None:
     session_id = websocket.path_params["session_id"]
 
     try:
-        session = resolve_session(session_id)
+        session = resolve_session(websocket.app.state.tracker, session_id)
     except KeyError:
         await websocket.close(code=4004, reason="Session not found")
         return

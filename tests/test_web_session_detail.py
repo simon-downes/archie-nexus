@@ -3,7 +3,6 @@
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from archie_orchestrator.app import app
@@ -18,8 +17,9 @@ from archie_shared.events import (
     TurnInterrupted,
 )
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import serve
 
 SID = "proj-01kx77jkz8"
 TEMPLATES = Path(__file__).parents[1] / "orchestrator/src/archie_orchestrator/templates/viewer"
@@ -35,7 +35,7 @@ def _app_state():
 
 
 async def _get(path: str, *, running=()):
-    with patch("archie_orchestrator.web.list_sessions", return_value=list(running)):
+    with serve(app, dict.fromkeys(running, 1)):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             return await client.get(path)
 
@@ -383,10 +383,7 @@ async def test_detail_unreadable_log(session_logs):
 async def test_detail_active_session_loads_live_client(session_logs):
     w = session_logs
     w.write(SID, [w.user("x"), w.assistant("y")])
-    running = SessionDescriptor(
-        session_id=SID, container_name=f"archie-{SID}", port=1, raw_docker_status="Up"
-    )
-    html = (await _get(f"/sessions/{SID}", running=[running])).text
+    html = (await _get(f"/sessions/{SID}", running=[SID])).text
     assert '<span id="live-state">connecting</span>' in html
     assert '<script src="/static/viewer/live.js" defer></script>' in html
     assert f'data-live-url="/sessions/{SID}/live"' in html

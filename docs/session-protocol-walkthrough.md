@@ -53,10 +53,12 @@ conversation and it does not invent persisted events. It waits for the agent's c
 The orchestrator is the host-side control plane. It:
 
 - starts and stops agent containers;
-- resolves session IDs to running containers and their mapped ports;
+- keeps one record per session in `archie.db` (status, name, model, pending question, times),
+  kept current by a session tracker that follows each running agent's `/stream` read-only;
+- resolves session IDs to the agents' mapped ports from the tracker's memory;
 - proxies session HTTP requests to the correct agent;
 - relays WebSocket traffic in both directions without interpreting commands;
-- observes live `llm_request` frames and writes a best-effort SQLite metrics index.
+- tails the session logs into a best-effort SQLite metrics index.
 
 The orchestrator does not run the LLM loop, execute tools, create public events, or own the
 canonical session log.
@@ -176,9 +178,12 @@ When the user runs `archie start`, the CLI first creates the session:
 ```text
 TUI/CLI                    Orchestrator                  Agent container
    │                            │                              │
-   │ POST /api/sessions        │                              │
-   │ {"workspace":"project"}  │                              │
+   │ POST /api/sessions         │                              │
+   │ {"workspace":"project"}    │                              │
    ├───────────────────────────▶│                              │
+   │                            │ validate, insert record      │
+   │ 202 SessionDescriptor      │ (status: starting)           │
+   │◀───────────────────────────┤                              │
    │                            │ start Docker container       │
    │                            ├─────────────────────────────▶│
    │                            │                              │ initialize agent
@@ -187,12 +192,28 @@ TUI/CLI                    Orchestrator                  Agent container
    │                            │                              │ append session_started
    │                            │ poll /status until ready     │
    │                            ├─────────────────────────────▶│
-   │ SessionDescriptor         │◀─────────────────────────────┤
+   │                            │ tracker follows /stream      │
+   │                            ├─────────────────────────────▶│
+   │                            │ session_status: idle         │
+   │                            │◀─────────────────────────────┤
+   │ GET /api/sessions/<id>     │                              │
+   │ every 0.5 s while starting │                              │
+   ├───────────────────────────▶│                              │
+   │ SessionDescriptor (idle)   │                              │
    │◀───────────────────────────┤                              │
 ```
 
-The orchestrator validates the workspace, creates a session ID, starts the container, maps its port
-8080 to an ephemeral localhost port, and waits for `/status` to report ready.
+The orchestrator validates the workspace and image, creates a session ID, inserts a `starting`
+session record (a `SessionDescriptor`, stored in `archie.db`) and returns it at once with 202. In
+the background it starts the container, maps its port 8080 to an ephemeral localhost port, and
+waits for the agent's own `/status` to report ready. Its session tracker then follows the agent's
+`/stream` for the rest of the session; the `session_status` the agent sends on connect makes the
+record `idle`. A start that fails or times out makes the record `failed`, with the message in
+`error`.
+
+The CLI polls `GET /api/sessions/<session-id>` every 0.5 s, for up to 60 s, until the status leaves
+`starting`. It reports a `failed` start's `error`, or any other ended status, and exits; after
+60 s it reports that the session is still starting and leaves it running.
 
 During agent startup, `SessionLog` opens the session JSONL file. If the log is empty, the agent
 publishes the first event through `SessionEventBus.emit()`:
@@ -205,7 +226,7 @@ There are no WebSocket clients yet, so the TUI normally learns this event throug
 history read. `session_started` records the log schema version, initial model key, and session
 start time.
 
-Once the orchestrator returns a `SessionDescriptor`, the CLI starts the TUI with two URLs:
+Once the record has left `starting`, the CLI starts the TUI with two URLs:
 
 ```text
 WebSocket: ws://<orchestrator>/api/sessions/<session-id>/stream
@@ -223,7 +244,7 @@ losing events produced while the log is being read.
 
 The TUI connects to the orchestrator's session WebSocket. The orchestrator:
 
-1. resolves the session ID to a running container;
+1. resolves the session ID to the running agent's port;
 2. accepts the TUI connection;
 3. opens a second WebSocket to the agent's `/stream` endpoint;
 4. starts one relay task in each direction.
@@ -722,11 +743,14 @@ On the agent-to-TUI path, it forwards frames without inspecting them. The SQLite
 built separately, by tailing the session logs (see [Architecture](architecture.md#orchestrator-metrics)),
 so requests made while no client is attached are still indexed.
 
-The SQLite metrics database is an index for aggregate queries. It is not the canonical event store.
-The JSONL session log remains authoritative.
+The metrics tables in `archie.db` are an index for aggregate queries. They are not the canonical
+event store. The JSONL session log remains authoritative.
 
 For `GET /events`, the orchestrator forwards the optional `after` cursor unchanged and relays the
-agent's status code, body, and content type.
+agent's status code, body, and content type. Once the session has ended and its agent is gone, the
+orchestrator reads the session log itself and answers in the agent's format: the same NDJSON, the
+same `after` handling and the same 409 for an unknown cursor. An ended session that never wrote a
+log (a `failed` start) returns an empty body.
 
 ## 13. Reconnection and client replay
 
@@ -1004,8 +1028,8 @@ conversation, available partial output, and all accounting/tool history.
 The following rules are useful when reading logs, debugging the TUI, or changing the protocol:
 
 1. **The agent owns public events.** The TUI sends commands; it does not invent conversation history.
-2. **The orchestrator is a relay, not the session authority.** It owns container lifecycle and a
-   best-effort metrics index.
+2. **The orchestrator is a relay, not the session authority.** It owns container lifecycle, the
+   session records and a best-effort metrics index; the conversation lives in the agent's log.
 3. **Persisted events are appended before broadcast.** A live persisted event already exists in the
    JSONL log.
 4. **`text_delta` is temporary.** `assistant_message` is the durable authority for assistant text.
@@ -1029,7 +1053,10 @@ The following rules are useful when reading logs, debugging the TUI, or changing
 
 ```text
 NEW SESSION
-CLI ──POST /api/sessions──▶ orchestrator ──start container──▶ agent
+CLI ──POST /api/sessions──▶ orchestrator: record starting, 202
+orchestrator ──start container (background)──▶ agent
+orchestrator ──follow /stream──▶ agent; session_status → record idle
+CLI ──GET /api/sessions/<id> until not starting──▶ orchestrator
 agent ──SessionLog.append(session_started)──▶ JSONL
 
 CONNECT

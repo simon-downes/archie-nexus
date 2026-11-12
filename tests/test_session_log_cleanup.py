@@ -19,7 +19,7 @@ def test_remove_empty_session_log_removes_idle_session(tmp_path):
     SessionLog(path).append(_session_started())
 
     with patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path):
-        _remove_empty_session_log("idle")
+        assert _remove_empty_session_log("idle") is True
 
     assert not path.exists()
 
@@ -29,7 +29,7 @@ def test_remove_empty_session_log_removes_shell_only_session(tmp_path):
     SessionLog(path).append(_session_started())
 
     with patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path):
-        _remove_empty_session_log("shell-only")
+        assert _remove_empty_session_log("shell-only") is True
 
     assert not path.exists()
 
@@ -41,7 +41,7 @@ def test_remove_empty_session_log_preserves_prompt_session(tmp_path):
     log.append(UserMessage(id="message", turn=1, scope=None, content="hello"))
 
     with patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path):
-        _remove_empty_session_log("active")
+        assert _remove_empty_session_log("active") is False
 
     assert path.exists()
 
@@ -52,7 +52,7 @@ def test_remove_empty_session_log_preserves_unreadable_log(tmp_path):
     path.write_text("not valid json\n")
 
     with patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path):
-        _remove_empty_session_log("broken")
+        assert _remove_empty_session_log("broken") is False
 
     assert path.exists()
 
@@ -64,6 +64,11 @@ def test_remove_empty_session_log_preserves_log_with_malformed_line(tmp_path):
         stream.write("not valid json\n")
 
     with patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path):
-        _remove_empty_session_log("partial")
+        assert _remove_empty_session_log("partial") is False
 
     assert path.exists()
+
+
+def test_remove_empty_session_log_without_a_log_returns_false(tmp_path):
+    with patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path):
+        assert _remove_empty_session_log("missing") is False

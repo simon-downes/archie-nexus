@@ -1,9 +1,9 @@
 """``archie stats``: usage insights from the local metrics index.
 
-Each subcommand syncs ``<ARCHIE_HOME_DIR>/metrics.db`` from the session logs,
-runs the matching :mod:`archie_orchestrator.insights` query, and prints it as
-``rich`` tables, or as JSON with ``--json``. The orchestrator need not be
-running.
+Each subcommand syncs the metrics tables of ``<ARCHIE_HOME_DIR>/archie.db`` from the
+session logs, runs the matching :mod:`archie_orchestrator.insights` query, and prints
+it as ``rich`` tables, or as JSON with ``--json``. The orchestrator need not be
+running. Sessions show their name only when one was set (082 D1).
 """
 
 from __future__ import annotations
@@ -94,7 +94,11 @@ def _table(title: str, columns: list[tuple[str, str]]) -> Table:
 
 
 def _sync_index():
-    """Sync the index, telling the user on stderr if another sync holds the lock."""
+    """Sync the index, telling the user on stderr if another sync holds the lock.
+
+    Raises:
+        click.ClickException: ``archie.db`` has a newer schema than this Archie supports.
+    """
     from archie_orchestrator.metrics import default_index
 
     index = default_index()
@@ -105,6 +109,8 @@ def _sync_index():
     timer.start()
     try:
         index.sync()
+    except RuntimeError as exc:  # store.migrate: the database is newer than this code
+        raise click.ClickException(str(exc)) from None
     finally:
         timer.cancel()
     return index
@@ -263,8 +269,8 @@ def render_overview(data: dict, console: Console) -> None:
     console.print(workspaces)
 
 
-_TITLE_MAX = 60
-_TITLE_MIN = 12
+_NAME_MAX = 60
+_NAME_MIN = 12
 
 
 def render_sessions(data: dict, console: Console) -> None:
@@ -291,18 +297,18 @@ def render_sessions(data: dict, console: Console) -> None:
         ]
         for s in data["sessions"]
     ]
-    # The title gets whatever width the fixed columns leave, or is dropped.
+    # The name gets whatever width the fixed columns leave, or is dropped.
     probe = _table("", columns)
     for row in rows:
         probe.add_row(*row)
     # Each extra column costs its width plus a 3-character separator.
     spare = console.width - console.measure(probe).maximum - 3
-    title_width = min(_TITLE_MAX, spare)
+    name_width = min(_NAME_MAX, spare)
     title = f"Sessions ({shown} of {data['total']}, by {data['sort']})"
-    if title_width >= _TITLE_MIN:
-        columns.insert(2, ("Title", "left"))
+    if name_width >= _NAME_MIN:
+        columns.insert(2, ("Name", "left"))
         for row, s in zip(rows, data["sessions"], strict=True):
-            row.insert(2, _one_line(s["title"], title_width))
+            row.insert(2, _one_line(s["name"], name_width))
     table = _table(title, columns)
     for row in rows:
         table.add_row(*row)
@@ -311,7 +317,7 @@ def render_sessions(data: dict, console: Console) -> None:
 
 def render_session(data: dict, console: Console) -> None:
     s = data["session"]
-    console.print(f"[bold]{escape(s['session_id'])}[/]  {escape(s['title'] or '')}")
+    console.print(f"[bold]{escape(s['session_id'])}[/]  {escape(s['name'] or '')}")
     console.print(
         f"[dim]started {escape(s['started_at'] or '—')} · {_num(s['turns'])} turns · "
         f"{_num(s['requests'])} requests · {_money(s['cost'])} · cache hit "

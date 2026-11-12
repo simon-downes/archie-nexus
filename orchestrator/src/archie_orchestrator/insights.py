@@ -2,6 +2,16 @@
 
 Each view is a function ``(conn, filters, ...) -> dict`` returning plain,
 JSON-serialisable data, so the CLI and the web pages share one implementation.
+The ``metrics_*`` tables join to the canonical ``sessions`` table for workspace,
+start time, last activity and name.
+
+Listed sessions (plan 082 D19b): a session appears in session lists, session counts,
+the workspace filter options and the per-session view only when it is *indexed*: it
+has a ``metrics_ingest_files`` row whose ``error`` is NULL, i.e. its log was read
+successfully. Records with no log (a ``failed`` start, a never-prompted session) and
+logs that could not be indexed are left out. A session's name is shown only when it
+was set by the user (``name_fixed``, D1); otherwise ``name`` is None.
+
 Filters (plan 075 D15/D16):
 
 - ``since`` / ``until``: UTC dates; ``until`` is exclusive. Requests and tool
@@ -153,7 +163,9 @@ def _tool_where(f: Filters, alias: str = "c") -> tuple[str, list]:
 
 
 _TURN_TIME = "COALESCE(t.started_at, s.started_at)"
-_TURN_FROM = "turns t JOIN sessions s ON s.session_id = t.session_id"
+_TURN_FROM = "metrics_turns t JOIN sessions s ON s.session_id = t.session_id"
+# D19b: a listed session has a log that was indexed without error.
+_INDEXED = "s.session_id IN (SELECT session_id FROM metrics_ingest_files WHERE error IS NULL)"
 
 
 def _turn_where(f: Filters, alias: str = "t") -> tuple[str, list]:
@@ -165,7 +177,8 @@ def _turn_where(f: Filters, alias: str = "t") -> tuple[str, list]:
 
 
 def _session_where(f: Filters) -> tuple[str, list]:
-    clauses: list[str] = []
+    """Listed (indexed, D19b) sessions started in range, in the workspace if given."""
+    clauses: list[str] = [_INDEXED]
     params: list = []
     _range("s.started_at", f, clauses, params)
     if f.workspace is not None:
@@ -245,9 +258,16 @@ def _usage(row) -> dict:
 
 
 def filter_options(conn: sqlite3.Connection) -> dict:
-    """Workspaces and models present in the index, for filter dropdowns."""
-    workspaces = [r[0] for r in conn.execute("SELECT DISTINCT workspace FROM sessions ORDER BY 1")]
-    models = [r[0] for r in conn.execute("SELECT DISTINCT model_key FROM requests ORDER BY 1")]
+    """Workspaces of listed sessions and models present in the index, for filter dropdowns."""
+    workspaces = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT DISTINCT s.workspace FROM sessions s WHERE {_INDEXED} ORDER BY 1"
+        )
+    ]
+    models = [
+        r[0] for r in conn.execute("SELECT DISTINCT model_key FROM metrics_requests ORDER BY 1")
+    ]
     return {"workspaces": workspaces, "models": models, "scopes": list(SCOPES)}
 
 
@@ -261,7 +281,7 @@ def overview(conn: sqlite3.Connection, f: Filters) -> dict:
     where, params = _request_where(f)
     row = conn.execute(
         f"SELECT {_USAGE}, COALESCE(SUM(r.status = 'interrupted'), 0) AS interrupted, "
-        f"COALESCE(SUM(r.status = 'no_usage'), 0) AS no_usage FROM requests r {where}",
+        f"COALESCE(SUM(r.status = 'no_usage'), 0) AS no_usage FROM metrics_requests r {where}",
         params,
     ).fetchone()
     totals = _usage(row)
@@ -285,7 +305,7 @@ def overview(conn: sqlite3.Connection, f: Filters) -> dict:
     by_model = [
         {"model": r["model"], **_usage(r)}
         for r in conn.execute(
-            f"SELECT r.model_key AS model, {_USAGE} FROM requests r {where} "
+            f"SELECT r.model_key AS model, {_USAGE} FROM metrics_requests r {where} "
             "GROUP BY r.model_key ORDER BY cost DESC, model",
             params,
         )
@@ -294,7 +314,7 @@ def overview(conn: sqlite3.Connection, f: Filters) -> dict:
         {"workspace": r["workspace"], "sessions": r["sessions"], **_usage(r)}
         for r in conn.execute(
             f"SELECT s.workspace AS workspace, COUNT(DISTINCT r.session_id) AS sessions, {_USAGE} "
-            f"FROM requests r JOIN sessions s ON s.session_id = r.session_id {where} "
+            f"FROM metrics_requests r JOIN sessions s ON s.session_id = r.session_id {where} "
             "GROUP BY s.workspace ORDER BY cost DESC, workspace LIMIT ?",
             [*params, TOP_N],
         )
@@ -312,7 +332,7 @@ def _daily_cost(conn, where: str, params: list, models_by_cost: list[str]) -> di
     top = models_by_cost[:TOP_DAILY_MODELS]
     rows = conn.execute(
         f"SELECT substr(r.timestamp, 1, 10) AS day, r.model_key AS model, SUM(r.cost_usd) AS cost "
-        f"FROM requests r {where} GROUP BY day, model ORDER BY day",
+        f"FROM metrics_requests r {where} GROUP BY day, model ORDER BY day",
         params,
     ).fetchall()
     days = day_span(r["day"] for r in rows)
@@ -343,20 +363,21 @@ SESSION_SORTS = tuple(_SESSION_SORTS)
 
 def _session_select(request_where: str) -> str:
     return (
-        "SELECT s.session_id, s.workspace, s.started_at, s.title, s.last_activity_at, "
-        "s.initial_model, "
+        "SELECT s.session_id, s.workspace, s.started_at, s.last_activity_at, "
+        "CASE WHEN s.name_fixed THEN s.name END AS name, "
         "COALESCE(u.requests, 0) AS requests, COALESCE(u.cost, 0.0) AS cost, "
         "COALESCE(u.input_tokens, 0) AS input_tokens, "
         "COALESCE(u.output_tokens, 0) AS output_tokens, "
         "COALESCE(u.cache_read_tokens, 0) AS cache_read_tokens, "
         "COALESCE(u.cache_write_tokens, 0) AS cache_write_tokens, "
-        "COALESCE(u.errors, 0) + (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.session_id "
-        "AND t.status = 'error') AS errors, "
-        "(SELECT COUNT(*) FROM turns t WHERE t.session_id = s.session_id) AS turns, "
+        "COALESCE(u.errors, 0) + (SELECT COUNT(*) FROM metrics_turns t "
+        "WHERE t.session_id = s.session_id AND t.status = 'error') AS errors, "
+        "(SELECT COUNT(*) FROM metrics_turns t WHERE t.session_id = s.session_id) AS turns, "
         "COALESCE((julianday(s.last_activity_at) - julianday(s.started_at)) * 86400, 0) "
         "AS duration "
         "FROM sessions s LEFT JOIN ("
-        f"SELECT r.session_id, {_USAGE} FROM requests r {request_where} GROUP BY r.session_id"
+        f"SELECT r.session_id, {_USAGE} FROM metrics_requests r {request_where} "
+        "GROUP BY r.session_id"
         ") u ON u.session_id = s.session_id"
     )
 
@@ -366,8 +387,7 @@ def _session_row(row) -> dict:
         "session_id": row["session_id"],
         "workspace": row["workspace"],
         "started_at": row["started_at"],
-        "title": row["title"],
-        "initial_model": row["initial_model"],
+        "name": row["name"],
         "turns": row["turns"],
         "requests": row["requests"],
         "cost": round(row["cost"], 6),
@@ -386,7 +406,7 @@ def _session_row(row) -> dict:
 def sessions(
     conn: sqlite3.Connection, f: Filters, *, sort: str = "started", limit: int = MAX_SESSIONS
 ) -> dict:
-    """Sessions started in range, with usage from requests matching model/scope."""
+    """Listed sessions started in range, with usage from requests matching model/scope."""
     if sort not in _SESSION_SORTS:
         raise InsightsError(f"invalid sort: {sort}")
     if limit < 1:
@@ -414,9 +434,11 @@ def sessions(
 def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
     """Per-turn, per-request, tool and subagent breakdown for one session.
 
-    Raises ``KeyError`` when the session is not indexed. Filters don't apply.
+    Raises ``KeyError`` when the session is not listed (D19b). Filters don't apply.
     """
-    row = conn.execute(f"{_session_select('')} WHERE s.session_id = ?", (session_id,)).fetchone()
+    row = conn.execute(
+        f"{_session_select('')} WHERE s.session_id = ? AND {_INDEXED}", (session_id,)
+    ).fetchone()
     if row is None:
         raise KeyError(session_id)
     turns = [
@@ -433,19 +455,20 @@ def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
         }
         for r in conn.execute(
             "SELECT t.turn, t.status, t.error, t.started_at, "
-            "(SELECT COUNT(*) FROM requests r WHERE r.session_id = t.session_id "
+            "(SELECT COUNT(*) FROM metrics_requests r WHERE r.session_id = t.session_id "
             " AND r.turn = t.turn) AS requests, "
-            "(SELECT SUM(r.cost_usd) FROM requests r WHERE r.session_id = t.session_id "
+            "(SELECT SUM(r.cost_usd) FROM metrics_requests r WHERE r.session_id = t.session_id "
             " AND r.turn = t.turn) AS cost, "
-            "(SELECT MAX(r.context_tokens) FROM requests r WHERE r.session_id = t.session_id "
-            " AND r.turn = t.turn AND r.scope IS NULL) AS context_tokens, "
-            "(SELECT COUNT(*) FROM tool_calls c WHERE c.session_id = t.session_id "
+            "(SELECT MAX(r.context_tokens) FROM metrics_requests r "
+            " WHERE r.session_id = t.session_id AND r.turn = t.turn AND r.scope IS NULL) "
+            "AS context_tokens, "
+            "(SELECT COUNT(*) FROM metrics_tool_calls c WHERE c.session_id = t.session_id "
             " AND c.turn = t.turn) AS tool_calls, "
-            "(SELECT SUM(r.status = 'error') FROM requests r WHERE r.session_id = t.session_id "
-            " AND r.turn = t.turn) AS request_errors, "
-            "(SELECT SUM(c.is_error) FROM tool_calls c WHERE c.session_id = t.session_id "
+            "(SELECT SUM(r.status = 'error') FROM metrics_requests r "
+            " WHERE r.session_id = t.session_id AND r.turn = t.turn) AS request_errors, "
+            "(SELECT SUM(c.is_error) FROM metrics_tool_calls c WHERE c.session_id = t.session_id "
             " AND c.turn = t.turn) AS tool_errors "
-            "FROM turns t WHERE t.session_id = ? ORDER BY t.turn",
+            "FROM metrics_turns t WHERE t.session_id = ? ORDER BY t.turn",
             (session_id,),
         )
     ]
@@ -463,12 +486,12 @@ def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
             "duration_ms": r["duration_ms"],
         }
         for r in conn.execute(
-            "SELECT * FROM requests WHERE session_id = ? ORDER BY id", (session_id,)
+            "SELECT * FROM metrics_requests WHERE session_id = ? ORDER BY id", (session_id,)
         )
     ]
     tools = _tool_rows(
         conn.execute(
-            "SELECT name, is_error, duration_ms, result_bytes FROM tool_calls c "
+            "SELECT name, is_error, duration_ms, result_bytes FROM metrics_tool_calls c "
             "WHERE c.session_id = ?",
             (session_id,),
         ).fetchall()
@@ -485,11 +508,13 @@ def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
             "cost": round(r["cost"] or 0.0, 6),
         }
         for r in conn.execute(
-            "SELECT a.*, (SELECT COUNT(*) FROM requests r WHERE r.session_id = a.session_id "
-            " AND r.scope = a.scope AND r.subagent_index = a.subagent_index) AS requests, "
-            "(SELECT SUM(r.cost_usd) FROM requests r WHERE r.session_id = a.session_id "
+            "SELECT a.*, (SELECT COUNT(*) FROM metrics_requests r "
+            " WHERE r.session_id = a.session_id AND r.scope = a.scope "
+            " AND r.subagent_index = a.subagent_index) AS requests, "
+            "(SELECT SUM(r.cost_usd) FROM metrics_requests r WHERE r.session_id = a.session_id "
             " AND r.scope = a.scope AND r.subagent_index = a.subagent_index) AS cost "
-            "FROM subagents a WHERE a.session_id = ? ORDER BY a.turn, a.scope, a.subagent_index",
+            "FROM metrics_subagents a WHERE a.session_id = ? "
+            "ORDER BY a.turn, a.scope, a.subagent_index",
             (session_id,),
         )
     ]
@@ -509,12 +534,12 @@ def models(conn: sqlite3.Connection, f: Filters) -> dict:
         f"SELECT r.model_key AS model, {_USAGE}, "
         "COALESCE(SUM(r.status = 'interrupted'), 0) AS interrupted, "
         "COALESCE(SUM(r.status = 'no_usage'), 0) AS no_usage "
-        f"FROM requests r {where} GROUP BY r.model_key ORDER BY cost DESC, model",
+        f"FROM metrics_requests r {where} GROUP BY r.model_key ORDER BY cost DESC, model",
         params,
     ).fetchall()
     durations: dict[str, list[int]] = {}
     for r in conn.execute(
-        f"SELECT r.model_key, r.duration_ms FROM requests r {where}"
+        f"SELECT r.model_key, r.duration_ms FROM metrics_requests r {where}"
         + (" AND " if where else " WHERE ")
         + "r.status = 'completed'",
         params,
@@ -568,14 +593,16 @@ def tools(conn: sqlite3.Connection, f: Filters) -> dict:
     """Calls, errors, duration and result size per tool, plus the commonest errors."""
     where, params = _tool_where(f)
     rows = conn.execute(
-        f"SELECT c.name, c.is_error, c.duration_ms, c.result_bytes FROM tool_calls c {where}",
+        "SELECT c.name, c.is_error, c.duration_ms, c.result_bytes "
+        f"FROM metrics_tool_calls c {where}",
         params,
     ).fetchall()
     err_clause = (" AND " if where else " WHERE ") + "c.is_error = 1"
     top_errors = [
         {"name": r["name"], "error": r["error_summary"], "count": r["n"]}
         for r in conn.execute(
-            f"SELECT c.name, c.error_summary, COUNT(*) AS n FROM tool_calls c {where}{err_clause} "
+            "SELECT c.name, c.error_summary, COUNT(*) AS n "
+            f"FROM metrics_tool_calls c {where}{err_clause} "
             "GROUP BY c.name, c.error_summary ORDER BY n DESC, c.name LIMIT ?",
             [*params, TOP_ERRORS],
         )
@@ -590,8 +617,8 @@ def subagents(conn: sqlite3.Connection, f: Filters) -> dict:
         r["agent"]: {"launches": r["n"], "errors": r["errors"]}
         for r in conn.execute(
             "SELECT a.agent, COUNT(*) AS n, COALESCE(SUM(a.status = 'error'), 0) AS errors "
-            "FROM subagents a JOIN sessions s ON s.session_id = a.session_id "
-            "LEFT JOIN turns t ON t.session_id = a.session_id AND t.turn = a.turn "
+            "FROM metrics_subagents a JOIN sessions s ON s.session_id = a.session_id "
+            "LEFT JOIN metrics_turns t ON t.session_id = a.session_id AND t.turn = a.turn "
             f"{twhere} GROUP BY a.agent",
             tparams,
         )
@@ -600,7 +627,7 @@ def subagents(conn: sqlite3.Connection, f: Filters) -> dict:
     usage = {
         r["agent"]: r
         for r in conn.execute(
-            f"SELECT a.agent AS agent, {_USAGE} FROM requests r JOIN subagents a "
+            f"SELECT a.agent AS agent, {_USAGE} FROM metrics_requests r JOIN metrics_subagents a "
             "ON a.session_id = r.session_id AND a.scope = r.scope "
             f"AND a.subagent_index = r.subagent_index {rwhere} GROUP BY a.agent",
             rparams,
@@ -630,7 +657,7 @@ def subagents(conn: sqlite3.Connection, f: Filters) -> dict:
         {"skill": r["skill"], "loads": r["loads"], "sessions": r["sessions"]}
         for r in conn.execute(
             f"SELECT c.skill, COUNT(*) AS loads, COUNT(DISTINCT c.session_id) AS sessions "
-            f"FROM tool_calls c {cwhere}{skill_clause} GROUP BY c.skill "
+            f"FROM metrics_tool_calls c {cwhere}{skill_clause} GROUP BY c.skill "
             "ORDER BY loads DESC, c.skill",
             cparams,
         )
@@ -645,7 +672,8 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
     by_model = [
         {"model": r["model_key"], "errors": r["n"]}
         for r in conn.execute(
-            f"SELECT r.model_key, COUNT(*) AS n FROM requests r {rwhere}{and_}r.status = 'error' "
+            "SELECT r.model_key, COUNT(*) AS n "
+            f"FROM metrics_requests r {rwhere}{and_}r.status = 'error' "
             "GROUP BY r.model_key ORDER BY n DESC, r.model_key",
             rparams,
         )
@@ -653,14 +681,14 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
     top_messages = [
         {"model": r["model_key"], "error": r["error"], "count": r["n"]}
         for r in conn.execute(
-            f"SELECT r.model_key, r.error, COUNT(*) AS n FROM requests r {rwhere}{and_}"
+            f"SELECT r.model_key, r.error, COUNT(*) AS n FROM metrics_requests r {rwhere}{and_}"
             "r.status = 'error' GROUP BY r.model_key, r.error ORDER BY n DESC LIMIT ?",
             [*rparams, TOP_ERRORS],
         )
     ]
     counts = conn.execute(
         "SELECT COALESCE(SUM(r.status = 'error'), 0), COALESCE(SUM(r.status = 'interrupted'), 0), "
-        f"COALESCE(SUM(r.status = 'no_usage'), 0) FROM requests r {rwhere}",
+        f"COALESCE(SUM(r.status = 'no_usage'), 0) FROM metrics_requests r {rwhere}",
         rparams,
     ).fetchone()
     twhere, tparams = _turn_where(f)
@@ -679,8 +707,8 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
     awhere, aparams = _turn_where(f, alias="a")
     aand = " AND " if awhere else " WHERE "
     subagent_from = (
-        "subagents a JOIN sessions s ON s.session_id = a.session_id "
-        "LEFT JOIN turns t ON t.session_id = a.session_id AND t.turn = a.turn"
+        "metrics_subagents a JOIN sessions s ON s.session_id = a.session_id "
+        "LEFT JOIN metrics_turns t ON t.session_id = a.session_id AND t.turn = a.turn"
     )
     subagent_error_count = conn.execute(
         f"SELECT COUNT(*) FROM {subagent_from} {awhere}{aand}a.status = 'error'", aparams
@@ -697,11 +725,11 @@ def errors(conn: sqlite3.Connection, f: Filters) -> dict:
     request_days = [
         r[0]
         for r in conn.execute(
-            f"SELECT DISTINCT substr(r.timestamp, 1, 10) FROM requests r {rwhere}", rparams
+            f"SELECT DISTINCT substr(r.timestamp, 1, 10) FROM metrics_requests r {rwhere}", rparams
         )
     ]
     for r in conn.execute(
-        f"SELECT substr(r.timestamp, 1, 10) AS day, COUNT(*) FROM requests r {rwhere}{and_}"
+        f"SELECT substr(r.timestamp, 1, 10) AS day, COUNT(*) FROM metrics_requests r {rwhere}{and_}"
         "r.status = 'error' GROUP BY day",
         rparams,
     ):

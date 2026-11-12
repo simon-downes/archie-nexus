@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from archie_orchestrator.app import app, lifespan
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
+
+from tests.session_fakes import FakeRuntime, running, use_runtime
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -25,15 +26,6 @@ def _app_state():
     yield
 
 
-def _make_session(session_id: str = "proj-01abc12345") -> SessionDescriptor:
-    return SessionDescriptor(
-        session_id=session_id,
-        container_name=f"archie-{session_id}",
-        port=32771,
-        raw_docker_status="Up 5 minutes",
-    )
-
-
 # ---------------------------------------------------------------------------
 # D4 — Orchestrator shutdown does NOT stop containers
 # ---------------------------------------------------------------------------
@@ -42,10 +34,8 @@ def _make_session(session_id: str = "proj-01abc12345") -> SessionDescriptor:
 @pytest.mark.asyncio
 async def test_shutdown_does_not_call_docker_stop(caplog):
     """Lifespan teardown must not call docker stop on any container."""
-    sessions = [_make_session()]
-
     with (
-        patch("archie_orchestrator.app.list_sessions", return_value=sessions),
+        use_runtime(app, FakeRuntime([running("proj-01abc12345", None)])),
         patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
         patch("archie_orchestrator.docker.subprocess.run") as mock_run,
     ):
@@ -59,28 +49,33 @@ async def test_shutdown_does_not_call_docker_stop(caplog):
 
 @pytest.mark.asyncio
 async def test_after_restart_sessions_rediscovered():
-    """After orchestrator restart, GET /sessions returns same sessions (stateless)."""
-    sessions = [_make_session("proj-01abc12345"), _make_session("proj-02def67890")]
+    """After an orchestrator restart, GET /sessions returns the same running sessions."""
+    runtime = FakeRuntime([running("proj-01abc12345", None), running("proj-02def67890", None)])
+    responses = []
 
-    with patch("archie_orchestrator.api.list_sessions", return_value=sessions):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            # Simulate a "restart" — the app is stateless, same docker ps result
-            resp1 = await client.get("/api/sessions")
-            resp2 = await client.get("/api/sessions")
+    with (
+        use_runtime(app, runtime),
+        patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
+    ):
+        for _ in range(2):  # start, stop, start again: the records come back from Docker
+            async with lifespan(app):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    responses.append(await client.get("/api/sessions"))
 
-    assert resp1.status_code == 200
-    assert resp2.status_code == 200
-    assert len(resp1.json()) == 2
-    assert len(resp2.json()) == 2
-    # Same sessions both times — rediscovery is the default
-    assert resp1.json() == resp2.json()
+    assert [r.status_code for r in responses] == [200, 200]
+    first, second = (r.json() for r in responses)
+    assert {s["session_id"] for s in first} == {"proj-01abc12345", "proj-02def67890"}
+    assert {s["status"] for s in first} == {"idle"}
+    assert first == second
+    assert runtime.list_calls == 2
 
 
 @pytest.mark.asyncio
 async def test_shutdown_logs_active_connections(caplog):
     """Shutdown log shows the count of active WS connections."""
     with (
-        patch("archie_orchestrator.app.list_sessions", return_value=[]),
+        use_runtime(app, FakeRuntime()),
         patch("archie_orchestrator.app.config_source.get", return_value=NexusConfig()),
         caplog.at_level(logging.INFO, logger="archie_orchestrator.app"),
     ):

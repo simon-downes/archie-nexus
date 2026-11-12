@@ -5,11 +5,12 @@ from unittest.mock import patch
 
 import pytest
 from archie_orchestrator.app import app
-from archie_orchestrator.docker import DockerError
+from archie_orchestrator.docker import DockerError, RunningContainer
 from archie_shared.schemas import NexusConfig
-from archie_shared.session import SessionDescriptor
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
+
+from tests.session_fakes import FakeRuntime, serve
 
 # ---------------------------------------------------------------------------
 # Shared fixture — prime app state before each test
@@ -22,12 +23,11 @@ def _app_state():
     yield
 
 
-def _make_session(session_id: str = "proj-01abc12345") -> SessionDescriptor:
-    return SessionDescriptor(
+def _make_session(session_id: str = "proj-01abc12345") -> RunningContainer:
+    return RunningContainer(
         session_id=session_id,
         container_name=f"archie-{session_id}",
         port=32771,
-        raw_docker_status="Up 5 minutes",
     )
 
 
@@ -123,15 +123,11 @@ def test_second_request_succeeds_after_first_explodes():
 
 @pytest.mark.asyncio
 async def test_post_sessions_docker_error_returns_helpful_message():
-    """POST /sessions with DockerError from start_session → 500 + message."""
-    with patch(
-        "archie_orchestrator.api.start_session",
-        side_effect=DockerError(
-            command=["docker", "run"],
-            stderr="Cannot connect to the Docker daemon",
-            returncode=1,
-        ),
-    ):
+    """POST /sessions with a DockerError while preparing the start → 500 + message."""
+    error = DockerError(
+        command=["docker", "image"], stderr="Cannot connect to the Docker daemon", returncode=1
+    )
+    with serve(app, runtime=FakeRuntime(prepare_error=error)):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/sessions",
@@ -144,18 +140,10 @@ async def test_post_sessions_docker_error_returns_helpful_message():
 
 @pytest.mark.asyncio
 async def test_delete_session_docker_error_returns_500():
-    """DELETE /sessions/{id} with DockerError → 500."""
+    """DELETE /sessions/{id} with a DockerError and the container still running → 500."""
     session = _make_session()
-    with (
-        patch(
-            "archie_orchestrator.api.stop_session",
-            side_effect=DockerError(
-                command=["docker", "stop"],
-                stderr="Error: No such container",
-                returncode=1,
-            ),
-        ),
-    ):
+    error = DockerError(command=["docker", "stop"], stderr="daemon busy", returncode=1)
+    with serve(app, {session.session_id: session.port}, runtime=FakeRuntime(stop_error=error)):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete(f"/api/sessions/{session.session_id}")
 
@@ -171,7 +159,7 @@ async def test_delete_session_docker_error_returns_500():
 @pytest.mark.asyncio
 async def test_delete_session_not_found_still_404():
     """DELETE /sessions/{id} for unknown session still returns 404."""
-    with patch("archie_orchestrator.api.stop_session", side_effect=KeyError("no such session")):
+    with serve(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete("/api/sessions/nonexistent-session-id")
 
@@ -209,7 +197,7 @@ def test_ws_proxy_unexpected_error_closes_with_1011(caplog):
             pass
 
     with (
-        patch("archie_orchestrator.proxy.list_sessions", return_value=[session]),
+        serve(app, {session.session_id: session.port}),
         patch("archie_orchestrator.proxy.websockets.connect", _ExplodingConnect()),
         caplog.at_level(logging.ERROR, logger="archie_orchestrator.proxy"),
     ):

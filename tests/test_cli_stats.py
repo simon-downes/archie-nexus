@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from archie_cli.cli import main
 from click.testing import CliRunner
+
+from tests.session_fakes import migrated_store, record
 
 
 @pytest.fixture
@@ -25,6 +28,11 @@ def home(session_logs, tmp_path):
             w.turn_complete(turn=1),
         ],
     )
+    w.write("other-01k0000001", [w.user("x"), w.llm(model_key="m1", cost_usd=0.5)])
+    store = migrated_store(tmp_path)  # imports both logs
+    store.update("proj-01k0000000", name="Fix the parser", name_fixed=True)
+    store.update("other-01k0000001", name="unfixed-name")
+    store.save(record("ghost-01k0000002", status="failed", ended_at="2026-07-01T00:00:00Z"))
     return tmp_path
 
 
@@ -37,9 +45,11 @@ def test_stats_json_prints_overview(home):
     result = _invoke("--since", "all", "--json")
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["totals"]["cost"] == 1.25
-    assert data["totals"]["requests"] == 1
-    assert (home / "metrics.db").exists()
+    assert data["totals"]["cost"] == 1.75
+    assert data["totals"]["requests"] == 2
+    assert data["totals"]["sessions"] == 2  # not the failed start with no log (D19b)
+    assert (home / "archie.db").exists()
+    assert not (home / "metrics.db").exists()
 
 
 def test_stats_default_table(home):
@@ -105,12 +115,47 @@ def test_stats_subcommands_json(home, view):
 
 def test_stats_session_json(home):
     result = _invoke("session", "proj-01k0000000", "--json")
-    assert json.loads(result.output)["session"]["title"] == "Fix the parser"
+    assert json.loads(result.output)["session"]["name"] == "Fix the parser"
+    result = _invoke("session", "other-01k0000001", "--json")
+    assert json.loads(result.output)["session"]["name"] is None
+
+
+def test_stats_sessions_show_fixed_names_and_indexed_sessions_only(home):
+    result = _invoke("sessions", "--since", "all")
+    assert result.exit_code == 0, result.output
+    assert "Name" in result.output and "Title" not in result.output
+    assert "Fix the parser" in result.output
+    assert "other-01k0000001" in result.output
+    assert "unfixed-name" not in result.output
+    assert "ghost-01k0000002" not in result.output
+    data = json.loads(_invoke("sessions", "--since", "all", "--json").output)
+    names = {s["session_id"]: s["name"] for s in data["sessions"]}
+    assert names == {"proj-01k0000000": "Fix the parser", "other-01k0000001": None}
+
+
+def test_stats_session_without_log_not_found(home):
+    result = _invoke("session", "ghost-01k0000002")
+    assert result.exit_code == 1
+    assert "Session not found" in result.output
 
 
 def test_stats_bad_sort_rejected(home):
     result = _invoke("sessions", "--sort", "nope")
     assert result.exit_code == 2
+
+
+@pytest.mark.parametrize("args", [["--since", "all"], ["session", "proj-01k0000000"]])
+def test_stats_newer_database_schema_exits_1(home, args):
+    conn = sqlite3.connect(home / "archie.db")
+    try:
+        conn.execute("PRAGMA user_version = 99")
+    finally:
+        conn.close()
+    result = _invoke(*args)
+    assert result.exit_code == 1
+    assert "schema version 99" in result.output
+    assert "Update Archie" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_group_options_apply_to_subcommand(home):
@@ -126,9 +171,12 @@ def test_subcommand_option_wins_over_group(home):
     assert json.loads(result.output)["filters"]["workspace"] == "proj"
 
 
-def test_session_title_with_markup_prints_literally(session_logs, tmp_path):
+def test_session_name_with_markup_prints_literally(session_logs, tmp_path):
     w = session_logs
-    w.write("mk-01k0000000", [w.user("fix [/] and [exit: 2] now"), w.llm()])
+    w.write("mk-01k0000000", [w.user("hi"), w.llm()])
+    migrated_store(tmp_path).update(
+        "mk-01k0000000", name="fix [/] and [exit: 2] now", name_fixed=True
+    )
     result = _invoke("session", "mk-01k0000000")
     assert result.exit_code == 0, result.output
     assert "fix [/] and [exit: 2] now" in result.output
@@ -147,7 +195,7 @@ def test_waits_for_lock_with_notice(home, monkeypatch):
     from archie_orchestrator.metrics import MetricsIndex
 
     monkeypatch.setattr(stats_module, "_WAIT_NOTICE_AFTER", 0.05)
-    index = MetricsIndex(home / "metrics.db", home / "sessions")
+    index = MetricsIndex(home / "archie.db", home / "sessions")
     release = threading.Event()
 
     def hold():

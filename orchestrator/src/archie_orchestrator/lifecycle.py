@@ -7,17 +7,14 @@ when invoking from an async context.
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from archie_shared.config import home_dir
 from archie_shared.events import UserMessage
 from archie_shared.kiro import startup_error_path
 from archie_shared.schemas import NexusConfig, expand_workspace_root
-from archie_shared.session import (
-    SessionDescriptor,
-    container_name,
-    generate_session_id,
-)
+from archie_shared.session import container_name, generate_session_id
 from archie_shared.session.log import SessionLog
 
 from archie_orchestrator.docker import (
@@ -32,8 +29,8 @@ from archie_orchestrator.docker import (
     CONTAINER_WORKSPACE_DIR,
     IMAGE_TAG,
     DockerError,
+    RunningContainer,
     check_image,
-    list_sessions,
     run_container,
     stop_container,
     wait_for_ready,
@@ -50,32 +47,57 @@ BACKENDS = ("native", "kiro")
 READY_TIMEOUT_S = {"native": 30.0, "kiro": 45.0}
 
 
-def _remove_empty_session_log(session_id: str) -> None:
-    """Remove a stopped session log that contains no submitted prompt."""
+def _remove_empty_session_log(session_id: str) -> bool:
+    """Remove a stopped session log that contains no submitted prompt.
+
+    Returns:
+        True if the log was removed; False if there was none, it holds a prompt, or it
+        could not be inspected or removed.
+    """
     path = home_dir() / "sessions" / f"{session_id}.jsonl"
     if not path.exists():
-        return
+        return False
     try:
         raw_lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
         events = SessionLog(path).read()
     except Exception:  # noqa: BLE001 — preserve the log when inspection fails
         log.warning("Could not inspect session log; preserving %s", path, exc_info=True)
-        return
+        return False
     if len(events) != len(raw_lines) or any(isinstance(event, UserMessage) for event in events):
-        return
+        return False
     try:
         path.unlink()
     except OSError:
         log.warning("Could not remove empty session log %s", path, exc_info=True)
+        return False
+    return True
 
 
-def start_session(
-    workspace: str, config: NexusConfig, *, backend: str = "native"
-) -> SessionDescriptor:
-    """Start a new agent container session for the given workspace.
+@dataclass(frozen=True)
+class PreparedStart:
+    """A validated session start, ready for :func:`run_start`.
 
-    Synchronous — blocks until the container's agent is ready (up to 30 s; 45 s for Kiro).
-    Use asyncio.to_thread() when calling from an async handler.
+    Attributes:
+        session_id: The new session's ID.
+        container_name: Docker container name for the session.
+        workspace: Workspace directory name.
+        backend: ``native`` or ``kiro``.
+        command: The full ``docker run`` command.
+        nexus_home: Host-side home directory mounted into the container.
+    """
+
+    session_id: str
+    container_name: str
+    workspace: str
+    backend: str
+    command: list[str]
+    nexus_home: Path
+
+
+def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native") -> PreparedStart:
+    """Validate a session start and build its ID and ``docker run`` command.
+
+    Synchronous and quick (one ``docker image inspect``); nothing is started.
 
     Args:
         workspace: Workspace directory name (resolved under workspace_root).
@@ -83,13 +105,12 @@ def start_session(
         backend: ``native`` (Archie's own loop) or ``kiro`` (``ARCHIE_BACKEND=kiro``).
 
     Returns:
-        A SessionDescriptor with session_id, container_name, port, and status.
+        The PreparedStart to pass to :func:`run_start`.
 
     Raises:
-        ValueError: If the workspace directory does not exist under workspace_root.
+        ValueError: If the backend is unknown or the workspace directory does not exist
+            under workspace_root.
         RuntimeError: If the image is missing locally.
-        DockerError: If docker run fails or the container does not become ready
-            within the timeout.
     """
     if backend not in BACKENDS:
         raise ValueError(f"Invalid backend {backend!r}: expected 'native' or 'kiro'")
@@ -181,12 +202,40 @@ def start_session(
         IMAGE_TAG,
     ]
 
-    # 7. Start container
+    return PreparedStart(
+        session_id=session_id,
+        container_name=cname,
+        workspace=workspace,
+        backend=backend,
+        command=docker_cmd,
+        nexus_home=nexus_home,
+    )
+
+
+def run_start(prepared: PreparedStart) -> int:
+    """Run a prepared session's container and wait until its agent is ready.
+
+    Synchronous — blocks until the container's agent is ready (up to 30 s; 45 s for Kiro).
+    Use asyncio.to_thread() when calling from an async handler. A container that fails
+    to become ready is stopped before the error is raised.
+
+    Returns:
+        The agent's published host port.
+
+    Raises:
+        DockerError: If docker run fails or the container does not become ready
+            within the timeout (for Kiro, with the agent's recorded startup error).
+    """
+    cname = prepared.container_name
+    docker_cmd = prepared.command
+    backend = prepared.backend
+
+    # Start container
     run_container(docker_cmd)
 
-    # 8. Wait for ready; raises RuntimeError on crash or timeout.
-    #    On failure, tear down the container we started so a stuck/timed-out
-    #    container is not left running (--rm only covers exit/crash).
+    # Wait for ready; raises RuntimeError on crash or timeout.
+    # On failure, tear down the container we started so a stuck/timed-out
+    # container is not left running (--rm only covers exit/crash).
     try:
         port_str = wait_for_ready(cname, docker_cmd, timeout=READY_TIMEOUT_S[backend])
     except RuntimeError:
@@ -197,7 +246,7 @@ def start_session(
             raise
         # The container runs with --rm, so the agent leaves the reason on the host mount.
         _cleanup_failed_start(cname)
-        reason = _kiro_startup_error(nexus_home, session_id)
+        reason = _kiro_startup_error(prepared.nexus_home, prepared.session_id)
         if reason is None:
             raise
         raise DockerError(
@@ -206,12 +255,31 @@ def start_session(
             returncode=exc.returncode,
         ) from exc
 
-    log.info("Session started: %s (workspace: %s)", session_id, workspace)
-    return SessionDescriptor(
-        session_id=session_id,
-        container_name=cname,
-        port=int(port_str),
-        raw_docker_status="",  # freshly started; real status available via GET /api/sessions
+    log.info("Session started: %s (workspace: %s)", prepared.session_id, prepared.workspace)
+    return int(port_str)
+
+
+def start_session(
+    workspace: str, config: NexusConfig, *, backend: str = "native"
+) -> RunningContainer:
+    """Start a new agent container session and wait until it is ready.
+
+    The composition of :func:`prepare_start` and :func:`run_start`. Synchronous; use
+    asyncio.to_thread() when calling from an async handler.
+
+    Returns:
+        The RunningContainer with session_id, container_name and port.
+
+    Raises:
+        ValueError: If the workspace directory does not exist under workspace_root.
+        RuntimeError: If the image is missing locally.
+        DockerError: If docker run fails or the container does not become ready
+            within the timeout.
+    """
+    prepared = prepare_start(workspace, config, backend=backend)
+    port = run_start(prepared)
+    return RunningContainer(
+        session_id=prepared.session_id, container_name=prepared.container_name, port=port
     )
 
 
@@ -232,20 +300,22 @@ def _kiro_startup_error(nexus_home: Path, session_id: str) -> str | None:
     return text or None
 
 
-def stop_session(session_id: str) -> None:
-    """Stop a running session by exact session ID.
+def stop_session(session_id: str) -> bool:
+    """Stop a session's container by name, then remove its log if it holds no prompt.
+
+    Runs ``docker stop archie-<session_id>`` directly, without a ``docker ps`` lookup
+    (082 D19); a log with no submitted prompt is removed (D19a).
 
     Args:
         session_id: Exact session ID to stop (no prefix matching).
 
+    Returns:
+        Whether the session's log was removed.
+
     Raises:
-        KeyError: If no running session with that ID exists.
-        RuntimeError: If docker stop fails.
+        DockerError: If docker stop fails (the log is left alone).
     """
-    sessions = list_sessions()
-    target = next((s for s in sessions if s.session_id == session_id), None)
-    if target is None:
-        raise KeyError(f"No running session with ID '{session_id}'")
-    stop_container(target.container_name)
-    _remove_empty_session_log(session_id)
+    stop_container(container_name(session_id))
+    removed = _remove_empty_session_log(session_id)
     log.info("Session stopped: %s", session_id)
+    return removed

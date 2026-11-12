@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 from archie_cli.cli import main
-from archie_shared.session import SessionDescriptor
+from archie_shared.session import SessionDescriptor, split_id
 from click.testing import CliRunner
 
 
@@ -17,15 +17,15 @@ def _sessions_response(sessions: list[SessionDescriptor]) -> MagicMock:
 
 
 def _make_session(
-    session_id: str = "myproject-01abc12345",
-    container_name: str = "archie-myproject-01abc12345",
-    port: int = 32771,
+    session_id: str = "myproject-01abc12345", status: str = "idle"
 ) -> SessionDescriptor:
     return SessionDescriptor(
         session_id=session_id,
-        container_name=container_name,
-        port=port,
-        raw_docker_status="Up",
+        workspace=split_id(session_id)[0],
+        backend="native",
+        name=session_id,
+        status=status,
+        started_at="2026-07-01T10:00:00+00:00",
     )
 
 
@@ -119,7 +119,7 @@ def test_start_non_detach_uses_proxy_urls(monkeypatch, tmp_path):
 
     descriptor = _make_session()
     post_resp = MagicMock()
-    post_resp.status_code = 200
+    post_resp.status_code = 202
     post_resp.content = msgspec.json.encode(descriptor)
     post_resp.json.return_value = {}
 

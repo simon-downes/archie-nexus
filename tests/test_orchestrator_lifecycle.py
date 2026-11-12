@@ -4,7 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from archie_orchestrator.lifecycle import REPO_ROOT, start_session, stop_session
+from archie_orchestrator.docker import DockerError, RunningContainer
+from archie_orchestrator.lifecycle import (
+    REPO_ROOT,
+    prepare_start,
+    run_start,
+    start_session,
+    stop_session,
+)
 from archie_shared.schemas import GlobalConfig, NexusConfig
 
 # ---------------------------------------------------------------------------
@@ -246,57 +253,44 @@ def test_start_session_env_vars_in_command(config, workspace, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_stop_session_calls_stop_container(config, workspace):
-    """stop_session calls stop_container with the correct container name."""
-    from archie_shared.session import SessionDescriptor
-
-    fake_sessions = [
-        SessionDescriptor(
-            session_id="myproject-01abc12345",
-            container_name="archie-myproject-01abc12345",
-            port=32771,
-            raw_docker_status="Up 1 hour",
-        )
-    ]
-
+def test_stop_session_stops_by_name_without_docker_ps():
+    """stop_session stops the container by name; no docker ps lookup (082 D19)."""
     with (
-        patch("archie_orchestrator.lifecycle.list_sessions", return_value=fake_sessions),
+        patch("archie_orchestrator.docker.list_sessions") as mock_ls,
         patch("archie_orchestrator.lifecycle.stop_container") as mock_stop,
+        patch(
+            "archie_orchestrator.lifecycle._remove_empty_session_log", return_value=False
+        ) as mock_remove,
     ):
-        stop_session("myproject-01abc12345")
+        assert stop_session("myproject-01abc12345") is False
 
     mock_stop.assert_called_once_with("archie-myproject-01abc12345")
+    mock_ls.assert_not_called()
+    mock_remove.assert_called_once_with("myproject-01abc12345")
 
 
-def test_stop_session_not_found_raises_key_error():
-    """stop_session raises KeyError when session ID is not running."""
-    with patch("archie_orchestrator.lifecycle.list_sessions", return_value=[]):
-        with pytest.raises(KeyError, match="myproject-01abc12345"):
-            stop_session("myproject-01abc12345")
+def test_stop_session_removes_a_prompt_less_log(session_logs):
+    """A log with no prompt is removed and reported (D19a); one with a prompt is kept."""
+    w = session_logs
+    w.write("empty-01abc12345", [w.session_started()])
+    w.write("used-01abc12345", [w.session_started(), w.user("hi")])
+    with patch("archie_orchestrator.lifecycle.stop_container"):
+        assert stop_session("empty-01abc12345") is True
+        assert stop_session("used-01abc12345") is False
+    assert not (w.dir / "empty-01abc12345.jsonl").exists()
+    assert (w.dir / "used-01abc12345.jsonl").exists()
 
 
-def test_stop_session_docker_failure_propagates():
-    """RuntimeError from stop_container propagates out of stop_session."""
-    from archie_shared.session import SessionDescriptor
-
-    fake_sessions = [
-        SessionDescriptor(
-            session_id="myproject-01abc12345",
-            container_name="archie-myproject-01abc12345",
-            port=32771,
-            raw_docker_status="Up",
-        )
-    ]
-
+def test_stop_session_docker_failure_propagates_and_keeps_the_log():
+    """A failed docker stop propagates and the log is not touched."""
+    error = DockerError(command=["docker", "stop"], stderr="daemon busy", returncode=1)
     with (
-        patch("archie_orchestrator.lifecycle.list_sessions", return_value=fake_sessions),
-        patch(
-            "archie_orchestrator.lifecycle.stop_container",
-            side_effect=RuntimeError("docker stop failed"),
-        ),
+        patch("archie_orchestrator.lifecycle.stop_container", side_effect=error),
+        patch("archie_orchestrator.lifecycle._remove_empty_session_log") as mock_remove,
     ):
-        with pytest.raises(RuntimeError, match="docker stop failed"):
+        with pytest.raises(DockerError, match="daemon busy"):
             stop_session("myproject-01abc12345")
+    mock_remove.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +374,61 @@ def test_start_session_native_docker_error_unchanged(config, workspace, tmp_path
     )
     assert "Kiro startup failed" not in str(error)
     mock_stop.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# prepare_start / run_start split (082 D15)
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_start_validates_and_builds_without_running(config, workspace, tmp_path):
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.run_container") as mock_run,
+        patch("archie_orchestrator.lifecycle.wait_for_ready") as mock_wait,
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        prepared = prepare_start(workspace[0], config, backend="kiro")
+    mock_run.assert_not_called()
+    mock_wait.assert_not_called()
+    assert prepared.session_id.startswith("myproject-")
+    assert prepared.container_name == f"archie-{prepared.session_id}"
+    assert (prepared.workspace, prepared.backend) == ("myproject", "kiro")
+    assert prepared.command[:2] == ["docker", "run"]
+    assert f"ARCHIE_SESSION_ID={prepared.session_id}" in prepared.command
+    assert prepared.nexus_home == tmp_path / ".nexus"
+
+
+def test_prepare_start_rejects_bad_input_before_docker(config):
+    with patch("archie_orchestrator.lifecycle.check_image") as mock_check:
+        with pytest.raises(ValueError, match="not found"):
+            prepare_start("nonexistent", config)
+    mock_check.assert_not_called()
+
+
+def test_run_start_runs_the_prepared_command_and_returns_the_port(config, workspace, tmp_path):
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        prepared = prepare_start(workspace[0], config)
+    with (
+        patch("archie_orchestrator.lifecycle.run_container") as mock_run,
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="40123") as mock_wait,
+    ):
+        assert run_start(prepared) == 40123
+    mock_run.assert_called_once_with(prepared.command)
+    assert mock_wait.call_args.args == (prepared.container_name, prepared.command)
+
+
+def test_start_session_returns_running_container(config, workspace, tmp_path):
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.run_container"),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="9999"),
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        started = start_session(workspace[0], config)
+    assert isinstance(started, RunningContainer)
+    assert started.port == 9999
+    assert started.container_name == f"archie-{started.session_id}"
