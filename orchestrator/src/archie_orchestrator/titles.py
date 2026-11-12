@@ -27,7 +27,9 @@ from pathlib import Path
 
 from archie_shared.models import (
     BedrockOpenAIProvider,
+    BedrockProvider,
     ModelEntry,
+    OpenAIProvider,
     calculate_cost,
     get_model,
     load_models,
@@ -47,6 +49,7 @@ LATEST_REPLY_CHARS = 600
 REQUEST_TIMEOUT = 15.0
 """Seconds before a title request times out; the SDK retries once on 429/5xx."""
 RESPONSES_MAX_OUTPUT_TOKENS = 64
+CONVERSE_MAX_TOKENS = 40
 ERROR_MAX_CHARS = 300
 
 SYSTEM_PROMPT = """\
@@ -328,6 +331,67 @@ def _bedrock_openai(model_id: str, region: str, system: str, user: str) -> Compl
     return _responses_call(client, model_id, system, user)
 
 
+def _openai(model_id: str, system: str, user: str) -> Completion:
+    """The public OpenAI Responses API with the stored ``openai`` key or ``OPENAI_API_KEY``.
+
+    As ``agent/.../llm/openai_api.py`` ``_api_key``; these requests leave AWS.
+    """
+    import os
+
+    from archie_shared.credentials import get_credential
+    from openai import OpenAI
+
+    credential = get_credential("openai")
+    api_key = getattr(credential, "api_key", None) if credential else None
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("No OpenAI API key: run `archie auth login openai`")
+    client = OpenAI(api_key=api_key, max_retries=1, timeout=REQUEST_TIMEOUT)
+    return _responses_call(client, model_id, system, user)
+
+
+def _converse(model_id: str, region: str, system: str, user: str) -> Completion:
+    """One Bedrock Converse request with the stored ``bedrock`` keys or the AWS chain.
+
+    As ``agent/.../llm/bedrock.py`` ``_create_client``, with this module's timeout and
+    one retry.
+    """
+    import boto3
+    from archie_shared.credentials import get_credential
+    from botocore.config import Config
+
+    kwargs: dict = {
+        "region_name": region,
+        "config": Config(
+            connect_timeout=5,
+            read_timeout=REQUEST_TIMEOUT,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    }
+    credential = get_credential("bedrock")
+    if credential and credential.aws_access_key_id and credential.aws_secret_access_key:
+        kwargs["aws_access_key_id"] = credential.aws_access_key_id
+        kwargs["aws_secret_access_key"] = credential.aws_secret_access_key
+        if credential.aws_session_token:
+            kwargs["aws_session_token"] = credential.aws_session_token
+    client = boto3.client("bedrock-runtime", **kwargs)
+    response = client.converse(
+        modelId=model_id,
+        system=[{"text": system}],
+        messages=[{"role": "user", "content": [{"text": user}]}],
+        inferenceConfig={"maxTokens": CONVERSE_MAX_TOKENS},
+    )
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    usage = response.get("usage", {})
+    return Completion(
+        text="".join(block.get("text", "") for block in content),
+        input_tokens=usage.get("inputTokens", 0),
+        output_tokens=usage.get("outputTokens", 0),
+        cache_read_tokens=usage.get("cacheReadInputTokens", 0),
+        cache_write_tokens=usage.get("cacheWriteInputTokens", 0),
+    )
+
+
 def _complete(model: ModelEntry, default_region: str, system: str, user: str) -> Completion:
     """Send one title request to ``model`` (region: the provider's, else the default).
 
@@ -338,6 +402,10 @@ def _complete(model: ModelEntry, default_region: str, system: str, user: str) ->
     match model.provider:
         case BedrockOpenAIProvider(model_id=model_id, region=region):
             return _bedrock_openai(model_id, region or default_region, system, user)
+        case BedrockProvider(model_id=model_id, region=region):
+            return _converse(model_id, region or default_region, system, user)
+        case OpenAIProvider(model_id=model_id):
+            return _openai(model_id, system, user)
         case _:
             raise ValueError(f"Unsupported title model provider: {provider_name(model.provider)}")
 

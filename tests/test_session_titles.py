@@ -385,6 +385,98 @@ def test_a_provider_without_a_region_uses_global_region(fake_bedrock_openai):
 
 
 @pytest.mark.title_calls
+def test_openai_uses_the_stored_key(fake_bedrock_openai, monkeypatch):
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeClient)
+    monkeypatch.setattr(
+        "archie_shared.credentials.get_credential",
+        lambda name: SimpleNamespace(api_key="sk-test") if name == "openai" else None,
+    )
+    model = "openai-gpt-6-luna"
+    assert model in load_models()
+
+    result = Titler(lambda: _config(model=model)).generate(SID, UNTITLED)
+
+    [client] = _FakeClient.instances
+    assert client.kwargs == {"api_key": "sk-test", "max_retries": 1, "timeout": 15.0}
+    assert client.requests[0]["model"] == "gpt-6-luna"
+    assert client.requests[0]["reasoning"] == {"effort": "none"}
+    assert result.title == "Workspaces API"
+
+
+@pytest.mark.title_calls
+def test_openai_without_a_key_is_a_logged_error(monkeypatch):
+    monkeypatch.setattr("archie_shared.credentials.get_credential", lambda name: None)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = Titler(lambda: _config(model="openai-gpt-6-luna")).generate(SID, UNTITLED)
+
+    assert result.error == "RuntimeError: No OpenAI API key: run `archie auth login openai`"
+
+
+class _FakeBedrockRuntime:
+    def __init__(self):
+        self.client_kwargs: dict = {}
+        self.requests: list = []
+
+    def client(self, service, **kwargs):
+        assert service == "bedrock-runtime"
+        self.client_kwargs = kwargs
+        return self
+
+    def converse(self, **kwargs):
+        self.requests.append(kwargs)
+        return {
+            "output": {"message": {"content": [{"text": "Cloudflare "}, {"text": "WAF review"}]}},
+            "usage": {"inputTokens": 500, "outputTokens": 6, "cacheReadInputTokens": 0},
+        }
+
+
+@pytest.mark.title_calls
+def test_bedrock_converse_sends_one_request(monkeypatch):
+    import boto3
+
+    fake = _FakeBedrockRuntime()
+    monkeypatch.setattr(boto3, "client", fake.client)
+    monkeypatch.setattr(
+        "archie_shared.credentials.get_credential",
+        lambda name: SimpleNamespace(
+            aws_access_key_id="AKIA", aws_secret_access_key="secret", aws_session_token=None
+        ),
+    )
+    model = "bedrock-claude-haiku-4-5"
+
+    result = Titler(lambda: _config(model=model, region="eu-west-2")).generate(SID, UNTITLED)
+
+    assert fake.client_kwargs["region_name"] == "eu-west-2"  # Haiku's entry has no region
+    assert (
+        fake.client_kwargs["aws_access_key_id"],
+        fake.client_kwargs["aws_secret_access_key"],
+    ) == (
+        "AKIA",
+        "secret",
+    )
+    assert "aws_session_token" not in fake.client_kwargs
+    config = fake.client_kwargs["config"]
+    assert (config.read_timeout, config.retries["max_attempts"]) == (15.0, 2)
+    [request] = fake.requests
+    assert request == {
+        "modelId": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "system": [{"text": SYSTEM_PROMPT}],
+        "messages": [{"role": "user", "content": [{"text": render_input(UNTITLED)}]}],
+        "inferenceConfig": {"maxTokens": 40},
+    }
+    assert (result.title, result.input_tokens, result.output_tokens) == (
+        "Cloudflare WAF review",
+        500,
+        6,
+    )
+    haiku = load_models()[model].cost.rates[0]
+    assert result.cost == pytest.approx(500 * haiku.input / 1e6 + 6 * haiku.output / 1e6)
+
+
+@pytest.mark.title_calls
 def test_an_unsupported_provider_is_a_logged_error(caplog):
     catalog = {"local": ModelEntry(name="L", context=1000, provider=OllamaProvider(model_id="x"))}
 
