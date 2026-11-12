@@ -120,7 +120,7 @@ def test_full_session_indexes_every_table(session_logs, tmp_path):
     assert stats.files_changed == 1 and stats.errors == 0 and stats.skipped == 0
     # The session row is the one-off import's (082 D7); the fold doesn't write it.
     session = _rows(tmp_path, "SELECT * FROM sessions")[0]
-    assert (session["workspace"], session["name"], session["name_source"]) == ("proj", SID, "id")
+    assert (session["workspace"], session["name"]) == ("proj", f"id:{SID}")
     assert session["started_at"] == "2026-07-01T09:59:00+00:00"
 
     assert _count(tmp_path, "metrics_requests") == 4

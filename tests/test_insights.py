@@ -315,7 +315,7 @@ def test_session_detail_name_only_when_fixed(db):
 
 def test_a_model_title_is_shown_like_a_user_name(db, tmp_path):
     SessionStore(db_path(tmp_path)).update(
-        "beta-01k0000001", name="Beta model title", name_source="model"
+        "beta-01k0000001", name="Beta model title", name_source="llm"
     )
     assert insights.session_detail(db, "beta-01k0000001")["session"]["name"] == ("Beta model title")
     names = {s["session_id"]: s["name"] for s in insights.sessions(db, ALL)["sessions"]}

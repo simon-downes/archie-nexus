@@ -31,7 +31,7 @@ type SessionRecordStatus = Literal[
 
 type SessionBackend = Literal["native", "kiro"]
 
-type NameSource = Literal["id", "model", "user"]
+type NameSource = Literal["id", "llm", "user"]
 """Where a session's ``name`` came from: its ID, the title model, or the user."""
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"stopped", "exited", "failed"})
@@ -49,9 +49,10 @@ class SessionDescriptor(msgspec.Struct):
             session ID (see ``name_source``).
         status: Lifecycle and turn state (see ``SessionRecordStatus``).
         started_at: ISO 8601 UTC start time.
-        name_source: Where ``name`` came from: ``id`` (the session ID), ``model`` (a
-            title from the orchestrator's title model) or ``user`` (never overwritten by
-            the model).
+        name_source: Where ``name`` came from: ``id`` (the session ID), ``llm`` (a title
+            from the orchestrator's title model) or ``user`` (never overwritten by the
+            model). ``archie.db`` stores both as one prefixed ``name``; the record and
+            the API keep them apart.
         error: Start failure message, for ``failed`` sessions.
         question: The pending question while ``blocked``.
         unseen: True when a root turn ended since a client last cleared it.

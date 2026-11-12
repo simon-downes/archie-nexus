@@ -71,7 +71,7 @@ async def test_the_first_prompt_titles_the_session(log):
     await idle(tracker)
 
     current = tracker.live(SID)
-    assert (current.name, current.name_source) == ("Workspaces API", "model")
+    assert (current.name, current.name_source) == ("Workspaces API", "llm")
     assert published[-1] == current
     assert tracker.store.get(SID) == current
     [(session_id, title_input)] = titler.calls
@@ -83,7 +83,7 @@ async def test_the_first_prompt_titles_the_session(log):
 
 async def test_turn_ends_refresh_a_title_on_schedule(log):
     titler = FakeTitler()
-    tracker = _tracker(titler, record(SID, name="Old", name_source="model"))
+    tracker = _tracker(titler, record(SID, name="Old", name_source="llm"))
     called = []
 
     for turn in range(1, 27):
@@ -100,7 +100,7 @@ async def test_turn_ends_refresh_a_title_on_schedule(log):
 
 async def test_later_prompts_and_failed_turns_do_not_trigger(log):
     titler = FakeTitler()
-    tracker = _tracker(titler, record(SID, name="Old", name_source="model"))
+    tracker = _tracker(titler, record(SID, name="Old", name_source="llm"))
 
     for frame in (
         user_frame(turn=3),
@@ -141,7 +141,7 @@ async def test_titles_follow_the_agent_stream(log):
     stored = tracker.store.get(SID)
     assert (stored.name, stored.name_source, stored.status) == (
         "Workspaces API",
-        "model",
+        "llm",
         "exited",
     )
     await tracker.close()
@@ -197,15 +197,15 @@ async def test_a_rename_during_the_call_wins(log):
 @pytest.mark.parametrize("result", [None, "KEEP"])
 async def test_a_failure_or_keep_keeps_the_previous_title(log, result):
     titler = FakeTitler(result)
-    tracker = _tracker(titler, record(SID, name="Old", name_source="model"))
+    tracker = _tracker(titler, record(SID, name="Old", name_source="llm"))
     published = []
     tracker.add_listener(published.append)
 
     await tracker._on_frame(SID, turn_frame("complete", turn=3))
     await idle(tracker)
 
-    assert (tracker.live(SID).name, tracker.live(SID).name_source) == ("Old", "model")
-    assert [(p.name, p.name_source) for p in published] == [("Old", "model")]  # unseen only
+    assert (tracker.live(SID).name, tracker.live(SID).name_source) == ("Old", "llm")
+    assert [(p.name, p.name_source) for p in published] == [("Old", "llm")]  # unseen only
     assert len(titler.calls) == 1
     await tracker.close()
 
@@ -234,7 +234,7 @@ async def test_an_ended_session_is_titled_in_the_store(log):
     stored = tracker.store.get(SID)
     assert (stored.name, stored.name_source, stored.status) == (
         "Workspaces API",
-        "model",
+        "llm",
         "stopped",
     )
     assert published == [stored]
@@ -333,7 +333,7 @@ async def test_loading_an_untitled_ended_session_titles_it(log):
 
     assert response.status_code == 200
     stored = tracker.store.get(SID)
-    assert (stored.name, stored.name_source) == ("Workspaces API", "model")
+    assert (stored.name, stored.name_source) == ("Workspaces API", "llm")
     await tracker.close()
 
 
@@ -348,7 +348,7 @@ async def test_opening_the_web_transcript_titles_an_untitled_session(log):
     await tracker.close()
 
 
-@pytest.mark.parametrize("source", ["model", "user"])
+@pytest.mark.parametrize("source", ["llm", "user"])
 async def test_viewing_a_named_session_makes_no_call(log, source):
     titler = FakeTitler()
     tracker = _tracker(titler, record(SID, name="Named", name_source=source, **ENDED))
@@ -400,7 +400,7 @@ async def test_resetting_a_name_requests_a_title(log):
     await idle(tracker)
 
     current = tracker.live(SID)
-    assert (current.name, current.name_source) == ("Workspaces API", "model")
+    assert (current.name, current.name_source) == ("Workspaces API", "llm")
     await tracker.close()
 
 

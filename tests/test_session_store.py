@@ -79,8 +79,7 @@ def test_migrate_creates_schema_wal_and_lock(tmp_path):
         conn.close()
     assert {"sessions", "meta"} <= tables
     assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
-    # Migration 2 appends name_source and leaves the unused name_fixed in place.
-    assert sorted(columns) == sorted((*store_module.COLUMNS, "name_fixed"))
+    assert columns == list(store_module.COLUMNS)  # migration 2 dropped name_fixed
     assert mode == "wal"
 
 
@@ -102,7 +101,7 @@ def test_migrate_rejects_a_newer_schema(tmp_path):
         migrate(db)
 
 
-def test_migration_2_maps_name_fixed_to_name_source(tmp_path, monkeypatch):
+def test_migration_2_prefixes_names_and_drops_name_fixed(tmp_path, monkeypatch):
     db = db_path(tmp_path)
     monkeypatch.setattr(store_module, "MIGRATIONS", store_module.MIGRATIONS[:1])
     assert migrate(db) == 1
@@ -125,13 +124,18 @@ def test_migration_2_maps_name_fixed_to_name_source(tmp_path, monkeypatch):
         "Named",
         "user",
     )
-    assert rows["proj-01kx77jkz9"].name_source == "id"
+    assert (rows["proj-01kx77jkz9"].name, rows["proj-01kx77jkz9"].name_source) == (
+        "proj-01kx77jkz9",
+        "id",
+    )
     conn = sqlite3.connect(db)
     try:
         columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+        stored = conn.execute("SELECT name FROM sessions ORDER BY session_id").fetchall()
     finally:
         conn.close()
-    assert columns[-1] == "name_source"  # name_fixed stays, unused, for older readers
+    assert "name_fixed" not in columns and "name_source" not in columns
+    assert stored == [("user:Named",), ("id:proj-01kx77jkz9",)]
 
 
 def test_migration_1_alone_imports_logs_into_the_version_1_table(session_logs, tmp_path):
@@ -146,22 +150,44 @@ def test_migration_1_alone_imports_logs_into_the_version_1_table(session_logs, t
     assert [tuple(r) for r in rows] == [("alpha-01kx77jkz8", 0)]
 
 
-def test_a_pre_083_reader_and_writer_still_work_after_migration_2(tmp_path):
-    db = db_path(tmp_path)
-    migrate(db)
-    SessionStore(db).insert(record(SID, name="Mine", name_source="user"))
-    conn = sqlite3.connect(db)
-    try:
-        conn.execute(
-            "INSERT INTO sessions (session_id, workspace, backend, name, name_fixed, status, "
-            "started_at) VALUES ('proj-01kx77jkz9', 'proj', 'native', 'Old', 1, 'idle', "
-            "'2026-07-01T10:00:00+00:00')"
-        )
-        conn.commit()
-        old_reads = conn.execute("SELECT name, name_fixed FROM sessions").fetchall()
-    finally:
-        conn.close()
-    assert sorted(old_reads) == [("Mine", 0), ("Old", 1)]
+@pytest.mark.parametrize(
+    ("name", "source", "stored"),
+    [
+        (SID, "id", f"id:{SID}"),
+        ("Review PR 26", "user", "user:Review PR 26"),
+        ("Workspaces API", "llm", "llm:Workspaces API"),
+        ("llm: my notes", "user", "user:llm: my notes"),  # only the first prefix counts
+    ],
+)
+def test_names_are_stored_with_their_source_prefix(store, name, source, stored):
+    store.insert(record(SID, name=name, name_source=source))
+
+    with closing(sqlite3.connect(store.db)) as conn:
+        assert conn.execute("SELECT name FROM sessions").fetchone() == (stored,)
+    got = store.get(SID)
+    assert (got.name, got.name_source) == (name, source)
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [(SID, (SID, "id")), ("Old name", ("Old name", "user")), ("x:y", ("x:y", "user"))],
+)
+def test_names_without_a_known_prefix_still_read(store, stored, expected):
+    store.insert(record(SID))
+    with closing(sqlite3.connect(store.db)) as conn, conn:
+        conn.execute("UPDATE sessions SET name = ?", (stored,))
+    got = store.get(SID)
+    assert (got.name, got.name_source) == expected
+
+
+def test_update_keeps_the_stored_half_of_a_name(store):
+    store.insert(record(SID, name="Mine", name_source="user"))
+    renamed = store.update(SID, name="Renamed")
+    assert (renamed.name, renamed.name_source) == ("Renamed", "user")
+    resourced = store.update(SID, name_source="llm")
+    assert (resourced.name, resourced.name_source) == ("Renamed", "llm")
+    with pytest.raises(KeyError):
+        store.update("proj-01kx77jkz9", name="Nobody")
 
 
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):

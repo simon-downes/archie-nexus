@@ -846,7 +846,7 @@ class SessionTracker:
         record = await self.get(session_id)
         if record is None or record.name_source == "user":
             return
-        current = record.name if record.name_source == "model" else None
+        current = record.name if record.name_source == "llm" else None
         try:
             title_input = await asyncio.to_thread(
                 read_title_input, self.log_path(session_id), record.workspace, current
@@ -877,10 +877,10 @@ class SessionTracker:
         if record is not None:
             # No await between this check and the in-memory change in ``_update``.
             if record.name_source == "user" or (
-                record.name_source == "model" and record.name == title
+                record.name_source == "llm" and record.name == title
             ):
                 return
-            await self._update(session_id, name=title, name_source="model")
+            await self._update(session_id, name=title, name_source="llm")
             return
         updated = await asyncio.to_thread(self.store.set_model_name, session_id, title)
         if updated is not None:

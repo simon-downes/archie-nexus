@@ -42,7 +42,7 @@ def _invoke(*args):
 
 
 def test_stats_sessions_show_model_titles(home):
-    migrated_store(home).update("other-01k0000001", name="Model title", name_source="model")
+    migrated_store(home).update("other-01k0000001", name="Model title", name_source="llm")
     result = _invoke("sessions", "--since", "all")
     assert result.exit_code == 0, result.output
     assert "Model title" in result.output

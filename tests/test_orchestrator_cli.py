@@ -43,7 +43,7 @@ def test_session_rows_show_model_titles():
     from archie_cli.cli import _format_session_row
 
     [titled] = _make_sessions(("myproject-01abc12345", "idle", "Model title"))
-    titled.name_source = "model"
+    titled.name_source = "llm"
     assert _format_session_row(titled).split()[-2:] == ["Model", "title"]
 
 

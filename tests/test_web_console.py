@@ -137,7 +137,7 @@ async def test_sessions_page_columns_name_and_last_activity():
             last_activity_at="2026-07-01T12:34:56+02:00",
         ),
         record("plain-01abc12345"),
-        record("titled-01abc12345", name="Model title", name_source="model"),
+        record("titled-01abc12345", name="Model title", name_source="llm"),
     ]
 
     with serve(app, records=sessions):
