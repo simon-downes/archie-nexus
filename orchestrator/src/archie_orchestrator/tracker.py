@@ -437,6 +437,17 @@ class SessionTracker:
         merged.update(self._records)
         return _newest_first(merged.values())
 
+    async def last_started_by_workspace(self) -> dict[str, str]:
+        """The newest ``started_at`` per workspace, over stored and in-memory records.
+
+        A just-created record is in memory before its row is written, so both count.
+        """
+        latest = await asyncio.to_thread(self.store.last_started_by_workspace)
+        for record in self._records.values():
+            if record.started_at > latest.get(record.workspace, ""):
+                latest[record.workspace] = record.started_at
+        return latest
+
     # -- listeners -----------------------------------------------------------
 
     def add_listener(self, listener: Callable[[SessionDescriptor], None]) -> None:

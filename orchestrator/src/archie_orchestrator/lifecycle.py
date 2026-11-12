@@ -36,6 +36,7 @@ from archie_orchestrator.docker import (
     wait_for_ready,
 )
 from archie_orchestrator.mounts import resolve_mounts
+from archie_orchestrator.workspaces import resolve_workspace
 
 # orchestrator/src/archie_orchestrator/lifecycle.py → repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -114,22 +115,8 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     """
     if backend not in BACKENDS:
         raise ValueError(f"Invalid backend {backend!r}: expected 'native' or 'kiro'")
-    # 1. Resolve and validate workspace path
-    # Reject names with path separators or traversal sequences to prevent
-    # a user-supplied value from escaping workspace_root.
-    if "/" in workspace or "\\" in workspace or workspace in (".", ".."):
-        raise ValueError(f"Invalid workspace name '{workspace}': must be a single directory name.")
-    workspace_path = expand_workspace_root(config) / workspace
-    # Resolve and confirm the result is still under workspace_root
-    resolved = workspace_path.resolve()
-    workspace_root_resolved = expand_workspace_root(config).resolve()
-    if not str(resolved).startswith(str(workspace_root_resolved) + "/"):
-        raise ValueError(f"Invalid workspace name '{workspace}': resolves outside workspace_root.")
-    if not resolved.is_dir():
-        raise ValueError(
-            f"Workspace '{workspace}' not found under {expand_workspace_root(config)}.\n"
-            f"Expected: {workspace_path}"
-        )
+    # 1. Resolve and validate workspace path (no escaping workspace_root)
+    resolved = resolve_workspace(expand_workspace_root(config), workspace)
 
     # 2. Check image exists
     if not check_image(IMAGE_TAG):

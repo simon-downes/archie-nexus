@@ -136,6 +136,8 @@ JSON API:
 | `GET` | `/api/sessions/{id}/metrics` | metrics for one session |
 | WebSocket | `/api/sessions/{id}/stream` | bidirectional client/session stream |
 | `GET` | `/api/metrics` | aggregate metrics; optional `since=<ISO-8601>` |
+| `GET` | `/api/workspaces` | every workspace under `global.workspace_root` with its git repos, sorted by name (see [Workspaces](#workspaces)) |
+| `GET` | `/api/workspaces/{name}` | one workspace; 404 for a name that is missing, hidden or resolves outside `workspace_root` |
 | `GET` | `/api/auth/providers` | typed, secret-free provider definitions |
 | `GET` | `/api/auth/status` | redacted credential status |
 | `PUT` | `/api/auth/credential/{provider}` | replace one static provider credential |
@@ -154,6 +156,12 @@ Other root routes:
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`. The orchestrator’s session routes are the normal client-facing interface; it does not proxy the agent's `/status`, since the session record carries the status, model and pending question. Ended-session history from `/api/sessions/{id}/events` has the agent's format: the same NDJSON lines and the same 409 `{"error": "cursor_not_found", "cursor": ...}` for an unknown cursor.
 
 The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only `archie.db` (the metrics tables joined to the session records); each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
+
+### Workspaces
+
+`/api/workspaces` describes the directories directly under `global.workspace_root`, as `Workspace` (`shared/src/archie_shared/workspaces.py`): `name`, `live_sessions` (from the tracker's memory), `last_session_at` (the newest `started_at` over the stored and in-memory session records) and `repos`. A workspace's repos are the workspace directory itself and its direct children that hold a git repository; hidden directories, symlinked children and deeper directories are not scanned. Each repo has `path` (relative to the workspace, `""` for the workspace itself), `origin`, `branch` (null when detached), `commit` and `worktrees` (`path`, `branch`, `commit`, `missing`). A linked worktree is listed under its repo, never as a repo of its own. At most 100 repos per workspace and 100 worktrees per repo are listed.
+
+Everything is read from the filesystem on each request and nothing is stored; one workspace with four repos takes about 7 ms. The orchestrator never runs `git` here: sessions can write a repo's `.git/config`, and git runs commands named there (`core.fsmonitor`, filters) even for `git status`, so running git on the host would let a session execute host commands. `orchestrator/src/archie_orchestrator/workspaces.py` instead reads `HEAD`, loose refs, the first 8 MiB of `packed-refs`, the `origin` URL from the repo's own config (no includes or `insteadOf`; credentials, query and fragment are removed: all userinfo for HTTP(S), the password otherwise) and the worktree records. Those files are untrusted too: reads are confined to the workspace directory after resolving symlinks, accept only regular files and are size-capped. A file that can't be read or parsed gives null fields, or leaves out the repo or worktree it describes; it never fails the request. Paths git recorded inside a container (`/workspace/...`) are mapped to the host workspace; a worktree outside the workspace keeps its absolute host path. Repositories using the reftable ref format get a null `branch` and `commit`.
 
 ### Authentication API security
 
