@@ -705,8 +705,8 @@ a 400 for a name with a newline, a 404 for the removed `/status`, and the `/` pa
 Not verified: anything against real Docker or a live agent container (no Docker in this
 environment); the feed behind a real reverse proxy.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/25
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
