@@ -21,6 +21,12 @@ and shown at once (its pane says "Starting…" until the record leaves ``startin
 rename and stop act on the session on screen, and their errors show as a client row in
 its pane. Errors of app actions (listing workspaces, creating) show as notices.
 
+Parity features (D20, D21): ``!command`` runs in the session's container only when the
+profile is local (each controller is created with ``direct_shell=profile.local``);
+ctrl+c copies the selection, else the focused block; ctrl+g writes the message in
+``$EDITOR`` inside ``suspend()``, which stalls the whole event loop, so afterwards the
+feed and every live controller reconnect without reporting an outage.
+
 Threading model: Textual runs an asyncio event loop on the main thread; the feed and
 the controllers' receive loops run as tasks on the same loop, so their notifications
 update widgets directly.
@@ -31,16 +37,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import subprocess
 import tempfile
 import webbrowser
 from collections import OrderedDict
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any
 
 import msgspec
 from archie_shared.session import SessionBackend, SessionDescriptor, container_name
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.containers import Horizontal, Vertical
@@ -441,7 +449,11 @@ class ArchieApp(App):
         if controller is None:
             name = record.container_name or container_name(session_id)
             controller = SessionController(
-                self._client, session_id, name, is_live=lambda: self._record_live(session_id)
+                self._client,
+                session_id,
+                name,
+                is_live=lambda: self._record_live(session_id),
+                direct_shell=self.profile.local,
             )
             self._controllers[session_id] = controller
         else:
@@ -864,66 +876,103 @@ class ArchieApp(App):
 
     # --- External editor --------------------------------------------------------------
 
-    async def _recover_after_editor(self, controller: SessionController) -> None:
-        """Restore the on-screen session's stream after the blocking editor returns."""
-        try:
-            if controller.live and not controller.closing:
-                # A reconnect still running afterwards reports its outage itself.
-                await controller.force_reconnect()
-        except Exception as exc:  # noqa: BLE001 — surface recovery failures only
-            controller.client_error(f"Unable to reconnect after closing the editor: {exc}")
-        finally:
-            controller.quiet = False
-
     def action_editor(self) -> None:
-        """Open $EDITOR for message composition. Auto-submits on save."""
+        """ctrl+g: write the message in ``$EDITOR``; saving sends it (084 D21).
+
+        The input's text opens in the editor (``nano`` when ``EDITOR`` is unset) while
+        the app is suspended. Saved text is sent as if typed and joins the input's
+        history; an empty save clears the input; quitting without saving changes
+        nothing. Nothing opens while a turn runs or the input is disabled.
+
+        The suspended event loop stalls every connection, so afterwards the feed and
+        every live controller reconnect (``_recover_after_editor``).
+        """
         pane = self._pane
         controller = self.controller
-        if pane is None or controller is None or controller.turn_active:
+        if pane is None or controller is None or controller.turn_active or pane.input.disabled:
             return
-        controller.quiet = True
-
-        editor = os.environ.get("EDITOR", "nano")
-        inp = pane.input
-        current_text = inp.text
-
-        # Write current input to a tempfile
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, prefix="archie-")
+        command = shlex.split(os.environ.get("EDITOR", "")) or ["nano"]
+        original = pane.input.text
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", prefix="archie-", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(original)
+        path = Path(tmp.name)
+        # Expected stalls: no outage rows or connection errors while they recover.
+        stalled = [c for c in self._controllers.values() if c.started and c.following]
+        for stalled_controller in stalled:
+            stalled_controller.quiet = True
+        suspended = False
+        error: str | None = None
+        content: str | None = None
         try:
-            tmp.write(current_text)
-            tmp.close()
-            mtime_before = os.path.getmtime(tmp.name)
-
-            editor_error: str | None = None
-            with self.suspend():
-                try:
-                    subprocess.run([editor, tmp.name], check=False)
-                except FileNotFoundError:
-                    editor_error = f"Editor not found: {editor}"
-
-            if editor_error:
-                self.notice("Editor", editor_error, "error")
-                return
-
-            mtime_after = os.path.getmtime(tmp.name)
-            if mtime_after == mtime_before:
-                # Editor exited without saving — no-op
-                return
-
-            with open(tmp.name) as f:
-                content = f.read().strip()
-
-            if content:
-                inp.clear()
-                inp._history.append(content)
-                inp._history_idx = len(inp._history)
-                inp._draft = ""
-                inp.post_message(MessageInput.Submitted(content))
-            else:
-                inp.clear()
-        finally:
+            before = path.stat().st_mtime_ns
             try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-            self._spawn(self._recover_after_editor(controller))
+                with self.suspend():
+                    suspended = True
+                    try:
+                        subprocess.run([*command, str(path)], check=False)
+                    except OSError as exc:
+                        error = f"Could not run {command[0]}: {exc.strerror or exc}"
+            except SuspendNotSupported:
+                error = "This terminal can't hand over to an editor."
+            if error is None:
+                text = path.read_text(encoding="utf-8")
+                if path.stat().st_mtime_ns != before or text != original:
+                    content = text.strip()  # saved
+        finally:
+            path.unlink(missing_ok=True)
+            if suspended:
+                self._recover_after_editor(stalled)
+            else:
+                for stalled_controller in stalled:
+                    stalled_controller.quiet = False
+
+        if error is not None:
+            self.notice("Editor", error, "error")
+            return
+        if content is None:
+            return  # quit without saving
+        inp = pane.input
+        inp.clear()
+        if content:
+            inp._history.append(content)
+            inp._history_idx = len(inp._history)
+            inp._draft = ""
+            inp.post_message(MessageInput.Submitted(content))
+
+    def _recover_after_editor(self, controllers: list[SessionController]) -> None:
+        """Reconnect what the suspended event loop stalled (084 D21).
+
+        The feed is dropped and followed again, so its snapshot re-syncs the sidebar
+        and every controller; each stalled controller replaces its stream at once (a
+        send made meanwhile waits for the new one). They stay ``quiet`` until
+        reconnected or ``SEND_WAIT`` passes; a reconnect still running then reports
+        its outage as usual.
+
+        Args:
+            controllers: The controllers that were following a stream, set ``quiet``.
+        """
+        self._restart_feed()
+        for controller in controllers:
+            controller.force_reconnect()
+
+        async def unquiet() -> None:
+            try:
+                await asyncio.gather(
+                    *(controller.wait_connected() for controller in controllers),
+                    return_exceptions=True,
+                )
+            finally:
+                for controller in controllers:
+                    controller.quiet = False
+
+        self._spawn(unquiet())
+
+    def _restart_feed(self) -> None:
+        """Drop the sessions feed's connection and follow it again."""
+        if self._shutting_down:
+            return
+        if self._feed_worker is not None:
+            self._feed_worker.cancel()
+        self._feed_worker = self.run_worker(self._follow_feed(), group="feed", exit_on_error=False)

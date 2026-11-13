@@ -15,7 +15,7 @@ architecture, see [architecture.md](architecture.md).
 │ TUI              │ ◀──────────────────────────▶ │ Orchestrator     │
 │                  │                              │                  │
 │ User interface   │                              │ Session lifecycle│
-│ _apply_event()   │                              │ Transparent proxy│
+│ apply(event)     │                              │ Transparent proxy│
 │ Replay cursor    │                              │ Metrics index    │
 └──────────────────┘                              └────────┬─────────┘
                                                          │
@@ -34,12 +34,13 @@ architecture, see [architecture.md](architecture.md).
 
 ### TUI
 
-The TUI is the client the user sees. It:
+The TUI is the client the user sees. One window follows the orchestrator's sessions feed for its
+sidebar and keeps a `SessionController` for each session it shows. For each session it:
 
 - sends strict flat client commands;
 - receives live events over a WebSocket;
 - reads persisted history over HTTP;
-- applies history and live events through the same `_apply_event(event)`;
+- applies history and live events through the same `SessionController.apply(event)`;
 - renders user messages, assistant text, tools, child agents, and errors;
 - keeps the last applied persisted event ID as its client replay cursor;
 - calculates displayed token and cost totals from `llm_request` events.
@@ -226,14 +227,18 @@ There are no WebSocket clients yet, so the TUI normally learns this event throug
 history read. `session_started` records the log schema version, initial model key, and session
 start time.
 
-Once the record has left `starting`, the CLI starts the TUI with two URLs:
+Once the record has left `starting`, the CLI opens the TUI on the orchestrator's base URL,
+focused on the new session. The window follows the sessions feed
+(`GET /api/sessions/feed`) for its sidebar and gives each session it shows a
+`SessionController`, which connects once the feed says the session has left `starting`:
 
 ```text
 WebSocket: ws://<orchestrator>/api/sessions/<session-id>/stream
-HTTP base: http://<orchestrator>/api/sessions/<session-id>
+History:   http://<orchestrator>/api/sessions/<session-id>/events
 ```
 
-`archie attach` reaches the same connection flow for an already-running session.
+`archie attach` opens the same window on an already-running session; switching to another
+session in the sidebar starts the same connection flow for it.
 
 ## 5. Initial TUI connection
 
@@ -294,7 +299,7 @@ this client.
 
 ### Step 3: buffer live events
 
-Immediately after connecting, the TUI starts its WebSocket receive loop in buffering mode. Anything
+Immediately after connecting, the controller starts its WebSocket receive loop in buffering mode. Anything
 arriving from the agent is temporarily held rather than rendered. This includes the handshake and
 status events, and can include turn events if another attached client starts a turn at the same
 time.
@@ -309,15 +314,15 @@ GET /api/sessions/<session-id>/events
 
 For a new session, the response normally contains only `session_started`. For an existing session,
 it contains the complete persisted history. Each NDJSON line is decoded through the same public
-event decoder used for live events and passed to `_apply_event(event)`.
+event decoder used for live events and passed to `apply(event)`.
 
-The TUI records every applied persisted event ID in a deduplication set. Its cursor advances only
-when `_apply_event()` accepts a persisted event; live-only events never advance it.
+The controller records every applied persisted event ID in a deduplication set. Its cursor advances
+only when `apply()` accepts a persisted event; live-only events never advance it.
 
 ### Step 5: apply the buffered live events
 
 After the history read succeeds, the TUI leaves buffering mode and applies the buffered WebSocket
-events through `_apply_event()`. Events already applied from history are ignored by event ID or,
+events through `apply()`. Events already applied from history are ignored by event ID or,
 for assistant text, by exact request identity.
 
 The connection order is therefore:
@@ -326,7 +331,7 @@ The connection order is therefore:
 1. Subscribe to live events
 2. Buffer anything received
 3. Read and apply persisted history
-4. Replay buffered live events through _apply_event(), deduplicated by identity
+4. Replay buffered live events through apply(), deduplicated by identity
 5. Continue applying new live events directly
 ```
 
@@ -348,7 +353,7 @@ The TUI:
 
 1. marks the turn as active;
 2. disables the input;
-3. shows a waiting indicator;
+3. shows the activity line (`Thinking…`);
 4. sends a flat WebSocket command.
 
 The command is:
@@ -585,8 +590,9 @@ the turn's persisted event sequence.
 
 ## 10. How the TUI applies the events
 
-The TUI uses one `_apply_event(event)` path for events received from both live
-WebSocket delivery and HTTP history reads. Each event goes through three steps:
+The TUI's `SessionController` (`cli/src/archie_cli/tui/session.py`) uses one `apply(event)` path
+for events received from both live WebSocket delivery and HTTP history reads. Each event goes
+through three steps:
 
 1. **Deduplicate.** An event ID that has already been applied is dropped, so an event received
    once through a history read and once through live delivery is applied once. A persisted
@@ -594,9 +600,13 @@ WebSocket delivery and HTTP history reads. Each event goes through three steps:
 2. **Reduce.** `TranscriptBuilder.apply(event)` in `archie_shared.transcript` updates the
    transcript model and returns the `Change` records the event caused (`append`, `replace`,
    `append_text`, `remove`).
-3. **Render.** The main conversation view and every open popup apply those changes to their
-   widgets. Then the app runs root-only client effects: the status bar, the throbber, and
-   turn state.
+3. **Render.** The controller updates its root-only client state (accounting and status-bar
+   values, the activity word, turn state and the pending question) and reports the changes to
+   its listener, the `SessionPane` of the session on screen. The pane applies them to the
+   conversation view and every open tool or subagent view, then shows the status bar, the
+   activity line and the input state. A controller whose session is not on screen has no
+   listener and keeps applying events to its model; a pane attached later rebuilds its rows
+   from the model, so switching back needs no refetch.
 
 The orchestrator's web viewer uses the same `TranscriptBuilder`, so the event rules below apply
 to both clients. There is no second reducer or separate replay schema. The model holds data only:
@@ -651,20 +661,21 @@ first tool call (or an orphan result), so text-only iterations have no empty gro
 Child events, which have a non-null `scope` and `subagent_index`, belong to the `task` tool call
 whose `tool_use_id` is their scope. The builder keeps each child as a subagent node under that
 tool, with its own transcript items, status, activity and cost. The main view shows a child only
-as a subagent row under its `task` tool. The child's transcript appears in the subagent popup.
+as a subagent row under its `task` tool. The child's transcript appears in the subagent view.
 
 ### The model and its views
 
 The model keeps every row of the session. The TUI's `TranscriptView` mounts only a window of
-about 200 top-level rows. Scrolling to either edge pages earlier or later rows in, keeping the
+about 40 top-level rows (`WINDOW_ROWS`). Scrolling to either edge pages earlier or later rows in, keeping the
 row at the edge in place, and boundary rows show how many rows are hidden. Live rows are mounted
 while the window shows the latest rows. While you read history, they only increase the hidden
 count below.
 
-Clicking a tool row opens a `ToolDetailScreen` with the call's full input and result. Clicking a
-subagent row opens a `SubagentScreen` with the child's transcript, in its own `TranscriptView`.
-Both are modal screens that read live model nodes, so they update as events arrive. A breadcrumb
-line names the levels above the popup. Escape, or a click outside the popup, closes one level.
+Clicking a tool row opens a `ToolDetailView` with the call's full input and result. Clicking a
+subagent row opens a `SubagentView` with the child's transcript, in its own `TranscriptView`.
+Both open inside the session pane, in the transcript's place, on a per-pane stack, and the pane
+feeds them every batch of changes, so they update as events arrive. A crumb line names the
+levels open. Escape closes one level; closing the last shows the transcript where it was left.
 
 ### Accounting
 
@@ -679,7 +690,7 @@ by the agent in each request event.
 
 `turn_complete`, `turn_error`, or `turn_interrupted` for a root turn ends the local turn display,
 removes temporary widgets, and re-enables input. A scoped terminal event updates only the matching
-subagent node's status, which its row and any open popup show. Only one of these persisted terminal
+subagent node's status, which its row and any open subagent view show. Only one of these persisted terminal
 events should exist for an accepted scope and turn, except when the storage append path itself has
 failed.
 
@@ -774,19 +785,33 @@ the cursor still points to `iteration_start`.
 
 ### Reconnect sequence
 
-After a lost connection, the TUI retries with backoff for up to roughly 30 seconds:
+After a lost connection, the session's controller retries with a 0.5, 1, 2, 4, then 8 s back-off
+(the last delay repeating) for as long as the TUI's sessions feed says the session is live. Each
+attempt that succeeds runs:
 
 ```text
 1. Open a new WebSocket
 2. Start buffering new live frames
 3. Receive a new handshake and session_status
 4. GET /events?after=<last-persisted-event-id>
-5. Apply missed persisted events in log order through _apply_event(event)
-6. Flush buffered live events through _apply_event(event), deduplicated by event ID and request identity
+5. Apply missed persisted events in log order through apply(event)
+6. Flush buffered live events through apply(event), deduplicated by event ID and request identity
 7. Resume direct live processing
 ```
 
-The new handshake does not replace or advance the history cursor.
+The new handshake does not replace or advance the history cursor. A failed connect or history
+read counts as one more attempt.
+
+Retrying stops when the stream closes with code 4004 (the orchestrator has no such session; a
+later feed snapshot that still lists the session starts it again) or when the feed reports the
+session ended, after which the controller reads `/events` once more and keeps the transcript. While the orchestrator itself is down the feed is lost too: it reconnects forever
+with the same back-off, and each new snapshot re-syncs the sidebar and restarts any stream that is
+down, so a restarted orchestrator is picked up without user action. The session on screen shows
+one `Connection lost; reconnecting…` row per outage; sessions in the background retry silently.
+
+After the external editor (ctrl+g), which suspends the whole TUI, the feed and every followed
+stream are replaced at once rather than waiting for them to fail, and that reconnect adds no
+outage row.
 
 ### Text deltas lost during disconnection
 
@@ -806,7 +831,7 @@ The TUI reconstructs the correct final conversation even though it cannot reprod
 character-by-character animation.
 
 If buffered post-reconnect deltas belong to a request whose `assistant_message` was already found in
-the history read, `_apply_event()` suppresses those deltas using the finalized request-key map.
+the history read, `apply()` suppresses those deltas using the finalized request-key map.
 
 ### Unknown cursor
 
@@ -890,7 +915,10 @@ Input beginning with `!` is handled entirely by the host-side TUI. It does not b
 command, enter the LLM/tool loop, use an HTTP shell route, or create a public event.
 
 The TUI removes the prefix and executes the command locally with `docker exec`, using `/workspace`
-inside the session container as the working directory:
+inside the session container as the working directory. `docker exec` on the client's machine only
+reaches containers of a local orchestrator, so the TUI runs `!` commands only on the default
+profile with no `ARCHIE_HOST`; on any other profile it shows a client-only error row and runs
+nothing:
 
 ```text
 TUI ──docker exec──▶ session container
@@ -1037,7 +1065,7 @@ The following rules are useful when reading logs, debugging the TUI, or changing
    `(scope, subagent_index, turn, iteration, request_id)`; there is no cumulative request-ID list.
 6. **The client replay cursor names only persisted events.** Never use a handshake, status, delta, or
    error-notice ID as `after=`.
-7. **One `_apply_event(event)` path handles live and history events.** Event-ID and
+7. **One `apply(event)` path handles live and history events.** Event-ID and
    request-key deduplication makes overlap safe.
 8. **`llm_request` is the accounting ledger.** Sum it by unique event ID; do not derive historical
    cost from current prices.
@@ -1063,7 +1091,7 @@ CONNECT
 TUI ──WebSocket──▶ orchestrator ──WebSocket──▶ agent
 agent ──handshake, session_status (live-only)──▶ TUI buffer
 TUI ──GET /events──▶ orchestrator ──GET /events──▶ agent
-agent ──persisted NDJSON history──▶ TUI _apply_event(event)
+agent ──persisted NDJSON history──▶ TUI apply(event)
 TUI ──flush deduplicated live buffer──▶ rendered session
 
 PROMPT

@@ -1,6 +1,6 @@
 # 084 — Multi-session TUI
 
-Status: building
+Status: reviewing
 Branch: build-it/084-multi-session-tui (base: main @ b1edcf9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/084-multi-session-tui
 
@@ -481,7 +481,7 @@ Tests and when they change:
   `test_model_switch.py` passes; full suite 5401 passed; Ruff clean; screenshots in
   `/tmp/084-m7/` (synthetic) inspected.
 
-### [ ] M8 — Direct shell, editor, copy and docs
+### [x] M8 — Direct shell, editor, copy and docs
 
 - **Approach:** D20, D21. `!` shell and the editor through the controller/pane; docs:
   `README.md`, `docs/architecture.md` (TUI sections and the `_apply_event` mentions),
@@ -491,7 +491,13 @@ Tests and when they change:
 - **Deliverable:** parity with the old TUI's remaining features.
 - **Verify:** full suite; Ruff; `rg -n "quit_screen|throbber|models_provider|DetailScreen"
   cli tests` finds nothing.
-- **Outcome:**
+- **Outcome:** `!` runs only when `ProfileInfo.local` (else a client error row); ctrl+g
+  edits the input in `$EDITOR` (split with `shlex`) and, as on main, sends the saved text;
+  afterwards the feed restarts and every following controller reconnects quietly (no
+  outage rows); copy unchanged. Docs: README "Terminal UI", architecture "Terminal UI" plus
+  lifecycle/data-flow/event-layer fixes, the protocol walkthrough and event spec. Evidence:
+  full suite 5411 passed; Ruff clean; the stale-name `rg` finds nothing; new shell, copy and
+  editor tests 5/5 runs.
 
 ## Deviations
 
@@ -550,6 +556,9 @@ CI: pending
 
 ## Follow-ups
 
+- `archie attach` with no ID and `archie start` with no workspace ignore `ARCHIE_HOST` when
+  picking the URL (as on main), while `ProfileInfo` honours it, so the label and `!` can
+  disagree with the orchestrator actually used.
 - Model, first message and background options in the new-session dialog (roadmap item 5).
 - A session browser for ended sessions.
 - Web client parity (roadmap item 6).

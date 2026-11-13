@@ -7,6 +7,11 @@ metrics, the pending question, the ``!`` direct shell, the client-only timeline
 entries (turn status, client errors, shell output), and the message input's draft and
 history while no view shows the session.
 
+Direct shell (084 D20, D21): ``!command`` runs ``docker exec`` on this machine, so it
+only reaches a local orchestrator's containers. A controller created with
+``direct_shell=False`` (a remote profile) answers ``!`` with a client entry and runs
+nothing.
+
 It reports what changed to at most one attached ``SessionListener`` (the widgets that
 show the session). The listener reads the rest from the controller's attributes, so a
 view attached later can render the current state without replaying events.
@@ -21,7 +26,9 @@ Connection rule (084 D9): a lost stream (or a failed connect) is retried with a
 record) says so and ``end`` was not called. A 4004 close (the orchestrator has no such
 session) stops at once. Each outage adds one ``Connection lost; reconnecting…`` client
 entry, and only while a view is attached (background controllers retry silently); a
-reconnect replays ``/events`` after the cursor to fill the gap.
+reconnect replays ``/events`` after the cursor to fill the gap. ``force_reconnect``
+replaces a stream the host stalled (the app suspended for an external editor); while
+``quiet`` is set, that outage adds no entry.
 """
 
 from __future__ import annotations
@@ -60,6 +67,12 @@ SHELL_MAX_LINES = 10_000
 
 SEND_WAIT = 15.0
 """Seconds a send waits for a running reconnect before it fails."""
+
+SHELL_NOT_LOCAL_TEXT = (
+    "! commands need a local orchestrator: they run docker exec on this machine, "
+    "and this window is connected to a remote one."
+)
+"""The client entry for a ``!`` command on a remote profile (084 D21)."""
 
 RECONNECTING_TEXT = "Connection lost; reconnecting…"
 """The client entry an attached view gets once per outage."""
@@ -235,6 +248,7 @@ class SessionController:
     Attributes:
         session_id: The orchestrator's id for the session (routing).
         container_name: The session's container, for ``!`` commands.
+        direct_shell: ``!`` commands may run (the orchestrator is local, 084 D20).
         ws: The live stream, or None before the first connect.
         builder: The transcript model.
         locals: Client-only timeline entries, oldest first.
@@ -257,7 +271,7 @@ class SessionController:
         question: The pending question, if any.
         answer_in_flight: Id of the question an answer is being sent for.
         shell_active: A ``!`` command is running.
-        quiet: Suppress connection errors (the host is suspended).
+        quiet: Suppress connection errors and outage entries (the host was suspended).
         reconnecting: A reconnect attempt is running.
         started: ``start`` was called.
         live: The session is followed on its stream (False for an ended session,
@@ -278,6 +292,7 @@ class SessionController:
         container_name: str,
         *,
         is_live: Callable[[], bool] | None = None,
+        direct_shell: bool = True,
     ) -> None:
         """Create a controller; nothing connects until ``start``.
 
@@ -286,10 +301,13 @@ class SessionController:
             session_id: The session to follow.
             container_name: The session's container, for ``!`` commands.
             is_live: Whether the session's record says it is live; None means always.
+            direct_shell: Whether ``!`` commands run; False on a remote profile, where
+                ``docker exec`` can't reach the session's container.
         """
         self._client = client
         self.session_id = session_id
         self.container_name = container_name
+        self.direct_shell = direct_shell
         self.ws: WSClient | None = None
         self.listener: SessionListener | None = None
 
@@ -683,10 +701,17 @@ class SessionController:
     # --- User actions -------------------------------------------------------------
 
     def submit(self, content: str) -> None:
-        """Handle submitted input: a ``!`` command, an answer, or a new message."""
+        """Handle submitted input: a ``!`` command, an answer, or a new message.
+
+        A ``!`` command runs only with ``direct_shell``; otherwise it adds a client
+        entry saying why (084 D21).
+        """
         if content.startswith("!"):
             command = content[1:].strip()
             if not command:
+                return
+            if not self.direct_shell:
+                self.client_error(SHELL_NOT_LOCAL_TEXT)
                 return
             if self.shell_active:
                 self.client_error("Shell command already running")
@@ -1031,12 +1056,16 @@ class SessionController:
         """True while the stream should be followed: live and not closing."""
         return self.live and not self.closing and self.is_live()
 
-    def _schedule_reconnect(self) -> None:
-        """Start a background reconnect unless one runs or the session isn't live."""
+    def _schedule_reconnect(self, *, fresh: bool = False) -> None:
+        """Start a background reconnect unless one runs or the session isn't live.
+
+        Args:
+            fresh: Close the current stream first and try at once (``force_reconnect``).
+        """
         if self.reconnecting or not self.following:
             return
         self.reconnecting = True
-        task = asyncio.create_task(self._reconnect())
+        task = asyncio.create_task(self._reconnect(fresh=fresh))
         self._reconnect_task = task
 
         def clear_reconnect_task(done: asyncio.Task) -> None:
@@ -1060,12 +1089,17 @@ class SessionController:
 
         Starts a reconnect if none runs and waits up to ``SEND_WAIT`` seconds for it.
         """
-        if self.ws is not None and self.ws.connected:
-            return True
+        if not self.reconnecting and self.ws is not None and self.ws.connected:
+            return True  # (a stream being replaced may still report connected)
         self._schedule_reconnect()
-        return await self._wait_connected(SEND_WAIT)
+        return await self.wait_connected(SEND_WAIT)
 
-    async def _wait_connected(self, timeout: float) -> bool:
+    async def wait_connected(self, timeout: float = SEND_WAIT) -> bool:
+        """Wait up to ``timeout`` seconds for a running reconnect to finish.
+
+        Returns:
+            True when the stream is connected and no reconnect runs.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while self.reconnecting and not self.closing and loop.time() < deadline:
@@ -1077,18 +1111,19 @@ class SessionController:
             raise RuntimeError("Not connected")
         return self.ws
 
-    async def force_reconnect(self) -> bool:
+    def force_reconnect(self) -> None:
         """Replace the stream with a fresh connection (after the host was suspended).
 
         A suspended event loop may leave the socket reporting OPEN after its
-        keepalive expired, so the current connection is not trusted. Waits up to
-        ``SEND_WAIT`` seconds; a reconnect still running after that carries on.
+        keepalive expired, so the current connection is not trusted: the reconnect
+        closes it and tries at once, then backs off as usual. It is under way when this
+        returns, so a send made afterwards waits for the new stream. Does nothing for a
+        controller that was not started, no longer follows its stream, or already
+        reconnects. ``wait_connected`` waits for the outcome.
         """
-        if not self.reconnecting:
-            await self._cancel_receive()
-            await self._disconnect()
-            self._schedule_reconnect()
-        return await self._wait_connected(SEND_WAIT)
+        if not self.started or self.reconnecting or not self.following:
+            return
+        self._schedule_reconnect(fresh=True)
 
     def _report_outage(self) -> None:
         """Add the outage's one client entry, if a view is attached (084 D9)."""
@@ -1097,7 +1132,7 @@ class SessionController:
         self._outage_reported = True
         self.client_error(RECONNECTING_TEXT)
 
-    async def _reconnect(self) -> bool:
+    async def _reconnect(self, *, fresh: bool = False) -> bool:
         """Reconnect with back-off and resync through ``/events?after=<cursor>``.
 
         Retries with ``RECONNECT_DELAYS`` (the last repeating) while ``following``;
@@ -1105,19 +1140,28 @@ class SessionController:
         about once. On success the receive loop restarts and missed events replay,
         deduplicated by event id.
 
+        Args:
+            fresh: Close the current stream first and make the first attempt at once.
+
         Returns:
             True once reconnected; False when the session stopped being live.
         """
         attempt = 0
+        waits = 0
         try:
+            if fresh:
+                await self._cancel_receive()
+                await self._disconnect()
             while self.following:
-                delay = self.RECONNECT_DELAYS[min(attempt, len(self.RECONNECT_DELAYS) - 1)]
+                if not (fresh and attempt == 0):
+                    delay = self.RECONNECT_DELAYS[min(waits, len(self.RECONNECT_DELAYS) - 1)]
+                    waits += 1
+                    await asyncio.sleep(delay)
+                    if not self.following:
+                        break
+                    self._outage = True
+                    self._report_outage()
                 attempt += 1
-                await asyncio.sleep(delay)
-                if not self.following:
-                    break
-                self._outage = True
-                self._report_outage()
                 try:
                     ws = await self._client.stream(self.session_id)
                 except Exception as e:  # noqa: BLE001 — retry on any connect failure

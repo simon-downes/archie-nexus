@@ -437,7 +437,7 @@ KEYS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("esc esc", "clear the input"),
             ("alt+m", "change model"),
             ("ctrl+c", "copy the selection or the focused block"),
-            ("ctrl+g", "write the message in $EDITOR"),
+            ("ctrl+g", "write the message in $EDITOR (saving sends it)"),
             ("ctrl+x", "stop the subagent shown in a subagent view"),
         ),
     ),

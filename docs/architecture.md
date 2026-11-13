@@ -8,6 +8,7 @@ This document describes the implementation currently in the repository. Code and
 - [Runtime topology and lifecycle](#runtime-topology-and-lifecycle)
 - [Host HTTP API](#host-http-api)
 - [Turn and data flow](#turn-and-data-flow)
+- [Terminal UI](#terminal-ui)
 - [Event layers](#event-layers)
 - [Event specification](event-spec.md) — canonical event catalog, delivery class, and replay rules
 - [Logs, accounting, and metrics](#logs-accounting-and-metrics)
@@ -47,7 +48,7 @@ AWS Bedrock / OpenAI API / Ollama / local workspace
 3. `archie start <workspace>` asks `POST /api/sessions` for a workspace directory below `global.workspace_root` (default `~/dev`). `archie start --kiro` adds `"backend": "kiro"`, which runs the session on Kiro CLI (see [kiro.md](kiro.md)). The request returns 202 with a `starting` session record; the CLI then polls `GET /api/sessions/{id}` every 0.5 s, up to 60 s, behind a terminal-aware activity status until the status leaves `starting`. A `failed` start prints the stored `error`, another ended status prints `Session ended during startup (<status>)`, and a timeout leaves the session running; all three exit 1.
 4. Before responding, the orchestrator validates the single directory name and the image, creates a session ID and inserts the `starting` record, so bad input (400) and a missing image (500) are still reported synchronously. In the background it runs a container, publishes container port 8080 on an ephemeral localhost port, and waits for the agent's `/status` to succeed (up to 30 seconds; 45 for Kiro sessions, which also get `ARCHIE_BACKEND=kiro`). The session tracker then follows the agent's `/stream`, and the agent's first `session_status` makes the record `idle`. A start that fails or times out makes it `failed`, with the message in `error`.
 5. The CLI connects through the orchestrator’s session routes. The orchestrator looks up the session's agent port in the tracker's memory, without calling Docker, and proxies to it.
-6. `archie stop` calls `DELETE /api/sessions/{session_id}`. The record becomes `stopping`, the container is stopped by name, and the response is the `stopped` record. The attached TUI closes its receive/reconnect tasks and WebSocket before requesting deletion; backend disconnects during this ordered teardown are handled as expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or the session record, except that a session that never received a prompt leaves neither. A container that goes away without a `DELETE` makes the record `exited`. After an orchestrator restart, the tracker reconciles the stored records with the running containers (see [Session records and the tracker](#session-records-and-the-tracker)).
+6. `archie stop` calls `DELETE /api/sessions/{session_id}`. The record becomes `stopping`, the container is stopped by name, and the response is the `stopped` record. Clients see the `stopping` and `stopped` records on the feed; the TUI stops following a session's stream and stops reconnecting once its record has ended, so the disconnect during teardown is expected transport loss. Containers use `--rm`; stopping/removing a container does not remove the host session JSONL log or the session record, except that a session that never received a prompt leaves neither. A container that goes away without a `DELETE` makes the record `exited`. After an orchestrator restart, the tracker reconciles the stored records with the running containers (see [Session records and the tracker](#session-records-and-the-tracker)).
 
 ### Session records and the tracker
 
@@ -203,13 +204,24 @@ A user message follows this path:
    "image omitted" note. Ollama is always text-only. Inside exec, `read` returns the caption text.
 5. The orchestrator's metrics sync (every 15 s, plus on each insights page and `archie stats`
    run) tails the session logs into the metrics tables of `archie.db`. It never touches the relay.
-6. The TUI applies live and stored events through one `_apply_event(event)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity. Behind that path, the shared `TranscriptBuilder` (`archie_shared.transcript`), which the web viewer also uses, reduces events into the transcript model; see [How the TUI applies the events](session-protocol-walkthrough.md#10-how-the-tui-applies-the-events).
+6. The TUI's `SessionController` applies live and stored events through one `apply(event)` path. On connection or reconnect it opens the stream, buffers its frames, requests `/events?after=<last-applied-persisted-id>` (the whole log on first load, and again after a 409), then applies the buffered live events, reconciled by event ID and exact assistant request identity. Behind that path, the shared `TranscriptBuilder` (`archie_shared.transcript`), which the web viewer also uses, reduces events into the transcript model; see [How the TUI applies the events](session-protocol-walkthrough.md#10-how-the-tui-applies-the-events).
 
 On a Kiro session (`ARCHIE_BACKEND=kiro`), step 4 runs in `KiroHarness` instead: Kiro CLI calls
 the model over ACP, Archie's tools run in an in-process MCP server, and the ACP stream is
 translated into the same canonical events. See [kiro.md](kiro.md).
 
 The orchestrator WebSocket proxy is intended to be transparent: it forwards client text to the agent and agent text/binary frames back to the client without inspecting them.
+
+## Terminal UI
+
+The TUI (`cli/src/archie_cli/tui/`) is one window per orchestrator profile. `archie start` and `archie attach` build an `HttpOrchestrator` for the profile's URL and a `ProfileInfo` (sidebar label, web link, and `local`: true only for the default profile with no `ARCHIE_HOST`), and run `ArchieApp` focused on a session, or on the newest live one when `attach` gets no ID.
+
+- **`OrchestratorClient`** (`client.py`) is the only way the window reaches the orchestrator: the sessions feed (`GET /api/sessions/feed`, parsed from server-sent events), `GET /events` (a 409 raises `CursorNotFound`), the session WebSocket, `GET`/`PATCH`/`DELETE /api/sessions/{id}`, `POST /api/sessions` and `GET /api/workspaces`. `HttpOrchestrator` implements it over HTTP; tests use a fake (`tests/tui_fakes.py`). A feed that sends no byte for 40 s (the server pings after 15 s of silence) counts as dead.
+- **`ArchieApp`** (`app.py`) follows the feed, which alone drives the sidebar: workspace bands sorted by name, sessions oldest first, each row with its status glyph, name, age and `location` (repo and branch). Ended sessions are hidden unless on screen. The feed reconnects forever with a 0.5 → 8 s back-off; each snapshot replaces every record and re-syncs the controllers, and an on-screen session missing from it is fetched on its own (a 404 shows it as ended). A `session` event for a session that isn't on screen may post a notice (it ended or failed to start, asks a question, failed a turn, or has a new reply); the on-screen session's `unseen` is cleared with `PATCH`. The app keeps a `SessionController` per visited session, at most five, evicting the least recently shown one that has no `!` command running and no answer being sent. Switches run one at a time under a lock, and a switch overtaken by a newer one does nothing.
+- **`SessionController`** (`session.py`) holds one session's client state with no widgets: the stream and its reconnect, the replay cursor and event dedup, the `TranscriptBuilder`, accounting and status-bar values, turn state, the pending question, the `!` shell, client-only timeline entries (turn status, client errors, shell output, each anchored after the node that was last when it was added), and the input's draft and history. It connects once its record is live and has left `starting`; an ended session only loads its log. History and live frames take the same `apply(event)` path, described under [Turn and data flow](#turn-and-data-flow). A lost stream is retried with a 0.5 → 8 s back-off while the feed says the session is live; a 4004 close or an ended record stops it. An outage adds one `Connection lost; reconnecting…` row to the session on screen; background controllers retry silently.
+- **`SessionPane`** (`pane.py`) is the view of the on-screen controller, and only that session has one mounted. `attach` renders the controller's current state (the transcript rebuilt from the builder's root nodes with the client entries after their anchors, then status, question and turn) and then follows its changes as its `SessionListener`; `detach` hands the draft and history back. Tool and subagent views open on a per-pane stack in the transcript's place and follow live updates; esc pops them.
+- Dialogs (new session, rename, stop, keys, quit) and the command palette act through the client; a failed session action shows as a client row in its pane, a failed app action as a notice. Quitting closes the window and leaves every session running.
+- `!command` runs `docker exec` on the client's machine, so a controller runs it only when the profile is `local`; otherwise it adds a client row. ctrl+g runs `$EDITOR` inside Textual's `suspend()`, which stalls the whole event loop, so afterwards the feed is reopened and every following controller replaces its stream at once, without outage rows for it.
 
 ## Event layers
 
@@ -245,7 +257,7 @@ session totals without changing the active conversation context display.
 
 `GET /events` returns ordered persisted NDJSON. Its optional `after` parameter is the client's last
 applied persisted event ID; live-only frames never advance that cursor. The TUI applies history
-and live frames through `_apply_event(event)`; both paths deduplicate by event ID,
+and live frames through `SessionController.apply(event)`; both paths deduplicate by event ID,
 and the shared `TranscriptBuilder` reconciles streamed text by request identity.
 
 A connect sends one live-only `handshake` containing protocol and session identity, followed by

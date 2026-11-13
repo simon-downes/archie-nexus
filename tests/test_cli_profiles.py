@@ -173,9 +173,14 @@ def test_profile_info_follows_the_local_profile_rule(monkeypatch):
         "gpu-box", "https://archie.example/", False
     )
     monkeypatch.setenv("ARCHIE_HOST", "10.0.0.9:7700")
-    assert _profile_info(None, OrchestratorProfile(host="10.0.0.9", port=7700)) == ProfileInfo(
+    env_profile = OrchestratorProfile(host="10.0.0.9", port=7700)
+    assert _profile_info(None, env_profile) == ProfileInfo(
         "10.0.0.9:7700", "http://10.0.0.9:7700/", False
     )
+    # ARCHIE_HOST wins over a plain value and a profile prefix alike: never local.
+    assert not _profile_info("myproject", env_profile).local
+    assert _profile_info("gpu-box/x", env_profile).label == "10.0.0.9:7700"
+    assert not _profile_info("gpu-box/x", env_profile).local
 
 
 # ---------------------------------------------------------------------------

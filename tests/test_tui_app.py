@@ -6,7 +6,9 @@ Everything runs against ``FakeOrchestrator`` (``tests/tui_fakes.py``) with ``run
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import archie_cli.tui.animation as animation
@@ -1877,3 +1879,148 @@ async def test_status_bar_keeps_the_cost_visible_at_120_columns():
         # Very narrow: the model name shortens, the cost stays.
         narrow = status.fit(30).plain
         assert narrow.rstrip().endswith("$12.3456 · 4.25 credits")
+
+
+# --- External editor (M8) ---------------------------------------------------------------
+
+
+def _editor(tmp_path, monkeypatch, body: str) -> Path:
+    """Point ``EDITOR`` at a shell script; it copies the file it gets to ``seen.md`` first."""
+    seen = tmp_path / "seen.md"
+    script = tmp_path / "editor.sh"
+    script.write_text(f'#!/bin/sh\ncp "$1" "{seen}"\n{body}\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("EDITOR", str(script))
+    return seen
+
+
+def _fake_suspend(app, monkeypatch) -> list[bool]:
+    """Replace ``app.suspend`` (headless drivers can't suspend); records each use."""
+    used: list[bool] = []
+
+    @contextlib.contextmanager
+    def suspend():
+        used.append(True)
+        yield
+
+    monkeypatch.setattr(app, "suspend", suspend)
+    return used
+
+
+async def _two_connected(app, pilot, client):
+    """Visit ws-b, then show ws-a: both controllers follow their streams."""
+    await attached(app, pilot, "ws-b")
+    await app.switch_to("ws-a")
+    pane = await attached(app, pilot, "ws-a")
+    await settle(pilot, lambda: client.opened("ws-a") == 1 and client.opened("ws-b") == 1)
+    return pane
+
+
+async def test_editor_sends_the_saved_text_and_reconnects_the_feed_and_every_controller(
+    tmp_path, monkeypatch, fast_retries
+):
+    client = _client(
+        make_record("ws-a", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2)),
+        logs={"ws-a": [_user("u1", "before")]},
+    )
+    app = make_app(client, focus="ws-b")
+    seen = _editor(tmp_path, monkeypatch, "printf 'from the editor\\n' > \"$1\"")
+    async with app.run_test(size=SIZE) as pilot:
+        used = _fake_suspend(app, monkeypatch)
+        pane = await _two_connected(app, pilot, client)
+        old = {sid: client.stream_for(sid) for sid in ("ws-a", "ws-b")}
+        background = app.controllers["ws-b"]
+        pane.input.insert("draft")
+        # Changed while the loop was stalled: only the feed's new snapshot carries it.
+        client.records["ws-b"] = make_record("ws-b", started_at=_at(2), name="Renamed")
+        # The first connect after the editor fails, so an outage begins (quietly).
+        client.fail_connects(OSError("refused"), OSError("refused"))
+        assert client.feed_connects == 1
+
+        await pilot.press("ctrl+g")
+        await _until(
+            lambda: (
+                client.feed_connects == 2
+                and client.opened("ws-a") == 2
+                and client.opened("ws-b") == 2
+                and not any(c.reconnecting or c.quiet for c in app.controllers.values())
+            )
+        )
+        await settle(pilot, lambda: client.stream_for("ws-a").sent)
+        await settle(pilot, lambda: app.records["ws-b"].name == "Renamed")
+
+        assert used == [True]
+        assert seen.read_text() == "draft"  # the editor got the input's text
+        # Sent as typed, on the new stream; the input is clear and keeps it in history.
+        assert client.stream_for("ws-a").sent == [("message", "from the editor")]
+        assert old["ws-a"].sent == []
+        assert pane.input.text == "" and pane.input._history[-1] == "from the editor"
+        for stream in old.values():
+            stream.disconnect.assert_awaited()
+        assert ("ws-a", "u1") in client.requests  # the stream's ``after`` resync
+        # The reconnect was expected: no outage rows, on screen or behind it.
+        assert _error_rows(pane) == [] and background.locals == []
+        assert app.pane is pane
+
+
+async def test_editor_quit_without_saving_keeps_the_input_and_still_reconnects(
+    tmp_path, monkeypatch
+):
+    client = _client(make_record("ws-a", started_at=_at(1)), make_record("ws-b", started_at=_at(2)))
+    app = make_app(client, focus="ws-b")
+    _editor(tmp_path, monkeypatch, "exit 0")
+    async with app.run_test(size=SIZE) as pilot:
+        _fake_suspend(app, monkeypatch)
+        pane = await _two_connected(app, pilot, client)
+        pane.input.insert("keep me")
+        app.action_editor()
+        await _until(
+            lambda: (
+                client.feed_connects == 2
+                and client.opened("ws-a") == 2
+                and client.opened("ws-b") == 2
+                and not any(c.reconnecting or c.quiet for c in app.controllers.values())
+            )
+        )
+        await pilot.pause()
+        assert pane.input.text == "keep me"
+        assert client.stream_for("ws-a").sent == [] and _error_rows(pane) == []
+
+
+async def test_editor_that_cannot_run_posts_a_notice(tmp_path, monkeypatch):
+    app = make_app()
+    monkeypatch.setenv("EDITOR", str(tmp_path / "no-such-editor"))
+    async with app.run_test(size=SIZE) as pilot:
+        _fake_suspend(app, monkeypatch)
+        pane = await attached(app, pilot)
+        pane.input.insert("still here")
+        posted = _record_notices(app)
+        app.action_editor()
+        await pilot.pause()
+        ((title, text, severity, _),) = posted
+        assert (title, severity) == ("Editor", "error")
+        assert text.startswith("Could not run ")
+        assert pane.input.text == "still here"
+
+
+async def test_editor_does_nothing_during_a_turn_or_without_suspend_support(monkeypatch):
+    from textual.app import SuspendNotSupported
+
+    app = make_app()
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        posted = _record_notices(app)
+        # Headless drivers can't suspend: a notice, no reconnect, nothing stays quiet.
+        monkeypatch.setattr(app, "suspend", lambda: (_ for _ in ()).throw(SuspendNotSupported()))
+        app.action_editor()
+        await pilot.pause()
+        assert [(title, severity) for title, _, severity, _ in posted] == [("Editor", "error")]
+        assert app._client.feed_connects == 1 and not app.controller.quiet
+        # While a turn runs, ctrl+g opens nothing.
+        posted.clear()
+        app.controller.turn_active = True
+        app.action_editor()
+        await pilot.pause()
+        assert posted == []
+        assert pane.input.text == ""
