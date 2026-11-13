@@ -1,6 +1,6 @@
 # 084 — Multi-session TUI
 
-Status: reviewing
+Status: done
 Branch: build-it/084-multi-session-tui (base: main @ b1edcf9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/084-multi-session-tui
 
@@ -548,8 +548,51 @@ Tests and when they change:
   dead-feed rules, the docs list, the M3/M4 status-bar split, ctrl+q before M7,
   POST/workspaces moved to M7, the switch-time measurement moved to M2, the eval script
   described. None rejected. Stopped after two passes.
+- Code review: `general` and `risk` (risk ran: a schema migration, the session record
+  contract, untrusted workspace files and tool inputs read on the host, per-frame tracker
+  work, `docker exec` and `$EDITOR`). Round 1 fixed: the risk ❌ (quadratic memory in
+  `shell_paths`; a 500 KB `cd` chain OOM-killed the orchestrator on every connect scan)
+  with command, segment, path and per-session caps; `shlex` cost bounded (worst case ~7 ms
+  on the loop); `locate` made linear in depth with path caps; per-job lookups capped; editor
+  `$EDITOR`/decode errors shown as notices; general ⚠️s (live frames lost when a session
+  ended during its first load; a second stream opened while `start()` was connecting and
+  never closed) with `start_soon`/`connecting` and `_set_ws`; client rows restored after a
+  409; dead `git_branch`/`agent_session_id` removed; a public `MessageInput` history API; the
+  unseen-PATCH window (answered the ❓: PATCH again when a newer record is still unseen);
+  tests moved off private state where public properties exist. Round 2 (risk, because of
+  the ❌): the fixes hold under probes; fixed hitting a cap wiping a known location (now
+  `GAVE_UP` keeps it; file paths keyed by directory), heredocs stripped before the 16 KiB cut
+  (plus a `<<<` here-string bug found on the way), and `.git` components checked with
+  `lstat`. Answered the ❓: hitting a cap means "unchanged". Rejected: none. Not done:
+  a few controller unit tests still set `turn_active` directly (they test the controller
+  in isolation). Stopped after two rounds.
+- Merge risk: High: this replaces the TUI used for every session, and its live behaviour
+  (feed, streams, reconnect, `!`, editor) was verified only against a fake orchestrator in
+  this container; a defect blocks day-to-day use. It is limited by the full suite (5442),
+  the unchanged server API apart from the additive `location` field, and a clean revert of
+  the client — except that migration 3 makes `archie.db` refuse older Archie, so a revert
+  of the server also needs `archie.db` restored or the `location` column tolerated.
 
 ## Outcome
+
+`archie start` and `archie attach` open a multi-session TUI: a feed-driven sidebar of every
+live session (grouped by workspace, state glyphs, model titles, `⎇ repo · branch`,
+age, filter, notices for other sessions' replies, questions, failures and ends) beside one
+session pane (header with state badge, two-line tool rows, activity line, in-pane tool and
+subagent views, question panel, input with draft kept per session, status bar). Switching
+keeps up to five sessions connected and remounts from memory. Dialogs cover new session
+(workspace + backend), rename, stop, keys and quit; the palette holds the session actions
+and a model picker. Reconnect follows the feed with no give-up. The orchestrator works out
+each session's repo, worktree and branch from its tool calls (bounded against hostile
+input) and stores it (migration 3). The single-session app is gone.
+
+Evidence: `env -u ARCHIE_BACKEND -u ARCHIE_SESSION_ID scripts/dev test` → 5442 passed;
+`scripts/dev ruff check .` clean; location eval over 10 real logs (this session resolves to
+its worktree and branch); switch back to the 11.5 MB session 423 ms median; screenshots of
+the pane, a tool view and the dialogs from synthetic sessions.
+
+Not verified: the TUI against the user's real orchestrator and agent containers (no host
+or Docker access here), on macOS terminals, and real `!`/editor use.
 
 PR: pending
 CI: pending
