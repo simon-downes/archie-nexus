@@ -1,13 +1,21 @@
-"""TUI-side canonical event handling: ledger accounting, reducer, replay.
+"""TUI-side canonical event handling: ledger accounting, reducer, replay, local entries.
 
-These exercise the M4 client-side reconstruction path without a running
-Textual app by stubbing `query_one` and the status-bar update.
+State is asserted on ``SessionController`` with a recording listener and the fake
+orchestrator client (``tests/tui_fakes.py``); rendering through a mounted
+``Conversation`` fed by the controller's changes; status-bar text on the host app.
 """
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import msgspec
 import pytest
+from archie_cli.tui.client import CursorNotFound, HttpOrchestrator, OrchestratorError
+from archie_cli.tui.session import (
+    ClientErrorEntry,
+    ShellOutputEntry,
+    TurnStatusEntry,
+)
 from archie_shared.events import (
     AssistantMessage,
     CompactionComplete,
@@ -21,19 +29,12 @@ from archie_shared.events import (
     TextDelta,
     ToolCall,
     ToolResult,
+    TurnComplete,
     UserMessage,
-    encode_event,
 )
+from archie_shared.transcript import TranscriptBuilder
 
-
-def _make_app():
-    from archie_cli.tui.app import ArchieApp
-
-    return ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
-        container_name="archie-proj-01abc",
-    )
+from tests.tui_fakes import FakeOrchestrator, RecordingListener, local_texts, make_controller
 
 
 def _llm_request(event_id, cost, input_tokens=100, output_tokens=10):
@@ -55,19 +56,43 @@ def _llm_request(event_id, cost, input_tokens=100, output_tokens=10):
     )
 
 
-def test_accumulate_ledger_folds_cost_and_tokens():
-    app = _make_app()
-    with patch.object(app, "_update_accounting_status"):
-        app._accumulate_ledger(_llm_request("e1", 0.10, input_tokens=100, output_tokens=10))
-        app._accumulate_ledger(_llm_request("e2", 0.05, input_tokens=50, output_tokens=5))
+def _user(content="go", event_id="u1"):
+    return UserMessage(id=event_id, turn=1, scope=None, content=content)
 
-    assert app._cumulative_cost == pytest.approx(0.15)
-    assert app._cumulative_input == 150
-    assert app._cumulative_output == 15
+
+def _assistant(event_id="a1", content="ok", request_id="r1"):
+    return AssistantMessage(
+        id=event_id,
+        turn=1,
+        scope=None,
+        iteration=1,
+        request_id=request_id,
+        content=content,
+        interrupted=False,
+    )
+
+
+def _root_turn_complete(stop_reason):
+    return TurnComplete(id=f"tc-{stop_reason}", turn=1, scope=None, stop_reason=stop_reason)
+
+
+# --- Accounting -------------------------------------------------------------------
+
+
+def test_accumulate_ledger_folds_cost_and_tokens():
+    controller, listener = make_controller()
+    controller.apply(_llm_request("e1", 0.10, input_tokens=100, output_tokens=10))
+    controller.apply(_llm_request("e2", 0.05, input_tokens=50, output_tokens=5))
+
+    assert controller.ledger.cost == pytest.approx(0.15)
+    assert controller.ledger.input_tokens == 150
+    assert controller.ledger.output_tokens == 15
+    assert controller.session_output == 15
+    assert listener.names().count("status") == 2
 
 
 def test_child_ledger_does_not_overwrite_root_context():
-    app = _make_app()
+    controller, _ = make_controller()
     root = _llm_request("root", 0.01, input_tokens=1000, output_tokens=10)
     child = LLMRequest(
         id="child",
@@ -86,24 +111,22 @@ def test_child_ledger_does_not_overwrite_root_context():
         context_tokens=9000,
         cost_usd=0.02,
     )
-    with patch.object(app, "_update_accounting_status"):
-        app._accumulate_ledger(root)
-        app._accumulate_ledger(child)
+    controller.apply(root)
+    controller.apply(child)
 
-    assert app._latest_context_tokens == 1010
-    assert app._cumulative_input == 10000
-    assert app._cumulative_cost == pytest.approx(0.03)
+    assert controller.ledger.context_tokens == 1010
+    assert controller.ledger.input_tokens == 10000
+    assert controller.ledger.cost == pytest.approx(0.03)
 
 
 def test_accumulate_ledger_deduplicates_by_id():
     """Replay + live broadcast of the same llm_request must not double-count."""
-    app = _make_app()
-    with patch.object(app, "_update_accounting_status"):
-        app._accumulate_ledger(_llm_request("e1", 0.10))
-        app._accumulate_ledger(_llm_request("e1", 0.10))  # duplicate id
+    controller, _ = make_controller()
+    controller._accumulate_ledger(_llm_request("e1", 0.10))
+    controller._accumulate_ledger(_llm_request("e1", 0.10))  # duplicate id
 
-    assert app._cumulative_cost == pytest.approx(0.10)
-    assert app._cumulative_input == 100
+    assert controller.ledger.cost == pytest.approx(0.10)
+    assert controller.ledger.input_tokens == 100
 
 
 def test_format_cost_adds_credits_only_when_reported():
@@ -114,30 +137,45 @@ def test_format_cost_adds_credits_only_when_reported():
     assert format_cost(0.0, 0.0) == "$0.0000 · 0.00 credits"
 
 
-def test_accumulate_ledger_sums_kiro_credits_into_status_label():
-    import msgspec
+def _host_app(client=None):
+    from archie_cli.tui.app import ArchieApp
 
-    app = _make_app()
-    status = MagicMock()
+    return ArchieApp(
+        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
+        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
+        container_name="archie-proj-01abc",
+        client=client or FakeOrchestrator(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_accumulate_ledger_sums_kiro_credits_into_status_label():
+    from archie_cli.tui.status import StatusBar
+
+    app = _host_app()
     first = msgspec.structs.replace(_llm_request("k1", 0.0097), credits=0.4828)
     second = msgspec.structs.replace(_llm_request("k2", 0.0753), credits=3.764829)
-    with patch.object(app, "query_one", return_value=status):
-        app._accumulate_ledger(first)
-        app._accumulate_ledger(second)
-        app._accumulate_ledger(second)  # duplicate id is not counted twice
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.session.apply(first)
+        app.session.apply(second)
+        app.session._accumulate_ledger(second)  # a duplicate id is not counted twice
+        await pilot.pause()
+        assert app.session.ledger.credits == pytest.approx(4.247629)
+        assert app.query_one(StatusBar).pricing_label == "$0.0850 · 4.25 credits"
 
-    assert app._cumulative_credits == pytest.approx(4.247629)
-    assert status.pricing_label == "$0.0850 · 4.25 credits"
 
+@pytest.mark.asyncio
+async def test_accumulate_ledger_native_requests_show_no_credits():
+    from archie_cli.tui.status import StatusBar
 
-def test_accumulate_ledger_native_requests_show_no_credits():
-    app = _make_app()
-    status = MagicMock()
-    with patch.object(app, "query_one", return_value=status):
-        app._accumulate_ledger(_llm_request("e1", 0.10))
-
-    assert app._cumulative_credits is None
-    assert status.pricing_label == "$0.1000"
+    app = _host_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.session.apply(_llm_request("e1", 0.10))
+        await pilot.pause()
+        assert app.session.ledger.credits is None
+        assert app.query_one(StatusBar).pricing_label == "$0.1000"
 
 
 @pytest.mark.parametrize(
@@ -146,127 +184,41 @@ def test_accumulate_ledger_native_requests_show_no_credits():
     ids=["kiro", "native"],
 )
 def test_turn_status_receives_turn_credits(credits, expected):
-    import msgspec
-
-    app = _make_app()
-    conv = MagicMock()
+    controller, listener = make_controller()
     request = _llm_request("r1", 0.0753)
     if credits is not None:
         request = msgspec.structs.replace(request, credits=credits)
-    with (
-        patch.object(app, "query_one", return_value=conv),
-        patch.object(app, "_remove_throbber"),
-        patch.object(app, "_show_throbber"),
-    ):
-        app._apply_event(_user())
-        app._apply_event(request)
-        app._apply_event(_root_turn_complete("end_turn"))
+    controller.apply(_user())
+    controller.apply(request)
+    controller.apply(_root_turn_complete("end_turn"))
 
-    conv.add_turn_status.assert_called_once()
-    args = conv.add_turn_status.call_args.args
-    assert args[5] == pytest.approx(0.0753)
-    assert args[6] == expected
+    (entry,) = [e for (e,) in listener.of("local")]
+    assert isinstance(entry, TurnStatusEntry)
+    assert entry.cost == pytest.approx(0.0753)
+    assert entry.credits == expected
 
-    with patch.object(app, "query_one", return_value=conv), patch.object(app, "_show_throbber"):
-        app._apply_event(_user("next", event_id="u2"))
-    assert app._turn_credits is None
+    controller.apply(_user("next", event_id="u2"))
+    assert controller.turn.credits is None
 
 
 def test_accumulate_ledger_resets_streaming_output_estimate():
-    app = _make_app()
-    app._estimated_output = 25
-    with patch.object(app, "_update_accounting_status"):
-        app._accumulate_ledger(_llm_request("e1", 0.10))
-
-    assert app._estimated_output == 0
-
-
-async def test_live_assistant_message_finalizes_stream_without_duplicate():
-    """The persisted assistant record must reconcile the live text stream."""
-    from archie_cli.tui.conversation import AssistantMessage as AssistantRow
-    from archie_cli.tui.conversation import StreamingMessage
-
-    text_delta = TextDelta(
-        id="d1",
-        turn=1,
-        iteration=1,
-        scope=None,
-        request_id="r1",
-        text="hello",
-    )
-    assistant = AssistantMessage(
-        id="a1",
-        turn=1,
-        scope=None,
-        iteration=1,
-        request_id="r1",
-        content="hello",
-        interrupted=False,
-    )
-    host = _ConversationHost()
-    conv = await host.run([_user(), text_delta, assistant], inspect=_rows)
-    rows = conv[-1]
-    assert [type(r).__name__ for r in rows] == ["UserMessage", "StreamingMessage"]
-    stream = rows[1]
-    assert isinstance(stream, StreamingMessage) and not isinstance(stream, AssistantRow)
-    assert stream.text == "hello"
-    (item,) = host.app.transcript.turns[0].items
-    assert item.kind == "text" and item.content == "hello"
-
-
-def test_throbber_tracks_provider_request_lifecycle():
-    """Show while a provider request is pending, not while tools execute."""
-    app = _make_app()
-    app._turn_active = True
-    throbber = MagicMock()
-    conv = MagicMock()
-    status = MagicMock()
-
-    def query_one(selector, _type=None):
-        return {"#conversation": conv, "#throbber": throbber, "#status": status}[selector]
-
-    with patch.object(app, "query_one", side_effect=query_one):
-        app._apply_event(IterationStart(id="i1", turn=1, iteration=0, scope=None))
-        assert throbber.display is True
-
-        app._apply_event(
-            TextDelta(
-                id="d1",
-                turn=1,
-                iteration=0,
-                scope=None,
-                request_id="r1",
-                text="partial",
-            )
-        )
-        assert throbber.display is False
-
-        app._apply_event(IterationStart(id="i2", turn=1, iteration=1, scope=None))
-        assert throbber.display is True
-        app._apply_event(
-            ToolCall(
-                id="c1",
-                turn=1,
-                iteration=1,
-                scope=None,
-                request_id="r2",
-                tool_use_id="t1",
-                name="read",
-                input={"path": "/etc/hosts"},
-            )
-        )
-        assert throbber.display is False
+    controller, _ = make_controller()
+    controller.estimated_output = 25
+    controller.apply(_llm_request("e1", 0.10))
+    assert controller.estimated_output == 0
 
 
 def test_compaction_request_counts_cost_without_context_update():
-    app = _make_app()
-    app._latest_context_tokens = 77
+    controller, _ = make_controller()
+    controller.ledger.context_tokens = 77
     event = _llm_request("compact", 0.25, input_tokens=500)
     event.purpose = "compaction"
-    with patch.object(app, "_update_accounting_status"):
-        app._accumulate_ledger(event)
-    assert app._cumulative_cost == pytest.approx(0.25)
-    assert app._latest_context_tokens == 77
+    controller.apply(event)
+    assert controller.ledger.cost == pytest.approx(0.25)
+    assert controller.ledger.context_tokens == 77
+
+
+# --- Rendering through a mounted Conversation ------------------------------------
 
 
 def _compaction_start(reason="cold_cache", estimate=2.54, request_id="r1"):
@@ -312,17 +264,26 @@ def _compaction_complete(
     )
 
 
-def _user(content="go", event_id="u1"):
-    return UserMessage(id=event_id, turn=1, scope=None, content=content)
-
-
 def _rows(conv):
     """Mounted top-level row widgets of a conversation, in order."""
     return [row.widget for row in conv.rows if row.widget is not None]
 
 
+class _ViewListener(RecordingListener):
+    """Records calls and renders model changes into a mounted Conversation."""
+
+    def __init__(self, controller, conv) -> None:
+        super().__init__()
+        self._controller = controller
+        self._conv = conv
+
+    def on_changes(self, changes) -> None:
+        super().on_changes(changes)
+        self._conv.apply_changes(self._controller.builder, changes)
+
+
 class _ConversationHost:
-    """A mounted Conversation driven through the app reducer."""
+    """A mounted Conversation driven by a SessionController."""
 
     def __init__(self) -> None:
         from archie_cli.tui.transcript_view import Conversation
@@ -333,42 +294,27 @@ class _ConversationHost:
                 yield Conversation(id="conversation")
 
         self.host = Host()
-        self.app = _make_app()
+        self.controller, _ = make_controller()
 
     async def run(self, events, *, turn_active=False, inspect=None):
-        """Apply events one by one; return per-event compaction headers, the
-        status/input mock, or (with ``inspect``) per-event ``inspect(conv)``."""
+        """Apply events one by one; return per-event compaction headers, or (with
+        ``inspect``) per-event ``inspect(conv)``."""
         from archie_cli.tui.conversation import CompactionEntry
         from archie_cli.tui.transcript_view import Conversation
 
         async with self.host.run_test() as pilot:
             conv = self.host.query_one(Conversation)
-            others = MagicMock()
-            self.app._turn_active = turn_active
-            with (
-                patch.object(
-                    self.app,
-                    "query_one",
-                    side_effect=lambda selector, _type=None: (
-                        conv if selector == "#conversation" else others
-                    ),
-                ),
-                patch.object(self.app, "_update_accounting_status"),
-                patch.object(self.app, "_estimate_context_pct", return_value=1.0),
-            ):
-                headers = []
-                for event in events:
-                    self.app._apply_event(event)
-                    await pilot.pause()
-                    if inspect is not None:
-                        headers.append(inspect(conv))
-                    else:
-                        headers.append(
-                            [_header_text(entry) for entry in conv.query(CompactionEntry)]
-                        )
-            if inspect is not None:
-                return headers
-            return headers, others
+            self.controller.attach(_ViewListener(self.controller, conv))
+            self.controller.turn_active = turn_active
+            snapshots = []
+            for event in events:
+                self.controller.apply(event)
+                await pilot.pause()
+                if inspect is not None:
+                    snapshots.append(inspect(conv))
+                else:
+                    snapshots.append([_header_text(entry) for entry in conv.query(CompactionEntry)])
+            return snapshots
 
 
 def _header_text(entry) -> str:
@@ -382,9 +328,57 @@ def _span_styles(static) -> str:
     return " ".join(str(span.style) for span in static.content.spans).lower()
 
 
+async def test_live_assistant_message_finalizes_stream_without_duplicate():
+    """The persisted assistant record must reconcile the live text stream."""
+    from archie_cli.tui.conversation import AssistantMessage as AssistantRow
+    from archie_cli.tui.conversation import StreamingMessage
+
+    text_delta = TextDelta(id="d1", turn=1, iteration=1, scope=None, request_id="r1", text="hello")
+    host = _ConversationHost()
+    conv = await host.run([_user(), text_delta, _assistant(content="hello")], inspect=_rows)
+    rows = conv[-1]
+    assert [type(r).__name__ for r in rows] == ["UserMessage", "StreamingMessage"]
+    stream = rows[1]
+    assert isinstance(stream, StreamingMessage) and not isinstance(stream, AssistantRow)
+    assert stream.text == "hello"
+    (item,) = host.controller.builder.turns[0].items
+    assert item.kind == "text" and item.content == "hello"
+
+
+def test_throbber_tracks_provider_request_lifecycle():
+    """Thinking while a provider request is pending, not while tools execute."""
+    controller, listener = make_controller()
+    controller.turn_active = True
+
+    controller.apply(IterationStart(id="i1", turn=1, iteration=0, scope=None))
+    assert controller.thinking is True
+
+    controller.apply(
+        TextDelta(id="d1", turn=1, iteration=0, scope=None, request_id="r1", text="partial")
+    )
+    assert controller.thinking is False
+
+    controller.apply(IterationStart(id="i2", turn=1, iteration=1, scope=None))
+    assert controller.thinking is True
+    controller.apply(
+        ToolCall(
+            id="c1",
+            turn=1,
+            iteration=1,
+            scope=None,
+            request_id="r2",
+            tool_use_id="t1",
+            name="read",
+            input={"path": "/etc/hosts"},
+        )
+    )
+    assert controller.thinking is False
+    assert listener.names().count("turn") == 4
+
+
 async def test_cold_cache_compaction_renders_pending_then_success():
     host = _ConversationHost()
-    headers, _ = await host.run([_compaction_start(), _compaction_complete()])
+    headers = await host.run([_compaction_start(), _compaction_complete()])
     assert headers == [
         ["○ Compaction threshold cold cache (123457 tokens)"],
         ["● Compaction threshold cold cache (123457 → 4563, $2.54, 123ms)"],
@@ -393,7 +387,7 @@ async def test_cold_cache_compaction_renders_pending_then_success():
 
 async def test_threshold_compaction_displays_cost_saved():
     host = _ConversationHost()
-    headers, _ = await host.run(
+    headers = await host.run(
         [
             _compaction_start("threshold", None),
             _compaction_complete("threshold", estimate=None, cost_saved=0.61),
@@ -404,7 +398,7 @@ async def test_threshold_compaction_displays_cost_saved():
 
 async def test_cold_cache_compaction_failure_renders_error():
     host = _ConversationHost()
-    headers, _ = await host.run(
+    headers = await host.run(
         [
             _compaction_start(),
             _compaction_complete(
@@ -419,6 +413,9 @@ async def test_cold_cache_compaction_failure_renders_error():
 
 async def test_compaction_status_colours_match_tool_entries():
     from archie_cli.tui import theme
+    from archie_cli.tui.conversation import CompactionEntry
+    from archie_cli.tui.transcript_view import Conversation
+    from textual.widgets import Static
 
     host = _ConversationHost()
     events = [
@@ -429,93 +426,76 @@ async def test_compaction_status_colours_match_tool_entries():
             "threshold", "interrupted", request_id="bad", tokens_after=None, error=None
         ),
     ]
-    from archie_cli.tui.conversation import CompactionEntry
-    from archie_cli.tui.transcript_view import Conversation
-    from textual.widgets import Static
-
+    controller = host.controller
     async with host.host.run_test() as pilot:
         conv = host.host.query_one(Conversation)
-        with (
-            patch.object(
-                host.app,
-                "query_one",
-                side_effect=lambda selector, _type=None: (
-                    conv if selector == "#conversation" else MagicMock()
-                ),
-            ),
-            patch.object(host.app, "_update_accounting_status"),
-            patch.object(host.app, "_estimate_context_pct", return_value=1.0),
-        ):
-            host.app._apply_event(events[0])
-            await pilot.pause()
-            pending = conv.query(CompactionEntry).first().query_one(".tool-header", Static)
-            assert theme.PRIMARY.lower() in _span_styles(pending)
-            for event in events[1:]:
-                host.app._apply_event(event)
-            await pilot.pause()
-            ok, bad = [e.query_one(".tool-header", Static) for e in conv.query(CompactionEntry)]
-            assert theme.SUCCESS.lower() in _span_styles(ok)
-            assert theme.ERROR.lower() in _span_styles(bad)
-            assert str(bad.render()).endswith("Failed: Compaction interrupted")
+        controller.attach(_ViewListener(controller, conv))
+        controller.apply(events[0])
+        await pilot.pause()
+        pending = conv.query(CompactionEntry).first().query_one(".tool-header", Static)
+        assert theme.PRIMARY.lower() in _span_styles(pending)
+        for event in events[1:]:
+            controller.apply(event)
+        await pilot.pause()
+        ok, bad = [e.query_one(".tool-header", Static) for e in conv.query(CompactionEntry)]
+        assert theme.SUCCESS.lower() in _span_styles(ok)
+        assert theme.ERROR.lower() in _span_styles(bad)
+        assert str(bad.render()).endswith("Failed: Compaction interrupted")
 
 
 async def test_unmatched_completion_mounts_terminal_entry():
     host = _ConversationHost()
-    headers, _ = await host.run([_compaction_complete()])
+    headers = await host.run([_compaction_complete()])
     assert headers == [["● Compaction threshold cold cache (123457 → 4563, $2.54, 123ms)"]]
 
 
 async def test_automatic_compaction_restores_throbber():
     host = _ConversationHost()
-    with patch.object(host.app, "_show_throbber") as show:
-        await host.run(
-            [_compaction_start(), _compaction_complete()],
-            turn_active=True,
-        )
-    show.assert_called_once()
-    assert host.app._turn_active is True
+    thinking = await host.run(
+        [_compaction_start(), _compaction_complete()],
+        turn_active=True,
+        inspect=lambda _conv: host.controller.thinking,
+    )
+    assert thinking == [False, True]
+    assert host.controller.turn_active is True
 
 
+@pytest.mark.asyncio
 async def test_replay_reset_replaces_the_transcript_model():
-    app = _make_app()
-    old = app.transcript
-    app._apply_event(_user())
-    with patch.object(app, "query_one", return_value=MagicMock()):
-        await app._reset_replay_state()
-    assert app.transcript is not old and app.transcript.turns == []
+    controller, listener = make_controller()
+    old = controller.builder
+    controller.apply(_user())
+    await controller.reset()
+    assert controller.builder is not old and controller.builder.turns == []
+    assert listener.names()[-2:] == ["reset", "status"]
 
 
 def test_context_compaction_updates_display_and_ends_manual_turn():
-    app = _make_app()
-    app._turn_active = True
-    conv = MagicMock()
-    app._apply_event(_user())
-    with (
-        patch.object(app, "query_one", return_value=conv),
-        patch.object(app, "_update_accounting_status"),
-    ):
-        app._apply_event(
-            ContextCompacted(
-                id="c1",
-                turn=1,
-                iteration=0,
-                scope=None,
-                request_id="r1",
-                reason="manual",
-                summary="## Goal\nKeep going",
-                model_key="m",
-                tokens_before=1000,
-                tokens_after=120,
-                duration_ms=10,
-                debug="counts",
-            )
+    controller, _ = make_controller()
+    controller.turn_active = True
+    controller.apply(_user())
+    controller.apply(
+        ContextCompacted(
+            id="c1",
+            turn=1,
+            iteration=0,
+            scope=None,
+            request_id="r1",
+            reason="manual",
+            summary="## Goal\nKeep going",
+            model_key="m",
+            tokens_before=1000,
+            tokens_after=120,
+            duration_ms=10,
+            debug="counts",
         )
-    (marker,) = app.transcript.turns[0].items
+    )
+    (marker,) = controller.builder.turns[0].items
     assert marker.kind == "compaction" and marker.marker
     assert (marker.reason, marker.tokens_before, marker.tokens_after) == ("manual", 1000, 120)
     assert marker.summary == "## Goal\nKeep going"
-    assert app._latest_context_tokens == 120
-    assert app._turn_active is False
+    assert controller.ledger.context_tokens == 120
+    assert controller.turn_active is False
 
 
 def _compacted(reason="threshold", tokens_after=50_000, model_key="bedrock-openai-gpt-6-luna"):
@@ -538,153 +518,97 @@ def _compacted(reason="threshold", tokens_after=50_000, model_key="bedrock-opena
 @pytest.mark.asyncio
 async def test_replayed_compaction_renders_after_prior_entries_with_session_window():
     """Replay draws the marker in order and sizes context against the session model."""
-    app = _make_app()
     conversation_request = _llm_request("l1", 0.1)
     conversation_request.model_key = "bedrock-claude-haiku-4-5"
-    events = [
-        UserMessage(id="u1", turn=1, scope=None, content="hi"),
-        conversation_request,
-        _compacted(tokens_after=50_000),
-    ]
-    body = "".join(encode_event(e) + "\n" for e in events)
-    resp = MagicMock(status_code=200, text=body)
-    conv = MagicMock()
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.get = AsyncMock(return_value=resp)
+    client = FakeOrchestrator(
+        {"s1": [_user("hi"), conversation_request, _compacted(tokens_after=50_000)]}
+    )
+    controller, _ = make_controller(client)
 
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "query_one", return_value=conv),
-        patch.object(app, "_update_accounting_status"),
-    ):
-        await app._replay_events()
+    assert await controller.replay() is True
 
-    (turn,) = app.transcript.turns
+    (turn,) = controller.builder.turns
     assert turn.user.content == "hi"
     assert [item.kind for item in turn.items] == ["compaction"]
-    assert app._latest_context_tokens == 50_000
+    assert controller.ledger.context_tokens == 50_000
     # Haiku's 200k window, not the compaction model's 1M window.
-    assert app._latest_context_pct == pytest.approx(25.0)
+    assert controller.ledger.context_pct == pytest.approx(25.0)
 
 
 def test_automatic_compaction_does_not_end_turn():
-    app = _make_app()
-    app._turn_active = True
-    conv = MagicMock()
-    with (
-        patch.object(app, "query_one", return_value=conv),
-        patch.object(app, "_update_accounting_status"),
-    ):
-        app._apply_event(_compacted(reason="cold_cache"))
-        app._apply_event(ErrorNotice(id="e-auto", kind="compaction_failed", message="failed"))
-    assert app._turn_active is True
+    controller, _ = make_controller()
+    controller.turn_active = True
+    controller.apply(_compacted(reason="cold_cache"))
+    controller.apply(ErrorNotice(id="e-auto", kind="compaction_failed", message="failed"))
+    assert controller.turn_active is True
 
 
 def test_tool_policy_notices_do_not_end_turn():
-    app = _make_app()
-    app._turn_active = True
-    conv = MagicMock()
-    with patch.object(app, "query_one", return_value=conv):
-        for kind in ("tool_policy_reload_failed", "tool_policy_reloaded"):
-            app._apply_event(ErrorNotice(id=f"e-{kind}", kind=kind, message="policy"))
-    assert app._turn_active is True
-    assert conv.add_client_error.call_count == 2
+    controller, _ = make_controller()
+    controller.turn_active = True
+    for kind in ("tool_policy_reload_failed", "tool_policy_reloaded"):
+        controller.apply(ErrorNotice(id=f"e-{kind}", kind=kind, message="policy"))
+    assert controller.turn_active is True
+    assert local_texts(controller) == ["policy", "policy"]
 
 
 def test_manual_compaction_failure_ends_pending_turn():
-    app = _make_app()
-    app._turn_active = True
-    conv = MagicMock()
-    input_widget = MagicMock()
-    with patch.object(
-        app,
-        "query_one",
-        side_effect=lambda selector, _type=None: (
-            conv if selector == "#conversation" else input_widget
-        ),
-    ):
-        app._apply_event(
-            ErrorNotice(id="e-manual", kind="manual_compaction_failed", message="failed")
-        )
-    assert app._turn_active is False
-    assert input_widget.disabled is False
+    controller, _ = make_controller()
+    controller.turn_active = True
+    controller.input_locked = True
+    controller.apply(ErrorNotice(id="e-manual", kind="manual_compaction_failed", message="failed"))
+    assert controller.turn_active is False
+    assert controller.input_locked is False
 
 
 def test_turn_error_notice_ends_pending_turn():
-    """A server-side rejection/error returns the local TUI to an idle state."""
-    app = _make_app()
-    app._turn_active = True
-    throbber = MagicMock()
-    conv = MagicMock()
-    input_widget = MagicMock()
-    app._throbber = throbber
+    """A server-side rejection/error returns the session to an idle state."""
+    controller, listener = make_controller()
+    controller.turn_active = True
+    controller.thinking = True
+    controller.input_locked = True
 
-    def query_one(selector, _type=None):
-        return {"#conversation": conv, "#throbber": throbber, "#input": input_widget}[selector]
+    controller.apply(ErrorNotice(id="e1", kind="turn_error", message="provider failed"))
 
-    with patch.object(app, "query_one", side_effect=query_one):
-        app._apply_event(ErrorNotice(id="e1", kind="turn_error", message="provider failed"))
-
-    assert app._turn_active is False
-    assert input_widget.disabled is False
-    conv.add_client_error.assert_called_once_with("provider failed")
-
-
-def _root_turn_complete(stop_reason):
-    from archie_shared.events import TurnComplete
-
-    return TurnComplete(id=f"tc-{stop_reason}", turn=1, scope=None, stop_reason=stop_reason)
+    assert controller.turn_active is False
+    assert controller.thinking is False
+    assert controller.input_locked is False
+    assert controller.turns_ended == 1
+    assert local_texts(controller) == ["provider failed"]
+    assert listener.names()[-2:] == ["local", "turn"]
 
 
 def test_content_filtered_turn_shows_compact_and_rephrase_guidance():
     """A content-filtered root turn renders an error telling the user to /compact and rephrase."""
     from archie_shared.transcript import CONTENT_FILTERED_MESSAGE
 
-    app = _make_app()
-    app._apply_event(_user())
-    app._turn_active = True
-    conv = MagicMock()
-    input_widget = MagicMock()
+    controller, _ = make_controller()
+    controller.apply(_user())
+    controller.turn_active = True
+    controller.input_locked = True
 
-    def query_one(selector, _type=None):
-        return {"#conversation": conv, "#input": input_widget}[selector]
+    controller.apply(_root_turn_complete("content_filtered"))
 
-    with (
-        patch.object(app, "query_one", side_effect=query_one),
-        patch.object(app, "_remove_throbber"),
-    ):
-        app._apply_event(_root_turn_complete("content_filtered"))
-
-    (notice,) = app.transcript.turns[0].items
+    (notice,) = controller.builder.turns[0].items
     assert notice.variant == "turn-error" and notice.detail == CONTENT_FILTERED_MESSAGE
     assert "/compact" in CONTENT_FILTERED_MESSAGE
     assert "Rephrase" in CONTENT_FILTERED_MESSAGE
-    assert app._turn_active is False
-    assert input_widget.disabled is False
+    assert controller.turn_active is False
+    assert controller.input_locked is False
 
 
 def test_end_turn_does_not_show_error():
-    app = _make_app()
-    conv = MagicMock()
-    with (
-        patch.object(app, "query_one", return_value=conv),
-        patch.object(app, "_remove_throbber"),
-    ):
-        app._apply_event(_root_turn_complete("end_turn"))
-
-    assert not any(item.kind == "notice" for item in app.transcript.preamble)
+    controller, _ = make_controller()
+    controller.apply(_root_turn_complete("end_turn"))
+    assert not any(item.kind == "notice" for item in controller.builder.preamble)
 
 
 def test_render_canonical_does_not_create_empty_iteration_block():
     """Text-only replay iterations do not leave an empty visual block."""
-    app = _make_app()
-    with patch.object(app, "query_one", return_value=MagicMock()):
-        app._apply_event(_user())
-        app._apply_event(IterationStart(id="i1", turn=1, iteration=1, scope=None))
-
-    assert app.transcript.turns[0].items == []
+    controller, _ = make_controller()
+    controller.apply(_user())
+    controller.apply(IterationStart(id="i1", turn=1, iteration=1, scope=None))
+    assert controller.builder.turns[0].items == []
 
 
 def _tool_call(tool_use_id, name, tool_input, iteration=1):
@@ -776,18 +700,12 @@ async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none(
             yield Conversation(id="conversation")
 
     host = Host()
-    app = _make_app()
+    builder = TranscriptBuilder()
     async with host.run_test() as pilot:
         conv = host.query_one(Conversation)
-        conv.apply_changes(app.transcript, app.transcript.apply(_user()))
-        reply = AssistantMessage(
-            id="a1", turn=1, scope=None, iteration=1, request_id="r1",
-            content="looking", interrupted=False,
-        )  # fmt: skip
-        conv.apply_changes(app.transcript, app.transcript.apply(reply))
-        conv.apply_changes(
-            app.transcript, app.transcript.apply(_tool_call("t1", "read", {"path": "a"}))
-        )
+        conv.apply_changes(builder, builder.apply(_user()))
+        conv.apply_changes(builder, builder.apply(_assistant(content="looking")))
+        conv.apply_changes(builder, builder.apply(_tool_call("t1", "read", {"path": "a"})))
         await pilot.pause()
         kind, colour = conv.query_one(AssistantRow).styles.border_left
         assert kind == "thick" and 0 < colour.a < 1
@@ -819,436 +737,335 @@ async def test_exec_and_shell_rows_show_ten_lines_and_no_click_expand():
     assert shell_lines[10] == "  … +4 lines"
 
 
+# --- Replay -------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_replay_dispatches_through_apply_event(tmp_path):
-    """Stored events use the same public application entry point as live events."""
-    app = _make_app()
-    event = UserMessage(id="u1", turn=1, scope=None, content="hi")
-    response = MagicMock(status_code=200, text=encode_event(event) + "\n")
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.get = AsyncMock(return_value=response)
+async def test_replay_dispatches_through_apply():
+    """Stored events use the same application entry point as live events."""
+    event = _user("hi")
+    controller, _ = make_controller(FakeOrchestrator({"s1": [event]}))
 
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "_apply_event") as apply_event,
-    ):
-        assert await app._replay_events() is True
+    with patch.object(controller, "apply") as apply:
+        assert await controller.replay() is True
 
-    apply_event.assert_called_once_with(event)
+    apply.assert_called_once_with(event)
 
 
 @pytest.mark.asyncio
 async def test_replay_events_seeds_cost_from_ledger():
     """A full replay containing an llm_request folds its cost into accounting."""
-    app = _make_app()
-    events = [
-        UserMessage(id="u1", turn=1, scope=None, content="hi"),
-        _llm_request("l1", 0.25, input_tokens=200, output_tokens=20),
-        AssistantMessage(
-            id="a1",
-            turn=1,
-            scope=None,
-            iteration=1,
-            request_id="l1",
-            content="ok",
-            interrupted=False,
-        ),
-    ]
-    body = "".join(encode_event(e) + "\n" for e in events)
-    resp = MagicMock(status_code=200, text=body)
+    client = FakeOrchestrator(
+        {"s1": [_user("hi"), _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)]}
+    )
+    client.logs["s1"].append(_assistant(request_id="l1"))
+    controller, listener = make_controller(client)
 
-    conv = MagicMock()
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.get = AsyncMock(return_value=resp)
+    await controller.replay()
 
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "query_one", return_value=conv),
-        patch.object(app, "_update_accounting_status"),
-    ):
-        await app._replay_events()
-
-    assert app._cumulative_cost == pytest.approx(0.25)
-    assert app._cumulative_input == 200
-    assert app._last_event_id == "a1"
+    assert client.requests == [("s1", None)]
+    assert controller.ledger.cost == pytest.approx(0.25)
+    assert controller.ledger.input_tokens == 200
+    assert controller.cursor == "a1"
+    replay = [call for call in listener.calls if call[0] == "replay"]
+    assert replay == [("replay", True), ("replay", False)]
 
 
 @pytest.mark.asyncio
 async def test_replay_events_409_falls_back_to_full_replay():
-    """An unknown cursor (409) clears state and re-requests the full log."""
-    app = _make_app()
-    app._last_event_id = "gone"
-    app._seen_event_ids = {"gone"}
-    app._seen_accounted_ids = {"old-ledger"}
-    app._cumulative_input = 999
-    app._cumulative_cost = 9.99
-
-    full_events = [
-        UserMessage(id="u1", turn=1, scope=None, content="hi"),
-        _llm_request("l1", 0.25, input_tokens=200, output_tokens=20),
-    ]
-    full_body = "".join(encode_event(e) + "\n" for e in full_events)
-    resp_409 = MagicMock(status_code=409, text="")
-    resp_full = MagicMock(status_code=200, text=full_body)
-
-    urls = []
-
-    async def _get(url, **kwargs):
-        urls.append(url)
-        return resp_409 if len(urls) == 1 else resp_full
-
-    conv = MagicMock()
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.get = _get
-
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "query_one", return_value=conv),
-    ):
-        await app._replay_events()
-
-    assert "after=gone" in urls[0]
-    assert urls[1].endswith("/events")  # full replay, no cursor
-    conv.reset.assert_called_once_with()
-    assert [turn.user.content for turn in app.transcript.turns] == ["hi"]
-    assert app._last_event_id == "l1"
-    assert app._seen_accounted_ids == {"l1"}
-    assert app._cumulative_input == 200
-    assert app._cumulative_cost == pytest.approx(0.25)
-
-
-@pytest.mark.asyncio
-async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
-    """Reconnect reconciliation keeps the completed turn and ledger totals stable."""
-    app = _make_app()
-    ledger = _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)
-    with patch.object(app, "_update_accounting_status"):
-        app._accumulate_ledger(ledger)
-    app._last_event_id = ledger.id
-    app._seen_event_ids.add(ledger.id)
-
-    status = MagicMock()
-    conversation = MagicMock()
-
-    def query_one(selector, _type=None):
-        return {"#status": status, "#conversation": conversation}[selector]
-
-    response = MagicMock(status_code=200, text="")
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-
-    async def get_response(*args, **kwargs):
-        await asyncio.sleep(0)
-        return response
-
-    mock_http.get = AsyncMock(side_effect=get_response)
-
-    async def buffered_receive_loop():
-        app._event_buffer.extend(
-            [
-                Handshake(
-                    id="h1",
-                    protocol_version=3,
-                    session_id="session-1",
-                ),
-                SessionStatus(id="s1", model_key="m", git_branch="main"),
-                ledger,
-            ]
-        )
-
-    app._ws.connect = AsyncMock()
-    app._receive_loop = buffered_receive_loop
-
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http),
-        patch.object(app, "query_one", side_effect=query_one),
-        patch.object(app, "notify"),
-    ):
-        await app._reconnect()
-
-    app._ws.connect.assert_awaited_once_with(app._ws_url)
-    requested_url = mock_http.get.await_args.args[0]
-    assert requested_url.endswith(f"/events?after={ledger.id}")
-    assert app._session_id == "session-1"
-    assert status.git_branch == "main"
-    assert app._last_event_id == ledger.id
-    assert app._seen_accounted_ids == {ledger.id}
-    assert app._cumulative_input == 200
-    assert app._cumulative_cost == pytest.approx(0.25)
-
-
-@pytest.mark.asyncio
-async def test_direct_shell_renders_locally_without_network_logging():
-    """The initiating TUI renders shell output directly and makes no POST."""
-    app = _make_app()
-    process = MagicMock(returncode=0)
-    process.communicate = AsyncMock(return_value=(b"output\n", None))
-    conversation = MagicMock()
-
-    with (
-        patch.object(app, "query_one", return_value=conversation),
-        patch(
-            "archie_cli.tui.app.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            return_value=process,
-        ),
-        patch("archie_cli.tui.app.httpx.AsyncClient") as http_client,
-    ):
-        await app._run_direct_shell("printf output")
-
-    conversation.add_shell_output.assert_called_once_with("printf output", "output\n", exit_code=0)
-    http_client.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_direct_shell_cancel_renders_local_output():
-    """Esc cancels local shell execution without creating a session event."""
-    import asyncio
-
-    app = _make_app()
-    conversation = MagicMock()
-    released = asyncio.Event()
-
-    class FakeProcess:
-        returncode = None
-
-        def kill(self):
-            self.returncode = -9
-            released.set()
-
-        async def communicate(self):
-            await released.wait()
-            return b"partial\n", None
-
-    process = FakeProcess()
-    with (
-        patch.object(app, "query_one", return_value=conversation),
-        patch(
-            "archie_cli.tui.app.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            return_value=process,
-        ),
-    ):
-        task = asyncio.create_task(app._run_direct_shell("long command"))
-        while app._shell_proc is not process:
-            await asyncio.sleep(0)
-        app.action_cancel()
-        await task
-
-    conversation.add_shell_output.assert_called_once_with(
-        "long command", "partial\n", exit_code=130
+    """An unknown cursor (409) resets state, tells the listener and refetches the log."""
+    client = FakeOrchestrator(
+        {"s1": [_user("hi"), _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)]}
     )
+    controller, listener = make_controller(client)
+    controller.cursor = "gone"
+    controller._seen_event_ids = {"gone"}
+    controller._seen_accounted_ids = {"old-ledger"}
+    controller.ledger.input_tokens = 999
+    controller.ledger.cost = 9.99
+
+    assert await controller.replay() is True
+
+    assert client.requests == [("s1", "gone"), ("s1", None)]  # then the full log
+    assert listener.names().count("reset") == 1
+    assert listener.names().index("reset") < listener.calls.index(("replay", True))
+    assert [turn.user.content for turn in controller.builder.turns] == ["hi"]
+    assert controller.cursor == "l1"
+    assert controller._seen_accounted_ids == {"l1"}
+    assert controller.ledger.input_tokens == 200
+    assert controller.ledger.cost == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_scripted_409_once_resets_then_reads_the_log():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    client.reject_cursor_once()
+    controller, listener = make_controller(client)
+
+    assert await controller.replay() is True
+    assert listener.names().count("reset") == 1
+    assert [turn.user.content for turn in controller.builder.turns] == ["hi"]
 
 
 @pytest.mark.asyncio
 async def test_replay_events_reports_http_failure():
     """Replay failure is explicit instead of being treated as an empty history."""
-    app = _make_app()
-    response = MagicMock(status_code=503, text="unavailable")
-    mock_http = AsyncMock()
-    mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-    mock_http.__aexit__ = AsyncMock(return_value=False)
-    mock_http.get = AsyncMock(return_value=response)
+    client = FakeOrchestrator()
+    client.reply(OrchestratorError("history request failed: 503", 503))
+    controller, listener = make_controller(client)
+    assert await controller.replay() is False
+    assert "replay" not in listener.names()
 
-    with patch("archie_cli.tui.app.httpx.AsyncClient", return_value=mock_http):
-        assert await app._replay_events() is False
+
+@pytest.mark.asyncio
+async def test_replay_yields_to_the_event_loop_every_200_events():
+    events = [_user(f"q{n}", event_id=f"u{n}") for n in range(450)]
+    controller, _ = make_controller(FakeOrchestrator({"s1": events}))
+    sleeps = []
+
+    async def record(delay):
+        sleeps.append(delay)
+
+    with patch("archie_cli.tui.session.asyncio.sleep", record):
+        assert await controller.replay() is True
+    # One yield in the fake request, then one after events 200 and 400.
+    assert sleeps == [0, 0, 0]
+    assert len(controller.builder.turns) == 450
+
+
+@pytest.mark.asyncio
+async def test_http_orchestrator_maps_event_statuses():
+    def http(status_code, text=""):
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.get = AsyncMock(return_value=MagicMock(status_code=status_code, text=text))
+        return client
+
+    orchestrator = HttpOrchestrator("http://127.0.0.1:7600/")
+    ok = http(200, "body")
+    with patch("archie_cli.tui.client.httpx.AsyncClient", return_value=ok):
+        assert await orchestrator.events("s1", "e3") == "body"
+    ok.get.assert_awaited_once_with(
+        "http://127.0.0.1:7600/api/sessions/s1/events?after=e3", timeout=5.0
+    )
+    with (
+        patch("archie_cli.tui.client.httpx.AsyncClient", return_value=http(409)),
+        pytest.raises(CursorNotFound),
+    ):
+        await orchestrator.events("s1", "gone")
+    with (
+        patch("archie_cli.tui.client.httpx.AsyncClient", return_value=http(503)),
+        pytest.raises(OrchestratorError) as raised,
+    ):
+        await orchestrator.events("s1", None)
+    assert raised.value.status_code == 503
+    assert orchestrator.stream_url("s1") == "ws://127.0.0.1:7600/api/sessions/s1/stream"
+    assert HttpOrchestrator("https://h").stream_url("s1") == "wss://h/api/sessions/s1/stream"
+
+
+# --- Connection ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_first_replay_reports_loaded_once():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    controller, listener = make_controller(client)
+
+    await controller.start()
+
+    assert listener.names().count("loaded") == 1
+    assert listener.names().index("loaded") > listener.calls.index(("replay", False))
+    assert controller.loaded
+
+    controller.RECONNECT_DELAYS = (0.0,)
+    client.latest.drop()
+    for _ in range(20):
+        if controller._reconnect_task is not None:
+            break
+        await asyncio.sleep(0)
+    await controller._reconnect_task
+    assert len(client.streams) == 2
+    assert listener.names().count("loaded") == 1  # later replays do not repeat it
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_loaded_waits_for_the_first_replay_that_lands():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    client.reply(OrchestratorError("down"))
+    controller, listener = make_controller(client)
+    controller.RECONNECT_DELAYS = (0.0,)
+
+    await controller.start()
+    assert "loaded" not in listener.names()
+    assert local_texts(controller) == ["Initial event replay failed; retrying connection."]
+
+    await controller._reconnect_task
+    assert listener.names().count("loaded") == 1
+    assert [turn.user.content for turn in controller.builder.turns] == ["hi"]
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_first_connect_failure_is_reported_and_not_retried():
+    client = FakeOrchestrator()
+    client.fail_connects(OSError("offline"))
+    controller, _ = make_controller(client)
+
+    await controller.start()
+
+    assert local_texts(controller) == ["Connection failed: offline"]
+    assert controller._reconnect_task is None and client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
+    """Reconnect reconciliation keeps the completed turn and ledger totals stable."""
+    ledger = _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)
+    client = FakeOrchestrator({"s1": [ledger]})
+    controller, _ = make_controller(client)
+    controller.apply(ledger)
+    controller.RECONNECT_DELAYS = (0.0,)
+    # Live frames that arrive while the replay request is in flight are buffered.
+    client.frames_on_connect(
+        Handshake(id="h1", protocol_version=3, session_id="session-1"),
+        SessionStatus(id="s1", model_key="m", git_branch="main"),
+        ledger,
+    )
+
+    assert await controller._reconnect() is True
+
+    assert client.requests == [("s1", "l1")]
+    assert controller.agent_session_id == "session-1"
+    assert controller.git_branch == "main"
+    assert controller.cursor == "l1"
+    assert controller._seen_accounted_ids == {"l1"}
+    assert controller.ledger.input_tokens == 200
+    assert controller.ledger.cost == pytest.approx(0.25)
+    await controller.close()
 
 
 @pytest.mark.asyncio
 async def test_reconnect_retries_when_replay_fails():
     """Reconnect does not report success until canonical replay succeeds."""
-    app = _make_app()
-    app._ws.connect = AsyncMock()
-    app._ws.disconnect = AsyncMock()
-    app._receive_loop = AsyncMock()
-    app._replay_events = AsyncMock(side_effect=[False, True])
+    client = FakeOrchestrator()
+    client.reply(OrchestratorError("down"), "")
+    controller, listener = make_controller(client)
+    controller.RECONNECT_DELAYS = (0.0, 0.0)
 
-    async def no_sleep(_delay):
-        return None
+    assert await controller._reconnect() is True
 
-    with (
-        patch("archie_cli.tui.app.asyncio.sleep", side_effect=no_sleep),
-        patch.object(app, "notify") as notify,
-    ):
-        await app._reconnect()
-
-    assert app._ws.connect.await_count == 2
-    assert app._replay_events.await_count == 2
-    app._ws.disconnect.assert_awaited_once()
-    assert any(call.args == ("Reconnected to agent",) for call in notify.call_args_list)
-
-
-def _child_texts(app, index=0):
-    sub = app.transcript.subagents[("task-1", index)]
-    return [(item.kind, getattr(item, "content", getattr(item, "text", ""))) for item in sub.items]
-
-
-@pytest.mark.asyncio
-async def test_replay_child_assistant_message_reconstructs_child_output():
-    """Persisted child assistant messages rebuild the child transcript on replay."""
-    app = _make_app()
-    event = AssistantMessage(
-        id="child-assistant",
-        turn=1,
-        scope="task-1",
-        subagent_index=0,
-        iteration=1,
-        request_id="request-1",
-        content="persisted child response",
-        interrupted=False,
-    )
-    app._apply_event(event)
-
-    assert _child_texts(app) == [("text", "persisted child response")]
+    assert len(client.streams) == 2
+    assert len(client.requests) == 2
+    client.streams[0].disconnect.assert_awaited_once()
+    assert ("notice", "Reconnected to agent") in listener.calls
+    await controller.close()
 
 
 @pytest.mark.asyncio
 async def test_receive_disconnect_preserves_partial_stream_until_replay():
     """A transient socket close must not finalize partial assistant output."""
-    app = _make_app()
-    app._turn_active = True
-    app._streaming = MagicMock()
-    app._stream_text = "partial response"
-
-    async def empty_receive():
-        if False:
-            yield None
-
-    app._ws.receive = empty_receive
-    with (
-        patch.object(app, "_show_client_error"),
-        patch.object(app, "_schedule_reconnect"),
-        patch.object(app, "_end_turn") as end_turn,
-    ):
-        await app._receive_loop()
-
-    end_turn.assert_not_called()
-    assert app._stream_text == "partial response"
-    assert app._turn_active is True
-
-
-@pytest.mark.asyncio
-async def test_child_replay_replaces_live_child_deltas():
-    """Durable child content replaces partial live deltas after reconnect."""
-    app = _make_app()
-    live_delta = TextDelta(
-        id="child-delta",
-        turn=1,
-        iteration=1,
-        scope="task-1",
-        subagent_index=0,
-        request_id="request-1",
-        text="partial ",
+    controller, _ = make_controller()
+    await controller.start()
+    controller.apply(_user())
+    controller.turn_active = True
+    controller.apply(
+        TextDelta(id="d1", turn=1, iteration=1, scope=None, request_id="r1", text="partial")
     )
-    durable = AssistantMessage(
-        id="child-assistant-reconnect",
+
+    with patch.object(controller, "_schedule_reconnect") as schedule:
+        controller.ws.close()
+        await controller._receive_task
+
+    schedule.assert_called_once_with(None)
+    assert local_texts(controller) == ["Connection lost: the agent closed the stream."]
+    assert controller.turn_active is True
+    (item,) = controller.builder.turns[0].items
+    assert item.kind == "stream" and item.text == "partial"
+
+
+# --- Children -----------------------------------------------------------------------
+
+
+def _child_texts(controller, index=0):
+    sub = controller.builder.subagents[("task-1", index)]
+    return [(item.kind, getattr(item, "content", getattr(item, "text", ""))) for item in sub.items]
+
+
+def _child_assistant(event_id, content, *, index=0, iteration=1, request_id="request-1"):
+    return AssistantMessage(
+        id=event_id,
         turn=1,
         scope="task-1",
-        subagent_index=0,
-        iteration=1,
-        request_id="request-1",
-        content="partial response",
+        subagent_index=index,
+        iteration=iteration,
+        request_id=request_id,
+        content=content,
         interrupted=False,
     )
 
-    app._apply_event(live_delta)
-    app._apply_event(durable)
 
-    assert _child_texts(app) == [("text", "partial response")]
+def _child_delta(event_id, text, *, index=0, iteration=1, request_id="request-1"):
+    return TextDelta(
+        id=event_id,
+        turn=1,
+        iteration=iteration,
+        scope="task-1",
+        subagent_index=index,
+        request_id=request_id,
+        text=text,
+    )
+
+
+def test_replay_child_assistant_message_reconstructs_child_output():
+    """Persisted child assistant messages rebuild the child transcript on replay."""
+    controller, _ = make_controller()
+    controller.apply(_child_assistant("child-assistant", "persisted child response"))
+    assert _child_texts(controller) == [("text", "persisted child response")]
+
+
+def test_child_replay_replaces_live_child_deltas():
+    """Durable child content replaces partial live deltas after reconnect."""
+    controller, _ = make_controller()
+    controller.apply(_child_delta("child-delta", "partial "))
+    controller.apply(_child_assistant("child-assistant-reconnect", "partial response"))
+    assert _child_texts(controller) == [("text", "partial response")]
 
 
 def test_child_replay_preserves_durable_lines_across_requests():
     """Reconnect reconciliation keeps each request's durable child answer."""
-    app = _make_app()
-    first_assistant = AssistantMessage(
-        id="child-assistant-1",
-        turn=1,
-        scope="task-1",
-        subagent_index=0,
-        iteration=1,
-        request_id="request-1",
-        content="first answer",
-        interrupted=False,
+    controller, _ = make_controller()
+    controller.apply(_child_assistant("child-assistant-1", "first answer"))
+    controller.apply(
+        _child_delta("child-delta-2", "second partial", iteration=2, request_id="request-2")
     )
-    second_delta = TextDelta(
-        id="child-delta-2",
-        turn=1,
-        iteration=2,
-        scope="task-1",
-        subagent_index=0,
-        request_id="request-2",
-        text="second partial",
+    controller.apply(
+        _child_assistant("child-assistant-2", "second answer", iteration=2, request_id="request-2")
     )
-    second_assistant = AssistantMessage(
-        id="child-assistant-2",
-        turn=1,
-        scope="task-1",
-        subagent_index=0,
-        iteration=2,
-        request_id="request-2",
-        content="second answer",
-        interrupted=False,
-    )
-
-    app._apply_event(first_assistant)
-    app._apply_event(second_delta)
-    app._apply_event(second_assistant)
-
-    assert _child_texts(app) == [("text", "first answer"), ("text", "second answer")]
+    assert _child_texts(controller) == [("text", "first answer"), ("text", "second answer")]
 
 
 def test_sibling_child_streams_finalize_independently():
     """Finalizing one child request leaves a sibling transient request untouched."""
-    app = _make_app()
-    child_zero_delta = TextDelta(
-        id="child-zero-delta",
-        turn=1,
-        iteration=1,
-        scope="task-1",
-        subagent_index=0,
-        request_id="request-zero",
-        text="zero partial",
+    controller, _ = make_controller()
+    controller.apply(_child_delta("child-zero-delta", "zero partial", request_id="request-zero"))
+    controller.apply(
+        _child_delta("child-one-delta", "one partial", index=1, request_id="request-one")
     )
-    child_one_delta = TextDelta(
-        id="child-one-delta",
-        turn=1,
-        iteration=1,
-        scope="task-1",
-        subagent_index=1,
-        request_id="request-one",
-        text="one partial",
-    )
-    child_zero_assistant = AssistantMessage(
-        id="child-zero-assistant",
-        turn=1,
-        iteration=1,
-        scope="task-1",
-        subagent_index=0,
-        request_id="request-zero",
-        content="zero answer",
-        interrupted=False,
+    controller.apply(
+        _child_assistant("child-zero-assistant", "zero answer", request_id="request-zero")
     )
 
-    app._apply_event(child_zero_delta)
-    app._apply_event(child_one_delta)
-    app._apply_event(child_zero_assistant)
-
-    assert _child_texts(app, 0) == [("text", "zero answer")]
-    assert _child_texts(app, 1) == [("stream", "one partial")]
-    assert app.transcript.subagents[("task-1", 1)].activity == "Responding..."
+    assert _child_texts(controller, 0) == [("text", "zero answer")]
+    assert _child_texts(controller, 1) == [("stream", "one partial")]
+    assert controller.builder.subagents[("task-1", 1)].activity == "Responding..."
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("scope, subagent_index", [(None, None), ("task-1", 0)])
-def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_index):
-    """Durable assistant content wins over a duplicate buffered live delta."""
-    app = _make_app()
+async def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_index):
+    """Durable assistant content wins over a duplicate live delta buffered during replay."""
     assistant = AssistantMessage(
         id=f"assistant-{scope}",
         turn=1,
@@ -1268,65 +1085,162 @@ def test_replay_assistant_suppresses_matching_buffered_delta(scope, subagent_ind
         request_id="request-1",
         text="durable response",
     )
-    app._event_buffer = [delta]
-    with patch.object(app, "query_one", return_value=MagicMock()):
-        if scope is None:
-            app._apply_event(_user())
-        app._apply_event(assistant)
-        app._dispatch_buffered_events()
+    log = [_user(), assistant] if scope is None else [assistant]
+    client = FakeOrchestrator({"s1": log})
+    client.frames_on_connect(delta)
+    controller, listener = make_controller(client)
+
+    await controller.start()
 
     items = (
-        app.transcript.turns[0].items
+        controller.builder.turns[0].items
         if scope is None
-        else app.transcript.subagents[(scope, subagent_index)].items
+        else controller.builder.subagents[(scope, subagent_index)].items
     )
     assert [(i.kind, i.content) for i in items] == [("text", "durable response")]
+    assert listener.names()[-1] == "loaded"  # the late delta changed nothing
+    await controller.close()
+
+
+# --- Local entries ----------------------------------------------------------------
+
+
+def test_local_entries_record_the_last_root_row_as_anchor():
+    controller, listener = make_controller()
+    controller.client_error("before anything")
+    controller.apply(_user())
+    controller.client_error("after the user message")
+    controller.apply(_assistant())
+    controller.apply(_llm_request("l1", 0.01))
+    controller.apply(_root_turn_complete("end_turn"))
+
+    turn = controller.builder.turns[0]
+    first, second, status = controller.locals
+    assert first == ClientErrorEntry(None, "before anything")
+    assert second.anchor == turn.user.id
+    assert isinstance(status, TurnStatusEntry) and status.anchor == turn.items[-1].id
+    assert [entry for (entry,) in listener.of("local")] == controller.locals
+
+
+@pytest.mark.asyncio
+async def test_local_entries_survive_a_reset():
+    controller, _ = make_controller()
+    controller.apply(_user())
+    controller.client_error("kept")
+    await controller.reset()
+    assert local_texts(controller) == ["kept"]
+
+
+def test_local_entry_before_any_turn_anchors_to_the_preamble():
+    controller, _ = make_controller()
+    controller.apply(_assistant("pre", "before any user message"))
+    controller.client_error("x")
+    assert controller.locals[-1].anchor == controller.builder.preamble[-1].id
+
+
+# --- Direct shell -----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_renders_locally_without_network_logging():
+    """The shell output is a local entry; nothing reaches the orchestrator."""
+    client = FakeOrchestrator()
+    controller, listener = make_controller(client)
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"output\n", None))
+
+    with patch(
+        "archie_cli.tui.session.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=process,
+    ) as exec_:
+        await controller.run_shell("printf output")
+
+    assert exec_.await_args.args[:5] == ("docker", "exec", "-w", "/workspace", "archie-s1")
+    assert controller.locals == [ShellOutputEntry(None, "printf output", "output\n", 0)]
+    assert listener.of("local") == [(controller.locals[0],)]
+    assert client.requests == [] and client.streams == []
+    assert not controller.shell_active
+
+
+@pytest.mark.asyncio
+async def test_direct_shell_cancel_renders_local_output():
+    """Esc cancels local shell execution without creating a session event."""
+    controller, _ = make_controller()
+    released = asyncio.Event()
+
+    class FakeProcess:
+        returncode = None
+
+        def kill(self):
+            self.returncode = -9
+            released.set()
+
+        async def communicate(self):
+            await released.wait()
+            return b"partial\n", None
+
+    process = FakeProcess()
+    with patch(
+        "archie_cli.tui.session.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=process,
+    ):
+        task = asyncio.create_task(controller.run_shell("long command"))
+        while controller._shell_proc is not process:
+            await asyncio.sleep(0)
+        assert controller.cancel() == "shell"
+        await task
+
+    assert controller.locals == [ShellOutputEntry(None, "long command", "partial\n", 130)]
+
+
+@pytest.mark.asyncio
+async def test_second_shell_command_while_one_runs_is_refused():
+    controller, _ = make_controller()
+    controller.shell_active = True
+    controller.submit("!ls")
+    assert local_texts(controller) == ["Shell command already running"]
 
 
 @pytest.mark.asyncio
 async def test_direct_shell_timeout_renders_exit_124():
-    app = _make_app()
+    controller, _ = make_controller()
     process = MagicMock(returncode=None)
     process.communicate = MagicMock()
     process.wait = AsyncMock()
-    conversation = MagicMock()
 
     with (
-        patch.object(app, "query_one", return_value=conversation),
         patch(
-            "archie_cli.tui.app.asyncio.create_subprocess_exec",
+            "archie_cli.tui.session.asyncio.create_subprocess_exec",
             new_callable=AsyncMock,
             return_value=process,
         ),
-        patch("archie_cli.tui.app.asyncio.wait_for", side_effect=TimeoutError),
+        patch("archie_cli.tui.session.asyncio.wait_for", side_effect=TimeoutError),
     ):
-        await app._run_direct_shell("sleep 60")
+        await controller.run_shell("sleep 60")
 
     process.kill.assert_called_once_with()
     process.wait.assert_awaited_once()
-    conversation.add_shell_output.assert_called_once_with("sleep 60", "(timed out)", exit_code=124)
+    assert controller.locals == [ShellOutputEntry(None, "sleep 60", "(timed out)", 124)]
 
 
 @pytest.mark.asyncio
 async def test_direct_shell_truncates_output_after_10000_lines():
-    app = _make_app()
+    controller, _ = make_controller()
     process = MagicMock(returncode=0)
     process.communicate = AsyncMock(
         return_value=("\n".join(f"line-{index}" for index in range(10_001)).encode(), None)
     )
-    conversation = MagicMock()
 
-    with (
-        patch.object(app, "query_one", return_value=conversation),
-        patch(
-            "archie_cli.tui.app.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            return_value=process,
-        ),
+    with patch(
+        "archie_cli.tui.session.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=process,
     ):
-        await app._run_direct_shell("generate-lines")
+        await controller.run_shell("generate-lines")
 
-    output = conversation.add_shell_output.call_args.args[1]
+    output = controller.locals[0].output
     assert output.splitlines()[-1] == "(truncated)"
     assert len(output.splitlines()) == 10_001
     assert output.splitlines()[0] == "line-0"
@@ -1335,18 +1249,13 @@ async def test_direct_shell_truncates_output_after_10000_lines():
 
 @pytest.mark.asyncio
 async def test_direct_shell_failure_renders_local_error():
-    app = _make_app()
-    conversation = MagicMock()
+    controller, _ = make_controller()
 
-    with (
-        patch.object(app, "query_one", return_value=conversation),
-        patch(
-            "archie_cli.tui.app.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            side_effect=OSError("docker unavailable"),
-        ),
+    with patch(
+        "archie_cli.tui.session.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        side_effect=OSError("docker unavailable"),
     ):
-        await app._run_direct_shell("pwd")
+        await controller.run_shell("pwd")
 
-    conversation.add_client_error.assert_called_once_with("Docker exec failed: docker unavailable")
-    conversation.add_shell_output.assert_not_called()
+    assert controller.locals == [ClientErrorEntry(None, "Docker exec failed: docker unavailable")]

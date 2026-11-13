@@ -6,7 +6,7 @@ D9: TUI transparently reconnects after an orchestrator bounce.
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from archie_orchestrator.app import app, lifespan
@@ -14,6 +14,7 @@ from archie_shared.schemas import NexusConfig
 from httpx import ASGITransport, AsyncClient
 
 from tests.session_fakes import FakeRuntime, running, use_runtime
+from tests.tui_fakes import FakeOrchestrator, local_texts, make_controller
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -93,92 +94,79 @@ async def test_shutdown_logs_active_connections(caplog):
 @pytest.mark.asyncio
 async def test_tui_reconnect_uses_0_5s_initial_delay():
     """TUI reconnect backoff starts at 0.5s (not 1.0s)."""
-    from archie_cli.tui.app import ArchieApp
-
-    app_instance = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
-        container_name="archie-proj-01abc",
-    )
-
+    controller, listener = make_controller(FakeOrchestrator(), "proj-01abc")
     sleep_calls = []
-    _slept_once = False
 
     async def _fake_sleep(delay):
-        nonlocal _slept_once
         sleep_calls.append(delay)
-        if not _slept_once:
-            _slept_once = True
-            # Abort reconnect loop after recording the first delay
-            raise asyncio.CancelledError
+        raise asyncio.CancelledError  # stop after recording the first delay
 
-    connect_calls = []
-
-    async def _fake_connect(url):
-        connect_calls.append(url)
-
-    with (
-        patch("archie_cli.tui.app.asyncio.sleep", _fake_sleep),
-        patch.object(app_instance._ws, "connect", _fake_connect),
-    ):
+    with patch("archie_cli.tui.session.asyncio.sleep", _fake_sleep):
         try:
-            await app_instance._reconnect()
-        except (Exception, asyncio.CancelledError):
+            await controller._reconnect()
+        except asyncio.CancelledError:
             pass
 
-    assert sleep_calls, "Expected at least one sleep call"
-    assert sleep_calls[0] == 0.5, f"First retry delay should be 0.5s, got {sleep_calls[0]}"
+    assert sleep_calls == [0.5], f"First retry delay should be 0.5s, got {sleep_calls}"
+    assert ("notice", "Reconnecting...") in listener.calls
+    assert not controller.reconnecting
 
 
 @pytest.mark.asyncio
 async def test_tui_reconnect_4004_gives_up_immediately():
-    """Close code 4004 (session ended) → no retry, immediate failure message."""
-    from archie_cli.tui.app import ArchieApp
-
-    app_instance = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
-        container_name="archie-proj-01abc",
-    )
-
+    """A 4004 close (session ended) is not retried and says so."""
+    client = FakeOrchestrator()
+    controller, _ = make_controller(client, "proj-01abc")
+    await controller.start()
+    real_sleep = asyncio.sleep
     sleep_calls = []
 
     async def _fake_sleep(delay):
         sleep_calls.append(delay)
+        await real_sleep(0)
 
-    client_errors = []
-    app_instance._show_client_error = lambda msg: client_errors.append(msg)
+    with patch("archie_cli.tui.session.asyncio.sleep", _fake_sleep):
+        client.latest.drop(4004)
+        await controller._receive_task
+        while controller.reconnecting:
+            await real_sleep(0)
 
-    with patch("archie_cli.tui.app.asyncio.sleep", _fake_sleep):
-        await app_instance._reconnect(close_code=4004)
-
-    # No sleeps — immediate give-up
+    # No back-off sleeps and no second connection: an immediate give-up.
     assert not sleep_calls
-    assert any("Session has ended" in e for e in client_errors)
+    assert len(client.streams) == 1
+    errors = local_texts(controller)
+    assert errors[0].startswith("Connection lost:")
+    assert any("Session has ended" in e for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_tui_reconnect_gives_up_after_the_retry_window():
+    """Without a successful connect in 30 s the client stops and says so."""
+    client = FakeOrchestrator()
+    controller, _ = make_controller(client, "proj-01abc")
+    controller.RECONNECT_WINDOW = 0.0  # the first 0.5 s delay is already past it
+
+    assert await controller._reconnect() is False
+    assert local_texts(controller) == [
+        "Reconnect failed after 30s. Relaunch the client to continue."
+    ]
+    assert client.streams == []
 
 
 @pytest.mark.asyncio
 async def test_tui_reconnect_deduplicates_history():
-    """After reconnect, _replay_events renders only events past the cursor.
+    """After reconnect, replay renders only events past the cursor.
 
     The client tracks the id of the last rendered canonical event and requests
     /events?after=<id>; already-seen ids are deduplicated.
     """
-    from archie_cli.tui.app import ArchieApp
-    from archie_shared.events import (
-        AssistantMessage,
-        UserMessage,
-        encode_event,
-    )
+    from archie_shared.events import AssistantMessage, UserMessage, encode_event
 
-    app_instance = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
-        container_name="archie-proj-01abc",
-    )
+    client = FakeOrchestrator()
+    controller, _ = make_controller(client, "proj-01abc")
     # Pretend we already rendered up to event "e3".
-    app_instance._last_event_id = "e3"
-    app_instance._seen_event_ids = {"e1", "e2", "e3"}
+    controller.cursor = "e3"
+    controller._seen_event_ids = {"e1", "e2", "e3"}
 
     # /events?after=e3 returns the tail (e4) plus e3 again (dedup exercise).
     events = [
@@ -193,38 +181,16 @@ async def test_tui_reconnect_deduplicates_history():
             interrupted=False,
         ),
     ]
-    body = "".join(encode_event(e) + "\n" for e in events)
+    client.reply("".join(encode_event(e) + "\n" for e in events))
 
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.text = body
-
-    mock_conv = MagicMock()
-
-    captured_url = {}
-
-    async def _get(url, **kwargs):
-        captured_url["url"] = url
-        return mock_resp
-
-    with (
-        patch("archie_cli.tui.app.httpx.AsyncClient") as mock_client_cls,
-    ):
-        mock_http = AsyncMock()
-        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-        mock_http.__aexit__ = AsyncMock(return_value=False)
-        mock_http.get = _get
-        mock_client_cls.return_value = mock_http
-
-        with patch.object(app_instance, "query_one", return_value=mock_conv):
-            await app_instance._replay_events()
+    assert await controller.replay() is True
 
     # Requested incremental replay from the cursor.
-    assert "after=e3" in captured_url["url"]
+    assert client.requests == [("proj-01abc", "e3")]
     # Only the unseen event (e4) reached the transcript; e3 was deduplicated.
-    assert app_instance.transcript.turns == []
-    assert [(i.role, i.content) for i in app_instance.transcript.preamble] == [("assistant", "new")]
-    assert app_instance._last_event_id == "e4"
+    assert controller.builder.turns == []
+    assert [(i.role, i.content) for i in controller.builder.preamble] == [("assistant", "new")]
+    assert controller.cursor == "e4"
 
 
 # ---------------------------------------------------------------------------

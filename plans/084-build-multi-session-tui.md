@@ -233,7 +233,7 @@ TUI (`cli/src/archie_cli/tui/`):
   into `commands.py`.
 - `app.py` (rewritten): `ArchieApp` per D19: layout, feed loop, controller LRU, switching
   (D10), animation timer (D16), actions and keys (D23).
-- `transcript_view.py`: `TranscriptView.load(timeline)`; `ToolRow` renders the two-line
+- `transcript_view.py`: `TranscriptView.load(builder, locals)` (D6); `ToolRow` renders the two-line
   model; `conversation.UserMessage` drops its header.
 - `status.py`, `theme.py`, `archie.tcss` per D31, D33.
 - Deleted: `quit_screen.py`, `throbber.py`, `models_provider.py`, `DetailScreen` classes.
@@ -311,7 +311,7 @@ Tests and when they change:
 
 ## Milestones
 
-### [ ] M1 — SessionController holds a session's state (prefactor)
+### [x] M1 — SessionController holds a session's state (prefactor)
 
 - **Approach:** **prefactor**. Create `client.py` (`HttpOrchestrator` for events/stream/
   delete only so far) and `session.py`. Move the per-session state and logic listed in
@@ -326,7 +326,14 @@ Tests and when they change:
   tests/test_tui_streaming.py tests/test_protocol_version.py tests/test_orchestrator_bounce.py
   tests/test_kiro_translate.py tests/test_tui_detail.py tests/test_tui_window.py` pass; full
   suite.
-- **Outcome:**
+- **Outcome:** `client.py` (`OrchestratorClient`, `HttpOrchestrator`: events/stream/delete,
+  `CursorNotFound`), `session.py` (`SessionController` with all per-session state, local
+  entries with anchors, `Ledger`/`TurnMetrics`, the `SessionListener` protocol), `app.py` a
+  thin host (1085 → 554 lines) with temporary shims, `tests/tui_fakes.py`. Listener adds two
+  methods beyond D6: `on_replay(active)` (brackets history batches so the conversation still
+  mounts once; replay yields every 200 events) and `on_notice(message, timeout)` (today's
+  reconnect toasts, M1 only); `on_reset` is async. Evidence: M1 Verify files 129 passed;
+  full suite 5209 passed; Ruff and format clean.
 
 ### [ ] M2 — The new TUI lists sessions and shows the selected one
 
@@ -431,6 +438,9 @@ Tests and when they change:
 
 ## Deviations
 
+- M1: `SessionListener` gained `on_replay(active)` and `on_notice(message, timeout)`, and
+  `on_reset` is async (popups and `Conversation.reset()` must finish before the full
+  replay). `on_notice` goes away with the reconnect toasts in M6.
 ## Risks
 
 - The TUI can't be run against the user's real orchestrator from this container; app

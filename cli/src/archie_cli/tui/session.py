@@ -1,0 +1,1006 @@
+"""One session's client state and behaviour, with no widgets (084 D6).
+
+``SessionController`` owns everything the TUI knows about one session: the stream
+connection and its reconnect rule, the replay cursor and event dedup, the transcript
+model (``TranscriptBuilder``), accounting and status-bar values, turn state and turn
+metrics, the pending question, the ``!`` direct shell, and the client-only timeline
+entries (turn status, client errors, shell output).
+
+It reports what changed to at most one attached ``SessionListener`` (the widgets that
+show the session). The listener reads the rest from the controller's attributes, so a
+view attached later can render the current state without replaying events.
+
+Replay batching: ``replay`` brackets a history batch with ``on_replay(True)`` and
+``on_replay(False)`` (``replaying`` is true in between) and yields to the event loop
+every ``REPLAY_YIELD_EVERY`` events. A view suspends row mounting on the first call
+and mounts the latest window once, from final node state, on the second.
+
+Connection rule (M1, unchanged from the single-session app): a dropped stream is
+retried with a 0.5 → 8 s back-off for up to 30 s; a 4004 close (session not found)
+stops at once.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
+
+from archie_shared import events as ce
+from archie_shared.commands import AnswerCommand, InterruptCommand, SwitchModelCommand
+from archie_shared.events import LLMRequest, decode_event
+from archie_shared.kiro import kiro_model_id
+from archie_shared.models import load_models
+from archie_shared.protocol import PROTOCOL_VERSION
+from archie_shared.transcript import Change, TranscriptBuilder
+
+from archie_cli.tui.client import CursorNotFound, OrchestratorClient
+from archie_cli.ws_client import WSClient
+
+log = logging.getLogger(__name__)
+
+SESSION_STATE_PROTOCOL = 4
+"""First protocol version whose ``session_status`` carries state and question."""
+
+REPLAY_YIELD_EVERY = 200
+"""Events applied between yields to the event loop while a history batch replays."""
+
+SHELL_TIMEOUT = 30
+"""Seconds a ``!`` command may run before it is killed."""
+
+SHELL_MAX_LINES = 10_000
+"""Lines of ``!`` output kept; the rest is cut and marked ``(truncated)``."""
+
+# ErrorNotice kinds that end the turn the client is waiting on.
+_TURN_ENDING_NOTICES = frozenset(
+    {"turn_active", "turn_error", "storage_error", "manual_compaction_failed"}
+)
+
+CancelAction = Literal["shell", "dismiss", "interrupt"]
+"""What ``SessionController.cancel`` did: killed the shell, dismissed the question or
+asked the agent to interrupt the turn."""
+
+
+# --- Timeline entries ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TurnStatusEntry:
+    """Client-only metrics for a completed root turn."""
+
+    anchor: str | None
+    duration_s: float
+    input_tokens: int
+    cache_read: int
+    cache_write: int
+    output_tokens: int
+    cost: float
+    credits: float | None
+    kind: Literal["turn_status"] = "turn_status"
+
+
+@dataclass(frozen=True)
+class ClientErrorEntry:
+    """A client or transport error; not part of the session log."""
+
+    anchor: str | None
+    message: str
+    kind: Literal["client_error"] = "client_error"
+
+
+@dataclass(frozen=True)
+class ShellOutputEntry:
+    """Output of a ``!`` command run on the host with ``docker exec``."""
+
+    anchor: str | None
+    command: str
+    output: str
+    exit_code: int
+    kind: Literal["shell_output"] = "shell_output"
+
+
+LocalEntry = TurnStatusEntry | ClientErrorEntry | ShellOutputEntry
+"""A client-only timeline entry. ``anchor`` is the id of the last root row node in the
+transcript when the entry was added (None before any), so a view rebuilt from the
+builder can put the entry back after it."""
+
+
+# --- Accounting -----------------------------------------------------------------------
+
+
+@dataclass
+class Ledger:
+    """Session totals folded from ``llm_request`` ledger events."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    context_tokens: int = 0
+    context_pct: float = 0.0
+    cost: float = 0.0
+    credits: float | None = None  # Kiro credits; None until a Kiro request reports them
+
+
+@dataclass
+class TurnMetrics:
+    """Client-only accounting for the current root turn."""
+
+    started_at: float | None = None  # monotonic time of a turn this client started
+    input_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0
+    credits: float | None = None
+    duration_s: float = 0.0  # summed request durations (turns this client did not start)
+
+    def empty(self) -> bool:
+        """True when nothing was measured, so no turn status row is shown."""
+        return self.started_at is None and not any(
+            (
+                self.input_tokens,
+                self.cache_read,
+                self.cache_write,
+                self.output_tokens,
+                self.cost,
+                self.credits,
+            )
+        )
+
+
+def estimate_context_pct(context_tokens: int, model_key: str) -> float:
+    """Context usage of ``context_tokens`` against the model's window, in percent."""
+    model = load_models().get(model_key)
+    if model is None or model.context <= 0:
+        return 0.0
+    return (context_tokens / model.context) * 100
+
+
+def _add_credits(total: float | None, event: LLMRequest) -> float | None:
+    """Add a request's Kiro credits to ``total``; native requests leave it unchanged."""
+    credits = event.credits
+    if not isinstance(credits, int | float):  # msgspec.UNSET on native requests
+        return total
+    return (total or 0.0) + credits
+
+
+# --- Listener -------------------------------------------------------------------------
+
+
+class SessionListener(Protocol):
+    """What a view of a session is told; it reads current values from the controller."""
+
+    def on_changes(self, changes: list[Change]) -> None:
+        """The transcript model changed (``controller.builder``)."""
+        ...
+
+    def on_local(self, entry: LocalEntry) -> None:
+        """A client-only timeline entry was added (also in ``controller.locals``)."""
+        ...
+
+    def on_status(self) -> None:
+        """Status-bar values changed (model, branch, session id, ledger, output)."""
+        ...
+
+    def on_turn(self) -> None:
+        """Turn state changed: ``thinking``, ``input_locked`` or ``turns_ended``."""
+        ...
+
+    def on_question(self) -> None:
+        """The pending question was shown or cleared (``controller.question``)."""
+        ...
+
+    def on_loaded(self) -> None:
+        """The first history replay landed."""
+        ...
+
+    async def on_reset(self) -> None:
+        """A 409 replaced the builder and cleared accounting; drop rows built from it."""
+        ...
+
+    def on_replay(self, active: bool) -> None:
+        """A history batch started (True) or finished (False)."""
+        ...
+
+    def on_notice(self, message: str, timeout: float | None) -> None:
+        """A transient connection notice ("Reconnecting..."); M1 only."""
+        ...
+
+
+# --- Controller -----------------------------------------------------------------------
+
+
+class SessionController:
+    """All client state and behaviour of one session (084 D6).
+
+    Attributes:
+        session_id: The orchestrator's id for the session (routing).
+        container_name: The session's container, for ``!`` commands.
+        ws: The live stream, or None before the first connect.
+        builder: The transcript model.
+        locals: Client-only timeline entries, oldest first.
+        cursor: Id of the latest persisted event applied (``/events?after=``).
+        loaded: The first history replay has landed.
+        replaying: A history batch is being applied.
+        ledger: Session accounting totals.
+        session_output: Output tokens shown, including the live streaming estimate.
+        model_key: The session's current model key.
+        model_name: Display name of the model, None until a status reports it.
+        supports_cache: Whether the model caches, None until a status reports it.
+        git_branch: Branch from the agent's status, None until reported.
+        agent_session_id: Session id from the agent's handshake ("" until then).
+        turn_active: A root turn is running.
+        thinking: A provider request is outstanding (the throbber shows).
+        input_locked: The message input is disabled.
+        turns_ended: Count of turn teardowns; a view refocuses input when it grows.
+        turn: Metrics of the current root turn.
+        question: The pending question, if any.
+        answer_in_flight: Id of the question an answer is being sent for.
+        shell_active: A ``!`` command is running.
+        quiet: Suppress connection notices and errors (the host is suspended).
+        reconnecting: A reconnect attempt is running.
+    """
+
+    RECONNECT_DELAYS: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0)
+    RECONNECT_WINDOW: float = 30.0
+
+    def __init__(self, client: OrchestratorClient, session_id: str, container_name: str) -> None:
+        """Create a controller; nothing connects until ``start``."""
+        self._client = client
+        self.session_id = session_id
+        self.container_name = container_name
+        self.ws: WSClient | None = None
+        self.listener: SessionListener | None = None
+
+        # History and model
+        self.cursor: str | None = None
+        self._seen_event_ids: set[str] = set()
+        self.builder = TranscriptBuilder()
+        self.locals: list[LocalEntry] = []
+        self.loaded = False
+        self.replaying = False
+
+        # Accounting and status values
+        self.ledger = Ledger()
+        self._seen_accounted_ids: set[str] = set()
+        self.estimated_output = 0  # live output estimate (chars/4), reset per request
+        self.session_output = 0
+        self.model_key = ""
+        self.model_name: str | None = None
+        self.supports_cache: bool | None = None
+        self.git_branch: str | None = None
+        self.agent_session_id = ""
+        # Protocol of the agent from its handshake. Agents before v4 send
+        # session_status without a state, which decodes as the "idle" default.
+        self.agent_protocol = 0
+        self._protocol_warned = False
+
+        # Turn
+        self.turn_active = False
+        self.thinking = False
+        self.input_locked = False
+        self.turns_ended = 0
+        self.turn = TurnMetrics()
+
+        # Question
+        self.question: ce.PendingQuestion | None = None
+        self.answer_in_flight: str | None = None
+
+        # Direct shell
+        self.shell_active = False
+        self._shell_proc: asyncio.subprocess.Process | None = None
+        self._shell_cancel_requested = False
+
+        # Connection
+        self.quiet = False
+        self.closing = False
+        self.reconnecting = False
+        self._receive_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._buffering = False
+        self._event_buffer: list = []
+        self._tasks: set[asyncio.Task] = set()
+
+    # --- Listener -----------------------------------------------------------------
+
+    def attach(self, listener: SessionListener) -> None:
+        """Report changes to ``listener`` (replacing any attached one)."""
+        self.listener = listener
+
+    def detach(self) -> None:
+        """Stop reporting changes; state keeps updating."""
+        self.listener = None
+
+    def _status_changed(self) -> None:
+        if self.listener is not None:
+            self.listener.on_status()
+
+    def _turn_changed(self) -> None:
+        if self.listener is not None:
+            self.listener.on_turn()
+
+    def _question_changed(self) -> None:
+        if self.listener is not None:
+            self.listener.on_question()
+
+    def _notice(self, message: str, timeout: float | None = None) -> None:
+        if not self.quiet and self.listener is not None:
+            self.listener.on_notice(message, timeout)
+
+    def _set_replaying(self, active: bool) -> None:
+        self.replaying = active
+        if self.listener is not None:
+            self.listener.on_replay(active)
+
+    def _mark_loaded(self) -> None:
+        if self.loaded:
+            return
+        self.loaded = True
+        if self.listener is not None:
+            self.listener.on_loaded()
+
+    # --- Timeline -----------------------------------------------------------------
+
+    def _last_root_id(self) -> str | None:
+        """Id of the last node the main transcript shows as a row, or None."""
+        turn = self.builder.current_turn()
+        if turn is not None:
+            if turn.items:
+                return turn.items[-1].id
+            return turn.user.id if turn.user is not None else turn.id
+        if self.builder.preamble:
+            return self.builder.preamble[-1].id
+        return None
+
+    def _add_local(self, entry: LocalEntry) -> None:
+        self.locals.append(entry)
+        if self.listener is not None:
+            self.listener.on_local(entry)
+
+    def client_error(self, message: str) -> None:
+        """Add a client/transport error entry (not recorded in the session log)."""
+        self._add_local(ClientErrorEntry(self._last_root_id(), message))
+
+    def _show_turn_status(self) -> None:
+        """Add the client-only metrics entry for the completed root turn."""
+        turn = self.turn
+        if turn.empty():
+            return
+        duration_s = (
+            time.monotonic() - turn.started_at if turn.started_at is not None else turn.duration_s
+        )
+        self._add_local(
+            TurnStatusEntry(
+                self._last_root_id(),
+                duration_s,
+                turn.input_tokens,
+                turn.cache_read,
+                turn.cache_write,
+                turn.output_tokens,
+                turn.cost,
+                turn.credits,
+            )
+        )
+        turn.started_at = None
+
+    # --- Events -------------------------------------------------------------------
+
+    def apply(self, event) -> None:
+        """Apply one live or history event; both take the same path.
+
+        Deduplicates by event id, advances the cursor for persisted events, updates
+        the transcript model, then the client-side state (status, turn, question).
+        """
+        event_id = getattr(event, "id", None)
+        if event_id is not None:
+            if event_id in self._seen_event_ids:
+                return
+            self._seen_event_ids.add(event_id)
+            if event.persist:
+                self.cursor = event_id
+
+        if isinstance(event, LLMRequest):
+            self._accumulate_ledger(event)
+        changes = self.builder.apply(event)
+        if changes and self.listener is not None:
+            self.listener.on_changes(changes)
+
+        if (
+            getattr(event, "scope", None) is not None
+            and getattr(event, "subagent_index", None) is not None
+        ):
+            return  # child events only change the transcript
+
+        if isinstance(event, ce.SessionStarted):
+            self.model_key = event.model_key
+        elif isinstance(event, ce.UserMessage):
+            self.turn = TurnMetrics()
+        elif isinstance(event, ce.Handshake):
+            self.agent_session_id = event.session_id
+            self.agent_protocol = event.protocol_version
+            self._status_changed()
+            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
+                self._protocol_warned = True
+                self.client_error(
+                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
+                    f"this client supports v{PROTOCOL_VERSION}. "
+                    "Some features may not work — consider updating the CLI."
+                )
+        elif isinstance(event, ce.SessionStatus):
+            self.model_key = event.model_key
+            kiro_id = kiro_model_id(event.model_key)
+            model = load_models().get(event.model_key)
+            if kiro_id is not None:
+                self.model_name = f"{kiro_id} (Kiro)"
+                self.supports_cache = False
+            elif model is not None:
+                self.model_name = model.name
+                self.supports_cache = model.can_cache
+            self.git_branch = event.git_branch
+            self._status_changed()
+            if self.agent_protocol >= SESSION_STATE_PROTOCOL:
+                self._apply_session_state(event)
+        elif isinstance(event, ce.CompactionStart):
+            self._stop_thinking()
+        elif isinstance(event, ce.CompactionComplete):
+            if event.tokens_after is not None:
+                self._set_context(event.tokens_after)
+            if event.reason == "manual":
+                self._end_turn()
+            else:
+                # The conversation request that follows is outstanding again.
+                self._start_thinking()
+        elif isinstance(event, ce.ContextCompacted):
+            self._stop_thinking()
+            self._set_context(event.tokens_after)
+            if event.reason == "manual":
+                self._end_turn()
+        elif isinstance(event, ce.ErrorNotice):
+            self.client_error(event.message)
+            if event.kind in _TURN_ENDING_NOTICES and self.turn_active:
+                self._end_turn()
+        elif isinstance(event, ce.TextDelta):
+            if not changes:
+                return  # a late delta for a request that is already final
+            self._stop_thinking()
+            self.turn_active = True
+            self.estimated_output += len(event.text) // 4
+            self.session_output = self.ledger.output_tokens + self.estimated_output
+            self._status_changed()
+        elif isinstance(event, ce.IterationStart):
+            # A new iteration means a new provider request is outstanding.
+            self._start_thinking()
+        elif isinstance(event, ce.ToolCall):
+            # The provider responded with a tool request; pending tool rows represent
+            # execution while the next iteration owns the thinking indicator.
+            self._stop_thinking()
+        elif isinstance(event, ce.LLMRequest):
+            turn = self.turn
+            turn.input_tokens += event.input_tokens
+            turn.cache_read += event.cache_read_tokens
+            turn.cache_write += event.cache_write_tokens
+            turn.output_tokens += event.output_tokens
+            turn.cost += event.cost_usd
+            turn.credits = _add_credits(turn.credits, event)
+            turn.duration_s += event.duration_ms / 1000
+        elif isinstance(event, (ce.TurnError, ce.TurnInterrupted)):
+            self._end_turn()
+        elif isinstance(event, ce.TurnComplete):
+            self._show_turn_status()
+            self._end_turn()
+
+    def _set_context(self, tokens: int) -> None:
+        """Record context size after compaction, against the session's model window."""
+        self.ledger.context_tokens = tokens
+        self.ledger.context_pct = estimate_context_pct(tokens, self.model_key)
+        self._accounting_changed()
+
+    def _accumulate_ledger(self, event: LLMRequest) -> None:
+        """Fold an ``llm_request`` ledger event into session accounting.
+
+        This is the authoritative cost and token source (it matches the persisted
+        ledger). Deduplicated by event id so replay plus live can't double-count.
+        """
+        if event.id in self._seen_accounted_ids:
+            return
+        self._seen_accounted_ids.add(event.id)
+        self.estimated_output = 0
+        ledger = self.ledger
+        ledger.input_tokens += event.input_tokens
+        ledger.output_tokens += event.output_tokens
+        ledger.cache_read += event.cache_read_tokens
+        ledger.cache_write += event.cache_write_tokens
+        if event.scope is None and event.subagent_index is None and event.purpose != "compaction":
+            # Root conversation requests are persisted, so replay tracks model
+            # switches even though live-only session_status frames are absent.
+            self.model_key = event.model_key
+            ledger.context_tokens = event.context_tokens
+            ledger.context_pct = estimate_context_pct(event.context_tokens, event.model_key)
+        ledger.cost += event.cost_usd
+        ledger.credits = _add_credits(ledger.credits, event)
+        self._accounting_changed()
+
+    def _accounting_changed(self) -> None:
+        self.session_output = self.ledger.output_tokens
+        self._status_changed()
+
+    # --- Turn state ---------------------------------------------------------------
+
+    def _start_thinking(self) -> None:
+        """Show the thinking indicator while a turn waits on the provider."""
+        if self.thinking or not self.turn_active:
+            return
+        self.thinking = True
+        self._turn_changed()
+
+    def _stop_thinking(self) -> None:
+        if self.thinking:
+            self.thinking = False
+            self._turn_changed()
+
+    def _end_turn(self) -> None:
+        """Single teardown path for every turn outcome."""
+        self.thinking = False
+        self.turn_active = False
+        self.input_locked = False
+        self.turns_ended += 1
+        self._turn_changed()
+
+    # --- Question -----------------------------------------------------------------
+
+    def _apply_session_state(self, event: ce.SessionStatus) -> None:
+        """Follow the agent's live state: the pending question and whether a turn runs."""
+        if event.state in ("working", "blocked") and not self.turn_active:
+            # Joined mid-turn (reconnect or another client's turn): Esc must interrupt.
+            self.turn_active = True
+            self.input_locked = True
+            self._turn_changed()
+        if event.question is not None:
+            self._show_question(event.question)
+        elif self.question is not None:
+            self._hide_question()
+        if event.state == "idle" and self.turn_active:
+            # A turn the client missed the end of (the terminal event normally ends it).
+            self._end_turn()
+
+    def _show_question(self, question: ce.PendingQuestion) -> None:
+        self.question = question
+        self.thinking = False
+        self.input_locked = False
+        self._question_changed()
+
+    def _hide_question(self) -> None:
+        self.question = None
+        self.answer_in_flight = None
+        if self.turn_active:
+            self.input_locked = True
+        self._question_changed()
+
+    def answer(self, command: AnswerCommand) -> None:
+        """Send an answer to the pending question unless one is already being sent."""
+        if self.answer_in_flight == command.question_id:
+            return
+        self.answer_in_flight = command.question_id
+        self._spawn(self._send_answer(command))
+
+    async def _send_answer(self, command: AnswerCommand) -> None:
+        """Send an answer; clear the question only once it was sent."""
+        try:
+            ws = await self._connected_ws()
+            await ws.send_command(command)
+        except Exception as e:  # noqa: BLE001 — surface any send failure
+            self.answer_in_flight = None
+            self.client_error(f"Send failed: {e}")
+            return
+        if self.question is not None and self.question.id == command.question_id:
+            self._hide_question()
+
+    # --- User actions -------------------------------------------------------------
+
+    def submit(self, content: str) -> None:
+        """Handle submitted input: a ``!`` command, an answer, or a new message."""
+        if content.startswith("!"):
+            command = content[1:].strip()
+            if not command:
+                return
+            if self.shell_active:
+                self.client_error("Shell command already running")
+                return
+            self._spawn(self.run_shell(command))
+            return
+
+        if self.question is not None:
+            self.answer(AnswerCommand(question_id=self.question.id, text=content))
+            return
+
+        if self.turn_active:
+            return
+
+        self.turn_active = True
+        self.turn = TurnMetrics(started_at=time.monotonic())
+        self.thinking = True
+        self.input_locked = True
+        self._turn_changed()
+        self._spawn(self._send_message(content))
+
+    async def _send_message(self, content: str) -> None:
+        """Reconnect if needed, then send a message to the agent."""
+        try:
+            ws = await self._connected_ws()
+            await ws.send_message(content)
+        except Exception as e:  # noqa: BLE001 — any failure ends the turn
+            self.client_error(f"Send failed: {e}")
+            self._end_turn()
+            # A send failure means the socket is dead; try to recover.
+            self._schedule_reconnect()
+
+    def cancel(self) -> CancelAction | None:
+        """Esc: kill a running ``!`` command, dismiss the question, or interrupt the turn.
+
+        Returns:
+            What was done, or None when there was nothing to cancel.
+        """
+        if self.shell_active and self._shell_proc is not None:
+            self._shell_cancel_requested = True
+            self._shell_proc.kill()
+            return "shell"
+        if self.question is not None:
+            # The first Esc dismisses the question; the next one interrupts the turn.
+            self.answer(AnswerCommand(question_id=self.question.id, dismiss=True))
+            return "dismiss"
+        if self.turn_active:
+            self._fire(lambda ws: ws.send_interrupt())
+            return "interrupt"
+        return None
+
+    def stop_child(self, scope: str, index: int) -> None:
+        """Interrupt one subagent while its siblings keep running."""
+        self._fire(lambda ws: ws.send_command(InterruptCommand(scope=scope, subagent_index=index)))
+
+    def switch_model(self, model_key: str) -> bool:
+        """Ask the agent to switch model; False (nothing sent) while a turn runs."""
+        if self.turn_active:
+            return False
+        self._fire(lambda ws: ws.send_command(SwitchModelCommand(model_key=model_key)))
+        return True
+
+    def _fire(self, make: Callable[[WSClient], Awaitable[None]]) -> None:
+        """Run a send on the current stream in the background (no reconnect first)."""
+        ws = self.ws
+        if ws is None:
+            log.debug("Session %s is not connected; command dropped", self.session_id)
+            return
+
+        async def run() -> None:
+            await make(ws)
+
+        self._spawn(run())
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    # --- Direct shell -------------------------------------------------------------
+
+    async def run_shell(self, command: str) -> None:
+        """Run ``command`` in the session's container with host-side ``docker exec``.
+
+        The output becomes a local entry; nothing is sent to the agent or logged.
+        """
+        self.shell_active = True
+        self._shell_cancel_requested = False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                "-w",
+                "/workspace",
+                self.container_name,
+                "bash",
+                "-c",
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            self._shell_proc = proc
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=SHELL_TIMEOUT)
+                exit_code = 130 if self._shell_cancel_requested else (proc.returncode or 0)
+                output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+                exit_code = 124
+                output = "(timed out)"
+
+            lines = output.split("\n")
+            if len(lines) > SHELL_MAX_LINES:
+                output = "\n".join(lines[:SHELL_MAX_LINES]) + "\n(truncated)"
+            self._add_local(ShellOutputEntry(self._last_root_id(), command, output, exit_code))
+        except Exception as exc:  # noqa: BLE001 — local execution failure
+            self.client_error(f"Docker exec failed: {exc}")
+        finally:
+            self.shell_active = False
+            self._shell_proc = None
+            self._shell_cancel_requested = False
+
+    # --- History ------------------------------------------------------------------
+
+    async def replay(self) -> bool:
+        """Fetch and apply persisted events after the cursor (all of them without one).
+
+        A cursor the log no longer has (409) resets every replay-derived state and
+        refetches the whole log.
+
+        Returns:
+            False when the history could not be read. Callers must not flush
+            buffered live events or report a reconnect then, because those events
+            cannot fill the history gap.
+        """
+        try:
+            try:
+                body = await self._client.events(self.session_id, self.cursor)
+            except CursorNotFound:
+                # The cursor was rotated or archived away: rebuild from the full log.
+                await self.reset()
+                body = await self._client.events(self.session_id, None)
+        except Exception as e:  # noqa: BLE001 — any failure means no history
+            log.warning("Failed to replay events: %s", e)
+            return False
+
+        self._set_replaying(True)
+        try:
+            applied = 0
+            for line in body.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = decode_event(line, persisted=True)
+                except Exception as e:  # noqa: BLE001 — skip malformed replay lines
+                    log.warning("Skipping malformed replay event: %s", e)
+                    continue
+                self.apply(event)
+                applied += 1
+                if applied % REPLAY_YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
+        finally:
+            self._set_replaying(False)
+        return True
+
+    async def reset(self) -> None:
+        """Clear all state reconstructed from the persisted event stream.
+
+        Local entries are kept; their anchors may no longer exist.
+        """
+        self.cursor = None
+        self._seen_event_ids.clear()
+        self.builder = TranscriptBuilder()
+        self._seen_accounted_ids.clear()
+        self.ledger = Ledger()
+        self.estimated_output = 0
+        self.turn = TurnMetrics()
+        self.turn_active = False
+        if self.listener is not None:
+            await self.listener.on_reset()
+        self._accounting_changed()
+
+    # --- Connection ---------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Connect, replay history while live frames buffer, then follow the stream.
+
+        Ordering: open the stream → start the receive loop (buffering) → replay
+        ``/events`` → apply buffered live frames not already applied (by event id).
+        A failed first connect is reported and not retried.
+        """
+        try:
+            self.ws = await self._client.stream(self.session_id)
+        except Exception as e:  # noqa: BLE001 — report any connect failure
+            self.client_error(f"Connection failed: {e}")
+            return
+
+        self._event_buffer = []
+        self._buffering = True
+        self._receive_task = asyncio.create_task(self._receive_loop())
+
+        if not await self.replay():
+            self._buffering = False
+            self._event_buffer = []
+            self.client_error("Initial event replay failed; retrying connection.")
+            await self._cancel_receive()
+            await self.ws.disconnect()
+            self._schedule_reconnect()
+            return
+
+        self._buffering = False
+        self._dispatch_buffered()
+        self._event_buffer = []
+        self._mark_loaded()
+
+    def _dispatch_buffered(self) -> None:
+        """Apply live frames received during replay; event ids suppress duplicates."""
+        for event in self._event_buffer:
+            self.apply(event)
+
+    async def _cancel_receive(self) -> None:
+        task = self._receive_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _receive_loop(self) -> None:
+        """Apply frames from the stream (buffered while a replay runs).
+
+        When the stream drops, report it and start a reconnect. A clean shutdown
+        (``close``) does neither.
+        """
+        ws = self.ws
+        if ws is None:
+            return
+        try:
+            async for event in ws.receive():
+                if self._buffering:
+                    self._event_buffer.append(event)
+                else:
+                    self.apply(event)
+        except Exception as e:  # noqa: BLE001 — any receive failure is a lost connection
+            log.warning("WS receive loop error: %s", e)
+            if not self.closing:
+                if not self.quiet:
+                    self.client_error(f"Connection lost: {e}")
+                close_code = getattr(getattr(e, "rcvd", None), "code", None)
+                self._schedule_reconnect(close_code)
+            return
+
+        # The generator ended without raising: the connection closed underneath us.
+        if not self.closing:
+            if not self.quiet:
+                self.client_error("Connection lost: the agent closed the stream.")
+            self._schedule_reconnect(None)
+
+    def _schedule_reconnect(self, close_code: int | None = None) -> None:
+        """Start a background reconnect unless one is already running."""
+        if self.reconnecting or self.closing:
+            return
+        self.reconnecting = True
+        task = asyncio.create_task(self._reconnect(close_code))
+        self._reconnect_task = task
+
+        def clear_reconnect_task(done: asyncio.Task) -> None:
+            if self._reconnect_task is done:
+                self._reconnect_task = None
+
+        task.add_done_callback(clear_reconnect_task)
+
+    async def ensure_connected(self) -> bool:
+        """Make sure the stream is connected before sending a user command."""
+        if self.ws is not None and self.ws.connected:
+            return True
+
+        # A receive-loop reconnect may already be running. Wait for it rather than
+        # starting a competing replay and receive loop.
+        if self.reconnecting:
+            while self.reconnecting and not self.closing:
+                await asyncio.sleep(0.05)
+            return self.ws is not None and self.ws.connected
+
+        return await self._run_tracked_reconnect()
+
+    async def _connected_ws(self) -> WSClient:
+        if not await self.ensure_connected() or self.ws is None:
+            raise RuntimeError("Not connected")
+        return self.ws
+
+    async def force_reconnect(self) -> bool:
+        """Replace the stream with a fresh connection (after the host was suspended).
+
+        A suspended event loop may leave the socket reporting OPEN after its
+        keepalive expired, so the current connection is not trusted.
+        """
+        if self.reconnecting:
+            return await self.ensure_connected()
+        if self.ws is not None:
+            await self.ws.disconnect()
+        return await self._run_tracked_reconnect()
+
+    async def _run_tracked_reconnect(self) -> bool:
+        """Run a reconnect in a task ``close`` can cancel, and wait for it."""
+        self.reconnecting = True
+        task = asyncio.create_task(self._reconnect())
+        self._reconnect_task = task
+        try:
+            return await task
+        finally:
+            if self._reconnect_task is task:
+                self._reconnect_task = None
+
+    async def _reconnect(self, close_code: int | None = None) -> bool:
+        """Reconnect with back-off and resync through ``/events?after=<cursor>``.
+
+        Close codes: 4004 (session not found) gives up at once; anything else
+        (4002 backend unreachable, 1006 abnormal, None) retries with back-off for
+        up to ``RECONNECT_WINDOW`` seconds. On success the receive loop restarts and
+        missed events replay, deduplicated by event id.
+        """
+        if close_code == 4004:
+            if not self.quiet:
+                self.client_error("Session has ended. Relaunch to start a new session.")
+            self.reconnecting = False
+            return False
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.RECONNECT_WINDOW
+        try:
+            for attempt, delay in enumerate(self.RECONNECT_DELAYS, start=1):
+                if self.closing:
+                    return False
+                if loop.time() + delay > deadline:
+                    break
+                self._notice("Reconnecting...", timeout=delay)
+                await asyncio.sleep(delay)
+                try:
+                    self.ws = await self._client.stream(self.session_id)
+                except Exception as e:  # noqa: BLE001 — retry on any connect failure
+                    log.warning("Reconnect attempt %d failed: %s", attempt, e)
+                    continue
+
+                # Reconnected: buffer live frames, replay missed events (deduplicated
+                # by id), then apply the buffered frames.
+                self._event_buffer = []
+                self._buffering = True
+                await self._cancel_receive()  # a stale loop must not race the new one
+                self._receive_task = asyncio.create_task(self._receive_loop())
+                if not await self.replay():
+                    self._buffering = False
+                    self._event_buffer = []
+                    await self._cancel_receive()
+                    await self.ws.disconnect()
+                    continue
+                self._buffering = False
+                self._dispatch_buffered()
+                self._event_buffer = []
+                self._mark_loaded()
+                self._notice("Reconnected to agent")
+                return True
+
+            self.client_error("Reconnect failed after 30s. Relaunch the client to continue.")
+            return False
+        finally:
+            self.reconnecting = False
+
+    async def close(self) -> None:
+        """Stop following the session: cancel receive and reconnect, then disconnect."""
+        self.closing = True
+        current = asyncio.current_task()
+        tasks = (self._receive_task, self._reconnect_task)
+        for task in tasks:
+            if task is not None and task is not current and not task.done():
+                task.cancel()
+        for task in tasks:
+            if task is None or task is current or task.done():
+                continue
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 — shutdown must continue
+                log.debug("Session client task ended during shutdown: %s", exc)
+        self._receive_task = None
+        self._reconnect_task = None
+        self.reconnecting = False
+
+        if self.ws is not None:
+            try:
+                await self.ws.disconnect()
+            except Exception as exc:  # noqa: BLE001 — shutdown must continue
+                log.debug("Session WebSocket ended during shutdown: %s", exc)

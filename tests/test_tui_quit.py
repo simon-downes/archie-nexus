@@ -55,7 +55,7 @@ async def test_quit_with_termination_disconnects_before_delete():
     client.delete = AsyncMock(side_effect=delete)
 
     with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=client),
+        patch("archie_cli.tui.client.httpx.AsyncClient", return_value=client),
         patch.object(app, "exit"),
     ):
         await _confirm_quit(app, True)
@@ -156,7 +156,7 @@ async def test_quit_with_termination_accepts_stopped_gone_or_conflict(status_cod
     client = _delete_client(return_value=MagicMock(status_code=status_code))
 
     with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=client),
+        patch("archie_cli.tui.client.httpx.AsyncClient", return_value=client),
         patch.object(app, "exit") as exit_mock,
     ):
         await _confirm_quit(app, True)
@@ -187,7 +187,7 @@ async def test_quit_with_termination_reports_delete_failure(delete_kwargs, messa
     client = _delete_client(**delete_kwargs)
 
     with (
-        patch("archie_cli.tui.app.httpx.AsyncClient", return_value=client),
+        patch("archie_cli.tui.client.httpx.AsyncClient", return_value=client),
         patch.object(app, "exit") as exit_mock,
     ):
         await _confirm_quit(app, True)

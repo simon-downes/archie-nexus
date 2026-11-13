@@ -209,42 +209,23 @@ def test_unmapped_tool_is_logged_under_its_tool_id():
 
 def test_tui_streams_both_text_segments_live():
     """The TUI streams text after a tool call because each segment has its own request id."""
-    from unittest.mock import MagicMock, patch
+    from tests.tui_fakes import make_controller
 
-    from archie_cli.tui.app import ArchieApp
-
-    app = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/p-01/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/p-01",
-        container_name="archie-p-01",
-    )
+    controller, listener = make_controller(session_id="p-01")
     events = [e for e in _run("run1_parallel_shell") if e.scope is None]
-    conv = MagicMock()
-    status = MagicMock()
-
-    def query_one(selector, _type=None):
-        return {"#conversation": conv, "#status": status}.get(selector, MagicMock())
-
-    with (
-        patch.object(app, "query_one", side_effect=query_one),
-        patch.object(app, "_update_accounting_status"),
-    ):
-        for event in events:
-            app._apply_event(event)
+    for event in events:
+        controller.apply(event)
     # Each assistant segment streamed into its own row (one first-delta append per
     # segment) and the final messages replaced those streams in the transcript.
+    builder = controller.builder
     texts = [
         item.content
-        for item in [
-            *app.transcript.preamble,
-            *(i for turn in app.transcript.turns for i in turn.items),
-        ]
+        for item in [*builder.preamble, *(i for turn in builder.turns for i in turn.items)]
         if getattr(item, "role", "") == "assistant"
     ]
     stream_ids = [
         change.node.id
-        for call in conv.apply_changes.call_args_list
-        for change in call.args[1]
+        for change in listener.changes()
         if change.kind == "append" and getattr(change.node, "kind", "") == "stream"
     ]
     messages = [e.content for e in events if isinstance(e, AssistantMessage)]

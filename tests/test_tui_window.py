@@ -212,7 +212,7 @@ async def test_replaying_1000_turns_through_the_app_mounts_a_bounded_window():
     app = _App()
     async with app.run_test(size=(120, 40)) as pilot:
         with (
-            patch("archie_cli.tui.app.httpx.AsyncClient", return_value=http),
+            patch("archie_cli.tui.client.httpx.AsyncClient", return_value=http),
             patch.object(app, "_update_accounting_status"),
         ):
             http.get = _async_return(MagicMock(status_code=200, text=body))

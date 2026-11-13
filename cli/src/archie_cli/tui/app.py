@@ -1,56 +1,97 @@
 """Main Textual application for the attach TUI.
 
-Connects to a running agent session via WebSocket and displays the
-conversation with streaming updates. This is a read-write client —
-it can send messages and interrupts to the agent.
+``ArchieApp`` shows one session. The session's state and behaviour live in a
+``SessionController`` (``session.py``); the app composes the widgets, renders what the
+controller reports (it is the controller's ``SessionListener``) and forwards input and
+actions to it. Detail popups, the command palette, the quit prompt, the external editor
+and copy stay here.
 
-Threading model:
-- Textual runs an asyncio event loop on the main thread
-- The WS receive loop runs as an asyncio task within the same loop
-- Events are dispatched to widget updates directly (no thread marshalling needed)
+Threading model: Textual runs an asyncio event loop on the main thread; the
+controller's receive loop runs as a task on the same loop, so its notifications update
+widgets directly.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import subprocess
 import tempfile
 import time
 
-import httpx
-from archie_shared import events as ce
-from archie_shared.commands import AnswerCommand, InterruptCommand, SwitchModelCommand
-from archie_shared.events import LLMRequest, decode_event
-from archie_shared.kiro import kiro_model_id
-from archie_shared.models import load_models
-from archie_shared.protocol import PROTOCOL_VERSION
-from archie_shared.transcript import TranscriptBuilder
+from archie_shared.commands import AnswerCommand
+from archie_shared.protocol import API_PREFIX
+from archie_shared.transcript import Change
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
 
 from archie_cli.tui import theme
+from archie_cli.tui.client import HttpOrchestrator, OrchestratorClient, OrchestratorError
 from archie_cli.tui.conversation import format_cost
 from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
 from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.quit_screen import QuitScreen
+from archie_cli.tui.session import (
+    ClientErrorEntry,
+    LocalEntry,
+    SessionController,
+    TurnStatusEntry,
+    estimate_context_pct,
+)
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.throbber import Throbber, ThrobberContainer
 from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
 from archie_cli.ws_client import WSClient
 
-log = logging.getLogger(__name__)
 
-# First protocol version whose session_status carries state and question.
-SESSION_STATE_PROTOCOL = 4
+class _AttachedSession:
+    """``OrchestratorClient`` for today's entry points (M1 only).
+
+    ``archie start``/``attach`` pass ready-made stream and session URLs, and the app
+    keeps one ``WSClient`` for its lifetime, reconnecting it in place.
+    """
+
+    def __init__(self, base_url: str, ws_url: str) -> None:
+        self._http = HttpOrchestrator(base_url)
+        self._ws_url = ws_url
+        self.ws = WSClient()
+
+    async def events(self, session_id: str, after: str | None) -> str:
+        return await self._http.events(session_id, after)
+
+    async def stream(self, session_id: str) -> WSClient:
+        await self.ws.connect(self._ws_url)
+        return self.ws
+
+    async def delete(self, session_id: str) -> int:
+        return await self._http.delete(session_id)
+
+
+def _split_session_url(api_url: str) -> tuple[str, str]:
+    """Split ``<base>/api/sessions/<id>`` into the orchestrator base URL and the id."""
+    base, marker, session_id = api_url.rpartition(f"{API_PREFIX}/sessions/")
+    if not marker:
+        return api_url.rstrip("/"), ""
+    return base, session_id.strip("/")
+
+
+def _forward(name: str, doc: str) -> property:
+    """A read/write property for a controller attribute (M1 test shims)."""
+
+    def get(app: ArchieApp):
+        return getattr(app.session, name)
+
+    def set_(app: ArchieApp, value) -> None:
+        setattr(app.session, name, value)
+
+    return property(get, set_, doc=doc)
 
 
 class ArchieApp(App):
-    """TUI client that attaches to a running agent session via WebSocket."""
+    """TUI client that attaches to a running agent session."""
 
     TITLE = "Archie"
     CSS_PATH = "archie.tcss"
@@ -65,78 +106,91 @@ class ArchieApp(App):
         Binding("ctrl+x", "stop_child", "Stop selected child"),
     ]
 
-    def __init__(self, ws_url: str, api_url: str, container_name: str) -> None:
+    def __init__(
+        self,
+        ws_url: str,
+        api_url: str,
+        container_name: str,
+        *,
+        client: OrchestratorClient | None = None,
+    ) -> None:
+        """Attach to the session whose record is at ``api_url``.
+
+        Args:
+            ws_url: The session's stream URL.
+            api_url: The session's record URL (``<base>/api/sessions/<id>``).
+            container_name: The session's container, for ``!`` commands.
+            client: Orchestrator access to use instead of ``ws_url``/``api_url``
+                (tests); the session id still comes from ``api_url``.
+        """
         super().__init__()
 
-        # Register custom theme
         self.register_theme(theme.THEME)
         self.theme = "archie"
 
         self._ws_url = ws_url
         self._api_url = api_url
         self._container_name = container_name
-        self._ws = WSClient()
-        self._receive_task: asyncio.Task | None = None
-        self._reconnect_task: asyncio.Task | None = None
-        self._reconnecting: bool = False
-        self._shutting_down: bool = False
-        self._quit_prompt_open: bool = False
-        self._editor_active: bool = False
-        # Warn-once guard for protocol-version mismatch (avoids refire on reconnect)
-        self._protocol_warned: bool = False
-        # Canonical replay cursor: id of the latest event already rendered.
-        # Used for incremental replay via /events?after= on connect/reconnect.
-        self._last_event_id: str | None = None
-        # Ids of canonical events already rendered — dedup across replay + live.
-        self._seen_event_ids: set[str] = set()
-        # The session transcript, reduced from canonical events. It owns request
-        # reconciliation, tool grouping and subagent state; the views render it.
-        self.transcript = TranscriptBuilder()
-        # Ids of llm_request ledger events already folded into accounting —
-        # prevents double-counting across replay + live broadcast.
-        self._seen_accounted_ids: set[str] = set()
+        base_url, session_id = _split_session_url(api_url)
+        attached = _AttachedSession(base_url, ws_url) if client is None else None
+        self._client: OrchestratorClient = attached or client
+        self.session = SessionController(self._client, session_id, container_name)
+        if attached is not None:
+            # One WSClient for the app's lifetime, as before: commands sent while it
+            # is disconnected fail inside it.
+            self.session.ws = attached.ws
+        self.session.attach(self)
 
-        # UI state
-        self._turn_active: bool = False
-        self._throbber: Throbber | None = None
-        self._last_esc_time: float = 0.0
-        # The pending question shown in the panel, and the id of an answer being sent.
-        self._question: ce.PendingQuestion | None = None
-        # Protocol of the attached agent, from its handshake. Agents before v4 send
-        # session_status without a state, which decodes as the "idle" default.
-        self._agent_protocol: int = 0
-        self._answer_in_flight: str | None = None
+        self._shutting_down = False
+        self._quit_prompt_open = False
+        self._last_esc_time = 0.0
+        self._turns_ended = 0
 
-        # Session state for local accumulation. Seeded from Handshake.accounting
-        # on connect, then updated live from broadcast llm_request ledger events.
-        self._session_id: str = ""
-        self._session_model_key: str = ""
-        self._cumulative_input: int = 0
-        self._cumulative_output: int = 0
-        self._cumulative_cache_read: int = 0
-        self._cumulative_cache_write: int = 0
-        self._latest_context_tokens: int = 0
-        self._latest_context_pct: float = 0.0
-        self._cumulative_cost: float = 0.0
-        # Kiro credits; None until a Kiro request reports them.
-        self._cumulative_credits: float | None = None
-        self._turn_started_at: float | None = None
-        self._turn_input = 0
-        self._turn_cache_read = 0
-        self._turn_cache_write = 0
-        self._turn_output = 0
-        self._turn_cost = 0.0
-        self._turn_credits: float | None = None
-        self._turn_duration_s = 0.0
+    # --- Forwarding shims (M1; removed with this app in M2) -------------------------
 
-        # Live output estimation (chars/4, reconciled on LLMRequest)
-        self._estimated_output: int = 0
+    _turn_active = _forward("turn_active", "A root turn is running.")
+    _reconnecting = _forward("reconnecting", "A reconnect attempt is running.")
+    _reconnect_task = _forward("_reconnect_task", "The running reconnect task.")
+    _receive_task = _forward("_receive_task", "The stream's receive task.")
+    _editor_active = _forward("quiet", "The external editor is open (connection notices off).")
+    _session_model_key = _forward("model_key", "The session's model key (model palette).")
 
-        # Direct shell (! prefix) state
-        self._shell_active: bool = False
-        self._shell_proc: asyncio.subprocess.Process | None = None
-        self._shell_command: str = ""
-        self._shell_cancel_requested: bool = False
+    @property
+    def _ws(self) -> WSClient | None:
+        """The session's stream client."""
+        return self.session.ws
+
+    @property
+    def transcript(self):
+        """The session's transcript model (subagent palette, tests)."""
+        return self.session.builder
+
+    @property
+    def _cumulative_cost(self) -> float:
+        return self.session.ledger.cost
+
+    def _apply_event(self, event) -> None:
+        """Apply one live or history event."""
+        self.session.apply(event)
+
+    async def _replay_events(self) -> bool:
+        """Replay history after the cursor; False when it could not be read."""
+        return await self.session.replay()
+
+    async def _reset_replay_state(self) -> None:
+        await self.session.reset()
+
+    async def _ensure_connected(self) -> bool:
+        return await self.session.ensure_connected()
+
+    def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
+        return estimate_context_pct(context_tokens, model_key)
+
+    def _show_client_error(self, message: str) -> None:
+        """Show a client/transport error (not recorded in the session log)."""
+        self.session.client_error(message)
+
+    # --- Layout ---------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         """Build the main UI layout."""
@@ -148,256 +202,149 @@ class ArchieApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        """Connect to agent and start receiving events.
-
-        Ordering: subscribe WS first → start receive loop (buffering) → the
-        Handshake frame provides the replay cursor → replay canonical
-        events via /events → reconcile buffered live events by event id.
-        """
+        """Focus the input, then connect the session and replay its history."""
         self.query_one("#input", MessageInput).focus()
+        await self.session.start()
 
+    def _widget(self, selector: str, expect_type: type):
+        """The widget at ``selector``, or None before the app is mounted."""
         try:
-            await self._ws.connect(self._ws_url)
-        except Exception as e:
-            self._show_client_error(f"Connection failed: {e}")
-            return
-
-        # Start receive loop FIRST — events buffer in _event_buffer
-        self._event_buffer: list = []
-        self._buffering = True
-        self._receive_task = asyncio.create_task(self._receive_loop())
-
-        # Replay persisted canonical events while the receive loop buffers.
-        if not await self._replay_events():
-            self._buffering = False
-            self._event_buffer = []
-            self._show_client_error("Initial event replay failed; retrying connection.")
-            if self._receive_task is not None and not self._receive_task.done():
-                self._receive_task.cancel()
-                try:
-                    await self._receive_task
-                except asyncio.CancelledError:
-                    pass
-            await self._ws.disconnect()
-            self._schedule_reconnect()
-            return
-
-        # Reconcile: dispatch buffered live events not already rendered.
-        self._buffering = False
-        self._dispatch_buffered_events()
-
-        self._event_buffer = []
-
-    async def _replay_events(self) -> bool:
-        """Fetch and render persisted canonical events, advancing the cursor.
-
-        Requests /events?after=<cursor> when a cursor is known (reconnect),
-        otherwise the full log. Each NDJSON line is a canonical event which is
-        rendered via the shared reducer and deduplicated by event id.
-
-        Returns ``False`` when the history request cannot be completed. Callers
-        must not flush buffered live events or report a successful reconnect in
-        that case, because those events cannot fill the history gap.
-        """
-        after = self._last_event_id
-        url = f"{self._api_url}/events"
-        if after:
-            url += f"?after={after}"
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, timeout=5.0)
-                if resp.status_code == 409:
-                    # Cursor no longer exists in the log (rotated/archived). Reset
-                    # every replay-derived view before rebuilding from the full log.
-                    await self._reset_replay_state()
-                    resp = await client.get(f"{self._api_url}/events", timeout=5.0)
-                if resp.status_code != 200:
-                    return False
-                body = resp.text
-        except Exception as e:
-            log.warning("Failed to replay events: %s", e)
-            return False
-
-        # Rows are mounted once, from final node state, after the whole batch.
-        view = self._conversation()
-        if view is not None:
-            view.suspend()
-        try:
-            for line in body.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = decode_event(line, persisted=True)
-                except Exception as e:  # noqa: BLE001 — skip malformed replay lines
-                    log.warning("Skipping malformed replay event: %s", e)
-                    continue
-                self._apply_event(event)
-        finally:
-            if view is not None:
-                view.resume()
-
-        return True
+            return self.query_one(selector, expect_type)
+        except Exception:  # noqa: BLE001 — no DOM yet (headless tests, early events)
+            return None
 
     def _conversation(self) -> Conversation | None:
         """The main transcript view, or None before the app is mounted."""
-        try:
-            return self.query_one("#conversation", Conversation)
-        except Exception:  # noqa: BLE001 — no DOM yet (headless tests, early replay)
-            return None
+        return self._widget("#conversation", Conversation)
 
-    async def _reset_replay_state(self) -> None:
-        """Clear all client state reconstructed from the persisted event stream."""
-        self._last_event_id = None
-        self._seen_event_ids.clear()
-        self.transcript = TranscriptBuilder()
-        self._seen_accounted_ids.clear()
-        self._cumulative_input = 0
-        self._cumulative_output = 0
-        self._cumulative_cache_read = 0
-        self._cumulative_cache_write = 0
-        self._latest_context_tokens = 0
-        self._latest_context_pct = 0.0
-        self._cumulative_cost = 0.0
-        self._cumulative_credits = None
-        self._estimated_output = 0
-        self._reset_turn_metrics()
-        self._turn_active = False
-        # Popups show nodes of the old model; close them before rebuilding.
-        while isinstance(self._top_screen(), DetailScreen):
-            await self.pop_screen()
+    # --- SessionListener ------------------------------------------------------------
 
-        conversation = self.query_one("#conversation", Conversation)
-        removal = conversation.reset()
-        if hasattr(removal, "__await__"):
-            await removal
-        self._update_accounting_status()
-
-    def _render_canonical(self, event) -> None:
-        """Apply one event: deduplicate by id, update the transcript model and its
-        views, then run client-side effects (status bar, throbber, turn state).
-
-        History reads and live frames use the same path; the transcript model
-        reconciles them by request identity.
-        """
-        event_id = getattr(event, "id", None)
-        if event_id is not None:
-            if event_id in self._seen_event_ids:
-                return
-            self._seen_event_ids.add(event_id)
-            if event.persist:
-                self._last_event_id = event_id
-
-        if isinstance(event, LLMRequest):
-            self._accumulate_ledger(event)
-        changes = self.transcript.apply(event)
-        self._dispatch_changes(changes)
-
-        if (
-            getattr(event, "scope", None) is not None
-            and getattr(event, "subagent_index", None) is not None
-        ):
-            return  # child events only change the transcript
-
-        if isinstance(event, ce.SessionStarted):
-            self._session_model_key = event.model_key
-        elif isinstance(event, ce.UserMessage):
-            self._reset_turn_metrics()
-        elif isinstance(event, ce.Handshake):
-            status = self.query_one("#status", StatusBar)
-            status.session_id = event.session_id
-            self._session_id = event.session_id
-            self._agent_protocol = event.protocol_version
-            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
-                self._protocol_warned = True
-                self._show_client_error(
-                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
-                    f"this client supports v{PROTOCOL_VERSION}. "
-                    "Some features may not work — consider updating the CLI."
-                )
-        elif isinstance(event, ce.SessionStatus):
-            self._session_model_key = event.model_key
-            status = self.query_one("#status", StatusBar)
-            kiro_id = kiro_model_id(event.model_key)
-            model = load_models().get(event.model_key)
-            if kiro_id is not None:
-                status.model_name = f"{kiro_id} (Kiro)"
-                status.supports_cache = False
-            elif model is not None:
-                status.model_name = model.name
-                status.supports_cache = model.can_cache
-            status.git_branch = event.git_branch
-            if self._agent_protocol >= SESSION_STATE_PROTOCOL:
-                self._apply_session_state(event)
-        elif isinstance(event, ce.CompactionStart):
-            self._remove_throbber()
-        elif isinstance(event, ce.CompactionComplete):
-            if event.tokens_after is not None:
-                self._latest_context_tokens = event.tokens_after
-                self._latest_context_pct = self._estimate_context_pct(
-                    event.tokens_after, self._session_model_key
-                )
-                self._update_accounting_status()
-            if event.reason == "manual":
-                self._end_turn()
-            else:
-                # The conversation request that follows is outstanding again.
-                self._show_throbber()
-        elif isinstance(event, ce.ContextCompacted):
-            self._remove_throbber()
-            self._latest_context_tokens = event.tokens_after
-            self._latest_context_pct = self._estimate_context_pct(
-                event.tokens_after, self._session_model_key
-            )
-            self._update_accounting_status()
-            if event.reason == "manual":
-                self._end_turn()
-        elif isinstance(event, ce.ErrorNotice):
-            self._show_client_error(event.message)
-            if (
-                event.kind
-                in {"turn_active", "turn_error", "storage_error", "manual_compaction_failed"}
-                and self._turn_active
-            ):
-                self._end_turn()
-        elif isinstance(event, ce.TextDelta):
-            if not changes:
-                return  # a late delta for a request that is already final
-            self._remove_throbber()
-            self._turn_active = True
-            self._estimated_output += len(event.text) // 4
-            status = self.query_one("#status", StatusBar)
-            status.session_output = self._cumulative_output + self._estimated_output
-        elif isinstance(event, ce.IterationStart):
-            # A new iteration means a new provider request is outstanding.
-            self._show_throbber()
-        elif isinstance(event, ce.ToolCall):
-            # The provider has responded with a tool request; pending tool rows
-            # represent execution while the next iteration owns the throbber.
-            self._remove_throbber()
-        elif isinstance(event, ce.LLMRequest):
-            self._turn_input += event.input_tokens
-            self._turn_cache_read += event.cache_read_tokens
-            self._turn_cache_write += event.cache_write_tokens
-            self._turn_output += event.output_tokens
-            self._turn_cost += event.cost_usd
-            self._turn_credits = _add_credits(self._turn_credits, event)
-            self._turn_duration_s += event.duration_ms / 1000
-        elif isinstance(event, (ce.TurnError, ce.TurnInterrupted)):
-            self._end_turn()
-        elif isinstance(event, ce.TurnComplete):
-            self._show_turn_status()
-            self._end_turn()
-
-    def _dispatch_changes(self, changes) -> None:
+    def on_changes(self, changes: list[Change]) -> None:
         """Send model changes to the main view and every open popup."""
-        if not changes:
-            return
+        builder = self.session.builder
         view = self._conversation()
         if view is not None:
-            view.apply_changes(self.transcript, changes)
+            view.apply_changes(builder, changes)
         for screen in self._detail_screens():
-            screen.node_changed(self.transcript, changes)
+            screen.node_changed(builder, changes)
+
+    def on_local(self, entry: LocalEntry) -> None:
+        """Append a client-only row."""
+        conv = self._conversation()
+        if conv is None:
+            return
+        if isinstance(entry, TurnStatusEntry):
+            conv.add_turn_status(
+                entry.duration_s,
+                entry.input_tokens,
+                entry.cache_read,
+                entry.cache_write,
+                entry.output_tokens,
+                entry.cost,
+                entry.credits,
+            )
+        elif isinstance(entry, ClientErrorEntry):
+            conv.add_client_error(entry.message)
+        else:
+            conv.add_shell_output(entry.command, entry.output, exit_code=entry.exit_code)
+
+    def on_status(self) -> None:
+        """Refresh the status bar."""
+        self._update_accounting_status()
+
+    def _update_accounting_status(self) -> None:
+        """Push the controller's status values to the status bar."""
+        status = self._widget("#status", StatusBar)
+        if status is None:
+            return
+        session = self.session
+        if session.model_name is not None:
+            status.model_name = session.model_name
+        if session.supports_cache is not None:
+            status.supports_cache = session.supports_cache
+        if session.git_branch is not None:
+            status.git_branch = session.git_branch
+        if session.agent_session_id:
+            status.session_id = session.agent_session_id
+        ledger = session.ledger
+        status.session_input = ledger.input_tokens
+        status.session_output = session.session_output
+        status.cache_read = ledger.cache_read
+        status.cache_write = ledger.cache_write
+        status.context_tokens = ledger.context_tokens
+        status.context_pct = ledger.context_pct
+        status.pricing_label = format_cost(ledger.cost, ledger.credits)
+
+    def on_turn(self) -> None:
+        """Show the throbber and input state; refocus the input after a turn ends."""
+        session = self.session
+        throbber = self._widget("#throbber", Throbber)
+        if throbber is not None:
+            throbber.display = session.thinking
+        inp = self._widget("#input", MessageInput)
+        if inp is not None:
+            inp.disabled = session.input_locked
+        if session.turns_ended != self._turns_ended:
+            self._turns_ended = session.turns_ended
+            conv = self._conversation()
+            if conv is not None:
+                conv.finish_streams()
+            if inp is not None:
+                inp.focus()
+
+    def on_question(self) -> None:
+        """Show or hide the question panel and route selection keys to it."""
+        session = self.session
+        panel = self._widget("#question", QuestionPanel)
+        inp = self._widget("#input", MessageInput)
+        if session.question is not None:
+            if panel is not None:
+                panel.show(session.question)
+            throbber = self._widget("#throbber", Throbber)
+            if throbber is not None:
+                throbber.display = session.thinking
+            if inp is not None:
+                inp.choice_handler = self._on_choice_key
+                inp.disabled = session.input_locked
+                inp.focus()
+        else:
+            if panel is not None:
+                panel.hide()
+            if inp is not None:
+                inp.choice_handler = None
+                inp.disabled = session.input_locked
+
+    def on_loaded(self) -> None:
+        """The first history replay landed; nothing extra to show in this app."""
+
+    async def on_reset(self) -> None:
+        """Close popups of the old model and drop every transcript row."""
+        while isinstance(self._top_screen(), DetailScreen):
+            await self.pop_screen()
+        conv = self._conversation()
+        if conv is not None:
+            removal = conv.reset()
+            if hasattr(removal, "__await__"):
+                await removal
+
+    def on_replay(self, active: bool) -> None:
+        """Mount rows once per history batch, from final node state."""
+        conv = self._conversation()
+        if conv is None:
+            return
+        if active:
+            conv.suspend()
+        else:
+            conv.resume()
+
+    def on_notice(self, message: str, timeout: float | None) -> None:
+        """Show a transient connection notice."""
+        if timeout is None:
+            self.notify(message)
+        else:
+            self.notify(message, timeout=timeout)
+
+    # --- Popups ---------------------------------------------------------------------
 
     def _top_screen(self):
         try:
@@ -417,7 +364,7 @@ class ArchieApp(App):
         top = self._top_screen()
         if isinstance(top, DetailScreen):
             return list(top.crumbs)
-        return [self._session_id or "Session"]
+        return [self.session.agent_session_id or "Session"]
 
     def on_tool_clicked(self, message: ToolClicked) -> None:
         self.push_screen(ToolDetailScreen(message.tool, self._crumbs()))
@@ -425,205 +372,9 @@ class ArchieApp(App):
     def on_subagent_clicked(self, message: SubagentClicked) -> None:
         self.push_screen(SubagentScreen(message.sub, self._crumbs()))
 
-    def _accumulate_ledger(self, event: LLMRequest) -> None:
-        """Fold an llm_request ledger event into cumulative accounting.
-
-        This is the authoritative live cost/token source (matches the persisted
-        ledger). Deduplicated by event id so replay + live can't double-count.
-        Updates the status bar.
-        """
-        if event.id in self._seen_accounted_ids:
-            return
-        self._seen_accounted_ids.add(event.id)
-        self._estimated_output = 0
-        self._cumulative_input += event.input_tokens
-        self._cumulative_output += event.output_tokens
-        self._cumulative_cache_read += event.cache_read_tokens
-        self._cumulative_cache_write += event.cache_write_tokens
-        if event.scope is None and event.subagent_index is None and event.purpose != "compaction":
-            # Root conversation requests are persisted, so replay tracks model
-            # switches even though live-only session_status frames are absent.
-            self._session_model_key = event.model_key
-            self._latest_context_tokens = event.context_tokens
-            self._latest_context_pct = self._estimate_context_pct(
-                event.context_tokens, event.model_key
-            )
-        self._cumulative_cost += event.cost_usd
-        self._cumulative_credits = _add_credits(self._cumulative_credits, event)
-        self._update_accounting_status()
-
-    def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
-        """Calculate context usage from a persisted request."""
-        model = load_models().get(model_key)
-        if model is None or model.context <= 0:
-            return 0.0
-        return (context_tokens / model.context) * 100
-
-    def _update_accounting_status(self) -> None:
-        """Push cumulative accounting to the status bar."""
-        status = self.query_one("#status", StatusBar)
-        status.session_input = self._cumulative_input
-        status.session_output = self._cumulative_output
-        status.cache_read = self._cumulative_cache_read
-        status.cache_write = self._cumulative_cache_write
-        status.context_tokens = self._latest_context_tokens
-        status.context_pct = self._latest_context_pct
-        status.pricing_label = format_cost(self._cumulative_cost, self._cumulative_credits)
-
-    async def _receive_loop(self) -> None:
-        """Consume events from the WebSocket and dispatch to widget updates.
-
-        During the buffering phase (before history is fetched), events are
-        stored in _event_buffer. After reconciliation, events are dispatched
-        directly.
-
-        When the generator ends because the connection dropped, we surface a
-        client error and kick off a reconnect attempt. A clean shutdown
-        (quit) does neither.
-        """
-        try:
-            async for event in self._ws.receive():
-                if self._buffering:
-                    self._event_buffer.append(event)
-                else:
-                    self._apply_event(event)
-        except Exception as e:
-            log.warning("WS receive loop error: %s", e)
-            if not self._shutting_down:
-                if not self._editor_active:
-                    self._show_client_error(f"Connection lost: {e}")
-                close_code = getattr(getattr(e, "rcvd", None), "code", None)
-                self._schedule_reconnect(close_code)
-            return
-
-        # Generator ended without raising — connection closed underneath us.
-        if not self._shutting_down:
-            if not self._editor_active:
-                self._show_client_error("Connection lost: the agent closed the stream.")
-            self._schedule_reconnect(None)
-
-    def _schedule_reconnect(self, close_code: int | None = None) -> None:
-        """Start a background reconnect task if one isn't already running."""
-        if self._reconnecting or self._shutting_down:
-            return
-        self._reconnecting = True
-        task = asyncio.create_task(self._reconnect(close_code))
-        self._reconnect_task = task
-
-        def clear_reconnect_task(done: asyncio.Task) -> None:
-            if self._reconnect_task is done:
-                self._reconnect_task = None
-
-        task.add_done_callback(clear_reconnect_task)
-
-    async def _ensure_connected(self) -> bool:
-        """Ensure the stream is connected before sending a user command."""
-        if self._ws.connected:
-            return True
-
-        # A receive-loop-triggered reconnect may already be in progress. Wait
-        # for that attempt rather than starting a competing replay/receive loop.
-        if self._reconnecting:
-            while self._reconnecting and not self._shutting_down:
-                await asyncio.sleep(0.05)
-            return self._ws.connected
-
-        return await self._run_tracked_reconnect()
-
-    async def _run_tracked_reconnect(self) -> bool:
-        """Run a reconnect in a task that quit can cancel, and wait for it."""
-        self._reconnecting = True
-        task = asyncio.create_task(self._reconnect())
-        self._reconnect_task = task
-        try:
-            return await task
-        finally:
-            if self._reconnect_task is task:
-                self._reconnect_task = None
-
-    async def _reconnect(self, close_code: int | None = None) -> bool:
-        """Reconnect to the agent with backoff and resync via canonical replay.
-
-        Close-code handling:
-        - 4004 (session not found): give up immediately.
-        - 4002 (backend unreachable) / 1006 (abnormal) / None: retry with backoff.
-
-        On success, restarts the receive loop and replays any missed canonical
-        events via /events?after=<last event id> (deduplicated by event id).
-
-        Total retry window is 30s before giving up.
-        """
-        if close_code == 4004:
-            if not self._editor_active:
-                self._show_client_error("Session has ended. Relaunch to start a new session.")
-            self._reconnecting = False
-            return False
-
-        start = asyncio.get_event_loop().time()
-        deadline = start + 30.0
-        delays = [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
-        try:
-            for attempt, delay in enumerate(delays, start=1):
-                if self._shutting_down:
-                    return
-                if asyncio.get_event_loop().time() + delay > deadline:
-                    break
-                if not self._editor_active:
-                    self.notify("Reconnecting...", timeout=delay)
-                await asyncio.sleep(delay)
-                try:
-                    await self._ws.connect(self._ws_url)
-                except Exception as e:  # noqa: BLE001 — retry on any connect failure
-                    log.warning("Reconnect attempt %d failed: %s", attempt, e)
-                    continue
-
-                # Reconnected — buffer incoming events, replay missed canonical
-                # events (deduped by id), then dispatch buffered live events.
-                self._event_buffer = []
-                self._buffering = True
-                # Cancel any stale receive loop before starting a fresh one.
-                if self._receive_task is not None and not self._receive_task.done():
-                    self._receive_task.cancel()
-                    try:
-                        await self._receive_task
-                    except asyncio.CancelledError:
-                        pass
-                self._receive_task = asyncio.create_task(self._receive_loop())
-                if not await self._replay_events():
-                    self._buffering = False
-                    self._event_buffer = []
-                    if self._receive_task is not None and not self._receive_task.done():
-                        self._receive_task.cancel()
-                        try:
-                            await self._receive_task
-                        except asyncio.CancelledError:
-                            pass
-                    await self._ws.disconnect()
-                    continue
-                self._buffering = False
-                self._dispatch_buffered_events()
-                self._event_buffer = []
-                if not self._editor_active:
-                    self.notify("Reconnected to agent")
-                return True
-
-            self._show_client_error("Reconnect failed after 30s. Relaunch the client to continue.")
-            return False
-        finally:
-            self._reconnecting = False
-
-    def _dispatch_buffered_events(self) -> None:
-        """Flush live frames after history; request keys suppress duplicates."""
-        for event in self._event_buffer:
-            self._apply_event(event)
-
-    def _apply_event(self, event) -> None:
-        """Apply one live or history event; both are handled the same way."""
-        self._render_canonical(event)
-
     def open_child_detail(self, key: tuple[str, int]) -> None:
         """Open the transcript popup for a known child (command palette)."""
-        child = self.transcript.subagents.get(key)
+        child = self.session.builder.subagents.get(key)
         if child is None:
             return
         self.push_screen(SubagentScreen(child, self._crumbs()))
@@ -642,155 +393,19 @@ class ArchieApp(App):
 
     def action_stop_child(self) -> None:
         """Target-stop the selected child while leaving siblings active."""
-        if self._active_child_key is not None:
-            asyncio.create_task(
-                self._ws.send_command(
-                    InterruptCommand(
-                        scope=self._active_child_key[0], subagent_index=self._active_child_key[1]
-                    )
-                )
-            )
+        key = self._active_child_key
+        if key is not None:
+            self.session.stop_child(*key)
 
-    # --- Message flow ---
+    # --- Input ----------------------------------------------------------------------
 
     def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
-        """Handle user message submission."""
-        content = event.content
-
-        # Direct shell: ! prefix bypasses the LLM entirely
-        if content.startswith("!"):
-            command = content[1:].strip()
-            if not command:
-                return
-            if self._shell_active:
-                conv = self.query_one("#conversation", Conversation)
-                conv.add_client_error("Shell command already running")
-                return
-            asyncio.create_task(self._run_direct_shell(command))
-            return
-
-        if self._question is not None:
-            self._answer(AnswerCommand(question_id=self._question.id, text=content))
-            return
-
-        if self._turn_active:
-            return
-
-        content = event.content
-        self._turn_active = True
-        self._turn_started_at = time.monotonic()
-        self._turn_input = 0
-        self._turn_cache_read = 0
-        self._turn_cache_write = 0
-        self._turn_output = 0
-        self._turn_cost = 0.0
-        self._turn_credits = None
-        self._turn_duration_s = 0.0
-        # Show throbber while waiting
-        self._show_throbber()
-
-        self.query_one("#input", MessageInput).disabled = True
-
-        # Send via WebSocket (fire-and-forget task)
-        asyncio.create_task(self._send_message(content))
-
-    async def _send_message(self, content: str) -> None:
-        """Reconnect if needed, then send a message to the agent."""
-        try:
-            if not await self._ensure_connected():
-                raise RuntimeError("Not connected")
-            await self._ws.send_message(content)
-        except Exception as e:
-            self._show_client_error(f"Send failed: {e}")
-            self._end_turn()
-            # A send failure means the socket is dead; try to recover.
-            self._schedule_reconnect()
-
-    async def _run_direct_shell(self, command: str) -> None:
-        """Execute and render a command locally through host-side docker exec."""
-        conv = self.query_one("#conversation", Conversation)
-        self._shell_active = True
-        self._shell_command = command
-        self._shell_cancel_requested = False
-        max_output_lines = 10_000
-        timeout = 30
-
-        try:
-            self._shell_proc = await asyncio.create_subprocess_exec(
-                "docker",
-                "exec",
-                "-w",
-                "/workspace",
-                self._container_name,
-                "bash",
-                "-c",
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            try:
-                stdout_bytes, _ = await asyncio.wait_for(
-                    self._shell_proc.communicate(), timeout=timeout
-                )
-                exit_code = (
-                    130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
-                )
-                output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-            except TimeoutError:
-                self._shell_proc.kill()
-                await self._shell_proc.wait()
-                exit_code = 124
-                output = "(timed out)"
-
-            lines = output.split("\n")
-            if len(lines) > max_output_lines:
-                output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
-            conv.add_shell_output(command, output, exit_code=exit_code)
-        except Exception as exc:  # noqa: BLE001 — local execution failure
-            conv.add_client_error(f"Docker exec failed: {exc}")
-        finally:
-            self._shell_active = False
-            self._shell_proc = None
-            self._shell_command = ""
-            self._shell_cancel_requested = False
-
-    # --- Pending question ---
-
-    def _apply_session_state(self, event: ce.SessionStatus) -> None:
-        """Follow the agent's live state: the pending question and whether a turn runs."""
-        if event.state in ("working", "blocked") and not self._turn_active:
-            # Joined mid-turn (reconnect or another client's turn): Esc must interrupt.
-            self._turn_active = True
-            self.query_one("#input", MessageInput).disabled = True
-        if event.question is not None:
-            self._show_question(event.question)
-        elif self._question is not None:
-            self._hide_question()
-        if event.state == "idle" and self._turn_active:
-            # A turn the client missed the end of (the terminal event normally ends it first).
-            self._end_turn()
-
-    def _show_question(self, question: ce.PendingQuestion) -> None:
-        self._question = question
-        self.query_one("#question", QuestionPanel).show(question)
-        self._remove_throbber()
-        inp = self.query_one("#input", MessageInput)
-        inp.choice_handler = self._on_choice_key
-        inp.disabled = False
-        inp.focus()
-
-    def _hide_question(self) -> None:
-        self._question = None
-        self._answer_in_flight = None
-        self.query_one("#question", QuestionPanel).hide()
-        inp = self.query_one("#input", MessageInput)
-        inp.choice_handler = None
-        if self._turn_active:
-            inp.disabled = True
+        """Hand submitted input to the session."""
+        self.session.submit(event.content)
 
     def _on_choice_key(self, key: str) -> bool:
         """Selection keys on an empty input while a question is shown."""
-        question = self._question
+        question = self.session.question
         if question is None:
             return False
         panel = self.query_one("#question", QuestionPanel)
@@ -798,110 +413,14 @@ class ArchieApp(App):
             panel.move(-1 if key == "up" else 1)
             return True
         if key in ("enter", "kp_enter"):
-            self._answer(AnswerCommand(question_id=question.id, option=panel.selected))
+            self.session.answer(AnswerCommand(question_id=question.id, option=panel.selected))
             return True
         if key.isdigit() and 1 <= int(key) <= len(question.options):
-            self._answer(AnswerCommand(question_id=question.id, option=int(key) - 1))
+            self.session.answer(AnswerCommand(question_id=question.id, option=int(key) - 1))
             return True
         return False
 
-    def _answer(self, command: AnswerCommand) -> None:
-        if self._answer_in_flight == command.question_id:
-            return
-        self._answer_in_flight = command.question_id
-        asyncio.create_task(self._send_answer(command))
-
-    async def _send_answer(self, command: AnswerCommand) -> None:
-        """Send an answer; hide the panel only once it was sent."""
-        try:
-            if not await self._ensure_connected():
-                raise RuntimeError("Not connected")
-            await self._ws.send_command(command)
-        except Exception as e:  # noqa: BLE001 — surface any send failure
-            self._answer_in_flight = None
-            self._show_client_error(f"Send failed: {e}")
-            return
-        if self._question is not None and self._question.id == command.question_id:
-            self._hide_question()
-
-    # --- UI helpers ---
-
-    def _reset_turn_metrics(self) -> None:
-        """Reset client-only accounting for the next root turn."""
-        self._turn_started_at = None
-        self._turn_input = 0
-        self._turn_cache_read = 0
-        self._turn_cache_write = 0
-        self._turn_output = 0
-        self._turn_cost = 0.0
-        self._turn_credits = None
-        self._turn_duration_s = 0.0
-
-    def _show_turn_status(self) -> None:
-        """Render client-only metrics for the completed root turn."""
-        if self._turn_started_at is None and not any(
-            (
-                self._turn_input,
-                self._turn_cache_read,
-                self._turn_cache_write,
-                self._turn_output,
-                self._turn_cost,
-                self._turn_credits,
-            )
-        ):
-            return
-        duration_s = (
-            time.monotonic() - self._turn_started_at
-            if self._turn_started_at is not None
-            else self._turn_duration_s
-        )
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_turn_status(
-            duration_s,
-            self._turn_input,
-            self._turn_cache_read,
-            self._turn_cache_write,
-            self._turn_output,
-            self._turn_cost,
-            self._turn_credits,
-        )
-        self._turn_started_at = None
-
-    def _end_turn(self) -> None:
-        """Single teardown path for every turn outcome."""
-        self._remove_throbber()
-        conv = self.query_one("#conversation", Conversation)
-        conv.finish_streams()
-        self._turn_active = False
-        inp = self.query_one("#input", MessageInput)
-        inp.disabled = False
-        inp.focus()
-
-    def _show_throbber(self) -> None:
-        """Show the fixed throbber while the agent is thinking."""
-        if self._throbber is not None or not self._turn_active:
-            return
-        self._throbber = self.query_one("#throbber", Throbber)
-        self._throbber.display = True
-
-    def _remove_throbber(self) -> None:
-        """Hide the throbber animation widget."""
-        if self._throbber is not None:
-            self._throbber.display = False
-            self._throbber = None
-        else:
-            self.query_one("#throbber", Throbber).display = False
-
-    def _show_client_error(self, message: str) -> None:
-        """Display a client/transport error, marked as local to this client.
-
-        These originate in the TUI or WebSocket transport and are NOT recorded
-        in the session log, so they are styled distinctly from agent errors.
-        """
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_client_error(message)
-
-    # --- Actions ---
+    # --- Actions --------------------------------------------------------------------
 
     def action_copy_block(self) -> None:
         """Copy the current text selection, or the focused message block."""
@@ -926,30 +445,23 @@ class ArchieApp(App):
                 return
 
     def action_cancel(self) -> None:
-        """Esc — signal the agent to interrupt, or kill running shell command.
+        """Esc: kill a running shell command, dismiss the question, or interrupt.
 
-        When idle, double-tap within 500ms clears the input.
+        When idle, a double tap within 500 ms clears the input.
         """
-        if self._shell_active and self._shell_proc is not None:
-            self._shell_cancel_requested = True
-            self._shell_proc.kill()
+        action = self.session.cancel()
+        if action == "shell":
             return
-        if self._question is not None:
-            # First Esc dismisses the question; the next one interrupts the turn.
-            self._answer(AnswerCommand(question_id=self._question.id, dismiss=True))
+        if action is not None:
             self._last_esc_time = 0
             return
-        if self._turn_active:
-            asyncio.create_task(self._ws.send_interrupt())
+        now = time.monotonic()
+        inp = self.query_one("#input", MessageInput)
+        if self._last_esc_time and (now - self._last_esc_time) < 0.5 and inp.text:
+            inp.clear()
             self._last_esc_time = 0
         else:
-            now = time.monotonic()
-            inp = self.query_one("#input", MessageInput)
-            if self._last_esc_time and (now - self._last_esc_time) < 0.5 and inp.text:
-                inp.clear()
-                self._last_esc_time = 0
-            else:
-                self._last_esc_time = now
+            self._last_esc_time = now
 
     async def action_quit(self) -> None:
         """Prompt before leaving, optionally terminating the attached session."""
@@ -960,58 +472,25 @@ class ArchieApp(App):
 
     async def _finish_quit(self, terminate_session: bool | None) -> None:
         """Complete quit after the confirmation screen has been answered."""
-        if terminate_session is None:
-            self._quit_prompt_open = False
-            return
         self._quit_prompt_open = False
+        if terminate_session is None:
+            return
         self._shutting_down = True
-        current_task = asyncio.current_task()
-        active_tasks = (self._receive_task, self._reconnect_task)
-        for task in active_tasks:
-            if task is not None and task is not current_task and not task.done():
-                task.cancel()
-        for task in active_tasks:
-            if task is None or task is current_task or task.done():
-                continue
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:  # noqa: BLE001 — shutdown must continue
-                log.debug("Session client task ended during shutdown: %s", exc)
-        self._receive_task = None
-        self._reconnect_task = None
-        self._reconnecting = False
-
-        try:
-            await self._ws.disconnect()
-        except Exception as exc:  # noqa: BLE001 — shutdown must continue
-            log.debug("Session WebSocket ended during shutdown: %s", exc)
+        await self.session.close()
 
         if terminate_session:
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.delete(self._api_url, timeout=15.0)
-                if response.status_code not in {200, 404, 409}:
-                    self._show_client_error(f"Failed to terminate session: {response.status_code}")
-            except httpx.HTTPError as exc:
+                status_code = await self._client.delete(self.session.session_id)
+                if status_code not in {200, 404, 409}:
+                    self._show_client_error(f"Failed to terminate session: {status_code}")
+            except OrchestratorError as exc:
                 self._show_client_error(f"Failed to terminate session: {exc}")
         await super().action_quit()
 
     async def _recover_after_editor(self) -> None:
-        """Restore the stream after returning from the blocking editor.
-
-        The editor blocks the event loop, so the WebSocket may still report OPEN
-        even though its keepalive has already expired. Force a fresh connection
-        instead of trusting that stale state.
-        """
+        """Restore the stream after returning from the blocking editor."""
         try:
-            if self._reconnecting:
-                recovered = await self._ensure_connected()
-            else:
-                await self._ws.disconnect()
-                recovered = await self._run_tracked_reconnect()
-            if not recovered:
+            if not await self.session.force_reconnect():
                 self._show_client_error("Unable to reconnect after closing the editor.")
         except Exception as exc:  # noqa: BLE001 — surface recovery failures only
             self._show_client_error(f"Unable to reconnect after closing the editor: {exc}")
@@ -1020,7 +499,7 @@ class ArchieApp(App):
 
     def action_editor(self) -> None:
         """Open $EDITOR for message composition. Auto-submits on save."""
-        if self._turn_active:
+        if self.session.turn_active:
             return
         self._editor_active = True
 
@@ -1071,15 +550,5 @@ class ArchieApp(App):
 
     def switch_model(self, model_key: str) -> None:
         """Send a model switch command to the agent (called by ModelProvider)."""
-        if self._turn_active:
+        if not self.session.switch_model(model_key):
             self.notify("Cannot switch model during active turn", severity="warning")
-            return
-        asyncio.create_task(self._ws.send_command(SwitchModelCommand(model_key=model_key)))
-
-
-def _add_credits(total: float | None, event: LLMRequest) -> float | None:
-    """Add a request's Kiro credits to ``total``; native requests leave it unchanged."""
-    credits = event.credits
-    if not isinstance(credits, int | float):  # msgspec.UNSET on native requests
-        return total
-    return (total or 0.0) + credits

@@ -1,84 +1,60 @@
-"""Tests for TUI protocol version mismatch warning."""
-
-from unittest.mock import MagicMock
+"""Tests for the TUI protocol version mismatch warning."""
 
 from archie_shared.events import Handshake
 from archie_shared.protocol import PROTOCOL_VERSION
 
-
-def _make_app():
-    from archie_cli.tui.app import ArchieApp
-
-    return ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
-        container_name="archie-proj-01abc",
-    )
+from tests.tui_fakes import local_texts, make_controller
 
 
-def _make_session_info(protocol_version: int) -> Handshake:
+def _make_session_info(protocol_version: int, event_id: str = "01J00000000000000000000001"):
     return Handshake(
-        id="01J00000000000000000000001",
+        id=event_id,
         protocol_version=protocol_version,
         session_id="proj-01abc12345",
     )
 
 
 def test_matching_version_no_warning():
-    """SessionInfo with matching protocol version → no warning shown."""
-    app = _make_app()
-    errors = []
-    app._show_client_error = lambda msg: errors.append(msg)
+    """A handshake with the client's protocol version shows no warning."""
+    controller, listener = make_controller()
+    controller.apply(_make_session_info(protocol_version=PROTOCOL_VERSION))
 
-    # Mock query_one to return a fake StatusBar
-    mock_status = MagicMock()
-    app.query_one = MagicMock(return_value=mock_status)
-
-    event = _make_session_info(protocol_version=PROTOCOL_VERSION)
-    app._apply_event(event)
-
-    assert not any("Protocol version" in e for e in errors)
+    assert not any("Protocol version" in e for e in local_texts(controller))
+    assert controller.agent_session_id == "proj-01abc12345"
+    assert "status" in listener.names()
 
 
 def test_older_session_version_no_warning():
-    """SessionInfo with version < client version → no warning (backwards compat)."""
-    app = _make_app()
-    errors = []
-    app._show_client_error = lambda msg: errors.append(msg)
-    app.query_one = MagicMock(return_value=MagicMock())
-
-    event = _make_session_info(protocol_version=max(1, PROTOCOL_VERSION - 1))
+    """A version below the client's shows no warning (backwards compatible)."""
+    controller, _ = make_controller()
     # Only meaningful if PROTOCOL_VERSION > 1; otherwise use current version
     if PROTOCOL_VERSION > 1:
-        app._apply_event(event)
-        assert not any("Protocol version" in e for e in errors)
+        controller.apply(_make_session_info(protocol_version=PROTOCOL_VERSION - 1))
+        assert not any("Protocol version" in e for e in local_texts(controller))
 
 
 def test_newer_session_version_shows_warning():
-    """SessionInfo with version > client version → warning with update suggestion."""
-    app = _make_app()
-    errors = []
-    app._show_client_error = lambda msg: errors.append(msg)
-    app.query_one = MagicMock(return_value=MagicMock())
+    """A version above the client's warns once, suggesting an update."""
+    controller, listener = make_controller()
+    controller.apply(_make_session_info(protocol_version=PROTOCOL_VERSION + 1))
 
-    event = _make_session_info(protocol_version=PROTOCOL_VERSION + 1)
-    app._apply_event(event)
-
+    errors = local_texts(controller)
     assert len(errors) == 1
     assert "Protocol version" in errors[0]
     assert str(PROTOCOL_VERSION + 1) in errors[0]
     assert str(PROTOCOL_VERSION) in errors[0]
     assert "updating" in errors[0].lower() or "update" in errors[0].lower()
+    assert listener.of("local") == [(controller.locals[0],)]
+
+    # A reconnect's handshake does not repeat it.
+    controller.apply(_make_session_info(PROTOCOL_VERSION + 1, "01J00000000000000000000002"))
+    assert len(local_texts(controller)) == 1
 
 
 def test_protocol_version_warning_does_not_disconnect():
-    """Version mismatch → warning shown but connection continues (no exception)."""
-    app = _make_app()
-    app._show_client_error = MagicMock()
-    app.query_one = MagicMock(return_value=MagicMock())
+    """A version mismatch only warns; nothing raises and no reconnect starts."""
+    controller, _ = make_controller()
+    controller.apply(_make_session_info(protocol_version=PROTOCOL_VERSION + 99))
 
-    # Should not raise
-    event = _make_session_info(protocol_version=PROTOCOL_VERSION + 99)
-    app._apply_event(event)
-
-    app._show_client_error.assert_called_once()
+    assert len(controller.locals) == 1
+    assert controller._reconnect_task is None and not controller.reconnecting
