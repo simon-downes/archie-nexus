@@ -594,7 +594,7 @@ the pane, a tool view and the dialogs from synthetic sessions.
 Not verified: the TUI against the user's real orchestrator and agent containers (no host
 or Docker access here), on macOS terminals, and real `!`/editor use.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/28
 CI: pending
 
 ## Follow-ups
