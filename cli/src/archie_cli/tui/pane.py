@@ -22,26 +22,30 @@ from archie_shared.transcript import Change, SubagentNode, ToolNode
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.widget import Widget
 from textual.widgets import Static
 
 from archie_cli.tui import theme
+from archie_cli.tui.animation import Animated, spinner
 from archie_cli.tui.conversation import format_cost
 from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.question import QuestionPanel
-from archie_cli.tui.session import LocalEntry, SessionController
+from archie_cli.tui.session import Activity, LocalEntry, SessionController
 from archie_cli.tui.sidebar import ANIMATED_STATUSES, branch_label, state_badge, state_glyph
 from archie_cli.tui.status import StatusBar
-from archie_cli.tui.throbber import Throbber, ThrobberContainer
 from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
 
 DOUBLE_ESC_S = 0.5
 """Seconds within which a second Esc clears the input."""
 
 
-class SessionHeader(Widget):
-    """Above the transcript: state glyph and name on the left, the state badge right."""
+class SessionHeader(Animated):
+    """Above the transcript: state glyph and name on the left, the state badge right.
+
+    The badge names the record's state (084 D30): ``WORKING``, ``NEEDS AN ANSWER``,
+    ``TURN FAILED``, ``READY``, ``NEW REPLY``, ``ENDED`` and the lifecycle states, on the
+    state's colour. Starting, working and stopping glyphs animate on the app's clock.
+    """
 
     DEFAULT_CSS = """
     SessionHeader {
@@ -54,10 +58,9 @@ class SessionHeader(Widget):
     def __init__(self, record: SessionDescriptor) -> None:
         super().__init__()
         self.record = record
-        self.frame = 0
 
     @property
-    def animated(self) -> bool:
+    def animating(self) -> bool:
         """True while the glyph animates."""
         return self.record.status in ANIMATED_STATUSES
 
@@ -75,8 +78,55 @@ class SessionHeader(Widget):
         return line
 
 
+class ActivityLine(Animated):
+    """``⠋ Thinking… (esc to cancel)`` under the transcript, for the whole turn.
+
+    The word follows ``SessionController.activity``: Thinking while a provider request
+    waits, Responding while a reply streams, Working while tools run. Between turns the
+    line is blank but keeps its height (one line and a blank one under it), so the
+    transcript never changes height. The spinner runs on the app's clock (084 D16).
+    """
+
+    DEFAULT_CSS = """
+    ActivityLine {
+        width: 1fr;
+        height: 2;
+        padding: 0 2 1 4;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.activity: Activity | None = None
+
+    @property
+    def animating(self) -> bool:
+        """True while a turn runs."""
+        return self.activity is not None
+
+    def show(self, activity: Activity | None) -> None:
+        """Show ``activity``'s word, or a blank line for None."""
+        if activity == self.activity:
+            return
+        self.activity = activity
+        self.refresh()
+        self.sync_animation()
+
+    def render(self) -> Text:
+        if self.activity is None:
+            return Text("")
+        return Text.assemble(
+            (spinner(self.frame), f"bold {theme.PRIMARY}"),
+            " ",
+            (f"{self.activity}…", "bold"),
+            (" (esc to cancel)", theme.MUTED),
+            no_wrap=True,
+            overflow="ellipsis",
+        )
+
+
 class SessionPane(Vertical):
-    """The on-screen session: header, transcript, throbber, question, input, status bar.
+    """The on-screen session: header, transcript, activity line, question, input, status.
 
     Attributes:
         record: The session's latest record from the feed.
@@ -101,7 +151,7 @@ class SessionPane(Vertical):
         self.header = SessionHeader(record)
         self.loading_line = Static("", classes="pane-loading")
         self.conversation = Conversation()
-        self.throbber = ThrobberContainer()
+        self.activity = ActivityLine()
         self.question = QuestionPanel()
         self.input = MessageInput()
         self.status = StatusBar()
@@ -112,7 +162,7 @@ class SessionPane(Vertical):
         yield self.header
         yield self.loading_line
         yield self.conversation
-        yield self.throbber
+        yield self.activity
         yield self.question
         yield self.input
         yield self.status
@@ -136,6 +186,7 @@ class SessionPane(Vertical):
         self._turns_ended = controller.turns_ended
         self._show_loading()
         self._show_branch()
+        self._show_session_id()
         self.on_status()
         self.on_question()
         self._show_turn()
@@ -156,7 +207,9 @@ class SessionPane(Vertical):
         self.record = record
         self.header.record = record
         self.header.refresh()
+        self.header.sync_animation()
         self._show_branch()
+        self._show_session_id()
         self._show_loading()
         self._show_turn()
 
@@ -164,18 +217,11 @@ class SessionPane(Vertical):
         """The status bar's branch, from the record's location (084 D31)."""
         self.status.git_branch = branch_label(self.record.location) or "—"
 
-    def tick(self, frame: int) -> bool:
-        """Advance the header's glyph; True if it animates."""
-        if not self.header.animated:
-            return False
-        self.header.frame = frame
-        self.header.refresh()
-        return True
-
-    @property
-    def animated(self) -> bool:
-        """True while the header's glyph animates."""
-        return self.header.animated
+    def _show_session_id(self) -> None:
+        """The status bar's session ID: only when the header shows a name instead (D31)."""
+        record = self.record
+        named = bool(record.name) and record.name != record.session_id
+        self.status.session_id = record.session_id if named else ""
 
     def focus_input(self) -> None:
         """Focus the input when it takes text."""
@@ -197,7 +243,7 @@ class SessionPane(Vertical):
         controller = self.controller
         if controller is None:
             return
-        self.query_one(Throbber).display = controller.thinking
+        self.activity.show(controller.activity)
         self.input.disabled = controller.input_locked or self.record.ended
 
     # --- SessionListener ----------------------------------------------------------
@@ -225,8 +271,6 @@ class SessionPane(Vertical):
             status.model_name = controller.model_name
         if controller.supports_cache is not None:
             status.supports_cache = controller.supports_cache
-        if controller.agent_session_id:
-            status.session_id = controller.agent_session_id
         ledger = controller.ledger
         status.session_input = ledger.input_tokens
         status.session_output = controller.session_output
@@ -237,7 +281,7 @@ class SessionPane(Vertical):
         status.pricing_label = format_cost(ledger.cost, ledger.credits)
 
     def on_turn(self) -> None:
-        """Show the throbber and input state; refocus the input after a turn ends."""
+        """Show the activity line and input state; refocus the input after a turn ends."""
         controller = self.controller
         if controller is None:
             return

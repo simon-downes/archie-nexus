@@ -64,6 +64,9 @@ CancelAction = Literal["shell", "dismiss", "interrupt"]
 """What ``SessionController.cancel`` did: killed the shell, dismissed the question or
 asked the agent to interrupt the turn."""
 
+Activity = Literal["Thinking", "Working", "Responding"]
+"""The activity line's word for a running turn."""
+
 
 # --- Timeline entries ---------------------------------------------------------------
 
@@ -188,7 +191,7 @@ class SessionListener(Protocol):
         ...
 
     def on_turn(self) -> None:
-        """Turn state changed: ``thinking``, ``input_locked`` or ``turns_ended``."""
+        """Turn state changed: ``thinking``, ``activity``, ``input_locked`` or ``turns_ended``."""
         ...
 
     def on_question(self) -> None:
@@ -235,7 +238,8 @@ class SessionController:
         git_branch: Branch from the agent's status, None until reported.
         agent_session_id: Session id from the agent's handshake ("" until then).
         turn_active: A root turn is running.
-        thinking: A provider request is outstanding (the throbber shows).
+        thinking: A provider request is outstanding.
+        activity: The activity line's word for the turn, or None (see the property).
         input_locked: The message input is disabled.
         turns_ended: Count of turn teardowns; a view refocuses input when it grows.
         turn: Metrics of the current root turn.
@@ -288,6 +292,7 @@ class SessionController:
         # Turn
         self.turn_active = False
         self.thinking = False
+        self._phase: Activity = "Working"  # what the turn does once no request waits
         self.input_locked = False
         self.turns_ended = 0
         self.turn = TurnMetrics()
@@ -316,6 +321,21 @@ class SessionController:
         # Input, kept for the next view (084 D7)
         self.draft = ""
         self.history: list[str] = []
+
+    @property
+    def activity(self) -> Activity | None:
+        """The activity line's word: what the running root turn is doing (084).
+
+        ``Thinking`` while a provider request is outstanding and no text has arrived,
+        ``Responding`` while a reply streams, ``Working`` while tool calls run. None
+        between turns and while a question waits for the user (the question panel
+        shows instead).
+        """
+        if not self.turn_active or self.question is not None:
+            return None
+        if self.thinking:
+            return "Thinking"
+        return self._phase
 
     @property
     def evictable(self) -> bool:
@@ -486,8 +506,8 @@ class SessionController:
         elif isinstance(event, ce.TextDelta):
             if not changes:
                 return  # a late delta for a request that is already final
-            self._stop_thinking()
             self.turn_active = True
+            self._set_phase("Responding")
             self.estimated_output += len(event.text) // 4
             self.session_output = self.ledger.output_tokens + self.estimated_output
             self._status_changed()
@@ -495,9 +515,9 @@ class SessionController:
             # A new iteration means a new provider request is outstanding.
             self._start_thinking()
         elif isinstance(event, ce.ToolCall):
-            # The provider responded with a tool request; pending tool rows represent
-            # execution while the next iteration owns the thinking indicator.
-            self._stop_thinking()
+            # The provider responded with a tool request: the turn now runs tools
+            # until the next iteration's request.
+            self._set_phase("Working")
         elif isinstance(event, ce.LLMRequest):
             turn = self.turn
             turn.input_tokens += event.input_tokens
@@ -562,10 +582,19 @@ class SessionController:
             self.thinking = False
             self._turn_changed()
 
+    def _set_phase(self, phase: Activity) -> None:
+        """The request answered with text or tool calls; report it if the word changed."""
+        changed = self.thinking or phase != self._phase
+        self.thinking = False
+        self._phase = phase
+        if changed:
+            self._turn_changed()
+
     def _end_turn(self) -> None:
         """Single teardown path for every turn outcome."""
         self.thinking = False
         self.turn_active = False
+        self._phase = "Working"
         self.input_locked = False
         self.turns_ended += 1
         self._turn_changed()

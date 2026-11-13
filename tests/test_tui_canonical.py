@@ -346,21 +346,26 @@ async def test_live_assistant_message_finalizes_stream_without_duplicate():
     assert item.kind == "text" and item.content == "hello"
 
 
-def test_throbber_tracks_provider_request_lifecycle():
-    """Thinking while a provider request is pending, not while tools execute."""
+def test_activity_tracks_provider_request_lifecycle():
+    """Thinking while a provider request is pending, Responding while text streams,
+    Working while tools execute; nothing between turns."""
     controller, listener = make_controller()
+    assert controller.activity is None
     controller.turn_active = True
 
     controller.apply(IterationStart(id="i1", turn=1, iteration=0, scope=None))
     assert controller.thinking is True
+    assert controller.activity == "Thinking"
 
     controller.apply(
         TextDelta(id="d1", turn=1, iteration=0, scope=None, request_id="r1", text="partial")
     )
     assert controller.thinking is False
+    assert controller.activity == "Responding"
 
     controller.apply(IterationStart(id="i2", turn=1, iteration=1, scope=None))
     assert controller.thinking is True
+    assert controller.activity == "Thinking"
     controller.apply(
         ToolCall(
             id="c1",
@@ -374,6 +379,7 @@ def test_throbber_tracks_provider_request_lifecycle():
         )
     )
     assert controller.thinking is False
+    assert controller.activity == "Working"
     assert listener.names().count("turn") == 4
 
 
@@ -450,7 +456,7 @@ async def test_unmatched_completion_mounts_terminal_entry():
     assert headers == [["● Compaction threshold cold cache (123457 → 4563, $2.54, 123ms)"]]
 
 
-async def test_automatic_compaction_restores_throbber():
+async def test_automatic_compaction_restores_thinking():
     host = _ConversationHost()
     thinking = await host.run(
         [_compaction_start(), _compaction_complete()],
@@ -650,7 +656,7 @@ def _tool_rows(conv):
 
 
 async def test_tool_rows_render_pending_then_complete_summaries():
-    """Rows use the shared formatter for the pending and completed summaries."""
+    """Rows are the shared two-line model: running, then finished (tool_rows)."""
     host = _ConversationHost()
     snapshots = await host.run(
         [
@@ -662,8 +668,8 @@ async def test_tool_rows_render_pending_then_complete_summaries():
         inspect=_tool_rows,
     )
     assert snapshots[1] == []
-    assert snapshots[2] == [["○ Read /etc/hosts (all lines)"]]
-    assert snapshots[3] == [["● Read /etc/hosts (3 lines, 5ms)"]]
+    assert snapshots[2] == [["⠋ Read\n╰ /etc/hosts"]]
+    assert snapshots[3] == [["● Read · 3 lines · 5ms\n╰ /etc/hosts"]]
 
 
 async def test_parallel_tools_share_one_block_and_iterations_split():
@@ -681,12 +687,13 @@ async def test_parallel_tools_share_one_block_and_iterations_split():
     assert [len(b) for b in blocks] == [2, 1]
 
 
-async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none():
+async def test_replies_and_iteration_blocks_have_transparent_rules_and_user_messages_a_bar():
     from pathlib import Path
 
     import archie_cli.tui.app as tui_app
     from archie_cli.tui import theme
     from archie_cli.tui.conversation import AssistantMessage as AssistantRow
+    from archie_cli.tui.conversation import UserMessage as UserRow
     from archie_cli.tui.transcript_view import Conversation, IterationBlock
     from textual.app import App
 
@@ -710,13 +717,15 @@ async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none(
         conv.apply_changes(builder, builder.apply(_tool_call("t1", "read", {"path": "a"})))
         await pilot.pause()
         kind, colour = conv.query_one(AssistantRow).styles.border_left
-        assert kind == "thick" and 0 < colour.a < 1
+        assert kind == "thick" and colour.a == 0  # lines the text up with the tool rows
+        kind, colour = conv.query_one(UserRow).styles.border_left
+        assert kind == "thick" and colour.a == 1
         block = conv.query_one(IterationBlock)
         assert block.styles.border_left[1].a == 0
         assert not block.focusable
 
 
-async def test_exec_and_shell_rows_show_ten_lines_and_no_click_expand():
+async def test_exec_and_shell_rows_are_two_lines():
     source = "\n".join(f"x{i} = {i}" for i in range(25))
     command = "\n".join(f"echo {i}" for i in range(14))
     host = _ConversationHost()
@@ -728,15 +737,10 @@ async def test_exec_and_shell_rows_show_ten_lines_and_no_click_expand():
         ],
         inspect=_tool_rows,
     )
+    # The source and the whole command are in the detail view, not the row.
     exec_row, shell_row = snapshots[-1][0]
-    exec_lines = exec_row.split("\n")
-    assert exec_lines[0] == "○ Exec"
-    assert exec_lines[1:11] == [f"  x{i} = {i}" for i in range(10)]
-    assert exec_lines[11] == "  … +15 lines"
-    shell_lines = shell_row.split("\n")
-    assert shell_lines[0] == "○ Shell echo 0"
-    assert shell_lines[1:10] == [f"  echo {i}" for i in range(1, 10)]
-    assert shell_lines[10] == "  … +4 lines"
+    assert exec_row == "⠋ Exec\n╰ python · 25 lines"
+    assert shell_row == "⠋ Shell\n╰ $ echo 0"
 
 
 # --- Replay -------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import asyncio
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+import archie_cli.tui.animation as animation
 import archie_cli.tui.app as tui_app
 import msgspec
 import pytest
@@ -585,7 +586,11 @@ async def test_a_turn_sends_shows_tools_question_and_status():
         )
         assert not pane.input.disabled
         assert not pane.question.display
-        assert pane.query_one(StatusBar).session_id == "agent-s1"
+        # The header shows the ID of an unnamed session; the status bar shows it only
+        # once the session has a name (D31).
+        assert pane.query_one(StatusBar).session_id == ""
+        client.publish(make_record("s1", name="Fix the parser"))
+        await settle(pilot, lambda: pane.status.session_id == "s1")
         detached = SessionLocation(repo="app", commit="abcdef0123" * 4)
         client.publish(make_record("s1", location=detached))
         await settle(pilot, lambda: pane.status.git_branch == "abcdef0")
@@ -603,7 +608,7 @@ async def test_header_follows_the_feed_and_animates_while_working():
         await settle(pilot, lambda: "WORKING" in pane.header.render().plain)
         frames = set()
         for _ in range(20):
-            await asyncio.sleep(tui_app.ANIMATION_INTERVAL)
+            await asyncio.sleep(animation.INTERVAL)
             frames.add(pane.header.render().plain[0])
             if len(frames) > 1:
                 break
@@ -781,3 +786,160 @@ async def test_http_feed_and_patch_report_failures(monkeypatch):
         async for _ in client.feed():
             pass
     assert feed_error.value.status_code == 404
+
+
+# --- The pane's look (M4) ---------------------------------------------------------------
+
+
+def _call(tool_use_id: str = "t1", name: str = "read", tool_input: dict | None = None) -> ToolCall:
+    return ToolCall(
+        id=f"c-{tool_use_id}",
+        turn=1,
+        iteration=1,
+        scope=None,
+        request_id="r1",
+        tool_use_id=tool_use_id,
+        name=name,
+        input=tool_input if tool_input is not None else {"path": "/workspace/app/a.py"},
+    )
+
+
+def _result(tool_use_id: str = "t1", content: str = "File: a.py (3 lines)") -> ToolResult:
+    return ToolResult(
+        id=f"r-{tool_use_id}",
+        turn=1,
+        iteration=1,
+        scope=None,
+        request_id="r1",
+        tool_use_id=tool_use_id,
+        content=content,
+        is_error=False,
+        duration_ms=6,
+        result_lines=len(content.splitlines()),
+    )
+
+
+async def test_user_message_has_a_bar_and_no_you_header():
+    from archie_cli.tui.conversation import UserMessage as UserRow
+    from textual.widgets import Static
+
+    client = _client(make_record("s1"), logs={"s1": [_user("u1", "hello there")]})
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        await settle(pilot, lambda: pane.conversation.query(UserRow))
+        message = pane.conversation.query_one(UserRow)
+        assert str(message.query_one(Static).render()) == "hello there"
+        assert "You" not in str(message.query_one(Static).render())
+        kind, colour = message.styles.border_left
+        assert kind == "thick" and colour.a == 1
+
+
+async def test_tool_rows_are_two_lines_in_the_pane():
+    from archie_cli.tui.transcript_view import ToolRow
+
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        await apply_events(app, pilot, _user("u1", "go"), _call(), _result())
+        await pilot.pause()
+        row = pane.conversation.query_one(ToolRow)
+        assert row.size.height == 2
+        assert row.render().plain == "● Read · 3 lines · 6ms\n╰ app/a.py"
+
+
+async def test_activity_line_keeps_its_height_and_follows_the_turn():
+    from archie_shared.events import IterationStart, TextDelta
+
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        line = pane.activity
+        await pilot.pause()
+        heights = (line.outer_size.height, pane.conversation.outer_size.height)
+        assert heights[0] == 2
+        assert line.activity is None and line.render().plain == ""
+
+        await pilot.press(*"go", "enter")
+        await settle(pilot, lambda: client.latest.sent)
+        assert line.activity == "Thinking"
+        await apply_events(
+            app, pilot, _user("u1", "go"), IterationStart(id="i1", turn=1, iteration=1, scope=None)
+        )
+        assert line.render().plain.endswith("Thinking… (esc to cancel)")
+        assert (line.outer_size.height, pane.conversation.outer_size.height) == heights
+
+        delta = TextDelta(id="d1", turn=1, iteration=1, scope=None, request_id="r1", text="Hm")
+        await apply_events(app, pilot, delta)
+        assert line.activity == "Responding"
+        assert "Responding…" in line.render().plain
+
+        await apply_events(app, pilot, _call())
+        assert line.activity == "Working"
+        assert "Working…" in line.render().plain
+        assert (line.outer_size.height, pane.conversation.outer_size.height) == heights
+
+        await apply_events(
+            app, pilot, _result(), TurnComplete(id="tc", turn=1, scope=None, stop_reason="end_turn")
+        )
+        assert line.activity is None and line.render().plain == ""
+        assert line.outer_size.height == heights[0]
+
+
+async def test_animation_clock_runs_only_while_something_animates():
+    from archie_cli.tui.transcript_view import ToolRow
+
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        clock = app.animation
+        await pilot.pause()
+        assert not clock.running and not clock.widgets
+
+        # A turn: the activity line, then a running tool row, register.
+        await pilot.press(*"go", "enter")
+        await settle(pilot, lambda: clock.running)
+        assert clock.widgets == {pane.activity}
+        frame = clock.frame
+        await asyncio.sleep(animation.INTERVAL * 4)
+        assert clock.frame > frame
+        await apply_events(app, pilot, _user("u1", "go"), _call())
+        row = pane.conversation.query_one(ToolRow)
+        assert row in clock.widgets
+
+        # A working session: its sidebar row and the pane's header.
+        client.publish(make_record("s1", status="working"))
+        sidebar_row = app.sidebar.sessions.rows["s1"]
+        await settle(pilot, lambda: sidebar_row in clock.widgets)
+        assert pane.header in clock.widgets
+
+        # Everything stops: the clock stops with it.
+        await apply_events(
+            app, pilot, _result(), TurnComplete(id="tc", turn=1, scope=None, stop_reason="end_turn")
+        )
+        assert row not in clock.widgets and pane.activity not in clock.widgets
+        assert clock.running
+        client.publish(make_record("s1", status="idle"))
+        await settle(pilot, lambda: not clock.running)
+        assert not clock.widgets
+        frame = clock.frame
+        await asyncio.sleep(animation.INTERVAL * 4)
+        assert clock.frame == frame
+
+
+async def test_a_removed_pane_leaves_nothing_on_the_clock():
+    client = _client(
+        make_record("ws-a", status="working", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2)),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot, "ws-a")
+        assert pane.header in app.animation.widgets
+        await app.switch_to("ws-b")
+        await attached(app, pilot, "ws-b")
+        # Only the working session's sidebar row animates now.
+        assert app.animation.widgets == {app.sidebar.sessions.rows["ws-a"]}

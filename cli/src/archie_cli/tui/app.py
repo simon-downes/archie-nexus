@@ -31,6 +31,7 @@ from textual.widgets import Static
 from textual.worker import Worker
 
 from archie_cli.tui import theme
+from archie_cli.tui.animation import AnimationClock
 from archie_cli.tui.client import FeedEvent, OrchestratorClient, ProfileInfo
 from archie_cli.tui.detail import DetailScreen
 from archie_cli.tui.input import MessageInput
@@ -47,9 +48,6 @@ MAX_CONTROLLERS = 5
 
 FEED_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
 """Seconds between sessions-feed reconnects; the last repeats."""
-
-ANIMATION_INTERVAL = 1 / 8
-"""Seconds between animation frames (084 D16)."""
 
 AGE_INTERVAL = 30.0
 """Seconds between redraws of the sidebar's ages."""
@@ -101,6 +99,7 @@ class ArchieApp(App):
         records: Session records from the feed, by session ID.
         current: ID of the session on screen, or None.
         sidebar: The sidebar widget.
+        animation: The one animation clock (084 D16); animated widgets register with it.
     """
 
     TITLE = "Archie"
@@ -154,8 +153,7 @@ class ArchieApp(App):
         self._snapshot_seen = False
         self._shutting_down = False
         self._feed_worker: Worker | None = None
-        self._animation = None
-        self._frame = 0
+        self.animation = AnimationClock()
 
     # --- Layout -----------------------------------------------------------------------
 
@@ -169,7 +167,7 @@ class ArchieApp(App):
 
     def on_mount(self) -> None:
         """Start the animation and age timers and follow the sessions feed."""
-        self._animation = self.set_interval(ANIMATION_INTERVAL, self._tick, pause=True)
+        self.animation.start(self)
         self.set_interval(AGE_INTERVAL, self.sidebar.sessions.refresh_rows)
         self._feed_worker = self.run_worker(self._follow_feed(), group="feed", exit_on_error=False)
 
@@ -247,7 +245,6 @@ class ArchieApp(App):
             pane.update_record(self.records[self.current])
         for session_id, controller in self._controllers.items():
             self._maybe_start(session_id, controller)
-        self._update_animation()
 
     def _initial_session(self) -> str | None:
         """``focus`` when the feed knows it, else the newest live session."""
@@ -439,23 +436,6 @@ class ArchieApp(App):
                 return True
             return action in _SWITCH_ACTIONS and isinstance(screen, DetailScreen)
         return True
-
-    # --- Animation --------------------------------------------------------------------
-
-    def _tick(self) -> None:
-        self._frame += 1
-        animated = self.sidebar.sessions.tick(self._frame)
-        if self._pane is not None and self._pane.tick(self._frame):
-            animated = True
-        if not animated and self._animation is not None:
-            self._animation.pause()
-
-    def _update_animation(self) -> None:
-        if self._animation is None:
-            return
-        pane_animates = self._pane is not None and self._pane.animated
-        if self.sidebar.sessions.animated or pane_animates:
-            self._animation.resume()
 
     # --- Popups (rows inside popups) --------------------------------------------------
 

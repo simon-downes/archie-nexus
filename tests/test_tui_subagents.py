@@ -91,7 +91,8 @@ def test_subagent_row_renders_agent_and_status_glyphs():
     rendered = render_subagent_row(sub)
     assert isinstance(rendered, Text)
     assert "reviewer #1" in rendered.plain and "Read foo.py" in rendered.plain
-    assert "○" in rendered.plain
+    assert "⠋" in rendered.plain  # the spinner, at frame 0
+    assert "⠙" in render_subagent_row(sub, frame=1).plain
     assert any(span.style == "bold #6871ff" for span in rendered.spans)
 
     sub.status = "complete"

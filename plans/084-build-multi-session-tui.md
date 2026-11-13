@@ -400,7 +400,7 @@ Tests and when they change:
   others to `archie-nexus` main or the `fix-callback-log-redaction` worktree; three empty
   logs to None; scans 13–45 ms.
 
-### [ ] M4 — Two-line tool rows, activity line and the pane's look
+### [x] M4 — Two-line tool rows, activity line and the pane's look
 
 - **Approach:** D11, D12, D16, D33. `tool_rows.py`; `ToolRow`; `UserMessage`; `ActivityLine`
   replaces the throbber (delete `throbber.py`); header badge; status bar (D31 except the
@@ -411,7 +411,17 @@ Tests and when they change:
   with `app.save_screenshot()` shows two-line rows, the activity line and the header badge.
 - **Verify:** `scripts/dev test tests/test_tool_rows.py tests/test_tui_app.py` pass; full
   suite; the screenshot is inspected.
-- **Outcome:**
+- **Outcome:** `shared/.../tool_rows.py` (plain-parts row model from `ToolNode`, cut rules
+  keeping the suffix), two-line `ToolRow`/`SubagentRow` drawn in `render()`, header-less user
+  messages with a bar and replies aligned to tool rows, `ActivityLine` from the controller's
+  `activity` (Thinking/Responding/Working; blank, same height between turns), one
+  `AnimationClock` (8 Hz, paused when nothing is registered) plus the 30 s age timer,
+  status bar per D31, theme and CSS per the prototype's values; `throbber.py` deleted;
+  `plans/tui-tool-rows.md` with the D12 corrections. Evidence: 88 targeted tests; full suite
+  5363 passed; Ruff clean; screenshot `/tmp/084-m4/084-m4.png` (synthetic session) inspected:
+  rows, bars, activity line, badge and repo/branch lines as specified, the status bar's cost
+  cut off at 150 columns (fixed in M7). Switch back to the 11.5 MB session: median 383 ms
+  (the prototype's `Markdown > *:last-child` rule cost ~500 ms and was replaced).
 
 ### [ ] M5 — Tool and subagent views inside the pane
 
@@ -462,6 +472,8 @@ Tests and when they change:
 
 ## Deviations
 
+- M4: fetch rows show `N lines` (the result has no match count); URLs are elided in the
+  middle like paths; widths are measured in characters, not cells.
 - M3: turns are ordered by their latest call, not the turn number (robust to a restarted
   counter). A `cd` target that can't be resolved stops the walk but keeps the directories
   reached before it.

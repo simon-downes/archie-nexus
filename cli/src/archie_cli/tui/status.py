@@ -1,12 +1,13 @@
-"""Status bar widget with session metrics.
+"""Status bar widget with session metrics (084 D31).
 
-Shows: model │ in:fresh/cache_read/cache_write out:output │ ctx:N% │ $cost │ session_id
+Shows: ⎇ branch │ model │ In: fresh / cache read / cache write  Out: output │ Ctx: N (P%)
+│ $cost, and on the right the session ID when the session has a name (the header shows
+the ID otherwise). No version: the sidebar shows it.
 
 Token counts are session totals (lifetime, only climb). Updated from
 Usage wire events which carry per-request values (accumulated client-side).
 """
 
-from archie_shared import __version__
 from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
@@ -23,8 +24,9 @@ class StatusBar(Widget):
 
     DEFAULT_CSS = """
     StatusBar {
-        height: 3;
-        padding: 1;
+        height: 1;
+        margin: 0 0 1 0;
+        padding: 0 1;
     }
     StatusBar #status-left {
         width: 1fr;
@@ -47,8 +49,8 @@ class StatusBar(Widget):
     context_tokens: reactive[int] = reactive(0)
     context_pct: reactive[float] = reactive(0.0)
 
-    # Right section
-    session_id: reactive[str] = reactive("—")
+    # Right section: the session ID, or "" when the header already shows it
+    session_id: reactive[str] = reactive("")
 
     # Model capability flags
     supports_cache: reactive[bool] = reactive(True)
@@ -130,7 +132,7 @@ class StatusBar(Widget):
                 f" │ [{theme.COST}]{self.pricing_label}[/]"
             )
         )
-        right.update(Text.from_markup(f"[{theme.MUTED}]v{__version__}[/] {self.session_id} "))
+        right.update(Text(f"{self.session_id} " if self.session_id else "", style=theme.MUTED))
 
 
 def _fmt(n: int) -> str:

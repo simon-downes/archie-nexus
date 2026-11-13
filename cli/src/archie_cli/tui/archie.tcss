@@ -38,9 +38,9 @@ SessionList {
 
 /* The profile name is a link to the web interface. */
 Sidebar > .sidebar-info {
-    link-color: #5fafff;
+    link-color: $link;
     link-style: none;
-    link-color-hover: #5fafff;
+    link-color-hover: $link;
     link-background-hover: transparent;
     link-style-hover: underline;
 }
@@ -54,22 +54,38 @@ SessionHeader {
     background: $surface;
 }
 
-/* The transcript sits on $pane: a step darker than the surface around it, not black. */
+/* The transcript sits on $pane: a step darker than the surface around it, not black.
+ * The activity line under it is the transcript's last row, on the same colour. */
 SessionPane > .pane-loading,
-ThrobberContainer,
-Throbber {
+ActivityLine {
     background: $pane;
 }
 
 /* --- Conversation area --- */
+/* One column of padding keeps the blocks' left bars off the sidebar's divider; the
+ * scrollbar is a quiet one-cell thumb on the transcript's own colour. */
 Conversation {
     background: $pane;
+    padding-left: 1;
     /* Only a vertical scrollbar; horizontal content is wrapped/clipped. */
     overflow-x: hidden;
     overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $pane;
+    scrollbar-background-hover: $pane;
+    scrollbar-background-active: $pane;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
 }
 
+/* Tool rows are names in bright blue over muted targets (transcript_view.ToolRow);
+ * the rows of consecutive iterations stack with no gap, and every other block is one
+ * blank line from its neighbours (each has a one-line margin; adjacent margins
+ * collapse). */
+
 /* --- Message borders --- */
+/* Your messages: a purple bar and no header. */
 UserMessage {
     border-left: thick $primary;
 }
@@ -79,23 +95,21 @@ PromptMessage {
     border-left: thick $primary;
 }
 
-/* A dim rule on assistant text; streaming matches so finalising doesn't shift it. */
-AssistantMessage {
-    border-left: thick $primary 30%;
-}
-
-AssistantMessage > .header {
-    color: $success;
-    text-style: bold;
-}
-
+/* Archie's replies: no header and no visible rule. The rule stays as a transparent
+ * column so reply text lines up with the tool rows; streaming matches so finalising
+ * doesn't shift it. */
+AssistantMessage,
 StreamingMessage {
-    border-left: thick $primary 30%;
+    border-left: thick transparent;
 }
 
-StreamingMessage > .header {
-    color: $success;
-    text-style: bold;
+/* Every Markdown block ends with a one-line bottom margin, so a reply's last block
+ * would add a blank line to the message's own margin. A negative margin on the
+ * Markdown takes it back; a `:last-child` rule does the same but restyling it made
+ * switching to a large session ~0.45 s slower. */
+AssistantMessage > Markdown,
+StreamingMessage > Markdown {
+    margin-bottom: -1;
 }
 
 QuestionPanel {
@@ -118,7 +132,7 @@ ShellOutput {
 }
 
 /* Iteration blocks keep the transparent border from DEFAULT_CSS, so their tool rows
- * line up with message text; the blank line between blocks separates iterations. */
+ * line up with message text. */
 
 /* --- Status bar colours --- */
 StatusBar {

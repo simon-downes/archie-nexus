@@ -27,7 +27,9 @@ COST = "#c7c400"  # monetary values
 ANSWER = "#5fd7d7"  # question option labels
 PANE = "#171717"  # the session pane's transcript: a step darker than the surface
 BAND = "#313356"  # sidebar workspace bands: the primary at about 25% over the surface
-TARGET = "#9a9a9a"  # repo names on a sidebar row, between muted and normal text
+TARGET = "#9a9a9a"  # what a row acts on (repo names, tool targets): between muted and normal
+TOOL_NAME = "#5fafff"  # tool names on tool rows: bright blue, from the xterm-256 range of ANSWER
+LINK = "#5fafff"  # the sidebar's web link
 
 # --- Textual Theme instance ---
 
@@ -49,5 +51,8 @@ THEME = Theme(
         "answer": ANSWER,
         "pane": PANE,
         "band": BAND,
+        "target": TARGET,
+        "tool-name": TOOL_NAME,
+        "link": LINK,
     },
 )

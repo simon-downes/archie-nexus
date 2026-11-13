@@ -83,7 +83,7 @@ async def test_final_message_with_same_text_keeps_the_streamed_markdown():
         conv = app.query_one(Conversation)
         assert conv.query_one(StreamingMessage) is stream  # kept, not rebuilt
         assert not conv.query(AssistantRow)
-        assert "⟳" not in str(stream.query_one(".header").render())
+        assert stream._finished  # the stream was flushed, not replaced
         assert stream.query_one(Markdown).source.rstrip("\n") == "".join(FRAGMENTS).rstrip("\n")
 
 

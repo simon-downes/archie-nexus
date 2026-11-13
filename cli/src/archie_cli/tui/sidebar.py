@@ -28,6 +28,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from archie_cli.tui import theme
+from archie_cli.tui.animation import PENDING_FRAMES, Animated, spinner
 from archie_cli.tui.client import ProfileInfo
 
 # archie-og's start-up banner (archie-og/src/archie/output.py) and its blue gradient.
@@ -40,12 +41,6 @@ BANNER = (
     "╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝╚══════╝",
 )
 BANNER_COLOURS = ("#a8d8ff", "#7bb8f0", "#4e98e0", "#2878d0", "#1060b8", "#0a4a9a")
-
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-"""Frames of the working spinner, one per animation tick."""
-
-PENDING_FRAMES = "◌◌◌◌○○○○"
-"""Frames of the starting/stopping glyph: a slow pulse between two circles."""
 
 ANIMATED_STATUSES = frozenset({"starting", "working", "stopping"})
 """Statuses whose glyph animates (084 D16)."""
@@ -86,7 +81,7 @@ def state_glyph(record: SessionDescriptor, frame: int = 0) -> Text:
     """The one-cell state marker of a session (084 D30)."""
     status = record.status
     if status == "working":
-        return Text(SPINNER[frame % len(SPINNER)], style=f"bold {theme.PRIMARY}")
+        return Text(spinner(frame), style=f"bold {theme.PRIMARY}")
     if status in ("starting", "stopping"):
         return Text(PENDING_FRAMES[frame % len(PENDING_FRAMES)], style=theme.MUTED)
     if status == "blocked":
@@ -156,10 +151,11 @@ def banner() -> Text:
 # --- Session list -------------------------------------------------------------------
 
 
-class SessionRow(Widget):
+class SessionRow(Animated):
     """One session: ``▌ ● name … 12m`` over ``▌ ⎇ repo · branch``.
 
     The ``▌`` bar marks the session on screen. A click posts ``SessionList.Chosen``.
+    Starting, working and stopping rows animate on the app's clock (084 D16).
     """
 
     DEFAULT_CSS = """
@@ -177,10 +173,9 @@ class SessionRow(Widget):
         super().__init__()
         self.record = record
         self.current = False
-        self.frame = 0
 
     @property
-    def animated(self) -> bool:
+    def animating(self) -> bool:
         """True while the state glyph animates."""
         return self.record.status in ANIMATED_STATUSES
 
@@ -300,6 +295,7 @@ class SessionList(VerticalScroll):
                 row.record = record
                 row.current = record.session_id == current
                 row.refresh()
+                row.sync_animation()
                 desired.append(row)
                 order.append(record.session_id)
 
@@ -322,21 +318,6 @@ class SessionList(VerticalScroll):
             if id(widget) not in shown:
                 self.mount(widget, after=previous)
             previous = widget
-
-    def tick(self, frame: int) -> bool:
-        """Advance the animated glyphs; True if any row animates."""
-        animated = False
-        for row in self.rows.values():
-            if row.animated:
-                animated = True
-                row.frame = frame
-                row.refresh()
-        return animated
-
-    @property
-    def animated(self) -> bool:
-        """True if any listed row animates."""
-        return any(row.animated for row in self.rows.values())
 
     def refresh_rows(self) -> None:
         """Redraw every row (ages)."""

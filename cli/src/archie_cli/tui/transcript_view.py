@@ -19,6 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from archie_shared.session.accounting import UsageTotals
+from archie_shared.tool_rows import row_lines, tool_row
 from archie_shared.transcript import (
     CompactionNode,
     IterationNode,
@@ -31,9 +32,7 @@ from archie_shared.transcript import (
     TurnNode,
     plain_text,
     subagent_status_text,
-    tool_extra,
     tool_headline,
-    tool_preview,
 )
 from rich.style import Style
 from rich.text import Text
@@ -43,6 +42,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from archie_cli.tui import theme
+from archie_cli.tui.animation import Animated, spinner
 from archie_cli.tui.conversation import (
     AssistantMessage,
     CancelledMessage,
@@ -79,29 +79,46 @@ def _markup(text: str) -> Text:
     return rendered
 
 
-def _status_glyph(status: str) -> Text:
+_GLYPH_STYLES = {
+    "running": f"bold {theme.PRIMARY}",
+    "ok": f"bold {theme.SUCCESS}",
+    "error": f"bold {theme.ERROR}",
+    "waiting": f"bold {theme.WARNING}",
+}
+_ROLE_STYLES = {
+    "label": f"bold {theme.TOOL_NAME}",
+    "muted": theme.MUTED,
+    "added": theme.SUCCESS,
+    "removed": theme.ERROR,
+    "error": theme.ERROR,
+    "target": theme.TARGET,
+}
+
+
+def _status_glyph(status: str, frame: int = 0) -> Text:
     if status in {"pending", "running"}:
-        return Text("○", style=f"bold {theme.PRIMARY}")
+        return Text(spinner(frame), style=_GLYPH_STYLES["running"])
     colour = theme.ERROR if status in {"error", "interrupted"} else theme.SUCCESS
     return Text("●", style=f"bold {colour}")
 
 
-def render_tool_row(tool: ToolNode) -> Text:
-    """The tool row: status glyph, summary, 10-line exec/shell preview, extra lines."""
-    text = Text()
-    text.append_text(_status_glyph(tool.status))
-    text.append(" ")
-    text.append_text(_markup(tool_headline(tool)))
-    lines, more = tool_preview(tool)
-    for line in lines:
-        text.append("\n  ")
-        text.append(line, style="dim")
-    if more:
-        text.append(f"\n  … +{more} lines", style="dim italic")
-    extra = tool_extra(tool)
-    if extra:
-        text.append("\n")
-        text.append_text(_markup(extra))
+def render_tool_row(tool: ToolNode, width: int = 120, frame: int = 0) -> Text:
+    """The tool's two-line row at ``width`` columns (plans/tui-tool-rows.md).
+
+    Args:
+        tool: The call.
+        width: Columns available; both lines are cut to fit.
+        frame: Animation frame, which picks a running row's spinner glyph.
+    """
+    parts = tool_row(tool)
+    lines = []
+    for segments in row_lines(parts, width, spinner(frame)):
+        line = Text(no_wrap=True)
+        for text, role in segments:
+            line.append(text, _GLYPH_STYLES[parts.glyph] if role == "glyph" else _ROLE_STYLES[role])
+        lines.append(line)
+    text = Text("\n").join(lines)
+    text.no_wrap = True
     return text
 
 
@@ -120,13 +137,13 @@ def _fmt_column(value: str, width: int, *, align: str = "<") -> str:
     return f"{value:{align}{width}}"
 
 
-def render_subagent_row(sub: SubagentNode) -> Text:
+def render_subagent_row(sub: SubagentNode, frame: int = 0) -> Text:
     """One line: glyph, agent #index, context tokens, cost and current status."""
     agent = _fmt_column(sub.label, _AGENT_COLUMN)
     context = _fmt_column(_fmt_tokens(sub.context_tokens), _CONTEXT_COLUMN, align=">")
     cost = _fmt_column(f"${sub.cost_usd:.4f}", _COST_COLUMN, align=">")
     text = Text("  ")
-    text.append_text(_status_glyph(sub.status))
+    text.append_text(_status_glyph(sub.status, frame))
     text.append(f" {agent} {context} {cost} - ")
     status = _markup(subagent_status_text(sub))
     if sub.status == "error":
@@ -153,12 +170,15 @@ class SubagentClicked(Message):
         self.sub = sub
 
 
-class ToolRow(Static):
-    """One tool call. Clicking it opens the tool detail screen."""
+class ToolRow(Animated):
+    """One tool call as two lines, cut to the row's width. A click opens its details.
+
+    A running call's spinner follows the app's animation clock (084 D16).
+    """
 
     DEFAULT_CSS = """
     ToolRow {
-        height: auto;
+        height: 2;
     }
     ToolRow:hover {
         background: $boost;
@@ -166,11 +186,20 @@ class ToolRow(Static):
     """
 
     def __init__(self, tool: ToolNode) -> None:
+        super().__init__()
         self.tool = tool
-        super().__init__(render_tool_row(tool))
+
+    @property
+    def animating(self) -> bool:
+        """True while the call runs (a waiting question shows ``?`` instead)."""
+        return self.tool.result is None and self.tool.name != "question"
+
+    def render(self) -> Text:
+        return render_tool_row(self.tool, self.content_size.width or 120, self.frame)
 
     def refresh_node(self) -> None:
-        self.update(render_tool_row(self.tool))
+        self.refresh()
+        self.sync_animation()
 
     def on_click(self, event) -> None:
         event.stop()
@@ -186,7 +215,7 @@ class ToolRow(Static):
         return plain_text(tool_headline(self.tool))
 
 
-class SubagentRow(Static):
+class SubagentRow(Animated):
     """One subagent under its task tool. Clicking it opens the subagent transcript."""
 
     DEFAULT_CSS = """
@@ -199,11 +228,20 @@ class SubagentRow(Static):
     """
 
     def __init__(self, sub: SubagentNode) -> None:
+        super().__init__()
         self.sub = sub
-        super().__init__(render_subagent_row(sub))
+
+    @property
+    def animating(self) -> bool:
+        """True while the subagent runs."""
+        return self.sub.status == "running"
+
+    def render(self) -> Text:
+        return render_subagent_row(self.sub, self.frame)
 
     def refresh_node(self) -> None:
-        self.update(render_subagent_row(self.sub))
+        self.refresh()
+        self.sync_animation()
 
     def on_click(self, event) -> None:
         event.stop()
@@ -211,7 +249,10 @@ class SubagentRow(Static):
 
 
 class IterationBlock(Widget):
-    """The tool calls of one provider response, separated from the next by a blank line.
+    """The tool calls of one provider response.
+
+    Blocks have no margin, so the tool rows of consecutive iterations stack with no
+    gap; other rows keep a blank line from them with their own margins.
 
     Rows are a tool row per call, each followed by its subagent rows. The block
     builds its rows from the ``IterationNode`` when mounted and on each ``sync``.
@@ -221,7 +262,7 @@ class IterationBlock(Widget):
 
     DEFAULT_CSS = """
     IterationBlock {
-        margin: 0 0 1 0;
+        margin: 0;
         padding: 0 2;
         height: auto;
         border-left: thick transparent;
@@ -272,7 +313,7 @@ class SubagentBlock(Widget):
 
     DEFAULT_CSS = """
     SubagentBlock {
-        margin: 0 0 1 0;
+        margin: 0;
         padding: 0 1;
         height: auto;
     }
