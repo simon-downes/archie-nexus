@@ -595,7 +595,7 @@ Not verified: the TUI against the user's real orchestrator and agent containers 
 or Docker access here), on macOS terminals, and real `!`/editor use.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/28
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
