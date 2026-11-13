@@ -25,6 +25,9 @@ POSITIVE = "#67c26d"  # positive values (input tokens)
 POSITIVE_BRIGHT = "#5ff967"  # bright positive (output tokens)
 COST = "#c7c400"  # monetary values
 ANSWER = "#5fd7d7"  # question option labels
+PANE = "#171717"  # the session pane's transcript: a step darker than the surface
+BAND = "#313356"  # sidebar workspace bands: the primary at about 25% over the surface
+TARGET = "#9a9a9a"  # repo names on a sidebar row, between muted and normal text
 
 # --- Textual Theme instance ---
 
@@ -44,5 +47,7 @@ THEME = Theme(
         "positive-bright": POSITIVE_BRIGHT,
         "cost": COST,
         "answer": ANSWER,
+        "pane": PANE,
+        "band": BAND,
     },
 )

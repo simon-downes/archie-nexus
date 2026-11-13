@@ -2,7 +2,7 @@
 
 State is asserted on ``SessionController`` with a recording listener and the fake
 orchestrator client (``tests/tui_fakes.py``); rendering through a mounted
-``Conversation`` fed by the controller's changes; status-bar text on the host app.
+``Conversation`` fed by the controller's changes; status-bar text on the app's pane.
 """
 
 import asyncio
@@ -34,7 +34,13 @@ from archie_shared.events import (
 )
 from archie_shared.transcript import TranscriptBuilder
 
-from tests.tui_fakes import FakeOrchestrator, RecordingListener, local_texts, make_controller
+from tests.tui_fakes import (
+    FakeOrchestrator,
+    RecordingListener,
+    attached,
+    local_texts,
+    make_controller,
+)
 
 
 def _llm_request(event_id, cost, input_tokens=100, output_tokens=10):
@@ -137,15 +143,10 @@ def test_format_cost_adds_credits_only_when_reported():
     assert format_cost(0.0, 0.0) == "$0.0000 · 0.00 credits"
 
 
-def _host_app(client=None):
-    from archie_cli.tui.app import ArchieApp
+def _host_app():
+    from tests.tui_fakes import make_app, make_record
 
-    return ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/proj-01abc/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/proj-01abc",
-        container_name="archie-proj-01abc",
-        client=client or FakeOrchestrator(),
-    )
+    return make_app(FakeOrchestrator(sessions=[make_record("proj-01abc")]), focus="proj-01abc")
 
 
 @pytest.mark.asyncio
@@ -155,14 +156,14 @@ async def test_accumulate_ledger_sums_kiro_credits_into_status_label():
     app = _host_app()
     first = msgspec.structs.replace(_llm_request("k1", 0.0097), credits=0.4828)
     second = msgspec.structs.replace(_llm_request("k2", 0.0753), credits=3.764829)
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(150, 30)) as pilot:
+        await attached(app, pilot)
+        app.controller.apply(first)
+        app.controller.apply(second)
+        app.controller._accumulate_ledger(second)  # a duplicate id is not counted twice
         await pilot.pause()
-        app.session.apply(first)
-        app.session.apply(second)
-        app.session._accumulate_ledger(second)  # a duplicate id is not counted twice
-        await pilot.pause()
-        assert app.session.ledger.credits == pytest.approx(4.247629)
-        assert app.query_one(StatusBar).pricing_label == "$0.0850 · 4.25 credits"
+        assert app.controller.ledger.credits == pytest.approx(4.247629)
+        assert app.pane.query_one(StatusBar).pricing_label == "$0.0850 · 4.25 credits"
 
 
 @pytest.mark.asyncio
@@ -170,12 +171,12 @@ async def test_accumulate_ledger_native_requests_show_no_credits():
     from archie_cli.tui.status import StatusBar
 
     app = _host_app()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(150, 30)) as pilot:
+        await attached(app, pilot)
+        app.controller.apply(_llm_request("e1", 0.10))
         await pilot.pause()
-        app.session.apply(_llm_request("e1", 0.10))
-        await pilot.pause()
-        assert app.session.ledger.credits is None
-        assert app.query_one(StatusBar).pricing_label == "$0.1000"
+        assert app.controller.ledger.credits is None
+        assert app.pane.query_one(StatusBar).pricing_label == "$0.1000"
 
 
 @pytest.mark.parametrize(
@@ -684,6 +685,7 @@ async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none(
     from pathlib import Path
 
     import archie_cli.tui.app as tui_app
+    from archie_cli.tui import theme
     from archie_cli.tui.conversation import AssistantMessage as AssistantRow
     from archie_cli.tui.transcript_view import Conversation, IterationBlock
     from textual.app import App
@@ -693,7 +695,7 @@ async def test_assistant_messages_have_the_dim_border_and_iteration_blocks_none(
 
         def __init__(self):
             super().__init__()
-            self.register_theme(tui_app.theme.THEME)
+            self.register_theme(theme.THEME)
             self.theme = "archie"
 
         def compose(self):

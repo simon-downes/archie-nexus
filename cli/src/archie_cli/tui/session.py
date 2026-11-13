@@ -3,8 +3,9 @@
 ``SessionController`` owns everything the TUI knows about one session: the stream
 connection and its reconnect rule, the replay cursor and event dedup, the transcript
 model (``TranscriptBuilder``), accounting and status-bar values, turn state and turn
-metrics, the pending question, the ``!`` direct shell, and the client-only timeline
-entries (turn status, client errors, shell output).
+metrics, the pending question, the ``!`` direct shell, the client-only timeline
+entries (turn status, client errors, shell output), and the message input's draft and
+history while no view shows the session.
 
 It reports what changed to at most one attached ``SessionListener`` (the widgets that
 show the session). The listener reads the rest from the controller's attributes, so a
@@ -243,6 +244,11 @@ class SessionController:
         shell_active: A ``!`` command is running.
         quiet: Suppress connection notices and errors (the host is suspended).
         reconnecting: A reconnect attempt is running.
+        started: ``start`` was called.
+        live: The session is followed on its stream (False for an ended session,
+            which only loads its log).
+        draft: The message input's text, kept while no view is attached.
+        history: Messages sent from the input, oldest first (input history).
     """
 
     RECONNECT_DELAYS: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0)
@@ -304,6 +310,20 @@ class SessionController:
         self._buffering = False
         self._event_buffer: list = []
         self._tasks: set[asyncio.Task] = set()
+        self.started = False
+        self.live = True
+
+        # Input, kept for the next view (084 D7)
+        self.draft = ""
+        self.history: list[str] = []
+
+    @property
+    def evictable(self) -> bool:
+        """True when closing the controller loses no work in progress (084 D7).
+
+        A running ``!`` command or an answer being sent keeps it.
+        """
+        return not self.shell_active and self.answer_in_flight is None
 
     # --- Listener -----------------------------------------------------------------
 
@@ -793,13 +813,25 @@ class SessionController:
 
     # --- Connection ---------------------------------------------------------------
 
-    async def start(self) -> None:
+    async def start(self, *, live: bool = True) -> None:
         """Connect, replay history while live frames buffer, then follow the stream.
 
         Ordering: open the stream → start the receive loop (buffering) → replay
         ``/events`` → apply buffered live frames not already applied (by event id).
         A failed first connect is reported and not retried.
+
+        Args:
+            live: False for an ended session: load ``/events`` once and open no stream
+                (084 D9).
         """
+        self.started = True
+        self.live = live
+        if not live:
+            if await self.replay():
+                self._mark_loaded()
+            else:
+                self.client_error("Could not load the session's history.")
+            return
         try:
             self.ws = await self._client.stream(self.session_id)
         except Exception as e:  # noqa: BLE001 — report any connect failure

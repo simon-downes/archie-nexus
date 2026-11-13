@@ -19,9 +19,51 @@ Screen {
     scrollbar-size: 0 0;
 }
 
+/* --- Sidebar --- */
+Sidebar {
+    background: $surface;
+    border-right: tall $surface-lighten-1;
+}
+
+SessionList {
+    background: $surface;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $surface;
+    scrollbar-background-hover: $surface;
+    scrollbar-background-active: $surface;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
+}
+
+/* The profile name is a link to the web interface. */
+Sidebar > .sidebar-info {
+    link-color: #5fafff;
+    link-style: none;
+    link-color-hover: #5fafff;
+    link-background-hover: transparent;
+    link-style-hover: underline;
+}
+
+EmptyPane {
+    color: $muted;
+}
+
+/* --- Session pane --- */
+SessionHeader {
+    background: $surface;
+}
+
+/* The transcript sits on $pane: a step darker than the surface around it, not black. */
+SessionPane > .pane-loading,
+ThrobberContainer,
+Throbber {
+    background: $pane;
+}
+
 /* --- Conversation area --- */
 Conversation {
-    background: black;
+    background: $pane;
     /* Only a vertical scrollbar; horizontal content is wrapped/clipped. */
     overflow-x: hidden;
     overflow-y: auto;
@@ -102,10 +144,4 @@ MessageInput {
 
 MessageInput:focus {
     border: round $primary;
-}
-
-/* --- Footer --- */
-Footer {
-    height: 2;
-    padding: 1 0 0 0;
 }

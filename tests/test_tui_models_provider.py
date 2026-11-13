@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from archie_cli.tui import models_provider
 from archie_cli.tui.models_provider import ModelProvider, model_entries
@@ -43,32 +43,56 @@ async def test_provider_discover_uses_session_key(monkeypatch):
     monkeypatch.setattr(models_provider, "_kiro_models", lambda: ("gpt-5.6-luna",))
     provider = ModelProvider.__new__(ModelProvider)
     app = MagicMock()
-    app._session_model_key = "kiro/gpt-5.6-luna"
+    app.session_model_key = "kiro/gpt-5.6-luna"
     provider._Provider__screen = MagicMock(app=app)
     hits = [h async for h in provider.discover()]
     assert [str(h.display) for h in hits] == ["Change Model → gpt-5.6-luna (Kiro)", "Quit"]
 
 
-def _status_name(model_key: str) -> str:
-    from archie_cli.tui.app import ArchieApp
+async def _status_name(model_key: str) -> str:
+    from archie_cli.tui.status import StatusBar
 
-    app = ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/p-01/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/p-01",
-        container_name="archie-p-01",
-    )
-    status = MagicMock()
-    with patch.object(app, "query_one", return_value=status):
-        app._apply_event(SessionStatus(id="s1", model_key=model_key, git_branch="main"))
-    return status.model_name
+    from tests.tui_fakes import apply_events, attached, make_app
 
-
-def test_status_bar_shows_kiro_model():
-    assert _status_name("kiro/claude-opus-5.5") == "claude-opus-5.5 (Kiro)"
+    app = make_app()
+    async with app.run_test(size=(150, 30)) as pilot:
+        await attached(app, pilot)
+        await apply_events(
+            app, pilot, SessionStatus(id="s1", model_key=model_key, git_branch="main")
+        )
+        return app.pane.query_one(StatusBar).model_name
 
 
-def test_status_bar_shows_native_model_name():
+async def test_status_bar_shows_kiro_model():
+    assert await _status_name("kiro/claude-opus-5.5") == "claude-opus-5.5 (Kiro)"
+
+
+async def test_status_bar_shows_native_model_name():
     from archie_shared.models import load_models
 
     key, model = next(iter(load_models().items()))
-    assert _status_name(key) == model.name
+    assert await _status_name(key) == model.name
+
+
+async def test_app_points_the_palette_at_the_on_screen_session():
+    from tests.tui_fakes import FakeOrchestrator, attached, make_app, make_record
+
+    client = FakeOrchestrator(
+        sessions=[
+            make_record("ws-a", started_at="2026-11-12T10:01:00+00:00"),
+            make_record("ws-b", started_at="2026-11-12T10:02:00+00:00"),
+        ]
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=(150, 30)) as pilot:
+        await attached(app, pilot, "ws-a")
+        app.controller.model_key = "kiro/gpt-5.6-luna"
+        assert app.session_model_key == "kiro/gpt-5.6-luna"
+        await app.switch_to("ws-b")
+        await attached(app, pilot, "ws-b")
+        assert app.session_model_key == ""
+        app.switch_model("model-sonnet")
+        await pilot.pause()
+        (kind, command), *_ = client.stream_for("ws-b").sent
+        assert kind == "command" and command.model_key == "model-sonnet"
+        assert not client.stream_for("ws-a").sent

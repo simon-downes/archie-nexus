@@ -1,21 +1,28 @@
 """TUI pending-question panel: display, keys, free text, Esc and state from session_status.
 
 Question and turn state are asserted on ``SessionController`` with a recording
-listener; the panel, keys and input on the host app over the fake client.
+listener; the panel, keys and input on the on-screen session's pane of the app over the
+fake client.
 """
 
 import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
-from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.question import QuestionPanel
 from archie_shared.commands import AnswerCommand
 from archie_shared.events import Handshake, PendingQuestion, QuestionOption, SessionStatus
 from textual.widgets import Static
 
-from tests.tui_fakes import FakeOrchestrator, local_texts, make_controller
+from tests.tui_fakes import (
+    FakeOrchestrator,
+    attached,
+    local_texts,
+    make_app,
+    make_controller,
+    make_record,
+)
 
 QUESTION = PendingQuestion(
     id="tu_q",
@@ -144,30 +151,31 @@ async def test_esc_dismisses_the_question_before_interrupting():
     await controller.close()
 
 
-# --- Host app ---------------------------------------------------------------------
+# --- App ------------------------------------------------------------------------------
+
+SIZE = (150, 30)
 
 
-def _app() -> ArchieApp:
-    return ArchieApp(
-        ws_url="ws://127.0.0.1:7600/api/sessions/s/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/s",
-        container_name="archie-s",
-        client=FakeOrchestrator(),
-    )
+def _app():
+    return make_app(FakeOrchestrator(sessions=[make_record("s")]), focus="s")
+
+
+async def _ready(app, pilot) -> None:
+    await attached(app, pilot, "s")
 
 
 async def _blocked(app, pilot):
-    await pilot.pause()  # the session connects on mount
-    app._apply_event(_handshake())
-    app._apply_event(_status("blocked", QUESTION, "s1"))
+    await _ready(app, pilot)
+    app.controller.apply(_handshake())
+    app.controller.apply(_status("blocked", QUESTION, "s1"))
     await pilot.pause()
-    return app.query_one("#question", QuestionPanel)
+    return app.pane.query_one(QuestionPanel)
 
 
 @pytest.mark.asyncio
 async def test_panel_shows_question_with_recommended_selected():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         panel = await _blocked(app, pilot)
         assert panel.display
         assert panel.selected == 0
@@ -176,42 +184,46 @@ async def test_panel_shows_question_with_recommended_selected():
         assert "❯ 1. Postgres (recommended)" in text
         assert "  2. SQLite" in text
         assert "Zero setup" in text
-        inp = app.query_one("#input", MessageInput)
+        inp = app.pane.query_one(MessageInput)
         assert not inp.disabled
-        assert app.session.turn_active
+        assert app.controller.turn_active
 
 
 @pytest.mark.asyncio
 async def test_digit_picks_option_and_hides_panel():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         panel = await _blocked(app, pilot)
         await pilot.press("3")
         await pilot.pause()
-        app._ws.send_command.assert_awaited_once_with(AnswerCommand(question_id="tu_q", option=2))
+        app.controller.ws.send_command.assert_awaited_once_with(
+            AnswerCommand(question_id="tu_q", option=2)
+        )
         assert not panel.display
-        assert app.query_one("#input", MessageInput).text == ""
+        assert app.pane.query_one(MessageInput).text == ""
 
 
 @pytest.mark.asyncio
 async def test_arrows_and_enter_pick_selected_option():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         await _blocked(app, pilot)
         await pilot.press("down", "down", "enter")
         await pilot.pause()
         # Recommended is 0; two downs select 2.
-        app._ws.send_command.assert_awaited_once_with(AnswerCommand(question_id="tu_q", option=2))
+        app.controller.ws.send_command.assert_awaited_once_with(
+            AnswerCommand(question_id="tu_q", option=2)
+        )
 
 
 @pytest.mark.asyncio
 async def test_typed_text_is_sent_as_answer():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         await _blocked(app, pilot)
         await pilot.press("C", "o", "c", "k", "r", "o", "a", "c", "h", "1", "enter")
         await pilot.pause()
-        app._ws.send_command.assert_awaited_once_with(
+        app.controller.ws.send_command.assert_awaited_once_with(
             AnswerCommand(question_id="tu_q", text="Cockroach1")
         )
 
@@ -219,70 +231,71 @@ async def test_typed_text_is_sent_as_answer():
 @pytest.mark.asyncio
 async def test_first_esc_dismisses_second_interrupts():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         panel = await _blocked(app, pilot)
         await pilot.press("escape")
         await pilot.pause()
-        app._ws.send_command.assert_awaited_once_with(
+        app.controller.ws.send_command.assert_awaited_once_with(
             AnswerCommand(question_id="tu_q", dismiss=True)
         )
-        app._ws.send_interrupt.assert_not_awaited()
+        app.controller.ws.send_interrupt.assert_not_awaited()
         assert not panel.display
 
         await pilot.press("escape")
         await pilot.pause()
-        app._ws.send_interrupt.assert_awaited_once()
+        app.controller.ws.send_interrupt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_send_failure_keeps_panel():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         panel = await _blocked(app, pilot)
-        app._ws.send_command = AsyncMock(side_effect=RuntimeError("socket closed"))
+        app.controller.ws.send_command = AsyncMock(side_effect=RuntimeError("socket closed"))
         await pilot.press("1")
         await pilot.pause()
         assert panel.display
-        assert app.session.question is not None
+        assert app.controller.question is not None
         # The user can retry after a failure.
         await pilot.press("1")
         await pilot.pause()
-        assert app._ws.send_command.await_count == 2
+        assert app.controller.ws.send_command.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_status_without_question_hides_panel_and_idle_ends_turn():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
         panel = await _blocked(app, pilot)
-        app._apply_event(_status("working", None, "s2"))
+        app.controller.apply(_status("working", None, "s2"))
         await pilot.pause()
         assert not panel.display
-        assert app.query_one("#input", MessageInput).disabled
-        app._apply_event(_status("idle", None, "s3"))
+        assert app.pane.query_one(MessageInput).disabled
+        app.controller.apply(_status("idle", None, "s3"))
         await pilot.pause()
-        assert not app.query_one("#input", MessageInput).disabled
+        assert not app.pane.query_one(MessageInput).disabled
 
 
 @pytest.mark.asyncio
 async def test_working_status_lets_esc_interrupt():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=SIZE) as pilot:
+        await _ready(app, pilot)
+        app.controller.apply(_handshake())
+        app.controller.apply(_status("working", None, "s1"))
         await pilot.pause()
-        app._apply_event(_handshake())
-        app._apply_event(_status("working", None, "s1"))
-        await pilot.pause()
-        assert app.query_one("#input", MessageInput).disabled
+        assert app.pane.query_one(MessageInput).disabled
         await pilot.press("escape")
         await pilot.pause()
-        app._ws.send_interrupt.assert_awaited_once()
+        app.controller.ws.send_interrupt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_history_keys_work_again_after_question():
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
-        inp = app.query_one("#input", MessageInput)
+    async with app.run_test(size=SIZE) as pilot:
+        await _ready(app, pilot)
+        inp = app.pane.query_one(MessageInput)
         inp._history = ["earlier message"]
         inp._history_idx = 1
         panel = await _blocked(app, pilot)
@@ -291,7 +304,7 @@ async def test_history_keys_work_again_after_question():
         assert panel.selected == 2
         await pilot.press("2")
         await pilot.pause()
-        app._apply_event(_status("idle", None, "s2"))
+        app.controller.apply(_status("idle", None, "s2"))
         await pilot.pause()
         await pilot.press("up")
         assert inp.text == "earlier message"
@@ -307,12 +320,12 @@ async def test_long_descriptions_wrap_at_120_columns():
         recommended=0,
     )
     app = _app()
-    async with app.run_test(size=(200, 60)) as pilot:
+    async with app.run_test(size=(250, 60)) as pilot:
+        await _ready(app, pilot)
+        app.controller.apply(_handshake())
+        app.controller.apply(_status("blocked", question, "s1"))
         await pilot.pause()
-        app._apply_event(_handshake())
-        app._apply_event(_status("blocked", question, "s1"))
-        await pilot.pause()
-        panel = app.query_one("#question", QuestionPanel)
+        panel = app.pane.query_one(QuestionPanel)
         for static in panel.query(Static):
             assert static.size.width <= 120
         description = panel.query_one(".option-description", Static)

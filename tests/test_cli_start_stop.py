@@ -372,11 +372,16 @@ def test_start_launches_tui_when_not_detached(monkeypatch, tmp_path):
         mock_tui.return_value.run = MagicMock()
         _start(["myproject"], polls=[_session_response(status="idle", status_code=200)])
 
-    mock_tui.assert_called_once_with(
-        ws_url="ws://127.0.0.1:7600/api/sessions/myproject-01abc12345/stream",
-        api_url="http://127.0.0.1:7600/api/sessions/myproject-01abc12345",
-        container_name="archie-myproject-01abc12345",
-    )
+    from archie_cli.tui.client import HttpOrchestrator, ProfileInfo
+
+    mock_tui.assert_called_once()
+    (client,), kwargs = mock_tui.call_args
+    assert isinstance(client, HttpOrchestrator)
+    assert client.base_url == "http://127.0.0.1:7600"
+    assert kwargs == {
+        "profile": ProfileInfo(label="local", web_url="http://127.0.0.1:7600/", local=True),
+        "focus": "myproject-01abc12345",
+    }
     mock_tui.return_value.run.assert_called_once()
 
 

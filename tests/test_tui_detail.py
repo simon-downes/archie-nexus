@@ -1,13 +1,13 @@
-"""TUI popups: tool detail, subagent transcript, breadcrumbs and Escape."""
+"""TUI popups: tool detail, subagent transcript, breadcrumbs and Escape.
+
+The popups open from the on-screen session's pane in the multi-session app, over the
+fake orchestrator client.
+"""
 
 import os
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-import archie_cli.tui.app as tui_app
 import pytest
 from archie_cli.tui import theme
-from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.detail import SubagentScreen, ToolDetailScreen, render_crumbs
 from archie_cli.tui.transcript_view import (
     Conversation,
@@ -25,6 +25,10 @@ from archie_shared.events import (
 )
 from rich.text import Text
 from textual.widgets import Static
+
+from tests.tui_fakes import apply_events, attached, make_app
+
+SIZE = (170, 40)
 
 
 def _call(tool_use_id, name, tool_input, *, scope=None, index=None, iteration=1):
@@ -71,26 +75,19 @@ CHILD_TEXT = AssistantMessage(
 CHILD_SHELL = _call("cs", "shell", {"command": "ls -la"}, scope="tk", index=0, iteration=2)
 
 
-class _App(ArchieApp):
-    """ArchieApp with the network stubbed out."""
-
-    CSS_PATH = Path(tui_app.__file__).parent / "archie.tcss"  # relative paths resolve here
-
-    def __init__(self):
-        super().__init__(ws_url="ws://x", api_url="http://x", container_name="x")
-        self._ws.connect = AsyncMock(side_effect=OSError("offline"))
-        self._ws.send_command = AsyncMock()
-        self._ws.send_interrupt = AsyncMock()
+def _app():
+    """The app showing one idle session over the fake client."""
+    return make_app()
 
 
 async def _feed(app, pilot, *events):
-    with (
-        patch.object(app, "_update_accounting_status"),
-        patch.object(app, "_estimate_context_pct", return_value=1.0),
-    ):
-        for event in events:
-            app._apply_event(event)
-    await pilot.pause()
+    """Apply events to the on-screen session once its pane has loaded."""
+    await attached(app, pilot)
+    await apply_events(app, pilot, *events)
+
+
+def _open_child(app, key):
+    app.pane.open_subagent(app.controller.builder.subagents[key])
 
 
 def _text(widget) -> str:
@@ -108,8 +105,8 @@ def _static_text(screen, selector) -> str:
 
 @pytest.mark.asyncio
 async def test_clicking_a_tool_row_opens_its_detail_popup():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, _call("t1", "exec", {"source": "x = 1\nprint(x)"}))
         await pilot.click(ToolRow)
         await pilot.pause()
@@ -136,8 +133,8 @@ async def test_clicking_a_tool_row_opens_its_detail_popup():
 
 @pytest.mark.asyncio
 async def test_tool_popup_text_can_be_selected_and_copied():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(
             app,
             pilot,
@@ -167,23 +164,23 @@ async def test_tool_popup_text_can_be_selected_and_copied():
 
 @pytest.mark.asyncio
 async def test_escape_closes_only_the_popup_and_does_not_interrupt():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, _call("t1", "read", {"path": "a.py"}))
-        app._turn_active = True
+        app.controller.turn_active = True
         await pilot.click(ToolRow)
         await pilot.pause()
         assert isinstance(app.screen, ToolDetailScreen)
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, ToolDetailScreen)
-        app._ws.send_interrupt.assert_not_called()
+        app.controller.ws.send_interrupt.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_subagent_row_opens_live_transcript_with_clickable_tools():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_TEXT)
         rows = app.query(SubagentRow)
         assert len(rows) == 1 and "general #0" in _text(rows.first())
@@ -222,10 +219,10 @@ async def test_subagent_row_opens_live_transcript_with_clickable_tools():
 
 @pytest.mark.asyncio
 async def test_clicking_a_tool_inside_the_subagent_screen():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_SHELL)
-        app.open_child_detail(("tk", 0))
+        _open_child(app, ("tk", 0))
         await pilot.pause()
         sub_screen = app.screen
         assert isinstance(sub_screen, SubagentScreen)
@@ -238,26 +235,26 @@ async def test_clicking_a_tool_inside_the_subagent_screen():
 
 @pytest.mark.asyncio
 async def test_stop_child_targets_the_open_subagent_screen():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_TEXT)
-        assert app._active_child_key is None
+        assert app.active_child_key is None
         await pilot.click(SubagentRow)
         await pilot.pause()
-        assert app._active_child_key == ("tk", 0)
+        assert app.active_child_key == ("tk", 0)
         app.action_stop_child()
         await pilot.pause()
-        command = app._ws.send_command.await_args.args[0]
+        command = app.controller.ws.send_command.await_args.args[0]
         assert (command.scope, command.subagent_index) == ("tk", 0)
         await pilot.press("escape")
         await pilot.pause()
-        assert app._active_child_key is None
+        assert app.active_child_key is None
 
 
 @pytest.mark.asyncio
 async def test_subagent_status_updates_in_row_and_popup():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_TEXT)
         await pilot.click(SubagentRow)
         await pilot.pause()
@@ -274,22 +271,21 @@ async def test_subagent_status_updates_in_row_and_popup():
 
 @pytest.mark.asyncio
 async def test_full_reset_closes_popups():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, _call("t1", "read", {"path": "a"}))
         await pilot.click(ToolRow)
         await pilot.pause()
         assert isinstance(app.screen, ToolDetailScreen)
-        with patch.object(app, "_update_accounting_status"):
-            await app._reset_replay_state()
+        await app.controller.reset()
         await pilot.pause()
         assert not isinstance(app.screen, ToolDetailScreen)
 
 
 @pytest.mark.asyncio
 async def test_long_results_are_capped_in_the_popup():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(
             app, pilot, USER, _call("t1", "web_fetch", {"url": "u"}), _result("t1", "y" * 9000)
         )
@@ -308,10 +304,10 @@ def test_breadcrumbs_name_the_levels_above_the_popup():
 
 @pytest.mark.asyncio
 async def test_clicking_the_backdrop_closes_only_the_top_popup():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_SHELL)
-        app.open_child_detail(("tk", 0))
+        _open_child(app, ("tk", 0))
         await pilot.pause()
         sub_screen = app.screen
         await pilot.click(sub_screen.view.query_one(ToolRow))
@@ -338,15 +334,11 @@ def test_popup_escape_binding_is_screen_local():
 @pytest.mark.asyncio
 async def test_child_event_before_the_subagent_screen_mounts():
     """A live event between push and mount must not raise or duplicate rows."""
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_TEXT)
-        app.open_child_detail(("tk", 0))
-        with (
-            patch.object(app, "_update_accounting_status"),
-            patch.object(app, "_estimate_context_pct", return_value=1.0),
-        ):
-            app._apply_event(CHILD_SHELL)  # no pause: the screen is not mounted yet
+        _open_child(app, ("tk", 0))
+        app.controller.apply(CHILD_SHELL)  # no pause: the screen is not mounted yet
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, SubagentScreen)
@@ -360,11 +352,11 @@ async def test_child_event_before_the_subagent_screen_mounts():
 
 @pytest.mark.asyncio
 async def test_event_before_the_tool_popup_mounts_still_draws_it():
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, _call("t1", "read", {"path": "a.py"}), _result("t1", "ok"))
         row = app.query_one(ToolRow)
-        app.on_tool_clicked(ToolClicked(row.tool))
+        app.pane.open_tool(row.tool)
         await _feed(app, pilot, _call("t2", "read", {"path": "b.py"}))
         screen = app.screen
         assert isinstance(screen, ToolDetailScreen)
@@ -376,13 +368,13 @@ async def test_event_before_the_tool_popup_mounts_still_draws_it():
 async def test_child_error_text_is_not_parsed_as_markup():
     from archie_shared.events import TurnError
 
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         error = TurnError(
             id="te", turn=1, scope="tk", subagent_index=0, message="bad [/] list[str]"
         )
         await _feed(app, pilot, USER, TASK, CHILD_TEXT, error)
-        app.open_child_detail(("tk", 0))
+        _open_child(app, ("tk", 0))
         await pilot.pause()
         await pilot.pause()
         from archie_cli.tui.conversation import ErrorMessage
@@ -408,10 +400,10 @@ async def test_subagent_popup_shows_its_prompt_collapsed_and_expandable():
 
     prompt = "\n".join(f"step {n}" for n in range(14))
     task = _call("tk", "task", {"tasks": [{"agent": "general", "prompt": prompt}]})
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, task, CHILD_TEXT)
-        assert app.transcript.subagents[("tk", 0)].prompt == prompt
+        assert app.controller.builder.subagents[("tk", 0)].prompt == prompt
         await pilot.click(SubagentRow)
         await pilot.pause()
         message = app.screen.view.query_one(PromptMessage)
@@ -435,8 +427,8 @@ async def test_subagent_popup_shows_its_prompt_collapsed_and_expandable():
 async def test_short_prompt_has_no_toggle():
     from archie_cli.tui.conversation import PromptMessage, PromptToggle
 
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_TEXT)
         await pilot.click(SubagentRow)
         await pilot.pause()

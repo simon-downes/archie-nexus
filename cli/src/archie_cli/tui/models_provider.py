@@ -1,4 +1,4 @@
-"""Command-palette providers for Archie."""
+"""Command-palette model switching for the on-screen session."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ class ModelProvider(Provider):
     """Textual command palette provider for model switching and app commands."""
 
     def _entries(self) -> list[tuple[str, str, str]]:
-        return model_entries(getattr(self.app, "_session_model_key", "") or "")
+        return model_entries(getattr(self.app, "session_model_key", "") or "")
 
     async def discover(self) -> Hits:
         for key, label, help_text in self._entries():
@@ -87,23 +87,3 @@ class ModelProvider(Provider):
 
     async def _quit(self) -> None:
         await self.app.action_quit()
-
-
-class SubagentProvider(Provider):
-    """Command-palette picker for currently known child scopes."""
-
-    async def discover(self) -> Hits:
-        for key, child in sorted(self.app.transcript.subagents.items()):
-            label = f"Subagent {child.label} ({child.status})"
-            yield DiscoveryHit(label, partial(self._open, key), help=f"${child.cost_usd:.4f}")
-
-    async def search(self, query: str) -> Hits:
-        matcher = self.matcher(query)
-        for key, child in sorted(self.app.transcript.subagents.items()):
-            label = f"Subagent {child.label} ({child.status})"
-            score = matcher.match(label)
-            if score > 0:
-                yield Hit(score, matcher.highlight(label), partial(self._open, key))
-
-    def _open(self, key: tuple[str, int]) -> None:
-        self.app.open_child_detail(key)

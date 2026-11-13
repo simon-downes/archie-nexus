@@ -183,12 +183,9 @@ async def test_a_new_user_message_returns_to_the_latest_window():
 
 @pytest.mark.asyncio
 async def test_replaying_1000_turns_through_the_app_mounts_a_bounded_window():
-    from unittest.mock import MagicMock, patch
+    from archie_cli.tui.transcript_view import WINDOW_OVERSCAN, WINDOW_PAGE, WINDOW_ROWS
 
-    from archie_cli.tui.transcript_view import WINDOW_OVERSCAN, WINDOW_ROWS, Conversation
-    from archie_shared.events import encode_event
-
-    from tests.test_tui_detail import _App
+    from tests.tui_fakes import FakeOrchestrator, attached, make_app, make_record
 
     events = []
     for turn in range(1, 1001):
@@ -204,22 +201,14 @@ async def test_replaying_1000_turns_through_the_app_mounts_a_bounded_window():
                 interrupted=False,
             )
         )
-    body = "".join(encode_event(e) + "\n" for e in events)
-    http = MagicMock()
-    http.__aenter__.return_value = http
-    http.__aexit__.return_value = False
+    client = FakeOrchestrator({"s1": events}, sessions=[make_record("s1")])
 
-    app = _App()
-    async with app.run_test(size=(120, 40)) as pilot:
-        with (
-            patch("archie_cli.tui.client.httpx.AsyncClient", return_value=http),
-            patch.object(app, "_update_accounting_status"),
-        ):
-            http.get = _async_return(MagicMock(status_code=200, text=body))
-            assert await app._replay_events() is True
+    app = make_app(client)
+    async with app.run_test(size=(170, 40)) as pilot:
+        pane = await attached(app, pilot)
         await pilot.pause()
-        conv = app.query_one(Conversation)
-        assert len(app.transcript.turns) == 1000
+        conv = pane.conversation
+        assert len(app.controller.builder.turns) == 1000
         rows = [row for row in conv.rows if row.node is not None]  # minus local rows
         assert len(rows) == 2000
         mounted = [row for row in conv.rows if row.widget is not None]
@@ -228,9 +217,27 @@ async def test_replaying_1000_turns_through_the_app_mounts_a_bounded_window():
         assert conv.window == (total - WINDOW_ROWS, total)
         assert _boundaries(conv) == {"earlier": total - WINDOW_ROWS}
 
+        # The default window fills the viewport, so scrolling pages it both ways.
+        assert conv.max_scroll_y > 0
+        conv.scroll_home(animate=False)
+        await pilot.pause()
+        await pilot.pause()
+        assert conv.window == (total - WINDOW_ROWS - WINDOW_PAGE, total - WINDOW_PAGE)
+        conv.scroll_end(animate=False)
+        await pilot.pause()
+        await pilot.pause()
+        assert conv.window == (total - WINDOW_ROWS, total)
 
-def _async_return(value):
-    async def get(*_args, **_kwargs):
-        return value
-
-    return get
+        # Shown again after a switch, the pane is rebuilt from the controller with the
+        # same bounded window.
+        client.records["s2"] = make_record("s2", started_at="2026-11-12T11:00:00+00:00")
+        app.records["s2"] = client.records["s2"]
+        await app.switch_to("s2")
+        await attached(app, pilot, "s2")
+        await app.switch_to("s1")
+        pane = await attached(app, pilot, "s1")
+        await pilot.pause()
+        conv = pane.conversation
+        assert len(conv.rows) == total
+        assert conv.window == (total - WINDOW_ROWS, total)
+        assert client.full_loads("s1") == 1

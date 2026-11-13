@@ -335,7 +335,7 @@ Tests and when they change:
   reconnect toasts, M1 only); `on_reset` is async. Evidence: M1 Verify files 129 passed;
   full suite 5209 passed; Ruff and format clean.
 
-### [ ] M2 — The new TUI lists sessions and shows the selected one
+### [x] M2 — The new TUI lists sessions and shows the selected one
 
 - **Approach:** `client.py` gains the feed and PATCH; `pane.py`,
   `sidebar.py`, new `app.py` (D7, D8, D10, D15, D19, D30; sidebar line 2 shows `no repo` until
@@ -350,7 +350,19 @@ Tests and when they change:
 - **Verify:** `scripts/dev test tests/test_tui_app.py tests/test_tui_detail.py
   tests/test_tui_subagents.py tests/test_cli_attach.py tests/test_cli_start_stop.py
   tests/test_cli_profiles.py` pass; full suite.
-- **Outcome:**
+- **Outcome:** New `ArchieApp(client, profile, focus)` with a feed-driven `Sidebar`
+  (`SessionList` of keyed `WorkspaceBand`/`SessionRow`, D30 glyphs and badges, `no repo` until
+  M3), one `SessionPane` (header, loading line, conversation, throbber, question, input,
+  status) attached to the on-screen `SessionController`; `TranscriptView.load` rebuilds from
+  the builder with anchored local entries; controller LRU of 5 with D7's exemptions;
+  switches serialised by a lock and generation number inside `batch_update()`;
+  `start`/`attach` wired, `quit_screen.py` and the M1 shims deleted, `SubagentProvider`
+  dropped (D22). A switch crash (a removed pane's `MessageInput` drawn after its styles were
+  cleared, 7 of 8 timing runs) is fixed by doing the whole switch in `batch_update()` with a
+  layout refresh, with a regression test. Window constants 200/80/40 → 40/20/20 (see
+  Deviations). Evidence: M2 Verify files pass; full suite 5236 passed; Ruff clean. Switch
+  back to `archie-01m32ky6rn.jsonl` (11.5 MB) through the next frame: median 376/401/379 ms
+  over 3 runs of 5 (491 widgets); `switch_to` itself 10 ms; first load ~780 ms.
 
 ### [ ] M3 — Sessions carry their repo and branch
 
@@ -438,11 +450,20 @@ Tests and when they change:
 
 ## Deviations
 
+- M2: `TranscriptView`'s window is 40 rows (page 20, overscan 20), not 078 D9's 200/80/40.
+  Every switch remounts the window; at 200 the 11.5 MB session mounted ~5,100 widgets and
+  took 5.2 s to settle, at 40 it mounts ~490 and takes ~0.38 s. The 300 ms target is still
+  missed by ~80 ms in this headless ARM container; the plan's fallback (a second mounted,
+  hidden pane) is not applied, because it doubles the DOM the 078 keypress cost depends on
+  for a gain only on A↔B toggling. Recorded under Risks. Follow-on fix in M3: a window
+  shorter than the viewport can't scroll, so earlier rows must page in automatically.
 - M1: `SessionListener` gained `on_replay(active)` and `on_notice(message, timeout)`, and
   `on_reset` is async (popups and `Conversation.reset()` must finish before the full
   replay). `on_notice` goes away with the reconnect toasts in M6.
 ## Risks
 
+- Switching back to a very large session takes ~0.4 s here (target 300 ms); not measured on
+  the user's Mac.
 - The TUI can't be run against the user's real orchestrator from this container; app
   behaviour is verified with the fake client and `run_test` only.
 - Moving `ArchieApp` logic into a controller may change replay/reconnect details only the

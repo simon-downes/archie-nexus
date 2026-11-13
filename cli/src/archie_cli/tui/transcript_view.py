@@ -7,11 +7,15 @@ its model node when it is mounted, so a row can be unmounted and rebuilt later.
 
 The main conversation shows the root transcript. A subagent screen shows one
 subagent's items with the same view class.
+
+A view built for a session that already has history is filled with ``load``: the rows
+of the builder's current root nodes, with each client-only entry put back after the
+row it followed (084 D6).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from archie_shared.session.accounting import UsageTotals
@@ -51,6 +55,7 @@ from archie_cli.tui.conversation import (
     TurnStatus,
     UserMessage,
 )
+from archie_cli.tui.session import ClientErrorEntry, LocalEntry, TurnStatusEntry
 
 # ---------------------------------------------------------------------------
 # Row widgets
@@ -365,12 +370,15 @@ class _Row:
         return self.factory() if self.factory is not None else widget_for(self.node)
 
 
-# Window parameters (plan 078 D9, from Tau): mount about WINDOW_ROWS rows, move the
-# window by WINDOW_PAGE rows at a time, and let live appends overshoot by
-# WINDOW_OVERSCAN rows before the oldest mounted rows are dropped.
-WINDOW_ROWS = 200
-WINDOW_PAGE = 80
-WINDOW_OVERSCAN = 40
+# Window parameters: mount about WINDOW_ROWS rows, move the window by WINDOW_PAGE rows
+# at a time, and let live appends overshoot by WINDOW_OVERSCAN rows before the oldest
+# mounted rows are dropped. Plan 084 replaced 078 D9's 200/80/40 (from Tau) because
+# every session switch remounts the window: on archie-01m32ky6rn.jsonl (11.5 MB), a
+# window of 200 rows meant about 5,100 widgets and 5.2 s to switch back to the
+# session; a window of 40 means about 490 widgets and about 0.44 s.
+WINDOW_ROWS = 40
+WINDOW_PAGE = 20
+WINDOW_OVERSCAN = 20
 
 
 class WindowBoundary(Static):
@@ -650,13 +658,61 @@ class TranscriptView(VerticalScroll):
 
     def add_local(self, factory: Callable[[], Widget]) -> None:
         """Append a client-only row (not part of the session transcript)."""
+        self._add_local_row(factory)
+        self.scroll_if_at_bottom()
+
+    def _add_local_row(self, factory: Callable[[], Widget]) -> None:
         self._local_ids += 1
         self._add_row(_Row(key=f"local-{self._local_ids}", node=None, factory=factory))
-        self.scroll_if_at_bottom()
 
     def add_node(self, node) -> None:
         """Append a row for a model node (used to build a view from existing state)."""
         self._append_node(node)
+
+    def load(self, builder: TranscriptBuilder, locals: Sequence[LocalEntry] = ()) -> None:
+        """Fill an empty root view from the builder's current state (084 D6).
+
+        Rows come from the root nodes in order (the preamble, then each turn's user
+        message and items), so replaced streams and removed rows are already resolved.
+        Each local entry goes after the node it names as its anchor; entries whose
+        anchor is gone go at the end, in the order they were added. The latest window
+        is mounted once.
+
+        Args:
+            builder: The session's transcript model.
+            locals: Client-only entries, oldest first.
+        """
+        waiting: dict[str | None, list[LocalEntry]] = {}
+        for entry in locals:
+            waiting.setdefault(entry.anchor, []).append(entry)
+        placed: set[int] = set()
+
+        def place(anchor: str | None) -> None:
+            for entry in waiting.pop(anchor, ()):
+                placed.add(id(entry))
+                self._add_local_row(local_row(entry))
+
+        was_suspended = self._suspended
+        self._suspended = True
+        place(None)
+        for node in builder.preamble:
+            self._add_row(_Row(node.id, node))
+            place(node.id)
+        for turn in builder.turns:
+            user = turn.user
+            if user is not None and user.content:
+                self._add_row(_Row(user.id, user))
+            place(turn.id)
+            if user is not None:
+                place(user.id)
+            for item in turn.items:
+                self._add_row(_Row(item.id, item))
+                place(item.id)
+        for entry in locals:
+            if id(entry) not in placed:
+                self._add_local_row(local_row(entry))
+        if not was_suspended:
+            self.resume()
 
     def _append_node(self, node) -> None:
         if isinstance(node, TurnNode):
@@ -759,30 +815,26 @@ class TranscriptView(VerticalScroll):
                 row.widget.finish()
 
 
+def local_row(entry: LocalEntry) -> Callable[[], Widget]:
+    """The row factory for one client-only timeline entry."""
+    if isinstance(entry, TurnStatusEntry):
+        return lambda: TurnStatus(
+            entry.duration_s,
+            entry.input_tokens,
+            entry.cache_read,
+            entry.cache_write,
+            entry.output_tokens,
+            entry.cost,
+            entry.credits,
+        )
+    if isinstance(entry, ClientErrorEntry):
+        return lambda: ClientErrorMessage(entry.message)
+    return lambda: ShellOutput(entry.command, entry.output, entry.exit_code)
+
+
 class Conversation(TranscriptView):
     """The main session transcript plus client-only rows."""
 
-    def add_turn_status(
-        self,
-        duration_s: float,
-        input_tokens: int,
-        cache_read: int,
-        cache_write: int,
-        output_tokens: int,
-        cost: float,
-        credits: float | None = None,
-    ) -> None:
-        """Add a client-only summary for a completed turn."""
-        self.add_local(
-            lambda: TurnStatus(
-                duration_s, input_tokens, cache_read, cache_write, output_tokens, cost, credits
-            )
-        )
-
-    def add_client_error(self, content: str) -> None:
-        """Add a client/transport error, marked as local (not in session log)."""
-        self.add_local(lambda: ClientErrorMessage(content))
-
-    def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> None:
-        """Add direct shell command output (! prefix, no LLM involvement)."""
-        self.add_local(lambda: ShellOutput(command, output, exit_code))
+    def add_entry(self, entry: LocalEntry) -> None:
+        """Append the row for a client-only timeline entry."""
+        self.add_local(local_row(entry))

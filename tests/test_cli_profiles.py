@@ -147,6 +147,36 @@ def test_start_with_profile_prefix_uses_correct_url(monkeypatch, tmp_path):
     assert "10.0.0.1:7601" in call_args[0][0]
     assert call_args[1]["json"]["workspace"] == "myproject"
 
+    from archie_cli.tui.client import ProfileInfo
+
+    (client,), kwargs = mock_app.call_args
+    assert client.base_url == "http://10.0.0.1:7601"
+    assert kwargs == {
+        "profile": ProfileInfo(label="gpu-box", web_url="http://10.0.0.1:7601/", local=False),
+        "focus": "myproject-01abc12345",
+    }
+
+
+def test_profile_info_follows_the_local_profile_rule(monkeypatch):
+    """Only the default profile with no ARCHIE_HOST is local (084 D20); the web link is
+    the profile's public_url, else http://host:port (D34)."""
+    from archie_cli.cli import _profile_info
+    from archie_cli.tui.client import ProfileInfo
+    from archie_shared.schemas import OrchestratorProfile
+
+    monkeypatch.delenv("ARCHIE_HOST", raising=False)
+    default = OrchestratorProfile(host="0.0.0.0", port=7600)
+    assert _profile_info(None, default) == ProfileInfo("local", "http://0.0.0.0:7600/", True)
+    assert _profile_info("myproject", default).local
+    public = OrchestratorProfile(host="10.0.0.1", public_url="https://archie.example/")
+    assert _profile_info("gpu-box/x", public) == ProfileInfo(
+        "gpu-box", "https://archie.example/", False
+    )
+    monkeypatch.setenv("ARCHIE_HOST", "10.0.0.9:7700")
+    assert _profile_info(None, OrchestratorProfile(host="10.0.0.9", port=7700)) == ProfileInfo(
+        "10.0.0.9:7700", "http://10.0.0.9:7700/", False
+    )
+
 
 # ---------------------------------------------------------------------------
 # archie ls — multi-profile

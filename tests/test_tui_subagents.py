@@ -1,8 +1,8 @@
-"""TUI subagent display: shared model state, rows and the status screen."""
+"""TUI subagent display: shared model state, rows and the status screen.
 
-from unittest.mock import MagicMock, patch
+Model state is asserted on a ``SessionController`` with a recording listener.
+"""
 
-from archie_cli.tui.app import ArchieApp
 from archie_cli.tui.detail import SubagentScreen
 from archie_cli.tui.transcript_view import render_subagent_row
 from archie_shared.events import (
@@ -16,13 +16,12 @@ from archie_shared.events import (
 from archie_shared.transcript import CHILD_CONTENT_FILTERED_MESSAGE, SubagentNode
 from rich.text import Text
 
+from tests.tui_fakes import make_controller
 
-def _app() -> ArchieApp:
-    return ArchieApp(
-        ws_url="ws://localhost/stream",
-        api_url="http://localhost",
-        container_name="container",
-    )
+
+def _controller():
+    controller, _ = make_controller()
+    return controller
 
 
 def _child_tool_call(name="read", tool_input=None, tool_use_id="child-tool"):
@@ -55,16 +54,14 @@ def _child_tool_result(content, *, is_error=False, tool_use_id="child-tool"):
     )
 
 
-def _apply(app, *events):
-    with patch.object(app, "query_one", return_value=MagicMock()):
-        for event in events:
-            app._apply_event(event)
-    return app.transcript
+def _apply(controller, *events):
+    for event in events:
+        controller.apply(event)
+    return controller.builder
 
 
 def test_live_scoped_llm_cost_is_included_in_status_accounting():
-    app = _app()
-    app._update_accounting_status = MagicMock()
+    controller, listener = make_controller()
     event = LLMRequest(
         id="request-1",
         scope="task-1",
@@ -82,12 +79,11 @@ def test_live_scoped_llm_cost_is_included_in_status_accounting():
         context_tokens=100,
         cost_usd=0.0085,
     )
-    with patch.object(app, "query_one", return_value=MagicMock()):
-        app._apply_event(event)
+    controller.apply(event)
 
-    assert app._cumulative_cost == 0.0085
-    app._update_accounting_status.assert_called_once()
-    assert app.transcript.subagents[("task-1", 0)].cost_usd == 0.0085
+    assert controller.ledger.cost == 0.0085
+    assert listener.names().count("status") == 1
+    assert controller.builder.subagents[("task-1", 0)].cost_usd == 0.0085
 
 
 def test_subagent_row_renders_agent_and_status_glyphs():
@@ -110,9 +106,9 @@ def test_subagent_row_renders_agent_and_status_glyphs():
 
 
 def test_tool_error_does_not_make_child_terminal():
-    app = _app()
+    controller = _controller()
     model = _apply(
-        app,
+        controller,
         _child_tool_call(tool_input={"path": "missing.py"}),
         _child_tool_result("not found", is_error=True),
     )
@@ -122,15 +118,15 @@ def test_tool_error_does_not_make_child_terminal():
 
 
 def test_child_exec_activity_has_explicit_prefix():
-    app = _app()
-    model = _apply(app, _child_tool_call("exec", {"source": "print('hello')"}))
+    controller = _controller()
+    model = _apply(controller, _child_tool_call("exec", {"source": "print('hello')"}))
     assert model.subagents[("task-1", 0)].activity == "Exec (1 lines)"
 
 
 def test_child_tools_are_kept_for_the_transcript():
-    app = _app()
+    controller = _controller()
     model = _apply(
-        app,
+        controller,
         _child_tool_call(),
         _child_tool_result("File: README.md (2 lines)"),
         TurnComplete(id="done", turn=1, scope="task-1", subagent_index=0, stop_reason="end_turn"),
@@ -143,9 +139,9 @@ def test_child_tools_are_kept_for_the_transcript():
 
 
 def test_content_filtered_child_is_shown_as_error():
-    app = _app()
+    controller = _controller()
     model = _apply(
-        app,
+        controller,
         TurnComplete(
             id="done", turn=1, scope="task-1", subagent_index=0, stop_reason="content_filtered"
         ),
@@ -164,9 +160,9 @@ def test_subagent_screen_reads_the_live_node():
 
 
 def test_replay_scoped_delta_streams_into_child_transcript():
-    app = _app()
+    controller = _controller()
     model = _apply(
-        app,
+        controller,
         TextDelta(
             id="delta",
             turn=1,
@@ -183,9 +179,9 @@ def test_replay_scoped_delta_streams_into_child_transcript():
 
 
 def test_child_assistant_replaces_its_stream():
-    app = _app()
+    controller = _controller()
     model = _apply(
-        app,
+        controller,
         TextDelta(
             id="d",
             turn=1,

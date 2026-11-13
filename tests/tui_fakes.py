@@ -1,11 +1,14 @@
-"""Fakes for TUI tests: an orchestrator client, its streams and a recording listener.
+"""Fakes for TUI tests: an orchestrator client, its streams, a recording listener and app
+helpers.
 
 ``FakeOrchestrator`` implements ``archie_cli.tui.client.OrchestratorClient`` without a
 server (084 D32). Each session has an event log that ``/events`` reads from (an
-``after`` the log does not hold answers 409, as the server does), and scripted bodies
-or errors can be queued ahead of it. ``stream()`` opens a ``FakeStream`` whose frames
-come from a queue and whose sends are recorded. ``RecordingListener`` records every
-``SessionListener`` call.
+``after`` the log does not hold answers 409, as the server does), or a raw NDJSON body,
+and scripted bodies or errors can be queued ahead of it. ``stream()`` opens a
+``FakeStream`` whose frames come from a queue and whose sends are recorded. ``feed()``
+sends a snapshot of the live records on every connect, then the records ``publish``
+queues, until ``drop_feed``. PATCH bodies are recorded. ``RecordingListener`` records
+every ``SessionListener`` call.
 """
 
 from __future__ import annotations
@@ -13,12 +16,41 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
-from archie_cli.tui.client import CursorNotFound
+import msgspec
+from archie_cli.tui.client import CursorNotFound, OrchestratorError, ProfileInfo
 from archie_shared.events import encode_event
+from archie_shared.session import SessionDescriptor, split_id
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 _CLOSE = object()
+_DROP = object()
+
+LOCAL_PROFILE = ProfileInfo(label="local", web_url="http://127.0.0.1:7600/", local=True)
+
+
+def make_record(
+    session_id: str = "s1",
+    *,
+    workspace: str | None = None,
+    status: str = "idle",
+    started_at: str = "2026-11-12T10:00:00+00:00",
+    name: str | None = None,
+    **fields,
+) -> SessionDescriptor:
+    """A session record; the workspace defaults to the ID's prefix (``ws`` for ``s1``)."""
+    if workspace is None:
+        prefix = split_id(session_id)[0] if "-" in session_id else ""
+        workspace = prefix or "ws"
+    return SessionDescriptor(
+        session_id=session_id,
+        workspace=workspace,
+        backend=fields.pop("backend", "native"),
+        name=name or session_id,
+        status=status,
+        started_at=started_at,
+        **fields,
+    )
 
 
 class FakeStream:
@@ -80,12 +112,24 @@ class FakeOrchestrator:
         delete_status: Status ``delete`` returns.
     """
 
-    def __init__(self, logs: dict[str, list] | None = None) -> None:
+    def __init__(
+        self,
+        logs: dict[str, list] | None = None,
+        *,
+        sessions: list[SessionDescriptor] | None = None,
+    ) -> None:
         self.logs: dict[str, list] = logs or {}
+        self.bodies: dict[str, str] = {}
+        self.records: dict[str, SessionDescriptor] = {r.session_id: r for r in sessions or ()}
         self.requests: list[tuple[str, str | None]] = []
         self.streams: list[FakeStream] = []
+        self.streams_by_session: dict[str, list[FakeStream]] = {}
         self.deleted: list[str] = []
         self.delete_status = 200
+        self.patches: list[tuple[str, dict]] = []
+        self.feed_connects = 0
+        self._feed: asyncio.Queue | None = None
+        self._feed_errors: list[Exception] = []
         self._replies: list[str | Exception] = []
         self._connect_errors: list[Exception] = []
         self._next_frames: list = []
@@ -94,6 +138,63 @@ class FakeOrchestrator:
     def latest(self) -> FakeStream:
         """The most recently opened stream."""
         return self.streams[-1]
+
+    def stream_for(self, session_id: str) -> FakeStream:
+        """The most recently opened stream of one session."""
+        return self.streams_by_session[session_id][-1]
+
+    def opened(self, session_id: str) -> int:
+        """How many streams were opened for a session."""
+        return len(self.streams_by_session.get(session_id, ()))
+
+    def full_loads(self, session_id: str) -> int:
+        """How many ``/events`` requests asked for a session's whole log."""
+        return self.requests.count((session_id, None))
+
+    # --- Feed -----------------------------------------------------------------------
+
+    def _queue(self) -> asyncio.Queue:
+        if self._feed is None:
+            self._feed = asyncio.Queue()
+        return self._feed
+
+    def publish(self, record: SessionDescriptor) -> None:
+        """Store a record and send it as a ``session`` feed event."""
+        self.records[record.session_id] = record
+        self._queue().put_nowait(("session", record))
+
+    def drop_feed(self) -> None:
+        """Fail the current feed connection."""
+        self._queue().put_nowait(_DROP)
+
+    def fail_feed(self, *errors: Exception) -> None:
+        """Make the next ``feed`` connects raise these errors, in order."""
+        self._feed_errors.extend(errors)
+
+    async def feed(self):
+        self.feed_connects += 1
+        if self._feed_errors:
+            raise self._feed_errors.pop(0)
+        live = [r for r in self.records.values() if not r.ended]
+        live.sort(key=lambda r: r.started_at, reverse=True)  # newest first, as the server
+        yield "snapshot", live
+        queue = self._queue()
+        while True:
+            item = await queue.get()
+            if item is _DROP:
+                raise OrchestratorError("feed dropped")
+            yield item
+
+    async def patch(self, session_id: str, body: dict) -> SessionDescriptor:
+        self.patches.append((session_id, body))
+        record = self.records.get(session_id)
+        if record is None:
+            raise OrchestratorError("session update failed: 404", 404)
+        record = msgspec.structs.replace(record, **body)
+        self.records[session_id] = record
+        return record
+
+    # --- History and streams ------------------------------------------------------------
 
     def reply(self, *items: str | Exception) -> None:
         """Queue ``/events`` replies (an NDJSON body or an error to raise) before the log."""
@@ -119,6 +220,8 @@ class FakeOrchestrator:
             if isinstance(item, Exception):
                 raise item
             return item
+        if after is None and session_id in self.bodies:
+            return self.bodies[session_id]
         log = self.logs.get(session_id, [])
         if after is not None:
             ids = [event.id for event in log]
@@ -133,6 +236,7 @@ class FakeOrchestrator:
         stream = FakeStream(self._next_frames)
         self._next_frames = []
         self.streams.append(stream)
+        self.streams_by_session.setdefault(session_id, []).append(stream)
         return stream
 
     async def delete(self, session_id: str) -> int:
@@ -199,3 +303,53 @@ def make_controller(client: FakeOrchestrator | None = None, session_id: str = "s
 def local_texts(controller) -> list[str]:
     """Messages of the controller's client-error entries, in order."""
     return [entry.message for entry in controller.locals if entry.kind == "client_error"]
+
+
+# --- App helpers ----------------------------------------------------------------------
+
+
+def make_app(
+    client: FakeOrchestrator | None = None,
+    *,
+    focus: str | None = "s1",
+    profile: ProfileInfo = LOCAL_PROFILE,
+):
+    """An ``ArchieApp`` over a fake client; by default one idle session ``s1``."""
+    from archie_cli.tui.app import ArchieApp
+
+    if client is None:
+        client = FakeOrchestrator(sessions=[make_record("s1")])
+    return ArchieApp(client, profile=profile, focus=focus)
+
+
+async def settle(pilot, predicate=None, *, tries: int = 50) -> None:
+    """Let the app run until ``predicate()`` holds (or a few frames without one)."""
+    for _ in range(tries if predicate is not None else 3):
+        if predicate is not None and predicate():
+            return
+        await pilot.pause()
+    if predicate is not None:
+        assert predicate(), "condition not reached"
+
+
+async def attached(app, pilot, session_id: str | None = None):
+    """Wait until the pane shows ``session_id`` (or any session) and it has loaded."""
+
+    def ready() -> bool:
+        pane = app.pane
+        return (
+            pane is not None
+            and pane.controller is not None
+            and (session_id is None or app.current == session_id)
+            and pane.controller.loaded
+        )
+
+    await settle(pilot, ready)
+    return app.pane
+
+
+async def apply_events(app, pilot, *events) -> None:
+    """Apply events to the on-screen controller, then let the widgets update."""
+    for event in events:
+        app.controller.apply(event)
+    await pilot.pause()
