@@ -5,8 +5,8 @@ blocks, compaction rows, client-only rows) and applies the ``Change`` records th
 ``archie_shared.transcript.TranscriptBuilder.apply`` returns. Each row is built from
 its model node when it is mounted, so a row can be unmounted and rebuilt later.
 
-The main conversation shows the root transcript. A subagent screen shows one
-subagent's items with the same view class.
+The main conversation shows the root transcript. A subagent view (``detail.py``) shows
+one subagent's items with the same view class.
 
 A view built for a session that already has history is filled with ``load``: the rows
 of the builder's current root nodes, with each client-only entry put back after the
@@ -62,7 +62,7 @@ from archie_cli.tui.session import ClientErrorEntry, LocalEntry, TurnStatusEntry
 # ---------------------------------------------------------------------------
 
 
-def _markup(text: str) -> Text:
+def safe_markup(text: str) -> Text:
     """Rich markup to ``Text``, or the plain text when the markup can't render.
 
     ``Text.from_markup`` accepts any tag name and only fails when Textual renders the
@@ -95,7 +95,14 @@ _ROLE_STYLES = {
 }
 
 
-def _status_glyph(status: str, frame: int = 0) -> Text:
+def status_glyph(status: str, frame: int = 0) -> Text:
+    """A node's status glyph: the spinner while it runs, else a green or red dot.
+
+    Args:
+        status: A tool's or subagent's status (``pending``/``running``, ``ok``/
+            ``complete``, ``error``/``interrupted``).
+        frame: Animation frame, which picks the spinner glyph.
+    """
     if status in {"pending", "running"}:
         return Text(spinner(frame), style=_GLYPH_STYLES["running"])
     colour = theme.ERROR if status in {"error", "interrupted"} else theme.SUCCESS
@@ -143,9 +150,9 @@ def render_subagent_row(sub: SubagentNode, frame: int = 0) -> Text:
     context = _fmt_column(_fmt_tokens(sub.context_tokens), _CONTEXT_COLUMN, align=">")
     cost = _fmt_column(f"${sub.cost_usd:.4f}", _COST_COLUMN, align=">")
     text = Text("  ")
-    text.append_text(_status_glyph(sub.status, frame))
+    text.append_text(status_glyph(sub.status, frame))
     text.append(f" {agent} {context} {cost} - ")
-    status = _markup(subagent_status_text(sub))
+    status = safe_markup(subagent_status_text(sub))
     if sub.status == "error":
         status.stylize(theme.ERROR)
     text.append_text(status)
@@ -155,7 +162,7 @@ def render_subagent_row(sub: SubagentNode, frame: int = 0) -> Text:
 
 
 class ToolClicked(Message):
-    """A tool row was clicked; the app opens its detail screen."""
+    """A tool row was clicked; the session pane opens its detail view."""
 
     def __init__(self, tool: ToolNode) -> None:
         super().__init__()
@@ -163,7 +170,7 @@ class ToolClicked(Message):
 
 
 class SubagentClicked(Message):
-    """A subagent row was clicked; the app opens its transcript screen."""
+    """A subagent row was clicked; the session pane opens its transcript view."""
 
     def __init__(self, sub: SubagentNode) -> None:
         super().__init__()
@@ -529,6 +536,11 @@ class TranscriptView(VerticalScroll):
     @property
     def window_is_latest(self) -> bool:
         return self._end >= len(self._rows)
+
+    @property
+    def following(self) -> bool:
+        """True while the view follows the end of the transcript."""
+        return self._autoscroll and self.window_is_latest
 
     def _schedule_shift(self, direction: str) -> None:
         if self._shift_pending or self._suspended:

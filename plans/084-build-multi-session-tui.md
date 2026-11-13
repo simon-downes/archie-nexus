@@ -423,7 +423,7 @@ Tests and when they change:
   cut off at 150 columns (fixed in M7). Switch back to the 11.5 MB session: median 383 ms
   (the prototype's `Markdown > *:last-child` rule cost ~500 ms and was replaced).
 
-### [ ] M5 — Tool and subagent views inside the pane
+### [x] M5 — Tool and subagent views inside the pane
 
 - **Approach:** D13, D23. `detail.py` widgets fed by `on_changes`; the pane's view stack;
   stop child from the subagent view; delete `DetailScreen`s; port `test_tui_detail.py` and
@@ -432,7 +432,15 @@ Tests and when they change:
 - **Deliverable:** clicking a row opens a live-updating view; Esc returns.
 - **Verify:** `scripts/dev test tests/test_tui_detail.py tests/test_tui_subagents.py` pass;
   full suite.
-- **Outcome:**
+- **Outcome:** `detail.py` rewritten: `ToolDetailView`/`SubagentView` widgets (crumb line,
+  headline card, section bands) on a per-pane stack that hides the transcript and restores
+  its scroll position; every `on_changes` batch reaches the open views, so a running tool's
+  view fills in and a subagent view keeps its own `TranscriptView` in sync; D23 Esc order
+  and ctrl+x (priority binding, only while a subagent view is open); `DetailScreen` and its
+  modal plumbing deleted. Also fixed: `SessionTracker.close()` now writes every in-memory
+  record once more, because a cancelled job's write could be cut short at shutdown (seen as
+  a flaky location test: 3 of 15 runs, 0 of 25 after). Evidence: M5 Verify files 69 passed;
+  full suite 5368 passed; Ruff clean; screenshot `/tmp/084-m5/084-m5.png` (synthetic).
 
 ### [ ] M6 — Notices, unseen and reconnect
 

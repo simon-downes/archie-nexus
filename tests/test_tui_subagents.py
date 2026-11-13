@@ -1,9 +1,9 @@
-"""TUI subagent display: shared model state, rows and the status screen.
+"""TUI subagent display: shared model state, rows and the subagent view.
 
 Model state is asserted on a ``SessionController`` with a recording listener.
 """
 
-from archie_cli.tui.detail import SubagentScreen
+from archie_cli.tui.detail import Crumb, SubagentView
 from archie_cli.tui.transcript_view import render_subagent_row
 from archie_shared.events import (
     AssistantMessage,
@@ -152,12 +152,15 @@ def test_content_filtered_child_is_shown_as_error():
     assert child.error == CHILD_CONTENT_FILTERED_MESSAGE
 
 
-def test_subagent_screen_reads_the_live_node():
+def test_subagent_view_reads_the_live_node():
     sub = SubagentNode("sub-x", "task-1", 0, agent="researcher")
-    modal = SubagentScreen(sub, ["session"])
+    view = SubagentView(sub, [Crumb("parent #1")])
     sub.status = "complete"
-    assert modal.sub is sub and modal.sub.status == "complete"
-    assert modal.crumbs == ["session", "researcher #0"]
+    assert view.sub is sub and view.card.sub.status == "complete"
+    assert not view.card.animating
+    assert "complete" in view.card.render().plain
+    assert view.crumbs == [Crumb("parent #1"), Crumb("researcher #0")]
+    assert view.child_key == ("task-1", 0)
 
 
 def test_replay_scoped_delta_streams_into_child_transcript():

@@ -134,6 +134,52 @@ ShellOutput {
 /* Iteration blocks keep the transparent border from DEFAULT_CSS, so their tool rows
  * line up with message text. */
 
+/* --- Detail views (detail.py) ---
+ * They take the transcript's place on its colour. A headline card on the surface
+ * colour, then one band per section (title left, facts right), which also divides
+ * it from the section before; a failed call's result has a red band. */
+DetailView,
+DetailView .detail-body {
+    background: $pane;
+}
+
+DetailView .detail-body {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $pane;
+    scrollbar-background-hover: $pane;
+    scrollbar-background-active: $pane;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
+}
+
+DetailView .detail-card {
+    background: $surface;
+}
+
+SectionPanel > .section-band {
+    background: $surface-lighten-1;
+}
+
+SectionPanel .section-title {
+    color: $secondary;
+    text-style: bold;
+}
+
+SectionPanel .section-facts {
+    color: $muted;
+}
+
+SectionPanel.-error > .section-band {
+    background: $error 25%;
+}
+
+SectionPanel.-error .section-title {
+    color: $error;
+}
+
 /* --- Status bar colours --- */
 StatusBar {
     color: $muted;

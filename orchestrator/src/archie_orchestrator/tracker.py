@@ -377,7 +377,9 @@ class SessionTracker:
 
         Sessions run on without the orchestrator, so nothing is marked ended: followed
         streams are cancelled without the end check (D14), pending activity is written
-        (D11) and pending terminal writes get one last attempt (D12a).
+        (D11), and every record held in memory is written once more. A cancelled task's
+        write may still be running in its worker thread, or may have been cut short
+        (D12a's "retried with the next change" has no next change at shutdown).
         """
         tasks = [*self._tasks.values(), *self._background, *self._flush_tasks.values()]
         for task in tasks:
@@ -388,9 +390,8 @@ class SessionTracker:
         self._flush_tasks.clear()
         for session_id in list(self._pending_activity):
             await self._update(session_id)
-        for session_id, record in list(self._records.items()):
-            if record.ended:
-                await self._persist(session_id)
+        for session_id in list(self._records):
+            await self._persist(session_id)
 
     async def _reconcile(self) -> bool:
         """Match the stored records against ``docker ps`` (D13); False if Docker failed.

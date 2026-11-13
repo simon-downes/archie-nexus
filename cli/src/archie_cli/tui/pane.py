@@ -7,9 +7,10 @@ controller's changes as its ``SessionListener``. ``detach`` hands the input's dr
 history back to the controller, so the next pane for the session restores them.
 
 Every query is scoped to the pane: the app mounts one pane at a time (D7), but nothing
-here assumes that. Tool and subagent popups are still modal ``DetailScreen``s on the
-app's screen stack (in-pane views are M5); the pane opens them and feeds them its model
-changes.
+here assumes that. Tool and subagent views open on a per-pane stack in the
+transcript's place (084 D13): the transcript is hidden, not unmounted, so popping the
+last view shows it where it was, and the pane feeds every open view its model changes.
+The stack goes with the pane, so a session switched back to opens at its transcript.
 """
 
 from __future__ import annotations
@@ -22,18 +23,24 @@ from archie_shared.transcript import Change, SubagentNode, ToolNode
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.widget import Widget
 from textual.widgets import Static
 
 from archie_cli.tui import theme
 from archie_cli.tui.animation import Animated, spinner
 from archie_cli.tui.conversation import format_cost
-from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
+from archie_cli.tui.detail import Crumb, DetailView, SubagentView, ToolDetailView
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.session import Activity, LocalEntry, SessionController
 from archie_cli.tui.sidebar import ANIMATED_STATUSES, branch_label, state_badge, state_glyph
 from archie_cli.tui.status import StatusBar
-from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
+from archie_cli.tui.transcript_view import (
+    LAYOUT_WAITS,
+    Conversation,
+    SubagentClicked,
+    ToolClicked,
+)
 
 DOUBLE_ESC_S = 0.5
 """Seconds within which a second Esc clears the input."""
@@ -157,6 +164,8 @@ class SessionPane(Vertical):
         self.status = StatusBar()
         self._turns_ended = 0
         self._last_esc_time = 0.0
+        self._views: list[DetailView] = []
+        self._saved_scroll: tuple[float, bool] = (0.0, True)  # the transcript's, when hidden
 
     def compose(self) -> ComposeResult:
         yield self.header
@@ -249,13 +258,13 @@ class SessionPane(Vertical):
     # --- SessionListener ----------------------------------------------------------
 
     def on_changes(self, changes: list[Change]) -> None:
-        """Send model changes to the transcript and every open popup."""
+        """Send model changes to the transcript and every open detail view."""
         controller = self.controller
         if controller is None:
             return
         self.conversation.apply_changes(controller.builder, changes)
-        for screen in self._detail_screens():
-            screen.node_changed(controller.builder, changes)
+        for view in self._views:
+            view.node_changed(controller.builder, changes)
 
     def on_local(self, entry: LocalEntry) -> None:
         """Append a client-only row."""
@@ -312,9 +321,8 @@ class SessionPane(Vertical):
         self._show_loading()
 
     async def on_reset(self) -> None:
-        """Close popups of the old model and drop every transcript row."""
-        while isinstance(self.app.screen, DetailScreen):
-            await self.app.pop_screen()
+        """Close the old model's detail views and drop every transcript row."""
+        await self.close_views()
         await self.conversation.reset()
 
     def on_replay(self, active: bool) -> None:
@@ -357,14 +365,20 @@ class SessionPane(Vertical):
         return False
 
     def cancel(self) -> None:
-        """Esc: kill a running ``!`` command, dismiss the question, or interrupt.
+        """Esc, first match wins (084 D23): kill a running ``!`` command, pop a detail
+        view, dismiss the question, interrupt the turn.
 
         When there is nothing to cancel, a second Esc within 0.5 s clears the input.
+        (An open dialog is a modal screen and takes Esc before it reaches the app.)
         """
         controller = self.controller
-        action = controller.cancel() if controller is not None else None
-        if action == "shell":
+        if controller is not None and controller.kill_shell():
             return
+        if self._views:
+            self.pop_view()
+            self._last_esc_time = 0
+            return
+        action = controller.cancel() if controller is not None else None
         if action is not None:
             self._last_esc_time = 0
             return
@@ -375,50 +389,125 @@ class SessionPane(Vertical):
         else:
             self._last_esc_time = now
 
-    # --- Popups -------------------------------------------------------------------
+    # --- Detail views (084 D13) -------------------------------------------------------
 
-    def _detail_screens(self) -> list[DetailScreen]:
-        return [screen for screen in self.app.screen_stack if isinstance(screen, DetailScreen)]
+    @property
+    def views(self) -> tuple[DetailView, ...]:
+        """The open detail views, bottom first; the last is on screen."""
+        return tuple(self._views)
 
-    def _crumbs(self) -> list[str]:
-        """Breadcrumb levels for a popup opened from the current screen."""
-        top = self.app.screen
-        if isinstance(top, DetailScreen):
-            return list(top.crumbs)
-        controller = self.controller
-        return [(controller.agent_session_id if controller else "") or "Session"]
+    @property
+    def top_view(self) -> DetailView | None:
+        """The detail view on screen, or None while the transcript shows."""
+        return self._views[-1] if self._views else None
+
+    @property
+    def transcript(self) -> Widget:
+        """What shows in the transcript's place: the top view's body, or the transcript."""
+        top = self.top_view
+        return top.body if top is not None else self.conversation
 
     def open_tool(self, tool: ToolNode) -> None:
-        """Open the detail popup of a tool call."""
-        self.app.push_screen(ToolDetailScreen(tool, self._crumbs()))
+        """Show a tool call's detail view, one level above the current one."""
+        self._push(ToolDetailView(tool, self._crumbs()))
 
     def open_subagent(self, sub: SubagentNode) -> None:
-        """Open the live transcript popup of a subagent."""
-        self.app.push_screen(SubagentScreen(sub, self._crumbs()))
+        """Show a subagent's live transcript, one level above the current one."""
+        self._push(SubagentView(sub, self._crumbs()))
 
     def on_tool_clicked(self, message: ToolClicked) -> None:
+        """A tool row in the transcript or in a subagent view was clicked."""
         message.stop()
         self.open_tool(message.tool)
 
     def on_subagent_clicked(self, message: SubagentClicked) -> None:
+        """A subagent row in the transcript or in a subagent view was clicked."""
         message.stop()
         self.open_subagent(message.sub)
 
+    def _crumbs(self) -> list[Crumb]:
+        top = self.top_view
+        return list(top.crumbs) if top is not None else []
+
+    def _focus_is_in_transcript(self) -> bool:
+        """True when focus is nowhere, or on the transcript or a view (not the input)."""
+        focused = self.app.focused
+        if focused is None:
+            return True
+        chain = focused.ancestors_with_self
+        return self.conversation in chain or any(view in chain for view in self._views)
+
+    def _push(self, view: DetailView) -> None:
+        """Hide what is shown (keeping it mounted) and show ``view`` in its place."""
+        move_focus = self._focus_is_in_transcript()
+        top = self.top_view
+        if top is not None:
+            top.display = False
+        else:
+            conversation = self.conversation
+            self._saved_scroll = (conversation.scroll_y, conversation.following)
+            conversation.display = False
+        self._views.append(view)
+        self.mount(view, before=self.activity)
+        if move_focus:
+            view.body.focus()
+
+    def pop_view(self) -> None:
+        """Close the top view and show the one under it, or the transcript where it was."""
+        if not self._views:
+            return
+        move_focus = self._focus_is_in_transcript()
+        self._views.pop().remove()
+        top = self.top_view
+        if top is not None:
+            top.display = True
+        else:
+            self._show_transcript()
+        if move_focus:
+            self.transcript.focus()
+
+    async def close_views(self) -> None:
+        """Close every detail view and show the transcript."""
+        views, self._views = self._views, []
+        for view in reversed(views):
+            await view.remove()
+        if views:
+            self._show_transcript()
+
+    def _show_transcript(self) -> None:
+        """Show the transcript again at the scroll position it was left at.
+
+        One that was following the end goes to the end, past rows added meanwhile.
+        Rows mounted while it was hidden are laid out only once it shows, which can
+        take a few refreshes, so the end is re-checked until the height settles.
+        """
+        conversation = self.conversation
+        conversation.display = True
+        scroll_y, following = self._saved_scroll
+
+        def restore(waits: int, height: int) -> None:
+            if not conversation.is_attached or self.top_view is not None:
+                return  # gone, or hidden again by a newer view
+            if not following:
+                conversation.scroll_to(y=scroll_y, animate=False, immediate=True)
+                return
+            conversation.scroll_end(animate=False, immediate=True)
+            settled = conversation.virtual_size.height
+            if waits > 0 and settled != height:
+                self.call_after_refresh(restore, waits - 1, settled)
+
+        self.call_after_refresh(restore, LAYOUT_WAITS, -1)
+
     @property
     def active_child_key(self) -> tuple[str, int] | None:
-        """The subagent ``ctrl+x`` stops: the topmost open subagent popup's."""
-        for screen in reversed(self._detail_screens()):
-            if isinstance(screen, SubagentScreen):
-                return (screen.sub.scope, screen.sub.index)
+        """The subagent ``ctrl+x`` stops: the topmost open subagent view's."""
+        for view in reversed(self._views):
+            if isinstance(view, SubagentView):
+                return view.child_key
         return None
 
     def stop_child(self) -> None:
-        """Stop the subagent of the topmost open subagent popup, if any."""
+        """Stop the subagent of the topmost open subagent view, if any."""
         key = self.active_child_key
         if key is not None and self.controller is not None:
             self.controller.stop_child(*key)
-
-    async def close_popups(self) -> None:
-        """Close every tool and subagent popup (the session is leaving the screen)."""
-        while isinstance(self.app.screen, DetailScreen):
-            await self.app.pop_screen()

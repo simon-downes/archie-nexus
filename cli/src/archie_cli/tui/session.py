@@ -687,15 +687,21 @@ class SessionController:
             # A send failure means the socket is dead; try to recover.
             self._schedule_reconnect()
 
+    def kill_shell(self) -> bool:
+        """Kill a running ``!`` command; False when none is running."""
+        if self.shell_active and self._shell_proc is not None:
+            self._shell_cancel_requested = True
+            self._shell_proc.kill()
+            return True
+        return False
+
     def cancel(self) -> CancelAction | None:
         """Esc: kill a running ``!`` command, dismiss the question, or interrupt the turn.
 
         Returns:
             What was done, or None when there was nothing to cancel.
         """
-        if self.shell_active and self._shell_proc is not None:
-            self._shell_cancel_requested = True
-            self._shell_proc.kill()
+        if self.kill_shell():
             return "shell"
         if self.question is not None:
             # The first Esc dismisses the question; the next one interrupts the turn.

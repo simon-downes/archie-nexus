@@ -33,13 +33,11 @@ from textual.worker import Worker
 from archie_cli.tui import theme
 from archie_cli.tui.animation import AnimationClock
 from archie_cli.tui.client import FeedEvent, OrchestratorClient, ProfileInfo
-from archie_cli.tui.detail import DetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider
 from archie_cli.tui.pane import SessionPane
 from archie_cli.tui.session import SessionController
 from archie_cli.tui.sidebar import SessionList, Sidebar
-from archie_cli.tui.transcript_view import SubagentClicked, ToolClicked
 
 log = logging.getLogger(__name__)
 
@@ -111,7 +109,9 @@ class ArchieApp(App):
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+c", "copy_block", "Copy Block", show=False),
         Binding("ctrl+g", "editor", "Editor", show=False),
-        Binding("ctrl+x", "stop_child", "Stop selected child", show=False),
+        # Priority, so it reaches the app while the input (where ctrl+x cuts) has focus;
+        # ``check_action`` passes the key on when no subagent view is open.
+        Binding("ctrl+x", "stop_child", "Stop selected child", show=False, priority=True),
         Binding("alt+up", "step_session(-1)", "Previous session", show=False, priority=True),
         Binding("alt+down", "step_session(1)", "Next session", show=False, priority=True),
         *(
@@ -357,8 +357,6 @@ class ArchieApp(App):
         if record is None or (session_id == self.current and self._pane is not None):
             return
         old = self._pane
-        if old is not None:
-            await old.close_popups()
         # No frame may be drawn from the old pane's removal until the new pane is in.
         # Textual prunes a removed widget's descendants one by one but drops them from
         # the screen's layout only after the whole subtree is gone, so a repaint in
@@ -416,7 +414,7 @@ class ArchieApp(App):
         """tab/shift+tab: move focus between the session list, transcript and input."""
         targets = [self.sidebar.sessions]
         if self._pane is not None:
-            targets.append(self._pane.conversation)
+            targets.append(self._pane.transcript)  # the open detail view's, if any
             if not self._pane.input.disabled:
                 targets.append(self._pane.input)
         focused = self.focused
@@ -425,37 +423,26 @@ class ArchieApp(App):
         targets[(index + step) % len(targets)].focus()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Session switching and focus keys act only on the main screen (or a popup)."""
+        """Switching and focus keys act only on the main screen; ``ctrl+x`` only while a
+        subagent view is open (otherwise the key goes on to the focused widget)."""
         if action in _SWITCH_ACTIONS or action == "cycle_focus":
             try:
-                screen = self.screen
-                main = self.screen_stack[0]
+                return self.screen is self.screen_stack[0]
             except Exception:  # noqa: BLE001 — no screen yet
                 return False
-            if screen is main:
-                return True
-            return action in _SWITCH_ACTIONS and isinstance(screen, DetailScreen)
+        if action == "stop_child":
+            return self.active_child_key is not None
         return True
 
-    # --- Popups (rows inside popups) --------------------------------------------------
-
-    def on_tool_clicked(self, message: ToolClicked) -> None:
-        """A tool row inside a popup: open its popup from the pane."""
-        if self._pane is not None:
-            self._pane.open_tool(message.tool)
-
-    def on_subagent_clicked(self, message: SubagentClicked) -> None:
-        """A subagent row inside a popup: open its popup from the pane."""
-        if self._pane is not None:
-            self._pane.open_subagent(message.sub)
+    # --- Subagent views ---------------------------------------------------------------
 
     @property
     def active_child_key(self) -> tuple[str, int] | None:
-        """The subagent ``ctrl+x`` stops, or None."""
+        """The subagent ``ctrl+x`` stops (the pane's topmost subagent view's), or None."""
         return self._pane.active_child_key if self._pane is not None else None
 
     def action_stop_child(self) -> None:
-        """Target-stop the selected child while leaving siblings active."""
+        """ctrl+x: stop the child shown in the open subagent view; siblings keep running."""
         if self._pane is not None:
             self._pane.stop_child()
 
