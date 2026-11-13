@@ -7,8 +7,10 @@ server (084 D32). Each session has an event log that ``/events`` reads from (an
 and scripted bodies or errors can be queued ahead of it. ``stream()`` opens a
 ``FakeStream`` whose frames come from a queue and whose sends are recorded. ``feed()``
 sends a snapshot of the live records on every connect, then the records ``publish``
-queues, until ``drop_feed``. PATCH bodies are recorded. ``RecordingListener`` records
-every ``SessionListener`` call.
+queues, until ``drop_feed`` (``fail_feed`` makes the next connects fail, as a stopped
+orchestrator does). PATCH bodies and ``session`` fetches are recorded; ``session``
+answers 404 for an ID ``records`` lacks. ``RecordingListener`` records every
+``SessionListener`` call.
 """
 
 from __future__ import annotations
@@ -127,6 +129,8 @@ class FakeOrchestrator:
         self.deleted: list[str] = []
         self.delete_status = 200
         self.patches: list[tuple[str, dict]] = []
+        self.patch_gate: asyncio.Event | None = None  # set: PATCHes wait for it
+        self.fetched: list[str] = []
         self.feed_connects = 0
         self._feed: asyncio.Queue | None = None
         self._feed_errors: list[Exception] = []
@@ -187,11 +191,21 @@ class FakeOrchestrator:
 
     async def patch(self, session_id: str, body: dict) -> SessionDescriptor:
         self.patches.append((session_id, body))
+        if self.patch_gate is not None:
+            await self.patch_gate.wait()
         record = self.records.get(session_id)
         if record is None:
             raise OrchestratorError("session update failed: 404", 404)
         record = msgspec.structs.replace(record, **body)
         self.records[session_id] = record
+        return record
+
+    async def session(self, session_id: str) -> SessionDescriptor:
+        self.fetched.append(session_id)
+        await asyncio.sleep(0)
+        record = self.records.get(session_id)
+        if record is None:
+            raise OrchestratorError("session request failed: 404", 404)
         return record
 
     # --- History and streams ------------------------------------------------------------
@@ -286,15 +300,16 @@ class RecordingListener:
     def on_replay(self, active: bool) -> None:
         self.calls.append(("replay", active))
 
-    def on_notice(self, message: str, timeout: float | None) -> None:
-        self.calls.append(("notice", message))
 
-
-def make_controller(client: FakeOrchestrator | None = None, session_id: str = "s1"):
+def make_controller(
+    client: FakeOrchestrator | None = None, session_id: str = "s1", *, is_live=None
+):
     """A ``SessionController`` over a fake client with a recording listener attached."""
     from archie_cli.tui.session import SessionController
 
-    controller = SessionController(client or FakeOrchestrator(), session_id, f"archie-{session_id}")
+    controller = SessionController(
+        client or FakeOrchestrator(), session_id, f"archie-{session_id}", is_live=is_live
+    )
     listener = RecordingListener()
     controller.attach(listener)
     return controller, listener

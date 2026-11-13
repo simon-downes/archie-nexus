@@ -19,16 +19,27 @@ class _SelectionParent(Widget):
         return "whole block"
 
 
-class CopyTestApp(App):
-    """Textual app shell for clipboard tests without a WebSocket connection."""
+class _CopyApp(App):
+    """Runs ``ArchieApp.action_copy_block``; records its notices instead of showing them."""
 
     BINDINGS = [Binding("ctrl+c", "copy_block", show=False)]
 
-    def compose(self) -> ComposeResult:
-        yield _SelectionParent()
+    def __init__(self) -> None:
+        super().__init__()
+        self.notices: list[str] = []
+
+    def notice(self, title: str, text: str = "", *args, **kwargs) -> None:
+        self.notices.append(title)
 
     def action_copy_block(self) -> None:
         ArchieApp.action_copy_block(self)
+
+
+class CopyTestApp(_CopyApp):
+    """Textual app shell for clipboard tests without a WebSocket connection."""
+
+    def compose(self) -> ComposeResult:
+        yield _SelectionParent()
 
 
 class _FocusableStatic(Static):
@@ -43,14 +54,9 @@ class _CopyParent(Widget):
         return "whole block"
 
 
-class NestedCopyTestApp(App):
-    BINDINGS = [Binding("ctrl+c", "copy_block", show=False)]
-
+class NestedCopyTestApp(_CopyApp):
     def compose(self) -> ComposeResult:
         yield _CopyParent(id="parent")
-
-    def action_copy_block(self) -> None:
-        ArchieApp.action_copy_block(self)
 
 
 class PasteTestApp(App):
@@ -101,6 +107,7 @@ async def test_copy_falls_back_to_focused_parent_block():
         await pilot.press("ctrl+c")
 
         assert app.clipboard == "whole block"
+        assert app.notices == ["Copied to clipboard"]
 
 
 @pytest.mark.asyncio

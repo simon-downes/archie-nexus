@@ -1,4 +1,4 @@
-"""The sidebar: banner, profile line, the session list and key hints (084 D15, D30).
+"""The sidebar: banner, profile line, the session list, notices and key hints (084 D15, D30).
 
 The session list is fed only by the sessions feed (D8). Sessions are grouped under a
 band per workspace (bands in name order, each with a count) and listed oldest first by
@@ -30,6 +30,7 @@ from textual.widgets import Static
 from archie_cli.tui import theme
 from archie_cli.tui.animation import PENDING_FRAMES, Animated, spinner
 from archie_cli.tui.client import ProfileInfo
+from archie_cli.tui.notices import NoticeStack
 
 # archie-og's start-up banner (archie-og/src/archie/output.py) and its blue gradient.
 BANNER = (
@@ -329,7 +330,7 @@ class SessionList(VerticalScroll):
 
 
 class Sidebar(Vertical):
-    """Banner, ``v0.1.0 · N running · local ↗``, the session list and key hints.
+    """Banner, ``v0.1.0 · N running · local ↗``, the session list, notices and key hints.
 
     The profile label in the info line is a link to the app's ``open_web`` action.
     """
@@ -359,11 +360,13 @@ class Sidebar(Vertical):
         self.profile = profile
         self.info = Static(self._info(0), classes="sidebar-info")
         self.sessions = SessionList()
+        self.notices = NoticeStack()
 
     def compose(self) -> ComposeResult:
         yield Static(banner(), classes="sidebar-brand")
         yield self.info
         yield self.sessions
+        yield self.notices
         yield Static(
             key_hints(("f1", "Keys"), ("^q", "Quit"), ("^p", "Palette")), classes="sidebar-keys"
         )

@@ -8,6 +8,13 @@ controller, removes it, and mounts a new pane rendered from the target's control
 Switches are serialised by a lock and numbered, so a switch overtaken by a newer one
 does nothing (D10).
 
+Feed rules (D9, D17, D18): the feed reconnects forever with back-off, and every
+snapshot re-syncs the rows and controllers (an on-screen session missing from it is
+fetched on its own). A ``session`` event for a session that is not on screen is
+compared with its previous record and may post one notice in the sidebar; the
+on-screen session's ``unseen`` is cleared with a PATCH. Each controller asks the app
+whether its record is live, so its reconnects stop once the feed says it ended.
+
 Threading model: Textual runs an asyncio event loop on the main thread; the feed and
 the controllers' receive loops run as tasks on the same loop, so their notifications
 update widgets directly.
@@ -23,6 +30,7 @@ import tempfile
 import webbrowser
 from collections import OrderedDict
 
+import msgspec
 from archie_shared.session import SessionDescriptor, container_name
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -32,9 +40,10 @@ from textual.worker import Worker
 
 from archie_cli.tui import theme
 from archie_cli.tui.animation import AnimationClock
-from archie_cli.tui.client import FeedEvent, OrchestratorClient, ProfileInfo
+from archie_cli.tui.client import FeedEvent, OrchestratorClient, OrchestratorError, ProfileInfo
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.models_provider import ModelProvider
+from archie_cli.tui.notices import NOTICE_TIMEOUT, Notice, Severity
 from archie_cli.tui.pane import SessionPane
 from archie_cli.tui.session import SessionController
 from archie_cli.tui.sidebar import SessionList, Sidebar
@@ -50,10 +59,47 @@ FEED_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
 AGE_INTERVAL = 30.0
 """Seconds between redraws of the sidebar's ages."""
 
+COPY_NOTICE_TIMEOUT = 2.0
+"""Seconds the "Copied to clipboard" notice shows."""
+
 EMPTY_TEXT = "No sessions — ctrl+n to start one"
 CONNECTING_TEXT = "Connecting…"
 
+QUESTION_CLIP = 80
+"""Characters of a question shown in a "Needs an answer" notice."""
+
 _SWITCH_ACTIONS = frozenset({"step_session", "jump_session"})
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` on one line, cut to ``limit`` characters with an ellipsis."""
+    line = " ".join(text.split())
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
+def transition_notice(
+    old: SessionDescriptor, new: SessionDescriptor
+) -> tuple[str, Severity] | None:
+    """The notice text and severity for a session's record change, or None (084 D17).
+
+    At most one per change, the most important first: the session ended ("Failed to
+    start" with its error for ``failed``), it asks a question (``blocked``), a turn
+    failed (``error``), or a root turn ended with a reply (``unseen`` became set).
+    """
+    if new.ended and not old.ended:
+        if new.status == "failed":
+            detail = f": {_clip(new.error, QUESTION_CLIP)}" if new.error else ""
+            return f"Failed to start{detail}", "error"
+        return "Session ended", "information"
+    if new.status == "blocked" and old.status != "blocked":
+        question = new.question.question if new.question is not None else ""
+        detail = f": {_clip(question, QUESTION_CLIP)}" if question else ""
+        return f"Needs an answer{detail}", "warning"
+    if new.status == "error" and old.status != "error":
+        return "Turn failed", "error"
+    if new.unseen and not old.unseen:
+        return "New reply", "information"
+    return None
 
 
 class Body(Horizontal):
@@ -153,6 +199,9 @@ class ArchieApp(App):
         self._snapshot_seen = False
         self._shutting_down = False
         self._feed_worker: Worker | None = None
+        self._fetching: set[str] = set()  # sessions being fetched (missing from a snapshot)
+        self._seen_inflight: set[str] = set()  # sessions with an ``unseen`` PATCH running
+        self._seen_sent: dict[str, SessionDescriptor] = {}  # the record each was sent for
         self.animation = AnimationClock()
 
     # --- Layout -----------------------------------------------------------------------
@@ -217,13 +266,22 @@ class ArchieApp(App):
             self._on_record(event[1])
 
     async def _on_snapshot(self, sessions: list[SessionDescriptor]) -> None:
-        """Replace every record; on the first snapshot, show the initial session."""
+        """Replace every record and re-sync the controllers (no notices).
+
+        The on-screen session keeps its record when the snapshot lacks it (it ended
+        while the feed was down) and is fetched on its own. Controllers of live
+        sessions whose stream is down reconnect; those of sessions no longer listed
+        stop. On the first snapshot, show the initial session.
+        """
         records = {record.session_id: record for record in sessions}
         current = self.current
         if current is not None and current not in records and current in self.records:
-            records[current] = self.records[current]  # it ended meanwhile; keep showing it
+            records[current] = self.records[current]
+            self._fetch_record(current)
         self.records = records
         self._records_changed()
+        for controller in self._controllers.values():
+            controller.resume()
         if not self._snapshot_seen:
             self._snapshot_seen = True
             target = self._initial_session()
@@ -234,8 +292,19 @@ class ArchieApp(App):
                 await self.switch_to(target)
 
     def _on_record(self, record: SessionDescriptor) -> None:
-        """Update one session's row (and the pane when it is on screen)."""
-        self.records[record.session_id] = record
+        """Update one session's row (and the pane when it is on screen).
+
+        A change to a session that is not on screen may post a notice; clicking it
+        shows the session.
+        """
+        session_id = record.session_id
+        old = self.records.get(session_id)
+        self.records[session_id] = record
+        if old is not None and session_id != self.current:
+            change = transition_notice(old, record)
+            if change is not None:
+                text, severity = change
+                self.notice(record.name, text, severity, session_id=session_id)
         self._records_changed()
 
     def _records_changed(self) -> None:
@@ -245,6 +314,71 @@ class ArchieApp(App):
             pane.update_record(self.records[self.current])
         for session_id, controller in self._controllers.items():
             self._maybe_start(session_id, controller)
+            if controller.started and not self._record_live(session_id):
+                controller.end()
+        self._clear_unseen()
+
+    def _record_live(self, session_id: str) -> bool:
+        """True while the feed has a record of the session that has not ended."""
+        record = self.records.get(session_id)
+        return record is not None and not record.ended
+
+    def _fetch_record(self, session_id: str) -> None:
+        """Fetch a record the snapshot lacks (084 D9); one fetch per session at a time."""
+        if session_id in self._fetching or self._shutting_down:
+            return
+        self._fetching.add(session_id)
+        self._spawn(self._fetch(session_id))
+
+    async def _fetch(self, session_id: str) -> None:
+        before = self.records.get(session_id)
+        try:
+            try:
+                record = await self._client.session(session_id)
+            except OrchestratorError as exc:
+                if exc.status_code != 404 or before is None:
+                    log.warning("Could not fetch session %s: %s", session_id, exc)
+                    return
+                # The orchestrator no longer knows it: show it as ended.
+                record = (
+                    before if before.ended else msgspec.structs.replace(before, status="exited")
+                )
+            if self._shutting_down or self.records.get(session_id) is not before:
+                return  # the feed sent something newer meanwhile
+            self.records[session_id] = record
+            self._records_changed()
+        except Exception as exc:  # noqa: BLE001 — a failed fetch only waits for the next snapshot
+            log.warning("Could not fetch session %s: %s", session_id, exc)
+        finally:
+            self._fetching.discard(session_id)
+
+    def _clear_unseen(self) -> None:
+        """PATCH ``unseen: false`` for the on-screen session when its record has it (D18).
+
+        Sent once per record from the feed; records that arrive while a PATCH for the
+        session runs count as covered by it. Failures are logged, not shown.
+        """
+        session_id = self.current
+        record = self.records.get(session_id) if session_id is not None else None
+        if session_id is None or record is None or not record.unseen or self._shutting_down:
+            return
+        if self._seen_sent.get(session_id) is record:
+            return
+        if session_id in self._seen_inflight:
+            # Sent before the running PATCH was answered: that PATCH covers it.
+            self._seen_sent[session_id] = record
+            return
+        self._seen_inflight.add(session_id)
+        self._seen_sent[session_id] = record
+        self._spawn(self._mark_seen(session_id))
+
+    async def _mark_seen(self, session_id: str) -> None:
+        try:
+            await self._client.patch(session_id, {"unseen": False})
+        except Exception as exc:  # noqa: BLE001 — logged, not shown (D18)
+            log.warning("Could not mark session %s seen: %s", session_id, exc)
+        finally:
+            self._seen_inflight.discard(session_id)
 
     def _initial_session(self) -> str | None:
         """``focus`` when the feed knows it, else the newest live session."""
@@ -263,7 +397,9 @@ class ArchieApp(App):
         controller = self._controllers.get(session_id)
         if controller is None:
             name = record.container_name or container_name(session_id)
-            controller = SessionController(self._client, session_id, name)
+            controller = SessionController(
+                self._client, session_id, name, is_live=lambda: self._record_live(session_id)
+            )
             self._controllers[session_id] = controller
         else:
             self._controllers.move_to_end(session_id)
@@ -393,6 +529,33 @@ class ArchieApp(App):
         message.stop()
         self._request_switch(message.session_id)
 
+    def on_notice_chosen(self, message: Notice.Chosen) -> None:
+        """A notice about a session was clicked: show that session."""
+        message.stop()
+        self._request_switch(message.session_id)
+
+    # --- Notices ----------------------------------------------------------------------
+
+    def notice(
+        self,
+        title: str,
+        text: str = "",
+        severity: Severity = "information",
+        *,
+        timeout: float = NOTICE_TIMEOUT,
+        session_id: str | None = None,
+    ) -> None:
+        """Show a notice in the sidebar (084 D17).
+
+        Args:
+            title: The bold first line.
+            text: The text under it.
+            severity: The colour of its bar.
+            timeout: Seconds until it goes.
+            session_id: The session it is about; clicking it shows that session.
+        """
+        self.sidebar.notices.add(title, text, severity, timeout=timeout, session_id=session_id)
+
     def action_step_session(self, step: int) -> None:
         """alt+↑/↓: show the previous or next session in sidebar order (wrapping)."""
         order = self.sidebar.sessions.order
@@ -462,7 +625,7 @@ class ArchieApp(App):
         selected = self.screen.get_selected_text()
         if selected is not None:
             self.copy_to_clipboard(selected)
-            self.notify("Copied to clipboard")
+            self.notice("Copied to clipboard", timeout=COPY_NOTICE_TIMEOUT)
             return
 
         focused = self.focused
@@ -476,7 +639,7 @@ class ArchieApp(App):
             text = get_copy_text()
             if text:
                 self.copy_to_clipboard(text)
-                self.notify("Copied to clipboard")
+                self.notice("Copied to clipboard", timeout=COPY_NOTICE_TIMEOUT)
                 return
 
     async def action_quit(self) -> None:
@@ -496,7 +659,9 @@ class ArchieApp(App):
         if controller is None:
             return
         if not controller.switch_model(model_key):
-            self.notify("Cannot switch model during active turn", severity="warning")
+            self.notice(
+                "Model not switched", "Cannot switch model during an active turn", "warning"
+            )
 
     # --- External editor --------------------------------------------------------------
 
@@ -504,8 +669,8 @@ class ArchieApp(App):
         """Restore the on-screen session's stream after the blocking editor returns."""
         try:
             if controller.live and not controller.closing:
-                if not await controller.force_reconnect():
-                    controller.client_error("Unable to reconnect after closing the editor.")
+                # A reconnect still running afterwards reports its outage itself.
+                await controller.force_reconnect()
         except Exception as exc:  # noqa: BLE001 — surface recovery failures only
             controller.client_error(f"Unable to reconnect after closing the editor: {exc}")
         finally:
@@ -538,7 +703,7 @@ class ArchieApp(App):
                     editor_error = f"Editor not found: {editor}"
 
             if editor_error:
-                self.notify(editor_error, severity="error")
+                self.notice("Editor", editor_error, "error")
                 return
 
             mtime_after = os.path.getmtime(tmp.name)

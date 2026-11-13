@@ -332,13 +332,6 @@ class SessionPane(Vertical):
         else:
             self.conversation.resume()
 
-    def on_notice(self, message: str, timeout: float | None) -> None:
-        """Show a transient connection notice."""
-        if timeout is None:
-            self.app.notify(message)
-        else:
-            self.app.notify(message, timeout=timeout)
-
     # --- Input --------------------------------------------------------------------
 
     def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:

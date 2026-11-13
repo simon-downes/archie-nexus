@@ -45,6 +45,20 @@ Sidebar > .sidebar-info {
     link-style-hover: underline;
 }
 
+/* Notices (notices.py): a card with a bar on the left coloured by severity. */
+Notice {
+    background: $surface-lighten-1;
+    border-left: thick $primary;
+}
+
+Notice.-warning {
+    border-left: thick $warning;
+}
+
+Notice.-error {
+    border-left: thick $error;
+}
+
 EmptyPane {
     color: $muted;
 }

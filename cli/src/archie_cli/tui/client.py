@@ -32,11 +32,18 @@ DELETE_TIMEOUT = 15.0
 PATCH_TIMEOUT = 5.0
 """Seconds allowed for renaming a session or marking it seen."""
 
+SESSION_TIMEOUT = 5.0
+"""Seconds allowed for reading one session record."""
+
 FEED_CONNECT_TIMEOUT = 5.0
 """Seconds allowed for connecting to the sessions feed."""
 
 FEED_READ_TIMEOUT = 40.0
-"""Seconds without a byte after which the feed counts as dead (the server pings after 15)."""
+"""Seconds without a byte after which the feed counts as dead (the server pings after 15).
+
+This is the dead-feed rule (084 D9): the server's ``: ping`` comments are bytes on the
+wire, so a healthy idle feed never reaches it, while a feed whose connection silently
+died raises ``OrchestratorError`` and the app reconnects."""
 
 
 @dataclass(frozen=True)
@@ -127,13 +134,27 @@ class OrchestratorClient(Protocol):
         """
         ...
 
+    async def session(self, session_id: str) -> SessionDescriptor:
+        """Return one session's record (live or ended).
+
+        Raises:
+            OrchestratorError: The request failed; ``status_code`` 404 for an unknown ID.
+        """
+        ...
+
 
 class HttpOrchestrator:
     """``OrchestratorClient`` over one orchestrator's HTTP API and WebSocket stream."""
 
-    def __init__(self, base_url: str) -> None:
-        """Create a client for the orchestrator at ``base_url`` (e.g. ``http://host:7600``)."""
+    def __init__(self, base_url: str, *, feed_read_timeout: float = FEED_READ_TIMEOUT) -> None:
+        """Create a client for the orchestrator at ``base_url`` (e.g. ``http://host:7600``).
+
+        Args:
+            base_url: The orchestrator's base URL.
+            feed_read_timeout: Seconds of feed silence that count as a dead feed.
+        """
         self.base_url = base_url.rstrip("/")
+        self.feed_read_timeout = feed_read_timeout
 
     def session_url(self, session_id: str) -> str:
         """The HTTP URL of one session's record."""
@@ -148,7 +169,7 @@ class HttpOrchestrator:
     async def feed(self) -> AsyncIterator[FeedEvent]:
         """Follow ``GET /api/sessions/feed`` (see ``OrchestratorClient``)."""
         url = f"{self.base_url}{API_PREFIX}/sessions/feed"
-        timeout = httpx.Timeout(FEED_CONNECT_TIMEOUT, read=FEED_READ_TIMEOUT)
+        timeout = httpx.Timeout(FEED_CONNECT_TIMEOUT, read=self.feed_read_timeout)
         try:
             async with (
                 httpx.AsyncClient(timeout=timeout) as client,
@@ -208,6 +229,22 @@ class HttpOrchestrator:
         if response.status_code != 200:
             raise OrchestratorError(
                 f"session update failed: {response.status_code}", response.status_code
+            )
+        try:
+            return msgspec.json.decode(response.content, type=SessionDescriptor)
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            raise OrchestratorError(f"unexpected session record: {exc}") from exc
+
+    async def session(self, session_id: str) -> SessionDescriptor:
+        """Send ``GET /api/sessions/{id}`` and return the record."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(self.session_url(session_id), timeout=SESSION_TIMEOUT)
+        except httpx.HTTPError as exc:
+            raise OrchestratorError(str(exc)) from exc
+        if response.status_code != 200:
+            raise OrchestratorError(
+                f"session request failed: {response.status_code}", response.status_code
             )
         try:
             return msgspec.json.decode(response.content, type=SessionDescriptor)

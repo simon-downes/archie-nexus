@@ -1,4 +1,4 @@
-"""The multi-session TUI: sidebar from the feed, switching, controllers and the pane (084 M2).
+"""The multi-session TUI: sidebar, switching, controllers, the pane, notices and reconnect (084).
 
 Everything runs against ``FakeOrchestrator`` (``tests/tui_fakes.py``) with ``run_test``.
 """
@@ -7,17 +7,24 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import archie_cli.tui.animation as animation
 import archie_cli.tui.app as tui_app
 import msgspec
 import pytest
 from archie_cli.tui.app import EMPTY_TEXT, EmptyPane
+from archie_cli.tui.client import OrchestratorError
 from archie_cli.tui.conversation import ClientErrorMessage, ShellOutput, TurnStatus
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.pane import SessionHeader, SessionPane
-from archie_cli.tui.session import ClientErrorEntry, ShellOutputEntry, TurnStatusEntry
+from archie_cli.tui.session import (
+    NOT_FOUND_TEXT,
+    RECONNECTING_TEXT,
+    ClientErrorEntry,
+    ShellOutputEntry,
+    TurnStatusEntry,
+)
 from archie_cli.tui.sidebar import (
     SessionRow,
     WorkspaceBand,
@@ -943,3 +950,417 @@ async def test_a_removed_pane_leaves_nothing_on_the_clock():
         await attached(app, pilot, "ws-b")
         # Only the working session's sidebar row animates now.
         assert app.animation.widgets == {app.sidebar.sessions.rows["ws-a"]}
+
+
+# --- Notices, unseen and reconnect (M6) ---------------------------------------------
+
+
+def _record_notices(app) -> list[tuple[str, str, str, str | None]]:
+    """Wrap ``app.notice`` so every notice posted is recorded as (title, text, severity, id)."""
+    posted: list[tuple[str, str, str, str | None]] = []
+    original = app.notice
+
+    def notice(title, text="", severity="information", **kwargs):
+        posted.append((title, text, severity, kwargs.get("session_id")))
+        original(title, text, severity, **kwargs)
+
+    app.notice = notice
+    return posted
+
+
+def _question(text: str = "Which file should I change?"):
+    from archie_shared.events import PendingQuestion, QuestionOption
+
+    return PendingQuestion(id="q1", question=text, options=[QuestionOption(label="A")])
+
+
+def _error_rows(pane) -> list[str]:
+    return [w.get_copy_text() for w in pane.conversation.query(ClientErrorMessage)]
+
+
+@pytest.fixture
+def fast_retries(monkeypatch):
+    """Reconnect the feed and streams after a few milliseconds."""
+    from archie_cli.tui.session import SessionController
+
+    monkeypatch.setattr(tui_app, "FEED_RETRY_DELAYS", (0.01,))
+    monkeypatch.setattr(SessionController, "RECONNECT_DELAYS", (0.01,))
+
+
+async def _until(predicate, timeout: float = 5.0) -> None:
+    """Wait in real time until ``predicate()`` holds."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        assert loop.time() < deadline, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+async def test_notice_per_transition_and_none_for_the_on_screen_session():
+    client = _client(
+        make_record("ws-a", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2), name="Fix the parser"),
+        make_record("ws-c", status="starting", started_at=_at(3), name="New one"),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        posted = _record_notices(app)
+        long_question = "Which file " + "really " * 30 + "should I change?"
+        steps = [
+            make_record("ws-b", started_at=_at(2), name="Fix the parser", status="working"),
+            make_record("ws-b", started_at=_at(2), name="Fix the parser", unseen=True),
+            # The same state again (say, a new location): no second notice.
+            make_record(
+                "ws-b",
+                started_at=_at(2),
+                name="Fix the parser",
+                unseen=True,
+                location=SessionLocation(repo="app", branch="main"),
+            ),
+            make_record(
+                "ws-b",
+                started_at=_at(2),
+                name="Fix the parser",
+                status="blocked",
+                question=_question(long_question),
+            ),
+            make_record("ws-b", started_at=_at(2), name="Fix the parser", status="error"),
+            make_record("ws-b", started_at=_at(2), name="Fix the parser", status="stopped"),
+            make_record(
+                "ws-c", started_at=_at(3), name="New one", status="failed", error="no image"
+            ),
+            # The on-screen session: none of these notify.
+            make_record("ws-a", started_at=_at(1), unseen=True),
+            make_record("ws-a", started_at=_at(1), status="blocked", question=_question()),
+            make_record("ws-a", started_at=_at(1), status="error"),
+        ]
+        for record in steps:
+            client.publish(record)
+        await settle(pilot, lambda: app.records["ws-a"].status == "error")
+        assert [(title, text.split(":")[0], sev, sid) for title, text, sev, sid in posted] == [
+            ("Fix the parser", "New reply", "information", "ws-b"),
+            ("Fix the parser", "Needs an answer", "warning", "ws-b"),
+            ("Fix the parser", "Turn failed", "error", "ws-b"),
+            ("Fix the parser", "Session ended", "information", "ws-b"),
+            ("New one", "Failed to start", "error", "ws-c"),
+        ]
+        question_text = posted[1][1]
+        assert question_text.startswith("Needs an answer: Which file really")
+        assert question_text.endswith("…") and len(question_text) <= len("Needs an answer: ") + 80
+        assert posted[4][1] == "Failed to start: no image"
+        # The newest three show as cards in the sidebar, bold title over the text.
+        cards = app.sidebar.notices.notices
+        assert [(n.title, n.text) for n in cards] == [
+            ("Fix the parser", "Turn failed"),
+            ("Fix the parser", "Session ended"),
+            ("New one", "Failed to start: no image"),
+        ]
+        assert cards[-1].has_class("-error")
+        assert str(cards[-1].render()) == "New one\nFailed to start: no image"
+
+
+async def test_no_notices_from_the_initial_or_a_resync_snapshot(fast_retries):
+    client = _client(
+        make_record("ws-a", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2), status="blocked", question=_question()),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        posted = _record_notices(app)
+        await attached(app, pilot, "ws-a")
+        client.drop_feed()
+        # Changed while the feed was down: the re-sync snapshot carries it silently.
+        client.records["ws-b"] = make_record("ws-b", started_at=_at(2), unseen=True)
+        await settle(pilot, lambda: client.feed_connects == 2)
+        await settle(pilot, lambda: app.records["ws-b"].unseen)
+        assert posted == []
+        assert not app.sidebar.notices.notices
+        # Feed events after it notify again.
+        client.publish(make_record("ws-b", started_at=_at(2), status="error"))
+        await settle(pilot, lambda: bool(posted))
+        assert [text for _, text, _, _ in posted] == ["Turn failed"]
+
+
+async def test_clicking_a_notice_switches_to_its_session():
+    client = _client(make_record("ws-a", started_at=_at(1)), make_record("ws-b", started_at=_at(2)))
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        client.publish(make_record("ws-b", started_at=_at(2), unseen=True))
+        await settle(pilot, lambda: app.sidebar.notices.notices)
+        (card,) = app.sidebar.notices.notices
+        await pilot.pause()
+        await pilot.click(card)
+        await attached(app, pilot, "ws-b")
+        await settle(pilot, lambda: not app.sidebar.notices.query("Notice"))
+        # A notice that is not about a session only goes away.
+        app.notice("Copied to clipboard")
+        await pilot.pause()
+        await pilot.click(app.sidebar.notices.notices[0])
+        await settle(pilot, lambda: not app.sidebar.notices.query("Notice"))
+        assert app.current == "ws-b"
+
+
+async def test_at_most_three_notices_and_each_times_out():
+    app = make_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot)
+        for n in range(5):
+            app.notice(f"Title {n}", f"text {n}", timeout=30)
+        await pilot.pause()
+        assert [n.title for n in app.sidebar.notices.notices] == ["Title 2", "Title 3", "Title 4"]
+        await settle(pilot, lambda: len(app.sidebar.notices.query("Notice")) == 3)
+        # The stack sits between the session list and the key hints.
+        children = list(app.sidebar.children)
+        assert children.index(app.sidebar.notices) == children.index(app.sidebar.sessions) + 1
+        app.notice("Brief", severity="warning", timeout=0.05)
+        await settle(pilot, lambda: "Brief" in [n.title for n in app.sidebar.notices.notices])
+        assert app.sidebar.notices.notices[-1].has_class("-warning")
+        await _until(lambda: "Brief" not in [n.title for n in app.sidebar.notices.notices])
+
+
+async def test_copy_posts_a_notice_not_a_toast():
+    app = make_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot)
+        with (
+            patch.object(app, "copy_to_clipboard") as copied,
+            patch.object(app.screen, "get_selected_text", return_value="copy me"),
+        ):
+            app.action_copy_block()
+        copied.assert_called_once_with("copy me")
+        await pilot.pause()
+        assert [n.title for n in app.sidebar.notices.notices] == ["Copied to clipboard"]
+        assert not app._notifications
+
+
+async def test_unseen_is_cleared_on_switch_and_on_update_while_shown_not_repeated():
+    client = _client(
+        make_record("ws-a", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2), unseen=True),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        assert client.patches == []  # ws-a has no unseen; ws-b is not shown
+        client.patch_gate = asyncio.Event()
+        await app.switch_to("ws-b")
+        await attached(app, pilot, "ws-b")
+        await settle(pilot, lambda: client.patches)
+        assert client.patches == [("ws-b", {"unseen": False})]
+
+        # Feed updates while that PATCH runs, or for other sessions, don't repeat it.
+        client.publish(make_record("ws-b", started_at=_at(2), unseen=True, name="Renamed"))
+        client.publish(make_record("ws-a", started_at=_at(1), status="working"))
+        await settle(pilot, lambda: app.records["ws-a"].status == "working")
+        assert len(client.patches) == 1
+        client.patch_gate.set()
+        await settle(pilot, lambda: not app._seen_inflight)
+        client.publish(make_record("ws-a", started_at=_at(1)))
+        await settle(pilot, lambda: app.records["ws-a"].status == "idle")
+        assert len(client.patches) == 1
+
+        # The server's echo, then a later turn end while shown: one more PATCH.
+        client.publish(make_record("ws-b", started_at=_at(2), name="Renamed"))
+        client.publish(make_record("ws-b", started_at=_at(2), unseen=True, name="Renamed"))
+        await settle(pilot, lambda: len(client.patches) == 2)
+        assert client.patches[1] == ("ws-b", {"unseen": False})
+
+
+async def test_a_failed_unseen_patch_is_logged_not_shown(caplog):
+    client = _client(make_record("s1", unseen=True))
+    client.patch = AsyncMock(side_effect=OrchestratorError("session update failed: 500", 500))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        await settle(pilot, lambda: client.patch.await_count == 1 and not app._seen_inflight)
+        assert "Could not mark session s1 seen" in caplog.text
+        assert not app.sidebar.notices.notices and _error_rows(pane) == []
+
+
+async def test_reconnect_after_an_orchestrator_restart(fast_retries):
+    # The orchestrator goes away: the feed and the stream drop and connects fail for a
+    # while; the turn that ran meanwhile is only in the log.
+    client = _client(make_record("ws-a"), logs={"ws-a": [_user("u1", "before")]})
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot, "ws-a")
+        client.fail_feed(*(OrchestratorError("refused") for _ in range(4)))
+        client.fail_connects(*(OSError("refused") for _ in range(4)))
+        client.drop_feed()
+        client.latest.drop(1006)
+        client.logs["ws-a"] += [_user("u2", "during", turn=2), _assistant("a2", "r", turn=2)]
+        client.records["ws-a"] = make_record("ws-a", status="idle", name="Back again")
+
+        await _until(lambda: client.opened("ws-a") == 2 and not app.controller.reconnecting)
+        await _until(lambda: client.feed_connects == 6 and app.records["ws-a"].name == "Back again")
+        await pilot.pause()
+        assert client.requests == [("ws-a", None), ("ws-a", "u1")]  # an ``after`` replay
+        keys = [row.key for row in pane.conversation.rows]
+        assert [k for k in keys if k.startswith("msg-")] == ["msg-u1", "msg-u2", "msg-a2"]
+        assert _error_rows(pane) == [RECONNECTING_TEXT]
+        assert not any("elaunch" in text.lower() for text in _error_rows(pane))
+        assert app.pane is pane and pane.header.record.name == "Back again"
+
+        # A second outage gets its own single row.
+        client.fail_connects(OSError("refused"), OSError("refused"))
+        client.latest.drop(1006)
+        await _until(lambda: client.opened("ws-a") == 3 and not app.controller.reconnecting)
+        await pilot.pause()
+        assert _error_rows(pane) == [RECONNECTING_TEXT, RECONNECTING_TEXT]
+
+
+async def test_background_controllers_reconnect_silently(fast_retries):
+    client = _client(make_record("ws-a", started_at=_at(1)), make_record("ws-b", started_at=_at(2)))
+    app = make_app(client, focus="ws-b")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-b")
+        await app.switch_to("ws-a")
+        await attached(app, pilot, "ws-a")
+        background = app.controllers["ws-b"]
+        client.fail_connects(OSError("refused"))
+        client.stream_for("ws-b").drop(1006)
+        await _until(lambda: client.opened("ws-b") == 2 and not background.reconnecting)
+        assert background.locals == []
+
+        # Shown during an outage, the pane gets the outage's one row.
+        client.fail_connects(*(OSError("refused") for _ in range(1000)))
+        client.stream_for("ws-b").drop(1006)
+        await _until(lambda: background._outage)
+        await app.switch_to("ws-b")
+        pane = await attached(app, pilot, "ws-b")
+        await pilot.pause()
+        assert _error_rows(pane) == [RECONNECTING_TEXT]
+        client._connect_errors.clear()
+        await _until(lambda: client.opened("ws-b") == 3 and not background.reconnecting)
+        await pilot.pause()
+        assert _error_rows(pane) == [RECONNECTING_TEXT]
+
+
+async def test_reconnect_stops_on_a_4004_close(fast_retries):
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        client.latest.drop(4004)
+        await settle(pilot, lambda: _error_rows(pane) == [NOT_FOUND_TEXT])
+        await asyncio.sleep(0.1)
+        assert client.opened("s1") == 1 and not app.controller.reconnecting
+
+
+async def test_reconnect_stops_once_the_record_ends_and_the_transcript_stays(fast_retries):
+    client = _client(make_record("s1"), logs={"s1": [_user("u1", "hello")]})
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        controller = app.controller
+        client.fail_connects(*(OSError("refused") for _ in range(1000)))
+        client.latest.drop(1006)
+        await _until(lambda: controller._outage)
+        client.publish(make_record("s1", status="exited"))
+        await _until(lambda: not controller.reconnecting and not controller.live)
+        attempts = len(client._connect_errors)
+        await asyncio.sleep(0.1)
+        assert len(client._connect_errors) == attempts  # no further connect attempts
+        await pilot.pause()
+        assert [row.key for row in pane.conversation.rows][0] == "msg-u1"
+        assert pane.input.disabled and "ENDED" in pane.header.render().plain
+
+
+async def test_reconnect_ends_when_the_session_ends_keeping_the_transcript():
+    client = _client(make_record("s1"), logs={"s1": [_user("u1", "hello")]})
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        controller, stream = app.controller, client.latest
+        await apply_events(app, pilot, _user("u2", "still going", turn=2))
+        controller.turn_active = True
+        client.logs["s1"] += [_user("u2", "still going", turn=2), _assistant("a2", "last", 2)]
+        client.publish(make_record("s1", status="stopped"))
+        await _until(lambda: not controller.live and stream.disconnect.await_count == 1)
+        await _until(lambda: ("s1", "u2") in client.requests)  # the tail, after the cursor
+        await pilot.pause()
+        keys = [row.key for row in pane.conversation.rows if row.key.startswith("msg-")]
+        assert keys == ["msg-u1", "msg-u2", "msg-a2"]
+        assert not controller.turn_active and pane.activity.activity is None
+        assert _error_rows(pane) == []
+        assert client.opened("s1") == 1
+
+
+@pytest.mark.parametrize("known", [True, False], ids=["ended-record", "not-found"])
+async def test_reconnect_fetches_an_on_screen_session_missing_from_a_snapshot(fast_retries, known):
+    client = _client(make_record("ws-a", started_at=_at(1)), make_record("ws-b", started_at=_at(2)))
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        posted = _record_notices(app)
+        pane = await attached(app, pilot, "ws-a")
+        client.drop_feed()
+        if known:
+            client.records["ws-a"] = make_record("ws-a", started_at=_at(1), status="stopped")
+        else:
+            del client.records["ws-a"]
+        await _until(lambda: client.fetched == ["ws-a"] and app.records["ws-a"].ended)
+        await pilot.pause()
+        assert app.records["ws-a"].status == ("stopped" if known else "exited")
+        assert app.current == "ws-a" and app.pane is pane
+        assert "ENDED" in pane.header.render().plain and pane.input.disabled
+        assert "ws-a" in app.sidebar.sessions.rows  # still listed: it is on screen
+        await _until(lambda: not app.controller.live)
+        assert posted == []
+
+
+async def test_reconnect_when_the_feed_is_silent_for_the_dead_feed_timeout(monkeypatch):
+    from archie_cli.tui.client import HttpOrchestrator
+
+    monkeypatch.setattr(tui_app, "FEED_RETRY_DELAYS", (0.01,))
+    snapshot = msgspec.json.encode({"sessions": [make_record("s1")]}).decode()
+    connects = 0
+    stop = asyncio.Event()
+
+    async def serve(reader, writer):
+        # Sends the snapshot, then nothing at all: no events, no pings.
+        nonlocal connects
+        connects += 1
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n"
+                b"connection: close\r\n\r\n" + f"event: snapshot\ndata: {snapshot}\n\n".encode()
+            )
+            await writer.drain()
+            await stop.wait()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = _client(make_record("s1"))
+    client.feed = HttpOrchestrator(f"http://127.0.0.1:{port}", feed_read_timeout=0.2).feed
+    app = make_app(client)
+    try:
+        async with app.run_test(size=SIZE) as pilot:
+            await attached(app, pilot, "s1")
+            await _until(lambda: connects >= 3)
+            assert app.current == "s1" and len(app.query(SessionPane)) == 1
+    finally:
+        stop.set()
+        server.close()
+        await server.wait_closed()
+
+
+async def test_http_session_reads_one_record(monkeypatch):
+    import httpx
+    from archie_cli.tui.client import HttpOrchestrator
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/sessions/ws-a":
+            return httpx.Response(200, content=msgspec.json.encode(make_record("ws-a")))
+        return httpx.Response(404, json={"error": "no"})
+
+    _mock_httpx(monkeypatch, handler)
+    client = HttpOrchestrator("http://orch:7600")
+    assert (await client.session("ws-a")).session_id == "ws-a"
+    with pytest.raises(OrchestratorError) as missing:
+        await client.session("ws-x")
+    assert missing.value.status_code == 404

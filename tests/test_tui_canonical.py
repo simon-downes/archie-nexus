@@ -12,6 +12,7 @@ import msgspec
 import pytest
 from archie_cli.tui.client import CursorNotFound, HttpOrchestrator, OrchestratorError
 from archie_cli.tui.session import (
+    RECONNECTING_TEXT,
     ClientErrorEntry,
     ShellOutputEntry,
     TurnStatusEntry,
@@ -914,15 +915,20 @@ async def test_loaded_waits_for_the_first_replay_that_lands():
 
 
 @pytest.mark.asyncio
-async def test_first_connect_failure_is_reported_and_not_retried():
-    client = FakeOrchestrator()
+async def test_first_connect_failure_is_retried_as_an_outage():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
     client.fail_connects(OSError("offline"))
     controller, _ = make_controller(client)
+    controller.RECONNECT_DELAYS = (0.0,)
 
     await controller.start()
+    assert local_texts(controller) == [] and client.requests == []
+    assert controller.reconnecting
 
-    assert local_texts(controller) == ["Connection failed: offline"]
-    assert controller._reconnect_task is None and client.requests == []
+    assert await controller._reconnect_task is True
+    assert local_texts(controller) == [RECONNECTING_TEXT]
+    assert controller.loaded and [t.user.content for t in controller.builder.turns] == ["hi"]
+    await controller.close()
 
 
 @pytest.mark.asyncio
@@ -965,7 +971,9 @@ async def test_reconnect_retries_when_replay_fails():
     assert len(client.streams) == 2
     assert len(client.requests) == 2
     client.streams[0].disconnect.assert_awaited_once()
-    assert ("notice", "Reconnected to agent") in listener.calls
+    # One entry for the whole outage, however many attempts it took.
+    assert local_texts(controller) == [RECONNECTING_TEXT]
+    assert [entry.message for (entry,) in listener.of("local")] == [RECONNECTING_TEXT]
     await controller.close()
 
 
@@ -984,8 +992,8 @@ async def test_receive_disconnect_preserves_partial_stream_until_replay():
         controller.ws.close()
         await controller._receive_task
 
-    schedule.assert_called_once_with(None)
-    assert local_texts(controller) == ["Connection lost: the agent closed the stream."]
+    schedule.assert_called_once_with()
+    assert local_texts(controller) == []  # the outage entry waits for the first back-off
     assert controller.turn_active is True
     (item,) = controller.builder.turns[0].items
     assert item.kind == "stream" and item.text == "partial"

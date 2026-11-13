@@ -442,7 +442,7 @@ Tests and when they change:
   a flaky location test: 3 of 15 runs, 0 of 25 after). Evidence: M5 Verify files 69 passed;
   full suite 5368 passed; Ruff clean; screenshot `/tmp/084-m5/084-m5.png` (synthetic).
 
-### [ ] M6 — Notices, unseen and reconnect
+### [x] M6 — Notices, unseen and reconnect
 
 - **Approach:** D9, D17, D18. Feed transitions → notices; PATCH unseen; the feed-driven
   stream retry rule replacing M1's 30 s give-up, the single reconnecting row, feed reconnect
@@ -451,7 +451,15 @@ Tests and when they change:
 - **Deliverable:** background sessions announce replies and questions; a restart recovers.
 - **Verify:** `scripts/dev test tests/test_tui_app.py -k "notice or unseen or reconnect"`
   pass; full suite.
-- **Outcome:**
+- **Outcome:** `notices.py` (`NoticeStack`, at most 3, click switches); one notice per feed
+  record change of a session not on screen (ended/failed, needs an answer, turn failed, new
+  reply), none from snapshots; one PATCH `unseen: false` per on-screen record; controllers
+  retry while the app's record is live (`is_live`), stop on 4004 or an ended record (`end()`
+  keeps the transcript), one "Connection lost; reconnecting…" row per outage, the 30 s
+  give-up and "Relaunch" texts gone, a failed first connect retried; dead feed via the
+  client's 40 s read timeout; snapshots re-sync and restart dead streams; a missing on-screen
+  session is fetched (404 → `exited`); `on_notice` removed. Evidence: `-k "notice or unseen
+  or reconnect"` 16 passed in 8/8 runs; full suite 5384 passed; Ruff clean.
 
 ### [ ] M7 — Dialogs, palette, model picker and filter
 
@@ -480,6 +488,9 @@ Tests and when they change:
 
 ## Deviations
 
+- M6: the dead-feed rule lives in the client's read timeout, because the SSE parser skips
+  pings and the app never sees them. A send while disconnected waits up to 15 s for the
+  reconnect before failing.
 - M4: fetch rows show `N lines` (the result has no match count); URLs are elided in the
   middle like paths; widths are measured in characters, not cells.
 - M3: turns are ordered by their latest call, not the turn number (robust to a restarted

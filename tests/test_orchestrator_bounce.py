@@ -9,6 +9,7 @@ import logging
 from unittest.mock import patch
 
 import pytest
+from archie_cli.tui.session import NOT_FOUND_TEXT, RECONNECTING_TEXT
 from archie_orchestrator.app import app, lifespan
 from archie_shared.schemas import NexusConfig
 from httpx import ASGITransport, AsyncClient
@@ -92,29 +93,34 @@ async def test_shutdown_logs_active_connections(caplog):
 
 
 @pytest.mark.asyncio
-async def test_tui_reconnect_uses_0_5s_initial_delay():
-    """TUI reconnect backoff starts at 0.5s (not 1.0s)."""
-    controller, listener = make_controller(FakeOrchestrator(), "proj-01abc")
+async def test_tui_reconnect_backs_off_from_0_5s_to_8s_and_keeps_trying():
+    """Back-off starts at 0.5 s, doubles to 8 s and repeats; there is no give-up."""
+    client = FakeOrchestrator()
+    client.fail_connects(*(OSError("refused") for _ in range(8)))
+    controller, listener = make_controller(client, "proj-01abc")
     sleep_calls = []
+    real_sleep = asyncio.sleep
 
     async def _fake_sleep(delay):
-        sleep_calls.append(delay)
-        raise asyncio.CancelledError  # stop after recording the first delay
+        if delay:  # the fake client's own yields are sleep(0)
+            sleep_calls.append(delay)
+        await real_sleep(0)
 
     with patch("archie_cli.tui.session.asyncio.sleep", _fake_sleep):
-        try:
-            await controller._reconnect()
-        except asyncio.CancelledError:
-            pass
+        assert await controller._reconnect() is True
 
-    assert sleep_calls == [0.5], f"First retry delay should be 0.5s, got {sleep_calls}"
-    assert ("notice", "Reconnecting...") in listener.calls
+    assert sleep_calls == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+    assert len(client.streams) == 1
+    # One entry for the outage, none per attempt, and no relaunch advice.
+    assert local_texts(controller) == [RECONNECTING_TEXT]
+    assert not any("elaunch" in text for text in local_texts(controller))
     assert not controller.reconnecting
+    await controller.close()
 
 
 @pytest.mark.asyncio
-async def test_tui_reconnect_4004_gives_up_immediately():
-    """A 4004 close (session ended) is not retried and says so."""
+async def test_tui_reconnect_4004_stops_immediately():
+    """A 4004 close (no such session) is not retried."""
     client = FakeOrchestrator()
     controller, _ = make_controller(client, "proj-01abc")
     await controller.start()
@@ -128,29 +134,39 @@ async def test_tui_reconnect_4004_gives_up_immediately():
     with patch("archie_cli.tui.session.asyncio.sleep", _fake_sleep):
         client.latest.drop(4004)
         await controller._receive_task
-        while controller.reconnecting:
+        for _ in range(5):
             await real_sleep(0)
 
-    # No back-off sleeps and no second connection: an immediate give-up.
-    assert not sleep_calls
+    # No back-off sleeps and no second connection: stopped at once.
+    assert not sleep_calls and not controller.reconnecting
     assert len(client.streams) == 1
-    errors = local_texts(controller)
-    assert errors[0].startswith("Connection lost:")
-    assert any("Session has ended" in e for e in errors)
+    assert local_texts(controller) == [NOT_FOUND_TEXT]
+    await controller.close()
 
 
 @pytest.mark.asyncio
-async def test_tui_reconnect_gives_up_after_the_retry_window():
-    """Without a successful connect in 30 s the client stops and says so."""
+async def test_tui_reconnect_stops_when_the_record_is_no_longer_live():
+    """Retries last as long as the feed's record says the session is live."""
+    live = True
     client = FakeOrchestrator()
-    controller, _ = make_controller(client, "proj-01abc")
-    controller.RECONNECT_WINDOW = 0.0  # the first 0.5 s delay is already past it
+    client.fail_connects(*(OSError("refused") for _ in range(20)))
+    controller, _ = make_controller(client, "proj-01abc", is_live=lambda: live)
+    controller.RECONNECT_DELAYS = (0.0,)
+    attempts = 0
+    real_stream = client.stream
 
+    async def counting_stream(session_id):
+        nonlocal attempts, live
+        attempts += 1
+        if attempts == 3:
+            live = False  # the feed reports the session ended
+        return await real_stream(session_id)
+
+    client.stream = counting_stream
     assert await controller._reconnect() is False
-    assert local_texts(controller) == [
-        "Reconnect failed after 30s. Relaunch the client to continue."
-    ]
+    assert attempts == 3
     assert client.streams == []
+    assert not controller.reconnecting
 
 
 @pytest.mark.asyncio
