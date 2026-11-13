@@ -187,11 +187,11 @@ A user message follows this path:
    bedrock-runtime), `openai` (Responses on `https://api.openai.com/v1`, `openai-*` keys,
    authenticated with the `openai` API key credential; these requests leave AWS), or `ollama`. Tool calls may
    invoke native tools, the exec runner, or child agents through the `task` tool.
-   Native `read` returns image files (PNG/JPEG/GIF/WebP) as image content, downscaled with
+   Native `read` and `web_fetch` return images (PNG/JPEG/GIF/WebP) as image content, downscaled with
    Pillow to at most 1568px on the long edge and ~1.2MP. Images ride on `ToolResultBlock.images`
    in memory only; provider adapters send them when the model's catalog entry has `can_see`
    (Converse `image` blocks; Responses `input_image` data URLs) and otherwise substitute a fixed
-   "image omitted" note. Ollama is always text-only. Inside exec, `read` returns the caption text.
+   "image omitted" note. Ollama is always text-only. Inside exec, both tools return the caption text.
 5. The orchestrator's metrics sync (every 15 s, plus on each insights page and `archie stats`
    run) tails the session logs into the metrics tables of `archie.db`. It never touches the relay.
 6. The TUI applies live and stored events through one `_apply_event(event)` path. On connection or reconnect it requests `/events?after=<last-applied-persisted-id>`, then reconciles buffered live events by event ID and exact assistant request identity. Behind that path, the shared `TranscriptBuilder` (`archie_shared.transcript`), which the web viewer also uses, reduces events into the transcript model; see [How the TUI applies the events](session-protocol-walkthrough.md#10-how-the-tui-applies-the-events).
