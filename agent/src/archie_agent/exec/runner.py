@@ -205,7 +205,7 @@ def _wrap_for_audit(fn, name: str, calls: list[CallRecord], plugin_context=None)
         if isinstance(result, ToolImage):
             return (
                 f"{result.caption}\n[Image content is not available inside exec; "
-                "call the native `read` tool to view it.]"
+                f"call the native `{name}` tool to view it.]"
             )
         return result
 

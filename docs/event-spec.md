@@ -123,8 +123,9 @@ by `(session_id, event_id)`; the session log remains the source of truth.
 
 `tool_result.images` was added after schema version 2 and defaults to an empty list, so
 earlier logs decode unchanged. It records metadata only for images returned by the native
-`read` tool (format, final dimensions, encoded size, source path). Image bytes are kept only
-in the agent's in-memory transcript and are never persisted or sent to clients.
+`read` and `web_fetch` tools (format, final dimensions, encoded size, source path or URL).
+Image bytes are kept only in the agent's in-memory transcript and are never persisted or
+sent to clients.
 
 `compaction_complete.skills_loaded` was added without a protocol version change and defaults
 to an empty list, so earlier logs decode unchanged. Events are decoded with unknown fields

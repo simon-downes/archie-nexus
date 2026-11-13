@@ -75,17 +75,26 @@ def _target_size(width: int, height: int) -> tuple[int, int]:
 def load_image(path: Path, display_path: str) -> ToolImage:
     """Load an image file, resize it for model input, and return a ToolImage.
 
-    Small images in a supported format are passed through byte-for-byte. Larger
-    images are downscaled (Lanczos) and re-encoded: PNG when the image has
-    transparency, otherwise JPEG. Animated GIF/WebP are reduced to the first frame.
+    See ``image_from_bytes`` for how the image is reduced.
     """
-    from PIL import Image, ImageOps, UnidentifiedImageError
-
     size = path.stat().st_size
     if size > MAX_SOURCE_BYTES:
         raise ImageError(f"Image too large to load ({size} bytes): {display_path}")
+    return image_from_bytes(path.read_bytes(), display_path)
 
-    raw = path.read_bytes()
+
+def image_from_bytes(raw: bytes, display_path: str) -> ToolImage:
+    """Decode image bytes, resize them for model input, and return a ToolImage.
+
+    Small images in a supported format are passed through byte-for-byte. Larger
+    images are downscaled (Lanczos) and re-encoded: PNG when the image has
+    transparency, otherwise JPEG. Animated GIF/WebP are reduced to the first frame.
+    ``display_path`` (a file path or URL) is used in the caption and errors.
+    """
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    if len(raw) > MAX_SOURCE_BYTES:
+        raise ImageError(f"Image too large to load ({len(raw)} bytes): {display_path}")
     try:
         img = Image.open(io.BytesIO(raw))
         img.load()
