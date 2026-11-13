@@ -16,6 +16,7 @@ from archie_orchestrator.store import (
     schema_version,
 )
 from archie_shared.events import PendingQuestion, QuestionOption
+from archie_shared.workspaces import SessionLocation
 
 from tests.session_fakes import record
 
@@ -37,6 +38,9 @@ def store(tmp_path) -> SessionStore:
 
 def _full_record(session_id: str = SID, **fields):
     values = {
+        "location": SessionLocation(
+            repo="app", worktree="app/.git/wt/x", branch="feat/x", commit="a" * 40, missing=True
+        ),
         "workspace": "proj",
         "backend": "kiro",
         "name": "My session",
@@ -66,8 +70,8 @@ def test_db_path_is_archie_db_in_home(tmp_path):
 def test_migrate_creates_schema_wal_and_lock(tmp_path):
     db = db_path(tmp_path)
     assert schema_version(db) is None
-    assert migrate(db) == 2
-    assert schema_version(db) == 2
+    assert migrate(db) == 3
+    assert schema_version(db) == 3
     assert (tmp_path / "archie.db.lock").exists()
     conn = sqlite3.connect(db)
     try:
@@ -79,7 +83,7 @@ def test_migrate_creates_schema_wal_and_lock(tmp_path):
         conn.close()
     assert {"sessions", "meta"} <= tables
     assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
-    assert columns == list(store_module.COLUMNS)  # migration 2 dropped name_fixed
+    assert columns == list(store_module.COLUMNS)  # 2 dropped name_fixed, 3 added location
     assert mode == "wal"
 
 
@@ -87,7 +91,7 @@ def test_migrate_is_idempotent(tmp_path):
     db = db_path(tmp_path)
     migrate(db)
     SessionStore(db).insert(record(SID))
-    assert migrate(db) == 2
+    assert migrate(db) == 3
     assert [r.session_id for r in SessionStore(db).list()] == [SID]
 
 
@@ -117,7 +121,7 @@ def test_migration_2_prefixes_names_and_drops_name_fixed(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.undo()
 
-    assert migrate(db) == 2
+    assert migrate(db) == 3
 
     rows = {r.session_id: r for r in SessionStore(db).list(include_ended=True)}
     assert (rows["proj-01kx77jkz8"].name, rows["proj-01kx77jkz8"].name_source) == (
@@ -136,6 +140,34 @@ def test_migration_2_prefixes_names_and_drops_name_fixed(tmp_path, monkeypatch):
         conn.close()
     assert "name_fixed" not in columns and "name_source" not in columns
     assert stored == [("user:Named",), ("id:proj-01kx77jkz9",)]
+
+
+def test_migration_3_adds_a_null_location_to_existing_rows(tmp_path, monkeypatch):
+    db = db_path(tmp_path)
+    monkeypatch.setattr(store_module, "MIGRATIONS", store_module.MIGRATIONS[:2])
+    assert migrate(db) == 2
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO sessions (session_id, workspace, backend, name, status, started_at) "
+            "VALUES (?, 'proj', 'native', ?, 'stopped', '2026-07-01T10:00:00+00:00')",
+            (SID, f"id:{SID}"),
+        )
+    conn.close()
+    monkeypatch.undo()
+
+    assert migrate(db) == 3
+
+    [row] = SessionStore(db).list(include_ended=True)
+    assert (row.session_id, row.status, row.location) == (SID, "stopped", None)
+    conn = sqlite3.connect(db)
+    try:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+        stored = conn.execute("SELECT location FROM sessions").fetchall()
+    finally:
+        conn.close()
+    assert columns[-1] == "location"
+    assert stored == [(None,)]
 
 
 def test_migration_1_alone_imports_logs_into_the_version_1_table(session_logs, tmp_path):
@@ -234,7 +266,7 @@ def test_migration_imports_each_log_once(session_logs, tmp_path):
     for path in paths:
         _touch(path)
 
-    assert migrate(db_path(tmp_path)) == 2  # migration 1 imports, then 2 runs on the rows
+    assert migrate(db_path(tmp_path)) == 3  # migration 1 imports, then 2 and 3 run on the rows
     store = SessionStore(db_path(tmp_path))
     mtime = MTIME.isoformat()
 
@@ -306,6 +338,28 @@ def test_insert_get_round_trips_every_field(store):
     loaded = store.get(SID)
     assert loaded == original
     assert loaded.container_name == f"archie-{SID}"
+
+
+@pytest.mark.parametrize(
+    "location", [None, SessionLocation(repo=""), SessionLocation(repo="lib", commit="b" * 40)]
+)
+def test_location_round_trips_through_save_and_update(store, location):
+    store.insert(record(SID))
+    assert store.get(SID).location is None
+    store.save(record(SID, location=location))
+    assert store.get(SID).location == location
+    moved = SessionLocation(repo="other", branch="main")
+    assert store.update(SID, location=moved).location == moved
+
+
+def test_an_unreadable_stored_location_reads_as_none(store, caplog):
+    store.insert(record(SID))
+    conn = sqlite3.connect(store.db)
+    with conn:
+        conn.execute("UPDATE sessions SET location = '{not json'")
+    conn.close()
+    assert store.get(SID).location is None
+    assert "unreadable location" in caplog.text
 
 
 def test_ended_record_round_trips_without_container(store):

@@ -83,7 +83,7 @@ click agent to show conversation in same style as main session, press esc to bac
 ## TUI Improvements
 
 Done:
-- Anchor throbber to bottom of screen directly above the status bar. Same background colour as the messages area. Needs to show/hide as currently.
+- Anchor the activity indicator to bottom of screen directly above the status bar. Same background colour as the messages area. Needs to show/hide as currently.
 - Skill tool summary should show how many lines were loaded
 - Diff background green/red is jarring - switch to green/red text colour and no background instead
 - Error blocks - Red text on red background is hard to read. Red background is overkill so let's remove it

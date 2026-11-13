@@ -395,7 +395,7 @@ def test_version_lives_in_meta_not_user_version(session_logs, tmp_path):
     assert _rows(tmp_path, "SELECT value FROM meta WHERE key = 'metrics_version'") == [
         {"value": str(METRICS_VERSION)}
     ]
-    assert _rows(tmp_path, "PRAGMA user_version")[0]["user_version"] == 2
+    assert _rows(tmp_path, "PRAGMA user_version")[0]["user_version"] == 3
 
 
 def test_no_old_metrics_tables(session_logs, tmp_path):

@@ -1,13 +1,35 @@
-"""Main Textual application for the attach TUI.
+"""The multi-session TUI: a sidebar of live sessions beside the on-screen session's pane.
 
-Connects to a running agent session via WebSocket and displays the
-conversation with streaming updates. This is a read-write client —
-it can send messages and interrupts to the agent.
+``ArchieApp`` talks to one orchestrator through an ``OrchestratorClient`` (084 D19). It
+follows the sessions feed, which alone drives the sidebar (D8), and keeps a
+``SessionController`` for each session visited, up to ``MAX_CONTROLLERS`` (D7). Only the
+session on screen has a ``SessionPane``; switching detaches the old pane from its
+controller, removes it, and mounts a new pane rendered from the target's controller.
+Switches are serialised by a lock and numbered, so a switch overtaken by a newer one
+does nothing (D10).
 
-Threading model:
-- Textual runs an asyncio event loop on the main thread
-- The WS receive loop runs as an asyncio task within the same loop
-- Events are dispatched to widget updates directly (no thread marshalling needed)
+Feed rules (D9, D17, D18): the feed reconnects forever with back-off, and every
+snapshot re-syncs the rows and controllers (an on-screen session missing from it is
+fetched on its own). A ``session`` event for a session that is not on screen is
+compared with its previous record and may post one notice in the sidebar; the
+on-screen session's ``unseen`` is cleared with a PATCH. Each controller asks the app
+whether its record is live, so its reconnects stop once the feed says it ended.
+
+Actions (D3, D14, D22-D24): the palette (``commands.SessionCommands``) and keys open
+dialogs (``dialogs``) and act through the orchestrator client: a new session is created
+and shown at once (its pane says "Starting…" until the record leaves ``starting``);
+rename and stop act on the session on screen, and their errors show as a client row in
+its pane. Errors of app actions (listing workspaces, creating) show as notices.
+
+Parity features (D20, D21): ``!command`` runs in the session's container only when the
+profile is local (each controller is created with ``direct_shell=profile.local``);
+ctrl+c copies the selection, else the focused block; ctrl+g writes the message in
+``$EDITOR`` inside ``suspend()``, which stalls the whole event loop, so afterwards the
+feed and every live controller reconnect without reporting an outage.
+
+Threading model: Textual runs an asyncio event loop on the main thread; the feed and
+the controllers' receive loops run as tasks on the same loop, so their notifications
+update widgets directly.
 """
 
 from __future__ import annotations
@@ -15,900 +37,656 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import subprocess
 import tempfile
-import time
+import webbrowser
+from collections import OrderedDict
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Any
 
-import httpx
-from archie_shared import events as ce
-from archie_shared.commands import AnswerCommand, InterruptCommand, SwitchModelCommand
-from archie_shared.events import LLMRequest, decode_event
-from archie_shared.kiro import kiro_model_id
-from archie_shared.models import load_models
-from archie_shared.protocol import PROTOCOL_VERSION
-from archie_shared.transcript import TranscriptBuilder
-from textual.app import App, ComposeResult
+import msgspec
+from archie_shared.session import SessionBackend, SessionDescriptor, container_name
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
-from textual.widgets import Footer
+from textual.command import CommandPalette
+from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
+from textual.widget import Widget
+from textual.widgets import Static
+from textual.worker import Worker
 
 from archie_cli.tui import theme
-from archie_cli.tui.conversation import format_cost
-from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
+from archie_cli.tui.animation import AnimationClock
+from archie_cli.tui.client import FeedEvent, OrchestratorClient, OrchestratorError, ProfileInfo
+from archie_cli.tui.commands import MODEL_PLACEHOLDER, ModelCommands, SessionCommands
+from archie_cli.tui.dialogs import (
+    KeysDialog,
+    NewSessionDialog,
+    QuitDialog,
+    RenameDialog,
+    stop_dialog,
+)
 from archie_cli.tui.input import MessageInput
-from archie_cli.tui.models_provider import ModelProvider, SubagentProvider
-from archie_cli.tui.question import QuestionPanel
-from archie_cli.tui.quit_screen import QuitScreen
-from archie_cli.tui.status import StatusBar
-from archie_cli.tui.throbber import Throbber, ThrobberContainer
-from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
-from archie_cli.ws_client import WSClient
+from archie_cli.tui.notices import NOTICE_TIMEOUT, Notice, Severity
+from archie_cli.tui.pane import SessionPane
+from archie_cli.tui.session import SessionController
+from archie_cli.tui.sidebar import SessionList, Sidebar
 
 log = logging.getLogger(__name__)
 
-# First protocol version whose session_status carries state and question.
-SESSION_STATE_PROTOCOL = 4
+MAX_CONTROLLERS = 5
+"""Controllers of visited sessions kept connected (084 D7)."""
+
+FEED_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
+"""Seconds between sessions-feed reconnects; the last repeats."""
+
+AGE_INTERVAL = 30.0
+"""Seconds between redraws of the sidebar's ages."""
+
+COPY_NOTICE_TIMEOUT = 2.0
+"""Seconds the "Copied to clipboard" notice shows."""
+
+EMPTY_TEXT = "No sessions — ctrl+n to start one"
+CONNECTING_TEXT = "Connecting…"
+
+QUESTION_CLIP = 80
+"""Characters of a question shown in a "Needs an answer" notice."""
+
+COMPACT_MESSAGE = "/compact"
+"""Sent as a message to compact a native session's context (084 D24)."""
+
+_MAIN_SCREEN_ACTIONS = frozenset(
+    {
+        "step_session",
+        "jump_session",
+        "cycle_focus",
+        "new_session",
+        "change_model",
+        "focus_filter",
+        "keys",
+        "quit",
+        "command_palette",
+    }
+)
+"""Key actions that act only while no dialog or palette is open."""
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` on one line, cut to ``limit`` characters with an ellipsis."""
+    line = " ".join(text.split())
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
+def transition_notice(
+    old: SessionDescriptor, new: SessionDescriptor
+) -> tuple[str, Severity] | None:
+    """The notice text and severity for a session's record change, or None (084 D17).
+
+    At most one per change, the most important first: the session ended ("Failed to
+    start" with its error for ``failed``), it asks a question (``blocked``), a turn
+    failed (``error``), or a root turn ended with a reply (``unseen`` became set).
+    """
+    if new.ended and not old.ended:
+        if new.status == "failed":
+            detail = f": {_clip(new.error, QUESTION_CLIP)}" if new.error else ""
+            return f"Failed to start{detail}", "error"
+        return "Session ended", "information"
+    if new.status == "blocked" and old.status != "blocked":
+        question = new.question.question if new.question is not None else ""
+        detail = f": {_clip(question, QUESTION_CLIP)}" if question else ""
+        return f"Needs an answer{detail}", "warning"
+    if new.status == "error" and old.status != "error":
+        return "Turn failed", "error"
+    if new.unseen and not old.unseen:
+        return "New reply", "information"
+    return None
+
+
+class Body(Horizontal):
+    """The window: sidebar and main area side by side."""
+
+    DEFAULT_CSS = """
+    Body {
+        height: 1fr;
+    }
+    """
+
+
+class Main(Vertical):
+    """The area right of the sidebar: one ``SessionPane`` or an ``EmptyPane``."""
+
+    DEFAULT_CSS = """
+    Main {
+        width: 1fr;
+        height: 1fr;
+    }
+    """
+
+
+class EmptyPane(Static):
+    """Shown in place of a session pane: before the feed's snapshot, or with no sessions."""
+
+    DEFAULT_CSS = """
+    EmptyPane {
+        width: 1fr;
+        height: 1fr;
+        padding: 1 2;
+    }
+    """
 
 
 class ArchieApp(App):
-    """TUI client that attaches to a running agent session via WebSocket."""
+    """TUI client for every session of one orchestrator.
+
+    Attributes:
+        profile: The orchestrator profile this window talks to.
+        records: Session records from the feed, by session ID.
+        current: ID of the session on screen, or None.
+        sidebar: The sidebar widget.
+        animation: The one animation clock (084 D16); animated widgets register with it.
+    """
 
     TITLE = "Archie"
     CSS_PATH = "archie.tcss"
-    COMMANDS = App.COMMANDS | {ModelProvider, SubagentProvider}
+    COMMANDS = {SessionCommands}  # our actions only: no Textual system commands
 
     BINDINGS = [
-        Binding("ctrl+q", "quit", "Quit"),
-        Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+c", "copy_block", "Copy Block"),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+n", "new_session", "New session", show=False, priority=True),
+        Binding("alt+m", "change_model", "Change model", show=False, priority=True),
+        Binding("ctrl+f", "focus_filter", "Filter sessions", show=False, priority=True),
+        Binding("f1", "keys", "Keys", show=False, priority=True),
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+c", "copy_block", "Copy Block", show=False),
         Binding("ctrl+g", "editor", "Editor", show=False),
-        Binding("ctrl+s", "subagent_picker", "Subagents"),
-        Binding("ctrl+x", "stop_child", "Stop selected child"),
+        # Priority, so it reaches the app while the input (where ctrl+x cuts) has focus;
+        # ``check_action`` passes the key on when no subagent view is open.
+        Binding("ctrl+x", "stop_child", "Stop selected child", show=False, priority=True),
+        Binding("alt+up", "step_session(-1)", "Previous session", show=False, priority=True),
+        Binding("alt+down", "step_session(1)", "Next session", show=False, priority=True),
+        *(
+            Binding(f"alt+{n}", f"jump_session({n})", show=False, priority=True)
+            for n in range(1, 10)
+        ),
+        Binding("tab", "cycle_focus(1)", show=False, priority=True),
+        Binding("shift+tab", "cycle_focus(-1)", show=False, priority=True),
     ]
 
-    def __init__(self, ws_url: str, api_url: str, container_name: str) -> None:
-        super().__init__()
+    def __init__(
+        self, client: OrchestratorClient, *, profile: ProfileInfo, focus: str | None = None
+    ) -> None:
+        """Create the window.
 
-        # Register custom theme
+        Args:
+            client: Access to the orchestrator.
+            profile: The orchestrator's profile (sidebar label, web link, local rule).
+            focus: Session to show first; None shows the newest live session.
+        """
+        super().__init__()
         self.register_theme(theme.THEME)
         self.theme = "archie"
 
-        self._ws_url = ws_url
-        self._api_url = api_url
-        self._container_name = container_name
-        self._ws = WSClient()
-        self._receive_task: asyncio.Task | None = None
-        self._reconnect_task: asyncio.Task | None = None
-        self._reconnecting: bool = False
-        self._shutting_down: bool = False
-        self._quit_prompt_open: bool = False
-        self._editor_active: bool = False
-        # Warn-once guard for protocol-version mismatch (avoids refire on reconnect)
-        self._protocol_warned: bool = False
-        # Canonical replay cursor: id of the latest event already rendered.
-        # Used for incremental replay via /events?after= on connect/reconnect.
-        self._last_event_id: str | None = None
-        # Ids of canonical events already rendered — dedup across replay + live.
-        self._seen_event_ids: set[str] = set()
-        # The session transcript, reduced from canonical events. It owns request
-        # reconciliation, tool grouping and subagent state; the views render it.
-        self.transcript = TranscriptBuilder()
-        # Ids of llm_request ledger events already folded into accounting —
-        # prevents double-counting across replay + live broadcast.
-        self._seen_accounted_ids: set[str] = set()
+        self._client = client
+        self.profile = profile
+        self._focus = focus
+        self.records: dict[str, SessionDescriptor] = {}
+        self.current: str | None = None
+        self.sidebar = Sidebar(profile)
+        self._main = Main()
+        self._placeholder: EmptyPane | None = EmptyPane(CONNECTING_TEXT)
+        self._pane: SessionPane | None = None
+        self._controllers: OrderedDict[str, SessionController] = OrderedDict()
+        self._start_tasks: dict[str, asyncio.Task] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._switch_lock = asyncio.Lock()
+        self._generation = 0
+        self._snapshot_seen = False
+        self._shutting_down = False
+        self._feed_worker: Worker | None = None
+        self._fetching: set[str] = set()  # sessions being fetched (missing from a snapshot)
+        self._seen_inflight: set[str] = set()  # sessions with an ``unseen`` PATCH running
+        self._seen_sent: dict[str, SessionDescriptor] = {}  # the record each was sent for
+        self.animation = AnimationClock()
 
-        # UI state
-        self._turn_active: bool = False
-        self._throbber: Throbber | None = None
-        self._last_esc_time: float = 0.0
-        # The pending question shown in the panel, and the id of an answer being sent.
-        self._question: ce.PendingQuestion | None = None
-        # Protocol of the attached agent, from its handshake. Agents before v4 send
-        # session_status without a state, which decodes as the "idle" default.
-        self._agent_protocol: int = 0
-        self._answer_in_flight: str | None = None
-
-        # Session state for local accumulation. Seeded from Handshake.accounting
-        # on connect, then updated live from broadcast llm_request ledger events.
-        self._session_id: str = ""
-        self._session_model_key: str = ""
-        self._cumulative_input: int = 0
-        self._cumulative_output: int = 0
-        self._cumulative_cache_read: int = 0
-        self._cumulative_cache_write: int = 0
-        self._latest_context_tokens: int = 0
-        self._latest_context_pct: float = 0.0
-        self._cumulative_cost: float = 0.0
-        # Kiro credits; None until a Kiro request reports them.
-        self._cumulative_credits: float | None = None
-        self._turn_started_at: float | None = None
-        self._turn_input = 0
-        self._turn_cache_read = 0
-        self._turn_cache_write = 0
-        self._turn_output = 0
-        self._turn_cost = 0.0
-        self._turn_credits: float | None = None
-        self._turn_duration_s = 0.0
-
-        # Live output estimation (chars/4, reconciled on LLMRequest)
-        self._estimated_output: int = 0
-
-        # Direct shell (! prefix) state
-        self._shell_active: bool = False
-        self._shell_proc: asyncio.subprocess.Process | None = None
-        self._shell_command: str = ""
-        self._shell_cancel_requested: bool = False
+    # --- Layout -----------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        """Build the main UI layout."""
-        yield Conversation(id="conversation")
-        yield ThrobberContainer(id="throbber-container")
-        yield QuestionPanel(id="question")
-        yield StatusBar(id="status")
-        yield MessageInput(id="input")
-        yield Footer()
+        """The sidebar and the main area."""
+        with Body():
+            yield self.sidebar
+            with self._main:
+                assert self._placeholder is not None
+                yield self._placeholder
 
-    async def on_mount(self) -> None:
-        """Connect to agent and start receiving events.
+    def on_mount(self) -> None:
+        """Start the animation and age timers and follow the sessions feed."""
+        self.animation.start(self)
+        self.set_interval(AGE_INTERVAL, self.sidebar.sessions.refresh_rows)
+        self._feed_worker = self.run_worker(self._follow_feed(), group="feed", exit_on_error=False)
 
-        Ordering: subscribe WS first → start receive loop (buffering) → the
-        Handshake frame provides the replay cursor → replay canonical
-        events via /events → reconcile buffered live events by event id.
-        """
-        self.query_one("#input", MessageInput).focus()
-
-        try:
-            await self._ws.connect(self._ws_url)
-        except Exception as e:
-            self._show_client_error(f"Connection failed: {e}")
-            return
-
-        # Start receive loop FIRST — events buffer in _event_buffer
-        self._event_buffer: list = []
-        self._buffering = True
-        self._receive_task = asyncio.create_task(self._receive_loop())
-
-        # Replay persisted canonical events while the receive loop buffers.
-        if not await self._replay_events():
-            self._buffering = False
-            self._event_buffer = []
-            self._show_client_error("Initial event replay failed; retrying connection.")
-            if self._receive_task is not None and not self._receive_task.done():
-                self._receive_task.cancel()
-                try:
-                    await self._receive_task
-                except asyncio.CancelledError:
-                    pass
-            await self._ws.disconnect()
-            self._schedule_reconnect()
-            return
-
-        # Reconcile: dispatch buffered live events not already rendered.
-        self._buffering = False
-        self._dispatch_buffered_events()
-
-        self._event_buffer = []
-
-    async def _replay_events(self) -> bool:
-        """Fetch and render persisted canonical events, advancing the cursor.
-
-        Requests /events?after=<cursor> when a cursor is known (reconnect),
-        otherwise the full log. Each NDJSON line is a canonical event which is
-        rendered via the shared reducer and deduplicated by event id.
-
-        Returns ``False`` when the history request cannot be completed. Callers
-        must not flush buffered live events or report a successful reconnect in
-        that case, because those events cannot fill the history gap.
-        """
-        after = self._last_event_id
-        url = f"{self._api_url}/events"
-        if after:
-            url += f"?after={after}"
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, timeout=5.0)
-                if resp.status_code == 409:
-                    # Cursor no longer exists in the log (rotated/archived). Reset
-                    # every replay-derived view before rebuilding from the full log.
-                    await self._reset_replay_state()
-                    resp = await client.get(f"{self._api_url}/events", timeout=5.0)
-                if resp.status_code != 200:
-                    return False
-                body = resp.text
-        except Exception as e:
-            log.warning("Failed to replay events: %s", e)
-            return False
-
-        # Rows are mounted once, from final node state, after the whole batch.
-        view = self._conversation()
-        if view is not None:
-            view.suspend()
-        try:
-            for line in body.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = decode_event(line, persisted=True)
-                except Exception as e:  # noqa: BLE001 — skip malformed replay lines
-                    log.warning("Skipping malformed replay event: %s", e)
-                    continue
-                self._apply_event(event)
-        finally:
-            if view is not None:
-                view.resume()
-
-        return True
-
-    def _conversation(self) -> Conversation | None:
-        """The main transcript view, or None before the app is mounted."""
-        try:
-            return self.query_one("#conversation", Conversation)
-        except Exception:  # noqa: BLE001 — no DOM yet (headless tests, early replay)
-            return None
-
-    async def _reset_replay_state(self) -> None:
-        """Clear all client state reconstructed from the persisted event stream."""
-        self._last_event_id = None
-        self._seen_event_ids.clear()
-        self.transcript = TranscriptBuilder()
-        self._seen_accounted_ids.clear()
-        self._cumulative_input = 0
-        self._cumulative_output = 0
-        self._cumulative_cache_read = 0
-        self._cumulative_cache_write = 0
-        self._latest_context_tokens = 0
-        self._latest_context_pct = 0.0
-        self._cumulative_cost = 0.0
-        self._cumulative_credits = None
-        self._estimated_output = 0
-        self._reset_turn_metrics()
-        self._turn_active = False
-        # Popups show nodes of the old model; close them before rebuilding.
-        while isinstance(self._top_screen(), DetailScreen):
-            await self.pop_screen()
-
-        conversation = self.query_one("#conversation", Conversation)
-        removal = conversation.reset()
-        if hasattr(removal, "__await__"):
-            await removal
-        self._update_accounting_status()
-
-    def _render_canonical(self, event) -> None:
-        """Apply one event: deduplicate by id, update the transcript model and its
-        views, then run client-side effects (status bar, throbber, turn state).
-
-        History reads and live frames use the same path; the transcript model
-        reconciles them by request identity.
-        """
-        event_id = getattr(event, "id", None)
-        if event_id is not None:
-            if event_id in self._seen_event_ids:
-                return
-            self._seen_event_ids.add(event_id)
-            if event.persist:
-                self._last_event_id = event_id
-
-        if isinstance(event, LLMRequest):
-            self._accumulate_ledger(event)
-        changes = self.transcript.apply(event)
-        self._dispatch_changes(changes)
-
-        if (
-            getattr(event, "scope", None) is not None
-            and getattr(event, "subagent_index", None) is not None
-        ):
-            return  # child events only change the transcript
-
-        if isinstance(event, ce.SessionStarted):
-            self._session_model_key = event.model_key
-        elif isinstance(event, ce.UserMessage):
-            self._reset_turn_metrics()
-        elif isinstance(event, ce.Handshake):
-            status = self.query_one("#status", StatusBar)
-            status.session_id = event.session_id
-            self._session_id = event.session_id
-            self._agent_protocol = event.protocol_version
-            if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
-                self._protocol_warned = True
-                self._show_client_error(
-                    f"Protocol version mismatch: session uses v{event.protocol_version}, "
-                    f"this client supports v{PROTOCOL_VERSION}. "
-                    "Some features may not work — consider updating the CLI."
-                )
-        elif isinstance(event, ce.SessionStatus):
-            self._session_model_key = event.model_key
-            status = self.query_one("#status", StatusBar)
-            kiro_id = kiro_model_id(event.model_key)
-            model = load_models().get(event.model_key)
-            if kiro_id is not None:
-                status.model_name = f"{kiro_id} (Kiro)"
-                status.supports_cache = False
-            elif model is not None:
-                status.model_name = model.name
-                status.supports_cache = model.can_cache
-            status.git_branch = event.git_branch
-            if self._agent_protocol >= SESSION_STATE_PROTOCOL:
-                self._apply_session_state(event)
-        elif isinstance(event, ce.CompactionStart):
-            self._remove_throbber()
-        elif isinstance(event, ce.CompactionComplete):
-            if event.tokens_after is not None:
-                self._latest_context_tokens = event.tokens_after
-                self._latest_context_pct = self._estimate_context_pct(
-                    event.tokens_after, self._session_model_key
-                )
-                self._update_accounting_status()
-            if event.reason == "manual":
-                self._end_turn()
-            else:
-                # The conversation request that follows is outstanding again.
-                self._show_throbber()
-        elif isinstance(event, ce.ContextCompacted):
-            self._remove_throbber()
-            self._latest_context_tokens = event.tokens_after
-            self._latest_context_pct = self._estimate_context_pct(
-                event.tokens_after, self._session_model_key
-            )
-            self._update_accounting_status()
-            if event.reason == "manual":
-                self._end_turn()
-        elif isinstance(event, ce.ErrorNotice):
-            self._show_client_error(event.message)
-            if (
-                event.kind
-                in {"turn_active", "turn_error", "storage_error", "manual_compaction_failed"}
-                and self._turn_active
-            ):
-                self._end_turn()
-        elif isinstance(event, ce.TextDelta):
-            if not changes:
-                return  # a late delta for a request that is already final
-            self._remove_throbber()
-            self._turn_active = True
-            self._estimated_output += len(event.text) // 4
-            status = self.query_one("#status", StatusBar)
-            status.session_output = self._cumulative_output + self._estimated_output
-        elif isinstance(event, ce.IterationStart):
-            # A new iteration means a new provider request is outstanding.
-            self._show_throbber()
-        elif isinstance(event, ce.ToolCall):
-            # The provider has responded with a tool request; pending tool rows
-            # represent execution while the next iteration owns the throbber.
-            self._remove_throbber()
-        elif isinstance(event, ce.LLMRequest):
-            self._turn_input += event.input_tokens
-            self._turn_cache_read += event.cache_read_tokens
-            self._turn_cache_write += event.cache_write_tokens
-            self._turn_output += event.output_tokens
-            self._turn_cost += event.cost_usd
-            self._turn_credits = _add_credits(self._turn_credits, event)
-            self._turn_duration_s += event.duration_ms / 1000
-        elif isinstance(event, (ce.TurnError, ce.TurnInterrupted)):
-            self._end_turn()
-        elif isinstance(event, ce.TurnComplete):
-            self._show_turn_status()
-            self._end_turn()
-
-    def _dispatch_changes(self, changes) -> None:
-        """Send model changes to the main view and every open popup."""
-        if not changes:
-            return
-        view = self._conversation()
-        if view is not None:
-            view.apply_changes(self.transcript, changes)
-        for screen in self._detail_screens():
-            screen.node_changed(self.transcript, changes)
-
-    def _top_screen(self):
-        try:
-            return self.screen
-        except Exception:  # noqa: BLE001 — headless tests have no screen stack
-            return None
-
-    def _detail_screens(self) -> list[DetailScreen]:
-        try:
-            stack = self.screen_stack
-        except Exception:  # noqa: BLE001 — headless tests have no screen stack
-            return []
-        return [screen for screen in stack if isinstance(screen, DetailScreen)]
-
-    def _crumbs(self) -> list[str]:
-        """Breadcrumb levels for a popup opened from the current screen."""
-        top = self._top_screen()
-        if isinstance(top, DetailScreen):
-            return list(top.crumbs)
-        return [self._session_id or "Session"]
-
-    def on_tool_clicked(self, message: ToolClicked) -> None:
-        self.push_screen(ToolDetailScreen(message.tool, self._crumbs()))
-
-    def on_subagent_clicked(self, message: SubagentClicked) -> None:
-        self.push_screen(SubagentScreen(message.sub, self._crumbs()))
-
-    def _accumulate_ledger(self, event: LLMRequest) -> None:
-        """Fold an llm_request ledger event into cumulative accounting.
-
-        This is the authoritative live cost/token source (matches the persisted
-        ledger). Deduplicated by event id so replay + live can't double-count.
-        Updates the status bar.
-        """
-        if event.id in self._seen_accounted_ids:
-            return
-        self._seen_accounted_ids.add(event.id)
-        self._estimated_output = 0
-        self._cumulative_input += event.input_tokens
-        self._cumulative_output += event.output_tokens
-        self._cumulative_cache_read += event.cache_read_tokens
-        self._cumulative_cache_write += event.cache_write_tokens
-        if event.scope is None and event.subagent_index is None and event.purpose != "compaction":
-            # Root conversation requests are persisted, so replay tracks model
-            # switches even though live-only session_status frames are absent.
-            self._session_model_key = event.model_key
-            self._latest_context_tokens = event.context_tokens
-            self._latest_context_pct = self._estimate_context_pct(
-                event.context_tokens, event.model_key
-            )
-        self._cumulative_cost += event.cost_usd
-        self._cumulative_credits = _add_credits(self._cumulative_credits, event)
-        self._update_accounting_status()
-
-    def _estimate_context_pct(self, context_tokens: int, model_key: str) -> float:
-        """Calculate context usage from a persisted request."""
-        model = load_models().get(model_key)
-        if model is None or model.context <= 0:
-            return 0.0
-        return (context_tokens / model.context) * 100
-
-    def _update_accounting_status(self) -> None:
-        """Push cumulative accounting to the status bar."""
-        status = self.query_one("#status", StatusBar)
-        status.session_input = self._cumulative_input
-        status.session_output = self._cumulative_output
-        status.cache_read = self._cumulative_cache_read
-        status.cache_write = self._cumulative_cache_write
-        status.context_tokens = self._latest_context_tokens
-        status.context_pct = self._latest_context_pct
-        status.pricing_label = format_cost(self._cumulative_cost, self._cumulative_credits)
-
-    async def _receive_loop(self) -> None:
-        """Consume events from the WebSocket and dispatch to widget updates.
-
-        During the buffering phase (before history is fetched), events are
-        stored in _event_buffer. After reconciliation, events are dispatched
-        directly.
-
-        When the generator ends because the connection dropped, we surface a
-        client error and kick off a reconnect attempt. A clean shutdown
-        (quit) does neither.
-        """
-        try:
-            async for event in self._ws.receive():
-                if self._buffering:
-                    self._event_buffer.append(event)
-                else:
-                    self._apply_event(event)
-        except Exception as e:
-            log.warning("WS receive loop error: %s", e)
-            if not self._shutting_down:
-                if not self._editor_active:
-                    self._show_client_error(f"Connection lost: {e}")
-                close_code = getattr(getattr(e, "rcvd", None), "code", None)
-                self._schedule_reconnect(close_code)
-            return
-
-        # Generator ended without raising — connection closed underneath us.
-        if not self._shutting_down:
-            if not self._editor_active:
-                self._show_client_error("Connection lost: the agent closed the stream.")
-            self._schedule_reconnect(None)
-
-    def _schedule_reconnect(self, close_code: int | None = None) -> None:
-        """Start a background reconnect task if one isn't already running."""
-        if self._reconnecting or self._shutting_down:
-            return
-        self._reconnecting = True
-        task = asyncio.create_task(self._reconnect(close_code))
-        self._reconnect_task = task
-
-        def clear_reconnect_task(done: asyncio.Task) -> None:
-            if self._reconnect_task is done:
-                self._reconnect_task = None
-
-        task.add_done_callback(clear_reconnect_task)
-
-    async def _ensure_connected(self) -> bool:
-        """Ensure the stream is connected before sending a user command."""
-        if self._ws.connected:
-            return True
-
-        # A receive-loop-triggered reconnect may already be in progress. Wait
-        # for that attempt rather than starting a competing replay/receive loop.
-        if self._reconnecting:
-            while self._reconnecting and not self._shutting_down:
-                await asyncio.sleep(0.05)
-            return self._ws.connected
-
-        return await self._run_tracked_reconnect()
-
-    async def _run_tracked_reconnect(self) -> bool:
-        """Run a reconnect in a task that quit can cancel, and wait for it."""
-        self._reconnecting = True
-        task = asyncio.create_task(self._reconnect())
-        self._reconnect_task = task
-        try:
-            return await task
-        finally:
-            if self._reconnect_task is task:
-                self._reconnect_task = None
-
-    async def _reconnect(self, close_code: int | None = None) -> bool:
-        """Reconnect to the agent with backoff and resync via canonical replay.
-
-        Close-code handling:
-        - 4004 (session not found): give up immediately.
-        - 4002 (backend unreachable) / 1006 (abnormal) / None: retry with backoff.
-
-        On success, restarts the receive loop and replays any missed canonical
-        events via /events?after=<last event id> (deduplicated by event id).
-
-        Total retry window is 30s before giving up.
-        """
-        if close_code == 4004:
-            if not self._editor_active:
-                self._show_client_error("Session has ended. Relaunch to start a new session.")
-            self._reconnecting = False
-            return False
-
-        start = asyncio.get_event_loop().time()
-        deadline = start + 30.0
-        delays = [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
-        try:
-            for attempt, delay in enumerate(delays, start=1):
-                if self._shutting_down:
-                    return
-                if asyncio.get_event_loop().time() + delay > deadline:
-                    break
-                if not self._editor_active:
-                    self.notify("Reconnecting...", timeout=delay)
-                await asyncio.sleep(delay)
-                try:
-                    await self._ws.connect(self._ws_url)
-                except Exception as e:  # noqa: BLE001 — retry on any connect failure
-                    log.warning("Reconnect attempt %d failed: %s", attempt, e)
-                    continue
-
-                # Reconnected — buffer incoming events, replay missed canonical
-                # events (deduped by id), then dispatch buffered live events.
-                self._event_buffer = []
-                self._buffering = True
-                # Cancel any stale receive loop before starting a fresh one.
-                if self._receive_task is not None and not self._receive_task.done():
-                    self._receive_task.cancel()
-                    try:
-                        await self._receive_task
-                    except asyncio.CancelledError:
-                        pass
-                self._receive_task = asyncio.create_task(self._receive_loop())
-                if not await self._replay_events():
-                    self._buffering = False
-                    self._event_buffer = []
-                    if self._receive_task is not None and not self._receive_task.done():
-                        self._receive_task.cancel()
-                        try:
-                            await self._receive_task
-                        except asyncio.CancelledError:
-                            pass
-                    await self._ws.disconnect()
-                    continue
-                self._buffering = False
-                self._dispatch_buffered_events()
-                self._event_buffer = []
-                if not self._editor_active:
-                    self.notify("Reconnected to agent")
-                return True
-
-            self._show_client_error("Reconnect failed after 30s. Relaunch the client to continue.")
-            return False
-        finally:
-            self._reconnecting = False
-
-    def _dispatch_buffered_events(self) -> None:
-        """Flush live frames after history; request keys suppress duplicates."""
-        for event in self._event_buffer:
-            self._apply_event(event)
-
-    def _apply_event(self, event) -> None:
-        """Apply one live or history event; both are handled the same way."""
-        self._render_canonical(event)
-
-    def open_child_detail(self, key: tuple[str, int]) -> None:
-        """Open the transcript popup for a known child (command palette)."""
-        child = self.transcript.subagents.get(key)
-        if child is None:
-            return
-        self.push_screen(SubagentScreen(child, self._crumbs()))
+    async def on_unmount(self) -> None:
+        """Stop the feed and close every controller."""
+        await self._close_sessions()
 
     @property
-    def _active_child_key(self) -> tuple[str, int] | None:
-        """The subagent ``ctrl+x`` stops: the topmost open subagent popup's."""
-        for screen in reversed(self._detail_screens()):
-            if isinstance(screen, SubagentScreen):
-                return (screen.sub.scope, screen.sub.index)
-        return None
+    def pane(self) -> SessionPane | None:
+        """The mounted session pane, or None."""
+        return self._pane
 
-    async def action_subagent_picker(self) -> None:
-        """Open the command palette filtered to subagent entries."""
-        self.action_command_palette()
+    @property
+    def on_screen(self) -> SessionDescriptor | None:
+        """The record of the session on screen, or None."""
+        return self.records.get(self.current) if self.current is not None else None
+
+    @property
+    def controller(self) -> SessionController | None:
+        """The on-screen session's controller, or None."""
+        return self._controllers.get(self.current) if self.current is not None else None
+
+    @property
+    def controllers(self) -> dict[str, SessionController]:
+        """Controllers kept, least recently shown first."""
+        return dict(self._controllers)
+
+    @property
+    def switching(self) -> bool:
+        """True while a switch runs (others may wait for it, D10)."""
+        return self._switch_lock.locked()
+
+    # --- Feed -------------------------------------------------------------------------
+
+    async def _follow_feed(self) -> None:
+        """Follow the sessions feed, reconnecting with back-off when it drops."""
+        attempt = 0
+        while not self._shutting_down:
+            try:
+                async for event in self._client.feed():
+                    attempt = 0
+                    await self._on_feed(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — any failure means reconnect
+                log.warning("Sessions feed lost: %s", exc)
+            if self._shutting_down:
+                return
+            delay = FEED_RETRY_DELAYS[min(attempt, len(FEED_RETRY_DELAYS) - 1)]
+            attempt += 1
+            await asyncio.sleep(delay)
+
+    async def _on_feed(self, event: FeedEvent) -> None:
+        if event[0] == "snapshot":
+            await self._on_snapshot(event[1])
+        else:
+            self._on_record(event[1])
+
+    async def _on_snapshot(self, sessions: list[SessionDescriptor]) -> None:
+        """Replace every record and re-sync the controllers (no notices).
+
+        The on-screen session keeps its record when the snapshot lacks it (it ended
+        while the feed was down) and is fetched on its own. Controllers of live
+        sessions whose stream is down reconnect; those of sessions no longer listed
+        stop. On the first snapshot, show the initial session.
+        """
+        records = {record.session_id: record for record in sessions}
+        current = self.current
+        if current is not None and current not in records and current in self.records:
+            records[current] = self.records[current]
+            self._fetch_record(current)
+        self.records = records
+        self._records_changed()
+        for controller in self._controllers.values():
+            controller.resume()
+        if not self._snapshot_seen:
+            self._snapshot_seen = True
+            target = self._initial_session()
+            if target is None:
+                if self._placeholder is not None:
+                    self._placeholder.update(EMPTY_TEXT)
+            else:
+                await self.switch_to(target)
+
+    def _on_record(self, record: SessionDescriptor) -> None:
+        """Update one session's row (and the pane when it is on screen).
+
+        A change to a session that is not on screen may post a notice; clicking it
+        shows the session.
+        """
+        session_id = record.session_id
+        old = self.records.get(session_id)
+        self.records[session_id] = record
+        if old is not None and session_id != self.current:
+            change = transition_notice(old, record)
+            if change is not None:
+                text, severity = change
+                self.notice(record.name, text, severity, session_id=session_id)
+        self._records_changed()
+
+    def _records_changed(self) -> None:
+        self.sidebar.show(self.records, self.current)
+        pane = self._pane
+        if pane is not None and self.current in self.records:
+            pane.update_record(self.records[self.current])
+        for session_id, controller in self._controllers.items():
+            self._maybe_start(session_id, controller)
+            if controller.started and not self._record_live(session_id):
+                controller.end()
+        self._clear_unseen()
+
+    def _record_live(self, session_id: str) -> bool:
+        """True while the feed has a record of the session that has not ended."""
+        record = self.records.get(session_id)
+        return record is not None and not record.ended
+
+    def _fetch_record(self, session_id: str) -> None:
+        """Fetch a record the snapshot lacks (084 D9); one fetch per session at a time."""
+        if session_id in self._fetching or self._shutting_down:
+            return
+        self._fetching.add(session_id)
+        self._spawn(self._fetch(session_id))
+
+    async def _fetch(self, session_id: str) -> None:
+        before = self.records.get(session_id)
+        try:
+            try:
+                record = await self._client.session(session_id)
+            except OrchestratorError as exc:
+                if exc.status_code != 404 or before is None:
+                    log.warning("Could not fetch session %s: %s", session_id, exc)
+                    return
+                # The orchestrator no longer knows it: show it as ended.
+                record = (
+                    before if before.ended else msgspec.structs.replace(before, status="exited")
+                )
+            if self._shutting_down or self.records.get(session_id) is not before:
+                return  # the feed sent something newer meanwhile
+            self.records[session_id] = record
+            self._records_changed()
+        except Exception as exc:  # noqa: BLE001 — a failed fetch only waits for the next snapshot
+            log.warning("Could not fetch session %s: %s", session_id, exc)
+        finally:
+            self._fetching.discard(session_id)
+
+    def _clear_unseen(self) -> None:
+        """PATCH ``unseen: false`` for the on-screen session when its record has it (D18).
+
+        Sent once per record from the feed, one PATCH at a time per session. A record
+        with ``unseen`` that arrives while a PATCH runs may come from a turn that ended
+        after the server applied it, so once the PATCH is answered the on-screen record
+        is checked again: if it is newer than the one the PATCH was sent for and still
+        has ``unseen``, one more PATCH goes. Failures are logged, not shown.
+        """
+        session_id = self.current
+        record = self.records.get(session_id) if session_id is not None else None
+        if session_id is None or record is None or not record.unseen or self._shutting_down:
+            return
+        if self._seen_sent.get(session_id) is record or session_id in self._seen_inflight:
+            return  # sent for this record, or re-checked when the running PATCH returns
+        self._seen_inflight.add(session_id)
+        self._seen_sent[session_id] = record
+        self._spawn(self._mark_seen(session_id))
+
+    async def _mark_seen(self, session_id: str) -> None:
+        try:
+            await self._client.patch(session_id, {"unseen": False})
+        except Exception as exc:  # noqa: BLE001 — logged, not shown (D18)
+            log.warning("Could not mark session %s seen: %s", session_id, exc)
+        finally:
+            self._seen_inflight.discard(session_id)
+        self._clear_unseen()  # a record that arrived meanwhile may need one more
+
+    def _initial_session(self) -> str | None:
+        """``focus`` when the feed knows it, else the newest live session."""
+        if self._focus is not None and self._focus in self.records:
+            return self._focus
+        live = [record for record in self.records.values() if not record.ended]
+        if not live:
+            return None
+        return max(live, key=lambda record: (record.started_at, record.session_id)).session_id
+
+    # --- Controllers ------------------------------------------------------------------
+
+    def _controller_for(self, record: SessionDescriptor) -> SessionController:
+        """The session's controller, created on first visit, marked most recent."""
+        session_id = record.session_id
+        controller = self._controllers.get(session_id)
+        if controller is None:
+            name = record.container_name or container_name(session_id)
+            controller = SessionController(
+                self._client,
+                session_id,
+                name,
+                is_live=lambda: self._record_live(session_id),
+                direct_shell=self.profile.local,
+            )
+            self._controllers[session_id] = controller
+        else:
+            self._controllers.move_to_end(session_id)
+        return controller
+
+    def _maybe_start(self, session_id: str, controller: SessionController) -> None:
+        """Start a controller once its record is known and has left ``starting``.
+
+        A ``failed`` session never ran, so there is nothing to load; its pane shows the
+        start error.
+        """
+        record = self.records.get(session_id)
+        if controller.started or record is None or record.status in ("starting", "failed"):
+            return
+        if self._shutting_down:
+            return
+        task = controller.start_soon(live=not record.ended)
+        self._start_tasks[session_id] = task
+
+        def done(finished: asyncio.Task) -> None:
+            if self._start_tasks.get(session_id) is finished:
+                del self._start_tasks[session_id]
+
+        task.add_done_callback(done)
+
+    def _evict(self) -> None:
+        """Close the least recently shown evictable controllers beyond the limit (D7)."""
+        while len(self._controllers) > MAX_CONTROLLERS:
+            victim = next(
+                (
+                    session_id
+                    for session_id, controller in self._controllers.items()
+                    if session_id != self.current and controller.evictable
+                ),
+                None,
+            )
+            if victim is None:
+                return
+            controller = self._controllers.pop(victim)
+            self._spawn(self._close_controller(victim, controller))
+
+    async def _close_controller(self, session_id: str, controller: SessionController) -> None:
+        task = self._start_tasks.pop(session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 — closing must continue
+                log.debug("Session %s start ended during close: %s", session_id, exc)
+        controller.detach()
+        await controller.close()
+
+    async def _close_sessions(self) -> None:
+        """Stop following the feed and close every controller (sessions keep running)."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        if self._feed_worker is not None:
+            self._feed_worker.cancel()
+        if self._pane is not None:
+            self._pane.detach()
+        controllers = list(self._controllers.items())
+        self._controllers.clear()
+        await asyncio.gather(
+            *(self._close_controller(sid, c) for sid, c in controllers),
+            return_exceptions=True,
+        )
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    # --- Switching --------------------------------------------------------------------
+
+    async def switch_to(self, session_id: str) -> None:
+        """Show ``session_id`` in the pane (084 D10).
+
+        Switches run one at a time; one that a newer switch overtook while it waited
+        for its turn does nothing.
+        """
+        self._generation += 1
+        generation = self._generation
+        async with self._switch_lock:
+            if generation != self._generation or self._shutting_down:
+                return
+            await self._show(session_id)
+
+    async def _show(self, session_id: str) -> None:
+        record = self.records.get(session_id)
+        if record is None or (session_id == self.current and self._pane is not None):
+            return
+        old = self._pane
+        # No frame may be drawn from the old pane's removal until the new pane is in.
+        # Textual prunes a removed widget's descendants one by one but drops them from
+        # the screen's layout only after the whole subtree is gone, so a repaint in
+        # between (moving focus off the input requests one) draws pruned widgets: a
+        # pruned TextArea (the input) has lost its component styles and raises
+        # KeyError 'text-area--gutter'. The layout refresh makes the next frame drop
+        # the removed widgets before it draws anything.
+        with self.batch_update():
+            if old is not None:
+                old.detach()
+                self._pane = None
+                await old.remove()
+            if self._placeholder is not None:
+                await self._placeholder.remove()
+                self._placeholder = None
+
+            self.current = session_id
+            controller = self._controller_for(record)
+            pane = SessionPane(record)
+            await self._main.mount(pane)
+            pane.attach(controller)
+            self._pane = pane
+            self._maybe_start(session_id, controller)
+            self._evict()
+            self._records_changed()
+            pane.focus_input()
+            self._main.screen.refresh(layout=True)
+
+    def _request_switch(self, session_id: str) -> None:
+        self.run_worker(self.switch_to(session_id), group="switch", exit_on_error=False)
+
+    def on_session_list_chosen(self, message: SessionList.Chosen) -> None:
+        """A sidebar row was clicked."""
+        message.stop()
+        self._request_switch(message.session_id)
+
+    def on_notice_chosen(self, message: Notice.Chosen) -> None:
+        """A notice about a session was clicked: show that session."""
+        message.stop()
+        self._request_switch(message.session_id)
+
+    # --- Notices ----------------------------------------------------------------------
+
+    def notice(
+        self,
+        title: str,
+        text: str = "",
+        severity: Severity = "information",
+        *,
+        timeout: float = NOTICE_TIMEOUT,
+        session_id: str | None = None,
+    ) -> None:
+        """Show a notice in the sidebar (084 D17).
+
+        Args:
+            title: The bold first line.
+            text: The text under it.
+            severity: The colour of its bar.
+            timeout: Seconds until it goes.
+            session_id: The session it is about; clicking it shows that session.
+        """
+        self.sidebar.notices.add(title, text, severity, timeout=timeout, session_id=session_id)
+
+    def action_step_session(self, step: int) -> None:
+        """alt+↑/↓: show the previous or next session in sidebar order (wrapping)."""
+        order = self.sidebar.sessions.order
+        if not order:
+            return
+        if self.current in order:
+            index = (order.index(self.current) + step) % len(order)
+        else:
+            index = 0 if step > 0 else len(order) - 1
+        self._request_switch(order[index])
+
+    def action_jump_session(self, number: int) -> None:
+        """alt+1…9: show the n-th session in sidebar order."""
+        order = self.sidebar.sessions.order
+        if 1 <= number <= len(order):
+            self._request_switch(order[number - 1])
+
+    def action_cycle_focus(self, step: int) -> None:
+        """tab/shift+tab: move focus between the filter, session list, transcript and input."""
+        targets: list[Widget] = [self.sidebar.filter, self.sidebar.sessions]
+        if self._pane is not None:
+            targets.append(self._pane.transcript)  # the open detail view's, if any
+            if not self._pane.input.disabled:
+                targets.append(self._pane.input)
+        focused = self.focused
+        chain = list(focused.ancestors_with_self) if focused is not None else []
+        index = next((i for i, target in enumerate(targets) if target in chain), -1)
+        targets[(index + step) % len(targets)].focus()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Switching, focus and dialog keys act only on the main screen (a dialog or the
+        palette gets them otherwise); ``ctrl+x`` only while a subagent view is open
+        (otherwise the key goes on to the focused widget)."""
+        if action in _MAIN_SCREEN_ACTIONS:
+            return self._on_main_screen()
+        if action == "stop_child":
+            return self.active_child_key is not None
+        return True
+
+    # --- Subagent views ---------------------------------------------------------------
+
+    @property
+    def active_child_key(self) -> tuple[str, int] | None:
+        """The subagent ``ctrl+x`` stops (the pane's topmost subagent view's), or None."""
+        return self._pane.active_child_key if self._pane is not None else None
 
     def action_stop_child(self) -> None:
-        """Target-stop the selected child while leaving siblings active."""
-        if self._active_child_key is not None:
-            asyncio.create_task(
-                self._ws.send_command(
-                    InterruptCommand(
-                        scope=self._active_child_key[0], subagent_index=self._active_child_key[1]
-                    )
-                )
-            )
+        """ctrl+x: stop the child shown in the open subagent view; siblings keep running."""
+        if self._pane is not None:
+            self._pane.stop_child()
 
-    # --- Message flow ---
+    # --- Actions ----------------------------------------------------------------------
 
-    def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
-        """Handle user message submission."""
-        content = event.content
+    def action_cancel(self) -> None:
+        """Esc: forwarded to the on-screen session."""
+        if self._pane is not None:
+            self._pane.cancel()
 
-        # Direct shell: ! prefix bypasses the LLM entirely
-        if content.startswith("!"):
-            command = content[1:].strip()
-            if not command:
-                return
-            if self._shell_active:
-                conv = self.query_one("#conversation", Conversation)
-                conv.add_client_error("Shell command already running")
-                return
-            asyncio.create_task(self._run_direct_shell(command))
-            return
-
-        if self._question is not None:
-            self._answer(AnswerCommand(question_id=self._question.id, text=content))
-            return
-
-        if self._turn_active:
-            return
-
-        content = event.content
-        self._turn_active = True
-        self._turn_started_at = time.monotonic()
-        self._turn_input = 0
-        self._turn_cache_read = 0
-        self._turn_cache_write = 0
-        self._turn_output = 0
-        self._turn_cost = 0.0
-        self._turn_credits = None
-        self._turn_duration_s = 0.0
-        # Show throbber while waiting
-        self._show_throbber()
-
-        self.query_one("#input", MessageInput).disabled = True
-
-        # Send via WebSocket (fire-and-forget task)
-        asyncio.create_task(self._send_message(content))
-
-    async def _send_message(self, content: str) -> None:
-        """Reconnect if needed, then send a message to the agent."""
-        try:
-            if not await self._ensure_connected():
-                raise RuntimeError("Not connected")
-            await self._ws.send_message(content)
-        except Exception as e:
-            self._show_client_error(f"Send failed: {e}")
-            self._end_turn()
-            # A send failure means the socket is dead; try to recover.
-            self._schedule_reconnect()
-
-    async def _run_direct_shell(self, command: str) -> None:
-        """Execute and render a command locally through host-side docker exec."""
-        conv = self.query_one("#conversation", Conversation)
-        self._shell_active = True
-        self._shell_command = command
-        self._shell_cancel_requested = False
-        max_output_lines = 10_000
-        timeout = 30
-
-        try:
-            self._shell_proc = await asyncio.create_subprocess_exec(
-                "docker",
-                "exec",
-                "-w",
-                "/workspace",
-                self._container_name,
-                "bash",
-                "-c",
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            try:
-                stdout_bytes, _ = await asyncio.wait_for(
-                    self._shell_proc.communicate(), timeout=timeout
-                )
-                exit_code = (
-                    130 if self._shell_cancel_requested else (self._shell_proc.returncode or 0)
-                )
-                output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-            except TimeoutError:
-                self._shell_proc.kill()
-                await self._shell_proc.wait()
-                exit_code = 124
-                output = "(timed out)"
-
-            lines = output.split("\n")
-            if len(lines) > max_output_lines:
-                output = "\n".join(lines[:max_output_lines]) + "\n(truncated)"
-            conv.add_shell_output(command, output, exit_code=exit_code)
-        except Exception as exc:  # noqa: BLE001 — local execution failure
-            conv.add_client_error(f"Docker exec failed: {exc}")
-        finally:
-            self._shell_active = False
-            self._shell_proc = None
-            self._shell_command = ""
-            self._shell_cancel_requested = False
-
-    # --- Pending question ---
-
-    def _apply_session_state(self, event: ce.SessionStatus) -> None:
-        """Follow the agent's live state: the pending question and whether a turn runs."""
-        if event.state in ("working", "blocked") and not self._turn_active:
-            # Joined mid-turn (reconnect or another client's turn): Esc must interrupt.
-            self._turn_active = True
-            self.query_one("#input", MessageInput).disabled = True
-        if event.question is not None:
-            self._show_question(event.question)
-        elif self._question is not None:
-            self._hide_question()
-        if event.state == "idle" and self._turn_active:
-            # A turn the client missed the end of (the terminal event normally ends it first).
-            self._end_turn()
-
-    def _show_question(self, question: ce.PendingQuestion) -> None:
-        self._question = question
-        self.query_one("#question", QuestionPanel).show(question)
-        self._remove_throbber()
-        inp = self.query_one("#input", MessageInput)
-        inp.choice_handler = self._on_choice_key
-        inp.disabled = False
-        inp.focus()
-
-    def _hide_question(self) -> None:
-        self._question = None
-        self._answer_in_flight = None
-        self.query_one("#question", QuestionPanel).hide()
-        inp = self.query_one("#input", MessageInput)
-        inp.choice_handler = None
-        if self._turn_active:
-            inp.disabled = True
-
-    def _on_choice_key(self, key: str) -> bool:
-        """Selection keys on an empty input while a question is shown."""
-        question = self._question
-        if question is None:
-            return False
-        panel = self.query_one("#question", QuestionPanel)
-        if key in ("up", "down"):
-            panel.move(-1 if key == "up" else 1)
-            return True
-        if key in ("enter", "kp_enter"):
-            self._answer(AnswerCommand(question_id=question.id, option=panel.selected))
-            return True
-        if key.isdigit() and 1 <= int(key) <= len(question.options):
-            self._answer(AnswerCommand(question_id=question.id, option=int(key) - 1))
-            return True
-        return False
-
-    def _answer(self, command: AnswerCommand) -> None:
-        if self._answer_in_flight == command.question_id:
-            return
-        self._answer_in_flight = command.question_id
-        asyncio.create_task(self._send_answer(command))
-
-    async def _send_answer(self, command: AnswerCommand) -> None:
-        """Send an answer; hide the panel only once it was sent."""
-        try:
-            if not await self._ensure_connected():
-                raise RuntimeError("Not connected")
-            await self._ws.send_command(command)
-        except Exception as e:  # noqa: BLE001 — surface any send failure
-            self._answer_in_flight = None
-            self._show_client_error(f"Send failed: {e}")
-            return
-        if self._question is not None and self._question.id == command.question_id:
-            self._hide_question()
-
-    # --- UI helpers ---
-
-    def _reset_turn_metrics(self) -> None:
-        """Reset client-only accounting for the next root turn."""
-        self._turn_started_at = None
-        self._turn_input = 0
-        self._turn_cache_read = 0
-        self._turn_cache_write = 0
-        self._turn_output = 0
-        self._turn_cost = 0.0
-        self._turn_credits = None
-        self._turn_duration_s = 0.0
-
-    def _show_turn_status(self) -> None:
-        """Render client-only metrics for the completed root turn."""
-        if self._turn_started_at is None and not any(
-            (
-                self._turn_input,
-                self._turn_cache_read,
-                self._turn_cache_write,
-                self._turn_output,
-                self._turn_cost,
-                self._turn_credits,
-            )
-        ):
-            return
-        duration_s = (
-            time.monotonic() - self._turn_started_at
-            if self._turn_started_at is not None
-            else self._turn_duration_s
-        )
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_turn_status(
-            duration_s,
-            self._turn_input,
-            self._turn_cache_read,
-            self._turn_cache_write,
-            self._turn_output,
-            self._turn_cost,
-            self._turn_credits,
-        )
-        self._turn_started_at = None
-
-    def _end_turn(self) -> None:
-        """Single teardown path for every turn outcome."""
-        self._remove_throbber()
-        conv = self.query_one("#conversation", Conversation)
-        conv.finish_streams()
-        self._turn_active = False
-        inp = self.query_one("#input", MessageInput)
-        inp.disabled = False
-        inp.focus()
-
-    def _show_throbber(self) -> None:
-        """Show the fixed throbber while the agent is thinking."""
-        if self._throbber is not None or not self._turn_active:
-            return
-        self._throbber = self.query_one("#throbber", Throbber)
-        self._throbber.display = True
-
-    def _remove_throbber(self) -> None:
-        """Hide the throbber animation widget."""
-        if self._throbber is not None:
-            self._throbber.display = False
-            self._throbber = None
-        else:
-            self.query_one("#throbber", Throbber).display = False
-
-    def _show_client_error(self, message: str) -> None:
-        """Display a client/transport error, marked as local to this client.
-
-        These originate in the TUI or WebSocket transport and are NOT recorded
-        in the session log, so they are styled distinctly from agent errors.
-        """
-        conv = self.query_one("#conversation", Conversation)
-        conv.add_client_error(message)
-
-    # --- Actions ---
+    def action_open_web(self) -> None:
+        """Open the orchestrator's web interface in the browser (084 D34)."""
+        webbrowser.open(self.profile.web_url)
 
     def action_copy_block(self) -> None:
         """Copy the current text selection, or the focused message block."""
         selected = self.screen.get_selected_text()
         if selected is not None:
             self.copy_to_clipboard(selected)
-            self.notify("Copied to clipboard")
+            self.notice("Copied to clipboard", timeout=COPY_NOTICE_TIMEOUT)
             return
 
         focused = self.focused
@@ -922,164 +700,291 @@ class ArchieApp(App):
             text = get_copy_text()
             if text:
                 self.copy_to_clipboard(text)
-                self.notify("Copied to clipboard")
+                self.notice("Copied to clipboard", timeout=COPY_NOTICE_TIMEOUT)
                 return
 
-    def action_cancel(self) -> None:
-        """Esc — signal the agent to interrupt, or kill running shell command.
+    def action_focus_filter(self) -> None:
+        """ctrl+f: focus the sidebar's filter."""
+        self.sidebar.filter.focus()
 
-        When idle, double-tap within 500ms clears the input.
-        """
-        if self._shell_active and self._shell_proc is not None:
-            self._shell_cancel_requested = True
-            self._shell_proc.kill()
-            return
-        if self._question is not None:
-            # First Esc dismisses the question; the next one interrupts the turn.
-            self._answer(AnswerCommand(question_id=self._question.id, dismiss=True))
-            self._last_esc_time = 0
-            return
-        if self._turn_active:
-            asyncio.create_task(self._ws.send_interrupt())
-            self._last_esc_time = 0
+    def _on_main_screen(self) -> bool:
+        try:
+            return self.screen is self.screen_stack[0]
+        except Exception:  # noqa: BLE001 — no screen yet
+            return False
+
+    def _acting_on(self) -> SessionDescriptor | None:
+        """The on-screen session's record when session actions apply (it has not ended)."""
+        record = self.on_screen
+        return record if record is not None and not record.ended else None
+
+    def _dialog(self, flow: Coroutine[Any, Any, None]) -> None:
+        """Run a dialog flow (it waits for the dialog) in a worker."""
+        self.run_worker(flow, group="dialog", exit_on_error=False)
+
+    async def _session_dialog[T](self, dialog: Screen[T]) -> T:
+        """Show a session dialog over the pane, dimming the pane, and wait for it (D14)."""
+        self._main.add_class("-dimmed")
+        try:
+            return await self.push_screen_wait(dialog)
+        finally:
+            self._main.remove_class("-dimmed")
+
+    def _session_error(self, session_id: str, message: str) -> None:
+        """Report a failed session action as a client row in its pane, else a notice."""
+        controller = self._controllers.get(session_id)
+        if controller is not None:
+            controller.client_error(message)
         else:
-            now = time.monotonic()
-            inp = self.query_one("#input", MessageInput)
-            if self._last_esc_time and (now - self._last_esc_time) < 0.5 and inp.text:
-                inp.clear()
-                self._last_esc_time = 0
-            else:
-                self._last_esc_time = now
+            record = self.records.get(session_id)
+            self.notice(record.name if record else session_id, message, "error")
 
-    async def action_quit(self) -> None:
-        """Prompt before leaving, optionally terminating the attached session."""
-        if self._shutting_down or self._quit_prompt_open:
-            return
-        self._quit_prompt_open = True
-        self.push_screen(QuitScreen(), self._finish_quit)
+    def _apply_record(self, record: SessionDescriptor) -> None:
+        """Take a record an action returned (the feed sends the same change too)."""
+        if record.session_id in self.records:
+            self.records[record.session_id] = record
+            self._records_changed()
 
-    async def _finish_quit(self, terminate_session: bool | None) -> None:
-        """Complete quit after the confirmation screen has been answered."""
-        if terminate_session is None:
-            self._quit_prompt_open = False
-            return
-        self._quit_prompt_open = False
-        self._shutting_down = True
-        current_task = asyncio.current_task()
-        active_tasks = (self._receive_task, self._reconnect_task)
-        for task in active_tasks:
-            if task is not None and task is not current_task and not task.done():
-                task.cancel()
-        for task in active_tasks:
-            if task is None or task is current_task or task.done():
-                continue
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:  # noqa: BLE001 — shutdown must continue
-                log.debug("Session client task ended during shutdown: %s", exc)
-        self._receive_task = None
-        self._reconnect_task = None
-        self._reconnecting = False
+    # New session (D3)
 
+    def action_new_session(self) -> None:
+        """ctrl+n: list the workspaces, ask for a workspace and backend, start it."""
+        self._dialog(self._new_session())
+
+    async def _new_session(self) -> None:
         try:
-            await self._ws.disconnect()
-        except Exception as exc:  # noqa: BLE001 — shutdown must continue
-            log.debug("Session WebSocket ended during shutdown: %s", exc)
+            workspaces = await self._client.workspaces()
+        except OrchestratorError as exc:
+            self.notice("Could not list workspaces", str(exc), "error")
+            return
+        names = sorted(workspace.name for workspace in workspaces)
+        if not names:
+            self.notice("No workspaces", "Add a directory under the workspace root.", "warning")
+            return
+        record = self.on_screen
+        workspace = record.workspace if record is not None else names[0]
+        backend = record.backend if record is not None else "native"
+        request = await self.push_screen_wait(NewSessionDialog(names, workspace, backend))
+        if request is not None:
+            await self.create_session(request.workspace, request.backend)
 
-        if terminate_session:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.delete(self._api_url, timeout=15.0)
-                if response.status_code not in {200, 404, 409}:
-                    self._show_client_error(f"Failed to terminate session: {response.status_code}")
-            except httpx.HTTPError as exc:
-                self._show_client_error(f"Failed to terminate session: {exc}")
-        await super().action_quit()
+    async def create_session(self, workspace: str, backend: SessionBackend) -> None:
+        """Start a session and show it (its pane says "Starting…" until it has started).
 
-    async def _recover_after_editor(self) -> None:
-        """Restore the stream after returning from the blocking editor.
-
-        The editor blocks the event loop, so the WebSocket may still report OPEN
-        even though its keepalive has already expired. Force a fresh connection
-        instead of trusting that stale state.
+        Args:
+            workspace: The workspace to start it in.
+            backend: ``native`` (Archie) or ``kiro``.
         """
         try:
-            if self._reconnecting:
-                recovered = await self._ensure_connected()
-            else:
-                await self._ws.disconnect()
-                recovered = await self._run_tracked_reconnect()
-            if not recovered:
-                self._show_client_error("Unable to reconnect after closing the editor.")
-        except Exception as exc:  # noqa: BLE001 — surface recovery failures only
-            self._show_client_error(f"Unable to reconnect after closing the editor: {exc}")
-        finally:
-            self._editor_active = False
-
-    def action_editor(self) -> None:
-        """Open $EDITOR for message composition. Auto-submits on save."""
-        if self._turn_active:
+            record = await self._client.create(workspace, backend)
+        except OrchestratorError as exc:
+            self.notice("Session not started", str(exc), "error")
             return
-        self._editor_active = True
+        if record.session_id not in self.records:  # the feed may have sent it already
+            self.records[record.session_id] = record
+            self._records_changed()
+        await self.switch_to(record.session_id)
 
-        editor = os.environ.get("EDITOR", "nano")
-        inp = self.query_one("#input", MessageInput)
-        current_text = inp.text
+    # Rename and stop
 
-        # Write current input to a tempfile
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, prefix="archie-")
+    def action_rename_session(self) -> None:
+        """Palette: rename the session on screen (an empty name resets it)."""
+        record = self._acting_on()
+        if record is not None:
+            self._dialog(self._rename(record.session_id))
+
+    async def _rename(self, session_id: str) -> None:
+        record = self.records[session_id]
+        result = await self._session_dialog(RenameDialog(record, over=self._main.region))
+        if result is None:
+            return
         try:
-            tmp.write(current_text)
-            tmp.close()
-            mtime_before = os.path.getmtime(tmp.name)
+            updated = await self._client.patch(session_id, {"name": result.name})
+        except OrchestratorError as exc:
+            self._session_error(session_id, f"Rename failed: {exc}")
+            return
+        self._apply_record(updated)
 
-            editor_error: str | None = None
-            with self.suspend():
-                try:
-                    subprocess.run([editor, tmp.name], check=False)
-                except FileNotFoundError:
-                    editor_error = f"Editor not found: {editor}"
+    def action_stop_session(self) -> None:
+        """Palette: stop the session on screen, after confirming."""
+        record = self._acting_on()
+        if record is not None:
+            self._dialog(self._stop(record.session_id))
 
-            if editor_error:
-                self.notify(editor_error, severity="error")
-                return
+    async def _stop(self, session_id: str) -> None:
+        record = self.records[session_id]
+        if not await self._session_dialog(stop_dialog(record, over=self._main.region)):
+            return
+        try:
+            stopped = await self._client.delete(session_id)
+        except OrchestratorError as exc:
+            self._session_error(session_id, f"Could not stop the session: {exc}")
+            return
+        self._apply_record(stopped)
 
-            mtime_after = os.path.getmtime(tmp.name)
-            if mtime_after == mtime_before:
-                # Editor exited without saving — no-op
-                return
+    # Model and compaction (D24)
 
-            with open(tmp.name) as f:
-                content = f.read().strip()
+    @property
+    def session_model_key(self) -> str:
+        """The on-screen session's model key (the model picker), or ``""``."""
+        controller = self.controller
+        if controller is not None and controller.model_key:
+            return controller.model_key
+        record = self.on_screen
+        return (record.model_key or "") if record is not None else ""
 
-            if content:
-                inp.clear()
-                inp._history.append(content)
-                inp._history_idx = len(inp._history)
-                inp._draft = ""
-                inp.post_message(MessageInput.Submitted(content))
-            else:
-                inp.clear()
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-            asyncio.create_task(self._recover_after_editor())
+    def action_change_model(self) -> None:
+        """alt+m: the palette with only the session's models."""
+        record = self._acting_on()
+        if record is None or record.status == "starting" or CommandPalette.is_open(self):
+            return
+        self.push_screen(CommandPalette(providers=[ModelCommands], placeholder=MODEL_PLACEHOLDER))
 
     def switch_model(self, model_key: str) -> None:
-        """Send a model switch command to the agent (called by ModelProvider)."""
-        if self._turn_active:
-            self.notify("Cannot switch model during active turn", severity="warning")
+        """Ask the on-screen session to switch model (the model picker's choice)."""
+        controller = self.controller
+        if controller is None or self._acting_on() is None or model_key == controller.model_key:
             return
-        asyncio.create_task(self._ws.send_command(SwitchModelCommand(model_key=model_key)))
+        if not controller.switch_model(model_key):
+            self.notice(
+                "Model not switched", "Cannot switch model during an active turn", "warning"
+            )
 
+    def action_compact(self) -> None:
+        """Palette: compact a native session's context by sending ``/compact`` (D24)."""
+        record = self._acting_on()
+        controller = self.controller
+        if record is None or record.backend == "kiro" or controller is None:
+            return
+        if controller.turn_active:
+            self.notice("Not compacted", "Wait for the turn to finish.", "warning")
+            return
+        controller.submit(COMPACT_MESSAGE)
 
-def _add_credits(total: float | None, event: LLMRequest) -> float | None:
-    """Add a request's Kiro credits to ``total``; native requests leave it unchanged."""
-    credits = event.credits
-    if not isinstance(credits, int | float):  # msgspec.UNSET on native requests
-        return total
-    return (total or 0.0) + credits
+    # Keys and quit
+
+    def action_keys(self) -> None:
+        """f1: the keyboard shortcuts."""
+        self.push_screen(KeysDialog())
+
+    async def action_quit(self) -> None:
+        """ctrl+q: confirm, then close the window; the sessions keep running (D22)."""
+        self._dialog(self._quit())
+
+    async def _quit(self) -> None:
+        live = [record for record in self.records.values() if not record.ended]
+        busy = sum(1 for record in live if record.status in ("working", "blocked"))
+        if await self.push_screen_wait(QuitDialog(len(live), busy)):
+            await self._close_sessions()
+            self.exit()
+
+    # --- External editor --------------------------------------------------------------
+
+    def action_editor(self) -> None:
+        """ctrl+g: write the message in ``$EDITOR``; saving sends it (084 D21).
+
+        The input's text opens in the editor (``nano`` when ``EDITOR`` is unset) while
+        the app is suspended. Saved text is sent as if typed and joins the input's
+        history; an empty save clears the input; quitting without saving changes
+        nothing. Nothing opens while a turn runs or the input is disabled.
+
+        The suspended event loop stalls every connection, so afterwards the feed and
+        every live controller reconnect (``_recover_after_editor``).
+        """
+        pane = self._pane
+        controller = self.controller
+        if pane is None or controller is None or controller.turn_active or pane.input.disabled:
+            return
+        try:
+            command = shlex.split(os.environ.get("EDITOR", "")) or ["nano"]
+        except ValueError as exc:  # an unbalanced quote
+            self.notice("Editor", f"Can't read EDITOR: {exc}", "error")
+            return
+        original = pane.input.text
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", prefix="archie-", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(original)
+        path = Path(tmp.name)
+        # Expected stalls: no outage rows or connection errors while they recover.
+        stalled = [c for c in self._controllers.values() if c.started and c.following]
+        for stalled_controller in stalled:
+            stalled_controller.quiet = True
+        suspended = False
+        error: str | None = None
+        content: str | None = None
+        try:
+            before = path.stat().st_mtime_ns
+            try:
+                with self.suspend():
+                    suspended = True
+                    try:
+                        subprocess.run([*command, str(path)], check=False)
+                    except OSError as exc:
+                        error = f"Could not run {command[0]}: {exc.strerror or exc}"
+            except SuspendNotSupported:
+                error = "This terminal can't hand over to an editor."
+            if error is None:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    error = "The saved message is not UTF-8 text; nothing was sent."
+                except OSError as exc:
+                    error = f"Could not read the saved message: {exc.strerror or exc}"
+                else:
+                    if path.stat().st_mtime_ns != before or text != original:
+                        content = text.strip()  # saved
+        finally:
+            path.unlink(missing_ok=True)
+            if suspended:
+                self._recover_after_editor(stalled)
+            else:
+                for stalled_controller in stalled:
+                    stalled_controller.quiet = False
+
+        if error is not None:
+            self.notice("Editor", error, "error")
+            return
+        if content is None:
+            return  # quit without saving
+        inp = pane.input
+        inp.clear()
+        if content:
+            inp.add_sent(content)
+            inp.post_message(MessageInput.Submitted(content))
+
+    def _recover_after_editor(self, controllers: list[SessionController]) -> None:
+        """Reconnect what the suspended event loop stalled (084 D21).
+
+        The feed is dropped and followed again, so its snapshot re-syncs the sidebar
+        and every controller; each stalled controller replaces its stream at once (a
+        send made meanwhile waits for the new one). They stay ``quiet`` until
+        reconnected or ``SEND_WAIT`` passes; a reconnect still running then reports
+        its outage as usual.
+
+        Args:
+            controllers: The controllers that were following a stream, set ``quiet``.
+        """
+        self._restart_feed()
+        for controller in controllers:
+            controller.force_reconnect()
+
+        async def unquiet() -> None:
+            try:
+                await asyncio.gather(
+                    *(controller.wait_connected() for controller in controllers),
+                    return_exceptions=True,
+                )
+            finally:
+                for controller in controllers:
+                    controller.quiet = False
+
+        self._spawn(unquiet())
+
+    def _restart_feed(self) -> None:
+        """Drop the sessions feed's connection and follow it again."""
+        if self._shutting_down:
+            return
+        if self._feed_worker is not None:
+            self._feed_worker.cancel()
+        self._feed_worker = self.run_worker(self._follow_feed(), group="feed", exit_on_error=False)

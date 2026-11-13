@@ -51,6 +51,30 @@ class Repo(msgspec.Struct):
     worktrees: list[Worktree] = msgspec.field(default_factory=list)
 
 
+class SessionLocation(msgspec.Struct):
+    """Where a session works: the repo, the linked worktree (if any) and its HEAD.
+
+    Worked out by the orchestrator from the session's tool calls (plan 084 D25-D28)
+    and served as ``SessionDescriptor.location``.
+
+    Attributes:
+        repo: The repo's location relative to the workspace (``""`` for the workspace
+            itself), or its absolute host path when it is outside the workspace.
+        worktree: The linked worktree the session works in, as ``Worktree.path``; None
+            for the repo's main checkout.
+        branch: Branch checked out there; None when HEAD is detached or unreadable.
+        commit: Commit hash HEAD resolves to; None when it can't be resolved.
+        missing: True when the worktree's checkout no longer exists (``git worktree
+            remove``) but git still records it.
+    """
+
+    repo: str
+    worktree: str | None = None
+    branch: str | None = None
+    commit: str | None = None
+    missing: bool = False
+
+
 class Workspace(msgspec.Struct):
     """One workspace directory and its repos.
 

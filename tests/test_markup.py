@@ -101,9 +101,9 @@ def test_shell_command_with_escaped_brackets_renders_as_valid_styles():
 
 
 def test_tui_markup_falls_back_to_plain_text_for_invalid_styles():
-    from archie_cli.tui.transcript_view import _markup
+    from archie_cli.tui.transcript_view import safe_markup
 
     markup = r"[bold]x[/] \\[slug\\] y"  # Rich reads a style named "slug\\"
-    rendered = _markup(markup)
+    rendered = safe_markup(markup)
     assert rendered.spans == []
     assert rendered.plain == plain_text(markup) == Text.from_markup(markup).plain

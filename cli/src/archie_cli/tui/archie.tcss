@@ -19,15 +19,117 @@ Screen {
     scrollbar-size: 0 0;
 }
 
+/* --- Sidebar --- */
+Sidebar {
+    background: $surface;
+    border-right: tall $surface-lighten-1;
+}
+
+SessionList {
+    background: $surface;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $surface;
+    scrollbar-background-hover: $surface;
+    scrollbar-background-active: $surface;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
+}
+
+/* The profile name is a link to the web interface. */
+Sidebar > .sidebar-info {
+    link-color: $link;
+    link-style: none;
+    link-color-hover: $link;
+    link-background-hover: transparent;
+    link-style-hover: underline;
+}
+
+/* Notices (notices.py): a card with a bar on the left coloured by severity. */
+Notice {
+    background: $surface-lighten-1;
+    border-left: thick $primary;
+}
+
+Notice.-warning {
+    border-left: thick $warning;
+}
+
+Notice.-error {
+    border-left: thick $error;
+}
+
+EmptyPane {
+    color: $muted;
+}
+
+/* The sidebar's filter: a rounded field like the message input. */
+SessionFilter {
+    border: round $surface-lighten-2;
+    background: $surface;
+}
+
+SessionFilter:focus {
+    border: round $primary;
+}
+
+/* --- Dialogs and the palette (dialogs.py, commands.py) ---
+ * The Screen rule above gives every screen an opaque background, modal ones included;
+ * these restore the see-through backdrop so the window stays visible, and live, behind
+ * them. A session dialog (-pane) is nearly transparent: the app dims the session pane
+ * instead (Main.-dimmed), so the sidebar stays bright. */
+Dialog,
+CommandPalette {
+    background: $background 60%;
+}
+
+Dialog.-pane {
+    background: $background 1%;
+}
+
+/* Tint doesn't cascade, so every widget in the dimmed area takes it. */
+Main.-dimmed,
+Main.-dimmed * {
+    tint: $background 60%;
+}
+
+/* --- Session pane --- */
+SessionHeader {
+    background: $surface;
+}
+
+/* The transcript sits on $pane: a step darker than the surface around it, not black.
+ * The activity line under it is the transcript's last row, on the same colour. */
+SessionPane > .pane-loading,
+ActivityLine {
+    background: $pane;
+}
+
 /* --- Conversation area --- */
+/* One column of padding keeps the blocks' left bars off the sidebar's divider; the
+ * scrollbar is a quiet one-cell thumb on the transcript's own colour. */
 Conversation {
-    background: black;
+    background: $pane;
+    padding-left: 1;
     /* Only a vertical scrollbar; horizontal content is wrapped/clipped. */
     overflow-x: hidden;
     overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $pane;
+    scrollbar-background-hover: $pane;
+    scrollbar-background-active: $pane;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
 }
 
+/* Tool rows are names in bright blue over muted targets (transcript_view.ToolRow);
+ * the rows of consecutive iterations stack with no gap, and every other block is one
+ * blank line from its neighbours (each has a one-line margin; adjacent margins
+ * collapse). */
+
 /* --- Message borders --- */
+/* Your messages: a purple bar and no header. */
 UserMessage {
     border-left: thick $primary;
 }
@@ -37,23 +139,21 @@ PromptMessage {
     border-left: thick $primary;
 }
 
-/* A dim rule on assistant text; streaming matches so finalising doesn't shift it. */
-AssistantMessage {
-    border-left: thick $primary 30%;
-}
-
-AssistantMessage > .header {
-    color: $success;
-    text-style: bold;
-}
-
+/* Archie's replies: no header and no visible rule. The rule stays as a transparent
+ * column so reply text lines up with the tool rows; streaming matches so finalising
+ * doesn't shift it. */
+AssistantMessage,
 StreamingMessage {
-    border-left: thick $primary 30%;
+    border-left: thick transparent;
 }
 
-StreamingMessage > .header {
-    color: $success;
-    text-style: bold;
+/* Every Markdown block ends with a one-line bottom margin, so a reply's last block
+ * would add a blank line to the message's own margin. A negative margin on the
+ * Markdown takes it back; a `:last-child` rule does the same but restyling it made
+ * switching to a large session ~0.45 s slower. */
+AssistantMessage > Markdown,
+StreamingMessage > Markdown {
+    margin-bottom: -1;
 }
 
 QuestionPanel {
@@ -76,19 +176,57 @@ ShellOutput {
 }
 
 /* Iteration blocks keep the transparent border from DEFAULT_CSS, so their tool rows
- * line up with message text; the blank line between blocks separates iterations. */
+ * line up with message text. */
 
-/* --- Status bar colours --- */
-StatusBar {
+/* --- Detail views (detail.py) ---
+ * They take the transcript's place on its colour. A headline card on the surface
+ * colour, then one band per section (title left, facts right), which also divides
+ * it from the section before; a failed call's result has a red band. */
+DetailView,
+DetailView .detail-body {
+    background: $pane;
+}
+
+DetailView .detail-body {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $pane;
+    scrollbar-background-hover: $pane;
+    scrollbar-background-active: $pane;
+    scrollbar-color: $surface-lighten-2;
+    scrollbar-color-hover: $primary 60%;
+    scrollbar-color-active: $primary;
+}
+
+DetailView .detail-card {
+    background: $surface;
+}
+
+SectionPanel > .section-band {
+    background: $surface-lighten-1;
+}
+
+SectionPanel .section-title {
+    color: $secondary;
+    text-style: bold;
+}
+
+SectionPanel .section-facts {
     color: $muted;
 }
 
-StatusBar #status-left {
-    color: auto;
+SectionPanel.-error > .section-band {
+    background: $error 25%;
 }
 
-StatusBar #status-right {
-    color: auto;
+SectionPanel.-error .section-title {
+    color: $error;
+}
+
+/* --- Status bar colours --- */
+StatusBar {
+    color: $foreground;
 }
 
 /* --- Input styling --- */
@@ -102,10 +240,4 @@ MessageInput {
 
 MessageInput:focus {
     border: round $primary;
-}
-
-/* --- Footer --- */
-Footer {
-    height: 2;
-    padding: 1 0 0 0;
 }
