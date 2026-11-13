@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 from archie_orchestrator import tracker as tracker_module
 from archie_orchestrator.location import (
+    GAVE_UP,
     MAX_CALL_PATHS,
     MAX_COMMAND_CHARS,
     MAX_ENTRIES,
@@ -33,6 +34,7 @@ from archie_orchestrator.workspaces import (
     MAX_PATH_CHARS,
     MAX_PATH_COMPONENTS,
     locate,
+    location_key,
     refresh_location,
 )
 from archie_shared.workspaces import SessionLocation
@@ -126,6 +128,7 @@ def test_candidates_from_tool_inputs(name, tool_input, expected):
         ('cd "my app" && echo "a; cd b && git x"', None, ["/", "/my app"], False),
         ("cat > f <<'EOF'\ncd app\ngit init\nEOF\ncd lib", None, ["/", "/lib"], False),
         ("cat <<-END\n\tcd app\n\tEND\ngit status", None, ["/"], True),
+        ("cat <<<word\ncd app", None, ["/", "/app"], False),  # a here-string has no body
         ("ls # cd app", None, ["/"], False),
         # git -C, chained -C, -c options, prefixes, subshells.
         ("git -C app -C src status", None, ["/", "/app", "/app/src"], True),
@@ -388,6 +391,8 @@ def _timed(fn):
         pytest.param('echo "' + "x" * 400_000 + '"', id="400KB-quoted-word"),
         pytest.param('cd "' + "x" * (MAX_COMMAND_CHARS - 10) + '"', id="16KB-quoted-cd"),
         pytest.param("git" + " -C ." * 3_000, id="git-C-chain"),
+        pytest.param("<<A" * 350_000, id="1MiB-heredoc-markers"),
+        pytest.param("x <<A\n" * 175_000, id="1MiB-heredoc-lines"),
     ],
 )
 def test_huge_commands_are_parsed_within_a_bound(command):
@@ -444,8 +449,9 @@ def test_a_session_keeps_its_latest_eligible_calls(workspace):
     first = call("edit", path="app/a.py", turn=1)
     others = [call("read", path="notes", turn=2)] * (MAX_ENTRIES - 1)
     assert where(workspace, first, *others).repo == "app"
-    # One more call drops the oldest, the only one in a repo.
-    assert where(workspace, first, *others, call("read", path="notes", turn=2)) is None
+    # One more call drops the oldest, the only one in a repo: the location is unknown
+    # (the session keeps the one it has), not "no repo".
+    assert where(workspace, first, *others, call("read", path="notes", turn=2)) is GAVE_UP
 
 
 def test_a_location_job_resolves_at_most_max_lookups_paths(workspace):
@@ -468,7 +474,72 @@ def test_a_location_job_resolves_at_most_max_lookups_paths(workspace):
 
     found, lookups = best(MAX_LOOKUPS - 1)
     assert (found.repo, lookups) == ("app", MAX_LOOKUPS)
-    assert best(MAX_LOOKUPS) == (None, MAX_LOOKUPS)
+    assert best(MAX_LOOKUPS) == (GAVE_UP, MAX_LOOKUPS)
+    assert where(workspace, call("read", path="notes")) is None  # nothing capped: no repo
+
+
+def _fed(*calls: tuple) -> LocationState:
+    state = LocationState()
+    for n, (name, tool_input, turn, scope) in enumerate(calls):
+        state.on_call(scope, f"tu{n}", name, tool_input, turn)
+        state.on_result(scope, f"tu{n}")
+    return state
+
+
+def test_files_in_one_folder_are_one_lookup(root, workspace):
+    make_repo(workspace / "app")
+    notes = workspace / "notes"
+    notes.mkdir()
+    reads = []
+    for i in range(MAX_LOOKUPS + 2):
+        (notes / f"f{i}.md").write_text("x")
+        reads.append(call("read", path=f"notes/f{i}.md", turn=2))
+    state = _fed(call("edit", path="app/a.py", turn=1), *reads)
+    # Without the directory key the reads use up the lookups; with it they are one.
+    assert state.best(lambda p: locate(workspace, p))[0] is GAVE_UP
+    found, from_root = tracker_module.locate_session(root, "proj", state)
+    assert (found.repo, from_root) == ("app", True)
+
+
+def test_location_key_maps_only_regular_files_to_their_directory(workspace):
+    (workspace / "d").mkdir()
+    (workspace / "d" / "f").write_text("x")
+    (workspace / "link").symlink_to(workspace / "d" / "f")
+    assert location_key(workspace, "/workspace/d/f") == "/workspace/d"
+    assert location_key(workspace, "/workspace/d") == "/workspace/d"
+    assert location_key(workspace, "/workspace/link") == "/workspace/link"
+    assert location_key(workspace, "/workspace/missing") == "/workspace/missing"
+
+
+def test_a_large_heredoc_keeps_the_cd_and_git_after_it():
+    body = "x = 1\n" * (19 * 1024 // 6)
+    command = (
+        f"cat > /workspace/repo/gen.py <<'EOF'\n{body}EOF\n"
+        "cd /workspace/repo && git add gen.py && git commit -m gen"
+    )
+    paths, runs_git = shell_paths(command)
+    assert (paths[-1], runs_git) == ("/workspace/repo", True)
+    assert candidate("shell", {"command": command}) == Candidate(
+        RANK_GIT, ("/workspace", "/workspace/repo")
+    )
+    message = "line\n" * (20 * 1024 // 5)
+    paths, runs_git = shell_paths(f"cd /workspace/repo && git commit -F - <<'EOF'\n{message}EOF")
+    assert (paths, runs_git) == (["/workspace", "/workspace/repo"], True)
+
+
+def test_many_heredoc_markers_parse_quickly():
+    # The marker line is past the parse cut, so only the cd before it counts.
+    command = "cd app && cat " + "<<A" * 10_000 + "\n" + "A\n" * 10_000 + "cd lib"
+    (paths, _), elapsed = _timed(lambda: shell_paths(command))
+    assert elapsed < 0.05
+    assert paths == ["/workspace", "/workspace/app"]
+
+
+def test_a_path_of_git_names_resolves_quickly(workspace):
+    path = "/workspace/" + "/".join([".git"] * (MAX_PATH_COMPONENTS - 1))
+    found, elapsed = _timed(lambda: locate(workspace, path))
+    assert found is None
+    assert elapsed < 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +756,25 @@ async def test_a_workspace_that_no_longer_resolves_clears_the_location(root, wor
     await tracker._on_frame(SID, _frame(_tool_call("t2", "read", {"path": "app/b.py"})))
     await tracker._on_frame(SID, _frame(_tool_result("t2")))
     await until(lambda: tracker.live(SID).location is None)
+    await tracker.close()
+
+
+async def test_a_session_placed_earlier_keeps_its_location_when_a_cap_is_hit(root, workspace):
+    sha = make_repo(workspace / "app")
+    tracker = _located_tracker(root)
+    await tracker._on_frame(SID, _frame(_tool_call("t0", "edit", {"path": "app/a.py"})))
+    await tracker._on_frame(SID, _frame(_tool_result("t0")))
+    await until(lambda: tracker.live(SID).location is not None)
+    await until(lambda: not tracker._location_tasks)
+    # A later turn reads more files than a job resolves, each in its own non-repo folder.
+    for i in range(MAX_LOOKUPS + 2):
+        tool_input = {"path": f"n{i}/f.md"}
+        await tracker._on_frame(SID, _frame(_tool_call(f"t{i + 1}", "read", tool_input, turn=2)))
+        await tracker._on_frame(SID, _frame(_tool_result(f"t{i + 1}", turn=2)))
+    await until(lambda: not tracker._location_tasks)
+    state = tracker._location_states[SID]
+    assert tracker_module.locate_session(root, "proj", state.snapshot())[0] is GAVE_UP
+    assert tracker.live(SID).location == SessionLocation(repo="app", branch="main", commit=sha)
     await tracker.close()
 
 

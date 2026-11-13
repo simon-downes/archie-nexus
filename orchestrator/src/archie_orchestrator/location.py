@@ -22,18 +22,23 @@ shells, then edits and writes, then the rest, newest first; earlier turns are tr
 only when it has none. Subagent calls count only when no root call resolves.
 
 Tool calls are untrusted and :func:`candidate` runs on the event loop, so its work is
-bounded to a few milliseconds: only the first :data:`MAX_COMMAND_CHARS` and
-:data:`MAX_SEGMENTS` segments of a command are parsed, a call keeps its latest
-:data:`MAX_CALL_PATHS` paths, and paths longer than PATH_MAX allows
-(``workspaces.MAX_PATH_CHARS``, ``workspaces.MAX_PATH_COMPONENTS``) are dropped. A
-session keeps its latest :data:`MAX_ENTRIES` eligible calls, and a location job
-resolves at most :data:`MAX_LOOKUPS` distinct paths.
+bounded to a few milliseconds: heredoc bodies are removed from the first
+:data:`MAX_HEREDOC_SCAN_CHARS` of a command (following at most :data:`MAX_HEREDOCS`
+open ones), then only the first :data:`MAX_COMMAND_CHARS` and :data:`MAX_SEGMENTS`
+segments of what is left are parsed, a call keeps its latest :data:`MAX_CALL_PATHS`
+paths, and paths longer than PATH_MAX allows (``workspaces.MAX_PATH_CHARS``,
+``workspaces.MAX_PATH_COMPONENTS``) are dropped. A session keeps its latest
+:data:`MAX_ENTRIES` eligible calls, and a location job resolves at most
+:data:`MAX_LOOKUPS` distinct paths (the tracker looks a file up as its directory).
+When a cap stops a job before it finds a repo, :meth:`LocationState.best` gives
+:data:`GAVE_UP` rather than None, and the session keeps its location.
 
 Everything here is pure apart from :func:`scan_log`, which reads a session log.
 """
 
 from __future__ import annotations
 
+import enum
 import json
 import posixpath
 import re
@@ -54,8 +59,14 @@ RANK_GIT, RANK_EDIT, RANK_OTHER = 0, 1, 2
 MAX_PENDING = 1000
 """Calls kept waiting for their result; the oldest are dropped past this."""
 
+MAX_HEREDOC_SCAN_CHARS = 1024 * 1024
+"""Characters of a shell command that heredoc bodies are removed from (a linear pass)."""
+
+MAX_HEREDOCS = 1024
+"""Open heredocs followed; past this the rest of the command is taken as their bodies."""
+
 MAX_COMMAND_CHARS = 16 * 1024
-"""Characters of a shell command that are parsed; the segment cut short is dropped."""
+"""Characters left after removing heredocs that are parsed; the segment cut short is dropped."""
 
 MAX_SEGMENTS = 256
 """Segments (``&&``, ``;``, ``||``, newline) of a shell command that are parsed."""
@@ -79,8 +90,18 @@ PATH_TOOLS: Mapping[str, int] = {
 }
 """Tools whose ``path`` input is a candidate, with its rank."""
 
+
+class GaveUp(enum.Enum):
+    """The type of :data:`GAVE_UP`."""
+
+    GAVE_UP = "gave-up"
+
+
+GAVE_UP = GaveUp.GAVE_UP
+"""What :meth:`LocationState.best` gives when a cap stopped it: the location is unknown."""
+
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+_HEREDOC = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")  # not <<<
 _UNRESOLVABLE = ("$", "~", "`")
 
 
@@ -131,9 +152,10 @@ def shell_paths(command: str, cwd: object = None) -> tuple[list[str], bool]:
     runs git when a command word of one of its segments is ``git``. Segments that
     don't parse as shell words are skipped.
 
-    Bounded for untrusted input: only the first :data:`MAX_COMMAND_CHARS` are parsed
-    (dropping the segment the cut falls in, so a truncated path isn't taken) and of
-    them the first :data:`MAX_SEGMENTS` segments, at most the latest
+    Bounded for untrusted input: heredoc bodies are removed from the first
+    :data:`MAX_HEREDOC_SCAN_CHARS`, then only the first :data:`MAX_COMMAND_CHARS` of
+    what is left are parsed (dropping the segment a cut falls in, so a truncated path
+    isn't taken) and of them the first :data:`MAX_SEGMENTS` segments, at most the latest
     :data:`MAX_CALL_PATHS` directories are returned, and a target past the path caps
     ends the walk like an unresolvable one.
     """
@@ -146,8 +168,15 @@ def shell_paths(command: str, cwd: object = None) -> tuple[list[str], bool]:
     paths: deque[str] = deque([current], maxlen=MAX_CALL_PATHS)
     runs_git = False
     walking = True
-    segments = _segments(_without_heredocs(command[:MAX_COMMAND_CHARS]))
-    if len(command) > MAX_COMMAND_CHARS:
+    # Heredocs first (one linear pass), so a large body doesn't push the cd and git
+    # after it past the cut.
+    truncated = len(command) > MAX_HEREDOC_SCAN_CHARS
+    text = _without_heredocs(command[:MAX_HEREDOC_SCAN_CHARS])
+    if len(text) > MAX_COMMAND_CHARS:
+        text = text[:MAX_COMMAND_CHARS]
+        truncated = True
+    segments = _segments(text)
+    if truncated:
         segments = segments[:-1]
     for segment in segments[:MAX_SEGMENTS]:
         if runs_git and not walking:
@@ -250,23 +279,26 @@ def _segments(command: str) -> list[str]:
 
 
 def _without_heredocs(command: str) -> str:
-    """``command`` with heredoc bodies removed (the lines up to each delimiter)."""
+    """``command`` with heredoc bodies removed (the lines up to each delimiter).
+
+    Past :data:`MAX_HEREDOCS` open heredocs the rest of the command is taken as bodies
+    and dropped, which keeps the pass linear with a bounded constant.
+    """
     if "<<" not in command:
         return command
     kept: list[str] = []
-    waiting: list[tuple[str, bool]] = []  # (delimiter, tabs stripped)
+    waiting: deque[tuple[str, bool]] = deque()  # (delimiter, tabs stripped)
     for line in command.split("\n"):
         if waiting:
             delimiter, strip_tabs = waiting[0]
             if (line.lstrip("\t") if strip_tabs else line) == delimiter:
-                waiting.pop(0)
+                waiting.popleft()
             continue
         kept.append(line)
-        waiting.extend(
-            (match.group(3), match.group(1) == "-")
-            for match in _HEREDOC.finditer(line)
-            if not line.startswith("<<<", match.start())
-        )
+        for match in _HEREDOC.finditer(line):
+            if len(waiting) >= MAX_HEREDOCS:
+                return "\n".join(kept)
+            waiting.append((match.group(3), match.group(1) == "-"))
     return "\n".join(kept)
 
 
@@ -327,7 +359,9 @@ class LocationState:
         # later (git init, worktree add) is still found on the next job. What they drop
         # is what best() tries last: the oldest calls (though a turn of more than
         # MAX_ENTRIES calls can lose its early git shells) and the lowest-ranked paths.
+        # When a cap leaves best() with nothing, it gives GAVE_UP, not None.
         self._entries: deque[_Entry] = deque(maxlen=MAX_ENTRIES)
+        self._dropped = False  # whether an entry has gone past MAX_ENTRIES
         self._seen: set[tuple[str | None, str]] = set()
         self._order = 0
         self.from_root = False
@@ -360,6 +394,8 @@ class LocationState:
         turn, root, found = pending
         self._seen.add(key)
         self._order += 1
+        if len(self._entries) == MAX_ENTRIES:
+            self._dropped = True  # the oldest goes; best() can no longer say "no repo"
         self._entries.append(_Entry(self._order, turn, root, found))
         return True
 
@@ -367,6 +403,7 @@ class LocationState:
         """A copy whose :meth:`best` can run in a thread while this one is fed."""
         copy = LocationState()
         copy._entries = deque(self._entries, maxlen=MAX_ENTRIES)
+        copy._dropped = self._dropped
         return copy
 
     @property
@@ -375,26 +412,40 @@ class LocationState:
         return bool(self._entries)
 
     def best(
-        self, resolve: Callable[[str], SessionLocation | None]
-    ) -> tuple[SessionLocation | None, bool]:
+        self,
+        resolve: Callable[[str], SessionLocation | None],
+        key: Callable[[str], str] | None = None,
+    ) -> tuple[SessionLocation | GaveUp | None, bool]:
         """The session's location and whether a root call gave it (D26).
 
-        ``resolve`` maps a container path to a location (None when it isn't in a repo);
-        each path is resolved at most once per call, and after :data:`MAX_LOOKUPS`
-        distinct paths have not resolved the session has no location. Within one call
-        its paths are tried newest first.
+        ``resolve`` maps a container path to a location (None when it isn't in a repo).
+        ``key``, when given, maps a path to the one resolved in its place, which must
+        resolve the same (a file's directory, so many files in one folder are one
+        lookup); each key is resolved at most once per call. Within one call its paths
+        are tried newest first.
+
+        :data:`GAVE_UP` (with :attr:`from_root` unchanged) when a cap stopped the
+        search before anything resolved: :data:`MAX_LOOKUPS` distinct keys tried with
+        more left, or older calls dropped past :data:`MAX_ENTRIES`. The location is
+        then unknown rather than none, so the caller keeps the one it has.
         """
         tried: set[str] = set()
+        keys: dict[str, str] = {}
         for root, path in self._ordered():
-            if path in tried:
+            lookup = keys.get(path)
+            if lookup is None:
+                lookup = keys[path] = key(path) if key is not None else path
+            if lookup in tried:
                 continue  # it didn't resolve the first time
             if len(tried) >= MAX_LOOKUPS:
-                break
-            tried.add(path)
-            found = resolve(path)
+                return GAVE_UP, self.from_root
+            tried.add(lookup)
+            found = resolve(lookup)
             if found is not None:
                 self.from_root = root
                 return found, root
+        if self._dropped:
+            return GAVE_UP, self.from_root
         self.from_root = False
         return None, False
 

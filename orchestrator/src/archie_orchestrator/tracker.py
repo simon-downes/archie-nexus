@@ -65,10 +65,15 @@ from websockets.exceptions import WebSocketException
 from archie_orchestrator import docker, lifecycle
 from archie_orchestrator.docker import DockerError, RunningContainer
 from archie_orchestrator.lifecycle import PreparedStart
-from archie_orchestrator.location import LocationState, scan_log
+from archie_orchestrator.location import GAVE_UP, GaveUp, LocationState, scan_log
 from archie_orchestrator.store import SessionStore, id_start_time, import_log, now_iso
 from archie_orchestrator.titles import TitleInput, TitleResult, read_title_input
-from archie_orchestrator.workspaces import locate, refresh_location, resolve_workspace
+from archie_orchestrator.workspaces import (
+    locate,
+    location_key,
+    refresh_location,
+    resolve_workspace,
+)
 
 log = logging.getLogger(__name__)
 
@@ -123,11 +128,13 @@ class SessionTitler(Protocol):
 
 def locate_session(
     root: Path, workspace: str, state: LocationState
-) -> tuple[SessionLocation | None, bool]:
+) -> tuple[SessionLocation | GaveUp | None, bool]:
     """A session's location from its calls, and whether a root call gave it (084 D26).
 
     Runs in a worker thread. A workspace that no longer resolves gives None; a path the
-    git reader can't handle (``OSError``, ``ValueError``) is skipped.
+    git reader can't handle (``OSError``, ``ValueError``) is skipped. Files are looked
+    up as their directory (:func:`location_key`). :data:`GAVE_UP` when a cap stopped
+    the search (see :meth:`LocationState.best`).
     """
     try:
         directory = resolve_workspace(root, workspace)
@@ -141,7 +148,7 @@ def locate_session(
             log.debug("Skipping location candidate %s: %s", path, exc)
             return None
 
-    return state.best(resolve)
+    return state.best(resolve, key=lambda path: location_key(directory, path))
 
 
 def refresh_sessions(
@@ -1053,6 +1060,8 @@ class SessionTracker:
         location, from_root = await asyncio.to_thread(
             locate_session, root, record.workspace, snapshot
         )
+        if location is GAVE_UP:
+            return  # a cap stopped the search: unknown, so the current location stays
         current = self._location_states.get(session_id)
         if current is not None:
             current.from_root = from_root

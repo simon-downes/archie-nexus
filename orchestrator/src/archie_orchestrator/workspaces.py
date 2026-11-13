@@ -186,6 +186,26 @@ def locate(workspace_dir: Path, container_path: str) -> SessionLocation | None:
     return _Reader(workspace_dir).locate(container_path)
 
 
+def location_key(workspace_dir: Path, container_path: str) -> str:
+    """The path to :func:`locate` in place of ``container_path``, with the same answer.
+
+    A regular file (not a symlink) gives its directory: its walk up is the directory's
+    with one level (the file, which holds no ``.git``) in front, so 100 files in one
+    folder are one lookup. Anything else (a directory, a symlink, a missing path) is
+    kept. One ``lstat``, no reads.
+    """
+    path = posixpath.normpath(container_path)
+    if not path.startswith(CONTAINER_WORKSPACE + "/"):
+        return container_path
+    mapped = workspace_dir / path.removeprefix(CONTAINER_WORKSPACE).lstrip("/")
+    try:
+        if stat.S_ISREG(mapped.lstat().st_mode):
+            return posixpath.dirname(path)
+    except (OSError, ValueError):
+        pass
+    return container_path
+
+
 def refresh_location(workspace_dir: Path, location: SessionLocation) -> SessionLocation | None:
     """``location`` re-read from disk: its branch and commit now, or None if it has gone.
 
@@ -392,7 +412,9 @@ class _Reader:
         # workspace) are too: walk exactly those, with no per-level containment check.
         for level, directory in enumerate((real, *real.parents)[: depth + 1]):
             if directory.name == ".git" and level < depth:
-                if self.is_dir(directory):
+                # real is resolved and confined, so a plain lstat is enough here (no
+                # realpath per level, which would make a path of .git names quadratic).
+                if _lstat_is_dir(directory):
                     return self._inside_git_dir(directory, real)
                 continue
             dotgit = directory / ".git"
@@ -535,6 +557,14 @@ def _lexists(path: Path) -> bool:
     try:
         return os.path.lexists(path)
     except ValueError:
+        return False
+
+
+def _lstat_is_dir(path: Path) -> bool:
+    """Whether ``path`` itself (not a symlink target) is a directory."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except (OSError, ValueError):
         return False
 
 
