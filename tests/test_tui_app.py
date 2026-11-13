@@ -17,7 +17,15 @@ from archie_cli.tui.conversation import ClientErrorMessage, ShellOutput, TurnSta
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.pane import SessionHeader, SessionPane
 from archie_cli.tui.session import ClientErrorEntry, ShellOutputEntry, TurnStatusEntry
-from archie_cli.tui.sidebar import SessionRow, WorkspaceBand, age, state_badge, state_glyph
+from archie_cli.tui.sidebar import (
+    SessionRow,
+    WorkspaceBand,
+    age,
+    branch_label,
+    state_badge,
+    state_glyph,
+    where,
+)
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.transcript_view import WINDOW_ROWS, TranscriptView
 from archie_shared.events import (
@@ -29,6 +37,7 @@ from archie_shared.events import (
     UserMessage,
 )
 from archie_shared.transcript import TranscriptBuilder
+from archie_shared.workspaces import SessionLocation
 from textual.app import App
 
 from tests.tui_fakes import (
@@ -192,6 +201,42 @@ async def test_row_content_marks_the_session_on_screen():
         assert _row_text(app, "ws-b").split("\n")[1] == "    no repo"
         width = app.sidebar.sessions.rows["ws-a"].size.width
         assert len(first) == width
+
+
+def test_row_line_two_shows_the_repo_and_branch():
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    cases = {
+        "repo": (SessionLocation(repo="archie-nexus", branch="main"), "⎇ archie-nexus · main"),
+        "nested": (SessionLocation(repo="group/lib", branch="feat/x"), "⎇ lib · feat/x"),
+        "workspace": (SessionLocation(repo="", branch="main"), "⎇ proj · main"),
+        "detached": (SessionLocation(repo="app", commit=sha), "⎇ app · 0123456"),
+        "unknown": (SessionLocation(repo="app"), "⎇ app · ?"),
+        "worktree": (
+            SessionLocation(repo="app", worktree="app/.git/wt/x", branch="plan/x", missing=True),
+            "⎇ app · plan/x",
+        ),
+        "none": (None, "  no repo"),
+    }
+    for case, (location, expected) in cases.items():
+        assert where(make_record("proj-01", location=location)).plain == expected, case
+    assert branch_label(None) is None
+    assert branch_label(SessionLocation(repo="", commit=sha)) == "0123456"
+
+
+async def test_rows_show_the_location_from_the_feed():
+    client = _client(
+        make_record("ws-a", started_at=_at(1), location=SessionLocation(repo="app", branch="main")),
+        make_record("ws-b", started_at=_at(2)),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        assert _row_text(app, "ws-a").split("\n")[1] == "▌ ⎇ app · main"
+        assert _row_text(app, "ws-b").split("\n")[1] == "    no repo"
+        moved = SessionLocation(repo="", branch=None, commit="f" * 40)
+        client.publish(make_record("ws-b", started_at=_at(2), location=moved))
+        await settle(pilot, lambda: app.sidebar.sessions.rows["ws-b"].record.location == moved)
+        assert _row_text(app, "ws-b").split("\n")[1] == "  ⎇ ws · fffffff"
 
 
 async def test_info_line_and_web_link():
@@ -482,10 +527,11 @@ async def test_a_turn_sends_shows_tools_question_and_status():
     from archie_cli.tui.transcript_view import ToolRow
     from archie_shared.events import Handshake, PendingQuestion, QuestionOption
 
-    client = _client(make_record("s1"))
+    client = _client(make_record("s1", location=SessionLocation(repo="app", branch="feat/x")))
     app = make_app(client)
     async with app.run_test(size=SIZE) as pilot:
         pane = await attached(app, pilot)
+        assert pane.status.git_branch == "feat/x"
         await pilot.press(*"hello", "enter")
         await settle(pilot, lambda: client.latest.sent)
         assert client.latest.sent == [("message", "hello")]
@@ -516,7 +562,8 @@ async def test_a_turn_sends_shows_tools_question_and_status():
         )
         assert pane.conversation.query(ToolRow)
         assert pane.question.display and not pane.input.disabled
-        assert pane.status.git_branch == "main"
+        # The agent's own git_branch is not the source: the record's location is (D31).
+        assert pane.status.git_branch == "feat/x"
         await pilot.press("1")
         await settle(pilot, lambda: len(client.latest.sent) == 2)
         assert client.latest.sent[1][1].option == 0
@@ -539,6 +586,11 @@ async def test_a_turn_sends_shows_tools_question_and_status():
         assert not pane.input.disabled
         assert not pane.question.display
         assert pane.query_one(StatusBar).session_id == "agent-s1"
+        detached = SessionLocation(repo="app", commit="abcdef0123" * 4)
+        client.publish(make_record("s1", location=detached))
+        await settle(pilot, lambda: pane.status.git_branch == "abcdef0")
+        client.publish(make_record("s1"))
+        await settle(pilot, lambda: pane.status.git_branch == "—")
 
 
 async def test_header_follows_the_feed_and_animates_while_working():

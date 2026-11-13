@@ -31,7 +31,7 @@ from archie_cli.tui.detail import DetailScreen, SubagentScreen, ToolDetailScreen
 from archie_cli.tui.input import MessageInput
 from archie_cli.tui.question import QuestionPanel
 from archie_cli.tui.session import LocalEntry, SessionController
-from archie_cli.tui.sidebar import ANIMATED_STATUSES, state_badge, state_glyph
+from archie_cli.tui.sidebar import ANIMATED_STATUSES, branch_label, state_badge, state_glyph
 from archie_cli.tui.status import StatusBar
 from archie_cli.tui.throbber import Throbber, ThrobberContainer
 from archie_cli.tui.transcript_view import Conversation, SubagentClicked, ToolClicked
@@ -135,6 +135,7 @@ class SessionPane(Vertical):
         self.input._history_idx = len(self.input._history)
         self._turns_ended = controller.turns_ended
         self._show_loading()
+        self._show_branch()
         self.on_status()
         self.on_question()
         self._show_turn()
@@ -151,12 +152,17 @@ class SessionPane(Vertical):
         self.controller = None
 
     def update_record(self, record: SessionDescriptor) -> None:
-        """Show a newer record of the session (header, loading line, input)."""
+        """Show a newer record of the session (header, loading line, input, branch)."""
         self.record = record
         self.header.record = record
         self.header.refresh()
+        self._show_branch()
         self._show_loading()
         self._show_turn()
+
+    def _show_branch(self) -> None:
+        """The status bar's branch, from the record's location (084 D31)."""
+        self.status.git_branch = branch_label(self.record.location) or "—"
 
     def tick(self, frame: int) -> bool:
         """Advance the header's glyph; True if it animates."""
@@ -219,8 +225,6 @@ class SessionPane(Vertical):
             status.model_name = controller.model_name
         if controller.supports_cache is not None:
             status.supports_cache = controller.supports_cache
-        if controller.git_branch is not None:
-            status.git_branch = controller.git_branch
         if controller.agent_session_id:
             status.session_id = controller.agent_session_id
         ledger = controller.ledger

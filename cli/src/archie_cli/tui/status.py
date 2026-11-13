@@ -7,6 +7,7 @@ Usage wire events which carry per-request values (accumulated client-side).
 """
 
 from archie_shared import __version__
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
@@ -38,7 +39,7 @@ class StatusBar(Widget):
 
     # Left section — session lifetime totals
     model_name: reactive[str] = reactive("—")
-    git_branch: reactive[str] = reactive("—")
+    git_branch: reactive[str] = reactive("—")  # from the session's location (084 D31)
     session_input: reactive[int] = reactive(0)
     session_output: reactive[int] = reactive(0)
     cache_read: reactive[int] = reactive(0)
@@ -121,7 +122,7 @@ class StatusBar(Widget):
 
         left.update(
             Text.from_markup(
-                f" [{theme.MUTED}]⎇ {self.git_branch}[/]"
+                f" [{theme.MUTED}]⎇ {escape(self.git_branch)}[/]"
                 f" │ [{theme.PRIMARY}]{self.model_name}[/]"
                 f" │ In: [{theme.POSITIVE}]{in_val}[/]"
                 f"  Out: [{theme.POSITIVE_BRIGHT}]{self.session_output}[/]"

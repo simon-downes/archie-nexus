@@ -364,7 +364,7 @@ Tests and when they change:
   back to `archie-01m32ky6rn.jsonl` (11.5 MB) through the next frame: median 376/401/379 ms
   over 3 runs of 5 (491 widgets); `switch_to` itself 10 ms; first load ~780 ms.
 
-### [ ] M3 — Sessions carry their repo and branch
+### [x] M3 — Sessions carry their repo and branch
 
 - **Approach:** D25–D29. `workspaces.locate` on `_Reader`; `location.py` (prototype's
   `location.py` as the algorithm reference, via `git show
@@ -386,7 +386,19 @@ Tests and when they change:
   with `/workspace` as the workspace dir) prints a location or `None` per session, and the
   current session (`$ARCHIE_SESSION_ID`) resolves to `archie-nexus` with the branch of the
   worktree it last worked in.
-- **Outcome:**
+- **Outcome:** `SessionLocation` and `SessionDescriptor.location`; `workspaces.locate` and
+  `refresh_location` on `_Reader`; new `location.py` (candidate extraction with ordered `cd`
+  chains, heredoc/comment skipping, `git -C`; `LocationState` keyed by `(scope, tool_use_id)`,
+  eligible on result; `best()` per D26; `scan_log`); tracker jobs on results and on every
+  connect (frames during the scan buffered and replayed), a 30 s sweep, `workspace_root`
+  injection; migration 3 (`location` JSON); sidebar line 2 and the status-bar branch from the
+  location; docs. Carry-over from M2: the window pages in earlier rows (up to 10 pages)
+  while it can't scroll, plus a `_jumping` guard so a jump to latest doesn't bounce back a
+  page. Evidence: 224 targeted tests pass; full suite 5307 passed; Ruff clean. Eval over
+  the 10 newest archie logs: this session resolves to `archie-nexus` /
+  `build-it-worktrees/084-multi-session-tui` / `build-it/084-multi-session-tui` (correct);
+  others to `archie-nexus` main or the `fix-callback-log-redaction` worktree; three empty
+  logs to None; scans 13–45 ms.
 
 ### [ ] M4 — Two-line tool rows, activity line and the pane's look
 
@@ -450,6 +462,9 @@ Tests and when they change:
 
 ## Deviations
 
+- M3: turns are ordered by their latest call, not the turn number (robust to a restarted
+  counter). A `cd` target that can't be resolved stops the walk but keeps the directories
+  reached before it.
 - M2: `TranscriptView`'s window is 40 rows (page 20, overscan 20), not 078 D9's 200/80/40.
   Every switch remounts the window; at 200 the 11.5 MB session mounted ~5,100 widgets and
   took 5.2 s to settle, at 40 it mounts ~490 and takes ~0.38 s. The 300 ms target is still

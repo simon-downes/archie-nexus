@@ -15,6 +15,7 @@ import msgspec
 
 from archie_shared.events import PendingQuestion, SessionState
 from archie_shared.session.identity import container_name
+from archie_shared.workspaces import SessionLocation
 
 type SessionRecordStatus = Literal[
     "starting",
@@ -59,6 +60,9 @@ class SessionDescriptor(msgspec.Struct):
         model_key: Model reported by the agent; None until the first ``session_status``.
         last_activity_at: ISO 8601 UTC time of the latest agent activity.
         ended_at: ISO 8601 UTC time the session ended; set with a terminal status.
+        location: The repo, worktree and branch the session works in, worked out by the
+            orchestrator from its tool calls; None until it touches a repo. Defaults to
+            None, so responses from orchestrators that don't send it still decode.
         container_name: Docker container name (archie-{session_id}); None once ended.
             Computed from the session ID and status, never stored.
     """
@@ -76,6 +80,7 @@ class SessionDescriptor(msgspec.Struct):
     model_key: str | None = None
     last_activity_at: str | None = None
     ended_at: str | None = None
+    location: SessionLocation | None = None
     container_name: str | None = None
 
     def __post_init__(self) -> None:

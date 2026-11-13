@@ -241,3 +241,91 @@ async def test_replaying_1000_turns_through_the_app_mounts_a_bounded_window():
         assert len(conv.rows) == total
         assert conv.window == (total - WINDOW_ROWS, total)
         assert client.full_loads("s1") == 1
+
+
+class _TallHost(App):
+    def compose(self):
+        yield TranscriptView(id="view", window=6, page=4, overscan=2)
+
+
+async def _settled(pilot, view: TranscriptView, condition) -> None:
+    for _ in range(40):
+        if condition():
+            return
+        await pilot.pause()
+    raise AssertionError(f"not settled: window {view.window}, max_scroll_y {view.max_scroll_y}")
+
+
+def _one_line_rows(view: TranscriptView, count: int, label: str = "line") -> None:
+    for i in range(count):
+        view.add_local(lambda i=i: Static(f"{label} {i}"))
+
+
+@pytest.mark.asyncio
+async def test_a_window_shorter_than_the_viewport_pages_earlier_rows_in():
+    app = _TallHost()
+    async with app.run_test(size=(80, 30)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.suspend()
+        _one_line_rows(view, 100)
+        view.resume()
+        # Six one-line rows can't scroll in 30 lines; earlier rows page in until they can.
+        await _settled(pilot, view, lambda: view.max_scroll_y > 0)
+        start, end = view.window
+        assert end == 100 and start < 100 - 6 and (100 - start) % 4 == 2
+        assert view.is_vertical_scroll_end  # still following the end
+        assert _boundaries(view) == {"earlier": start}
+        # Scrolling to the top now pages further back, as for a full window.
+        view.scroll_home(animate=False)
+        await _settled(pilot, view, lambda: view.window[0] < start)
+        for _ in range(5):
+            await pilot.pause()  # let the page's anchor restore land
+        # The window keeps its larger size: appends at the end don't shrink it back.
+        view.jump_to_latest()
+        await pilot.pause()
+        assert view.window == (start, 100)
+        _one_line_rows(view, 10, "more")
+        await pilot.pause()
+        assert view.window[1] == 110 and view.window[1] - view.window[0] >= 100 - start
+        assert view.max_scroll_y > 0
+
+
+@pytest.mark.asyncio
+async def test_growing_the_viewport_pages_earlier_rows_in():
+    app = _TallHost()
+    async with app.run_test(size=(80, 5)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.suspend()
+        _one_line_rows(view, 100)
+        view.resume()
+        await pilot.pause()
+        await pilot.pause()
+        assert view.window == (94, 100)  # six rows and a boundary fill 5 lines
+        await pilot.resize_terminal(80, 40)
+        await _settled(pilot, view, lambda: view.window[0] < 94 and view.max_scroll_y > 0)
+        assert view.window[1] == 100
+
+
+@pytest.mark.asyncio
+async def test_filling_stops_at_the_first_row_and_after_its_page_limit(monkeypatch):
+    from archie_cli.tui import transcript_view
+
+    app = _TallHost()
+    async with app.run_test(size=(80, 60)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.suspend()
+        _one_line_rows(view, 20)
+        view.resume()
+        await _settled(pilot, view, lambda: view.window == (0, 20))
+        assert view.max_scroll_y == 0 and _boundaries(view) == {}
+
+    monkeypatch.setattr(transcript_view, "FILL_PAGES", 2)
+    app = _TallHost()
+    async with app.run_test(size=(80, 60)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.suspend()
+        _one_line_rows(view, 100)
+        view.resume()
+        for _ in range(20):
+            await pilot.pause()
+        assert view.window == (100 - 6 - 2 * 4, 100)

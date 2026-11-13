@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 
 from archie_shared import __version__
 from archie_shared.session import SessionDescriptor
+from archie_shared.workspaces import SessionLocation
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -106,9 +107,31 @@ def state_badge(record: SessionDescriptor) -> tuple[str, str]:
     return _BADGES.get(record.status, (record.status.upper(), theme.MUTED))
 
 
+def branch_label(location: SessionLocation | None) -> str | None:
+    """The branch, else the commit's first 7 characters, else ``?``; None without a location."""
+    if location is None:
+        return None
+    if location.branch:
+        return location.branch
+    return location.commit[:7] if location.commit else "?"
+
+
 def where(record: SessionDescriptor) -> Text:
-    """Line 2 of a row: the session's repo and branch (``no repo`` until M3's location)."""
-    return Text("  no repo", style=theme.MUTED)  # two cells: lines up with a repo name
+    """Line 2 of a row: ``⎇ <repo name> · <branch>``, or ``no repo`` (084 D30).
+
+    The repo name is the last part of the location's repo path, or the workspace's
+    name when the workspace itself is the repo. A worktree whose checkout has gone is
+    shown muted.
+    """
+    location = record.location
+    if location is None:
+        return Text("  no repo", style=theme.MUTED)  # two cells: lines up with a repo name
+    repo = location.repo.rstrip("/").rpartition("/")[2] or record.workspace
+    text = Text("⎇ ", style=theme.MUTED)
+    text.append(repo, style=theme.MUTED if location.missing else "")
+    text.append(" · ", style=theme.MUTED)
+    text.append(branch_label(location) or "?", style=theme.MUTED)
+    return text
 
 
 def key_hints(*pairs: tuple[str, str]) -> Text:

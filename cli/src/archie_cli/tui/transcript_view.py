@@ -379,6 +379,10 @@ class _Row:
 WINDOW_ROWS = 40
 WINDOW_PAGE = 20
 WINDOW_OVERSCAN = 20
+FILL_PAGES = 10
+"""Most pages added at once to fill a viewport the window's rows don't fill."""
+LAYOUT_WAITS = 5
+"""Refreshes to wait for mounted rows to be laid out before deciding to fill."""
 
 
 class WindowBoundary(Static):
@@ -410,7 +414,10 @@ class TranscriptView(VerticalScroll):
 
     Every row stays in ``rows``; only ``rows[start:end]`` (``window``) have mounted
     widgets. Scrolling to the top or bottom edge pages the window, and boundary rows
-    show how many rows are outside it.
+    show how many rows are outside it. A window whose rows are shorter than the
+    viewport can't scroll, so after the window moves or the view is resized, earlier
+    rows are added a page at a time until it can (at most :data:`FILL_PAGES` pages),
+    and the window keeps that larger size.
     """
 
     DEFAULT_CSS = """
@@ -440,12 +447,15 @@ class TranscriptView(VerticalScroll):
         self._local_ids = 0
         self._suspended = False
         self._window = window
+        self._span = window  # rows to keep mounted; grows to fill the viewport
         self._page = page
+        self._filling = False
         self._overscan = overscan
         self._start = 0
         self._end = 0
         self._shift_pending = False
         self._window_generation = 0
+        self._jumping = False  # a jump to the latest rows hasn't reached the end yet
         self._top: WindowBoundary | None = None
         self._bottom: WindowBoundary | None = None
 
@@ -454,7 +464,8 @@ class TranscriptView(VerticalScroll):
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         self._autoscroll = new_value >= self.max_scroll_y and self.window_is_latest
-        if new_value <= 1 and new_value < old_value and self._start > 0:
+        if new_value <= 1 and new_value < old_value and self._start > 0 and not self._jumping:
+            # (Not while a jump lands: rows unmounted above can clamp the offset to 0.)
             self._schedule_shift("earlier")
         elif (
             new_value >= max(0, self.max_scroll_y - 1)
@@ -496,12 +507,12 @@ class TranscriptView(VerticalScroll):
             if direction == "earlier" and start > 0:
                 anchor = self._rows[start].widget if start < end else None
                 new_start = max(0, start - self._page)
-                new_end = min(total, max(new_start + self._window, start + 1))
+                new_end = min(total, max(new_start + self._span, start + 1))
                 self._set_window(new_start, new_end)
             elif direction == "later" and end < total:
                 anchor = self._rows[end - 1].widget if end > start else None
                 new_end = min(total, end + self._page)
-                new_start = max(0, min(new_end - self._window, end - 1))
+                new_start = max(0, min(new_end - self._span, end - 1))
                 self._set_window(new_start, new_end)
         finally:
             if anchor is None:
@@ -534,19 +545,86 @@ class TranscriptView(VerticalScroll):
         """Mount the newest rows and follow the end of the transcript."""
         total = len(self._rows)
         self._window_generation += 1  # cancels a pending anchor restore
-        self._set_window(max(0, total - self._window), total)
+        self._set_window(max(0, total - self._span), total)
         self._autoscroll = True
         if not self._suspended:
+            self._jumping = True
             self.scroll_end(animate=False)
 
-    def _set_window(self, new_start: int, new_end: int) -> None:
-        """Mount exactly ``rows[new_start:new_end]``, keeping widgets already mounted."""
+            def landed() -> None:
+                self._jumping = False
+
+            self.call_after_refresh(landed)
+
+    def _set_window(self, new_start: int, new_end: int, *, fill: bool = True) -> None:
+        """Mount exactly ``rows[new_start:new_end]``, keeping widgets already mounted.
+
+        With ``fill``, earlier rows are paged in afterwards if the viewport has no
+        scroll room (``_fill_viewport``).
+        """
         for i in range(self._start, self._end):
             if not new_start <= i < new_end:
                 self._unmount(self._rows[i])
         self._start, self._end = new_start, new_end
         self._sync_boundaries()
         self._mount_missing()
+        if fill:
+            self._schedule_fill()
+
+    def on_resize(self) -> None:
+        self._schedule_fill()
+
+    def _schedule_fill(self, pages: int | None = None) -> None:
+        """Check after the next refresh (once the rows are laid out) whether to fill."""
+        if self._filling or self._suspended or not self.is_attached:
+            return
+        self._filling = True
+        self.call_after_refresh(self._fill_viewport, FILL_PAGES if pages is None else pages)
+
+    def _fill_viewport(self, pages: int, waits: int = LAYOUT_WAITS) -> None:
+        """Page earlier rows in while the mounted rows don't fill the viewport.
+
+        Without scroll room, scrolling can't reach the top edge, so earlier rows could
+        never page in. Each step adds :attr:`_page` rows above (keeping the rows below)
+        and checks again after the next refresh, up to ``pages`` steps. The window then
+        keeps its larger size, so appends don't shrink it back. A view following the
+        end stays at the end; otherwise the previous first row stays in view.
+
+        Rows mounted but not yet laid out (fewer lines than rows, as every row takes
+        at least one) are waited for, up to ``waits`` refreshes.
+        """
+        self._filling = False
+        if self._suspended or not self.is_attached or pages <= 0:
+            return
+        if self._start == 0 or self.max_scroll_y > 0:
+            return
+        window = [row.widget for row in self._rows[self._start : self._end]]
+        if self.virtual_size.height < len(window) or not all(
+            widget is not None and widget.is_mounted for widget in window
+        ):
+            if waits > 0:
+                self._filling = True
+                self.call_after_refresh(self._fill_viewport, pages, waits - 1)
+            return
+        anchor = window[0]
+        following = self._autoscroll and self.window_is_latest
+        new_start = max(0, self._start - self._page)
+        self._span = max(self._span, self._end - new_start)
+        self._set_window(new_start, self._end, fill=False)
+        generation = self._window_generation
+
+        def settle() -> None:
+            self._filling = False
+            if generation != self._window_generation:
+                return  # the window moved meanwhile (``jump_to_latest``)
+            if following:
+                self.scroll_end(animate=False, immediate=True)
+            elif anchor is not None and anchor.is_attached:
+                self.scroll_to_widget(anchor, top=True, animate=False, immediate=True)
+            self._schedule_fill(pages - 1)
+
+        self._filling = True
+        self.call_after_refresh(settle)
 
     def _mount_missing(self) -> None:
         """Mount the unmounted rows inside the window, in order, one batch per gap."""
@@ -614,12 +692,12 @@ class TranscriptView(VerticalScroll):
         mounted = self._end - self._start
         if not was_latest:
             self._sync_boundaries()  # reading earlier rows: count the new one below
-        elif mounted < self._window + self._overscan:
+        elif mounted < self._span + self._overscan:
             self._end += 1
             self._mount_missing()
         elif self._autoscroll:
             # Following the end at the cap: drop the oldest rows beyond the window.
-            self._set_window(len(self._rows) - self._window, len(self._rows))
+            self._set_window(len(self._rows) - self._span, len(self._rows))
         else:
             self._sync_boundaries()  # scrolled up at the cap: leave the window alone
 
