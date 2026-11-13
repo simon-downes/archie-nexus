@@ -4,8 +4,10 @@ helpers.
 ``FakeOrchestrator`` implements ``archie_cli.tui.client.OrchestratorClient`` without a
 server (084 D32). Each session has an event log that ``/events`` reads from (an
 ``after`` the log does not hold answers 409, as the server does), or a raw NDJSON body,
-and scripted bodies or errors can be queued ahead of it. ``stream()`` opens a
-``FakeStream`` whose frames come from a queue and whose sends are recorded. ``feed()``
+and scripted bodies or errors can be queued ahead of it; with ``events_gate`` set, a
+request waits for it after its body was read. ``stream()`` opens a ``FakeStream``
+whose frames come from a queue and whose sends are recorded (with ``stream_gate`` set,
+it waits for the gate before opening). ``feed()``
 sends a snapshot of the live records on every connect, then the records ``publish``
 queues, until ``drop_feed`` (``fail_feed`` makes the next connects fail, as a stopped
 orchestrator does). PATCH bodies and ``session`` fetches are recorded; ``session``
@@ -142,6 +144,9 @@ class FakeOrchestrator:
         self.workspaces_error: Exception | None = None
         self.patches: list[tuple[str, dict]] = []
         self.patch_gate: asyncio.Event | None = None  # set: PATCHes wait for it
+        self.events_gate: asyncio.Event | None = None  # set: /events waits after reading
+        self.stream_gate: asyncio.Event | None = None  # set: stream() waits before opening
+        self.stream_calls = 0  # stream() calls, including those waiting at the gate
         self.fetched: list[str] = []
         self.feed_connects = 0
         self._feed: asyncio.Queue | None = None
@@ -246,6 +251,12 @@ class FakeOrchestrator:
     async def events(self, session_id: str, after: str | None) -> str:
         self.requests.append((session_id, after))
         await asyncio.sleep(0)  # a real request yields; buffered frames arrive meanwhile
+        body = self._read_events(session_id, after)
+        if self.events_gate is not None:
+            await self.events_gate.wait()
+        return body
+
+    def _read_events(self, session_id: str, after: str | None) -> str:
         if self._replies:
             item = self._replies.pop(0)
             if isinstance(item, Exception):
@@ -262,6 +273,9 @@ class FakeOrchestrator:
         return "".join(encode_event(event) + "\n" for event in log)
 
     async def stream(self, session_id: str) -> FakeStream:
+        self.stream_calls += 1
+        if self.stream_gate is not None:
+            await self.stream_gate.wait()
         if self._connect_errors:
             raise self._connect_errors.pop(0)
         stream = FakeStream(self._next_frames)

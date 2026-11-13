@@ -91,7 +91,7 @@ def test_old_agent_status_does_not_end_the_turn():
     controller.turn_active = True
     controller.apply(SessionStatus(id="old", model_key="m", git_branch="main"))
     assert controller.turn_active
-    assert controller.git_branch == "main"
+    assert controller.model_key == "m"
 
 
 @pytest.mark.asyncio
@@ -296,8 +296,7 @@ async def test_history_keys_work_again_after_question():
     async with app.run_test(size=SIZE) as pilot:
         await _ready(app, pilot)
         inp = app.pane.query_one(MessageInput)
-        inp._history = ["earlier message"]
-        inp._history_idx = 1
+        inp.set_sent_history(["earlier message"])
         panel = await _blocked(app, pilot)
         await pilot.press("up")
         assert inp.text == ""

@@ -166,6 +166,7 @@ class SessionPane(Vertical):
         self._last_esc_time = 0.0
         self._views: list[DetailView] = []
         self._saved_scroll: tuple[float, bool] = (0.0, True)  # the transcript's, when hidden
+        self._reloading = False  # a 409 reset dropped the rows; the reload rebuilds them
 
     def compose(self) -> ComposeResult:
         yield self.header
@@ -190,8 +191,7 @@ class SessionPane(Vertical):
         self.conversation.load(controller.builder, controller.locals)
         self.input.text = controller.draft
         self.input.move_cursor(self.input.document.end)
-        self.input._history = list(controller.history)
-        self.input._history_idx = len(self.input._history)
+        self.input.set_sent_history(controller.history)
         self._turns_ended = controller.turns_ended
         self._show_loading()
         self._show_branch()
@@ -208,7 +208,7 @@ class SessionPane(Vertical):
             return
         controller.detach()
         controller.draft = self.input.text
-        controller.history = list(self.input._history)
+        controller.history = self.input.sent_history
         self.controller = None
 
     def update_record(self, record: SessionDescriptor) -> None:
@@ -264,17 +264,22 @@ class SessionPane(Vertical):
     # --- SessionListener ----------------------------------------------------------
 
     def on_changes(self, changes: list[Change]) -> None:
-        """Send model changes to the transcript and every open detail view."""
+        """Send model changes to the transcript and every open detail view.
+
+        After a reset the transcript skips them: the reload's end rebuilds it.
+        """
         controller = self.controller
         if controller is None:
             return
-        self.conversation.apply_changes(controller.builder, changes)
+        if not self._reloading:
+            self.conversation.apply_changes(controller.builder, changes)
         for view in self._views:
             view.node_changed(controller.builder, changes)
 
     def on_local(self, entry: LocalEntry) -> None:
-        """Append a client-only row."""
-        self.conversation.add_entry(entry)
+        """Append a client-only row (after a reset, the reload's end places it)."""
+        if not self._reloading:
+            self.conversation.add_entry(entry)
 
     def on_status(self) -> None:
         """Push the controller's status values to the status bar."""
@@ -327,16 +332,26 @@ class SessionPane(Vertical):
         self._show_loading()
 
     async def on_reset(self) -> None:
-        """Close the old model's detail views and drop every transcript row."""
+        """Close the old model's detail views and drop every transcript row.
+
+        The full reload that follows is not mounted row by row: when its batch ends
+        (``on_replay(False)``), the transcript is rebuilt from the controller like on
+        ``attach``, so client-only rows come back after their anchors.
+        """
         await self.close_views()
         await self.conversation.reset()
+        self._reloading = True
 
     def on_replay(self, active: bool) -> None:
         """Mount rows once per history batch, from final node state."""
         if active:
             self.conversation.suspend()
-        else:
-            self.conversation.resume()
+            return
+        controller = self.controller
+        if self._reloading and controller is not None:
+            self._reloading = False
+            self.conversation.load(controller.builder, controller.locals)
+        self.conversation.resume()
 
     # --- Input --------------------------------------------------------------------
 

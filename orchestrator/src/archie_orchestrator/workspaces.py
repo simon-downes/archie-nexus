@@ -51,6 +51,12 @@ MAX_REPOS = 100
 MAX_WORKTREES = 100
 """Most worktrees listed per repo."""
 
+MAX_PATH_CHARS = 4096
+"""Longest session path :func:`locate` accepts (Linux PATH_MAX)."""
+
+MAX_PATH_COMPONENTS = 256
+"""Most components a session path :func:`locate` accepts may have."""
+
 REFTABLE_HEAD = "refs/heads/.invalid"
 """The placeholder HEAD of a repo whose refs are in a reftable."""
 
@@ -362,18 +368,30 @@ class _Reader:
     # -- session locations ---------------------------------------------------
 
     def locate(self, container_path: str) -> SessionLocation | None:
-        """The repo or worktree holding a ``/workspace/...`` path (see :func:`locate`)."""
+        """The repo or worktree holding a ``/workspace/...`` path (see :func:`locate`).
+
+        Paths past :data:`MAX_PATH_CHARS` or :data:`MAX_PATH_COMPONENTS` (before or
+        after resolving symlinks) give None, so a walk up is one pass over at most
+        :data:`MAX_PATH_COMPONENTS` levels.
+        """
+        if len(container_path) > MAX_PATH_CHARS:
+            return None
         path = posixpath.normpath(container_path)
         if path != CONTAINER_WORKSPACE and not path.startswith(CONTAINER_WORKSPACE + "/"):
+            return None
+        if path.count("/") > MAX_PATH_COMPONENTS:
             return None
         mapped = self.workspace / path.removeprefix(CONTAINER_WORKSPACE).lstrip("/")
         real = self._confined(mapped)
         if real is None:
             return None
-        for directory in (real, *real.parents):
-            if not directory.is_relative_to(self.workspace):
-                return None
-            if directory.name == ".git" and directory != self.workspace:
+        depth = len(real.parts) - len(self.workspace.parts)
+        if depth > MAX_PATH_COMPONENTS:
+            return None
+        # real is inside the workspace, so its first depth + 1 levels (real up to the
+        # workspace) are too: walk exactly those, with no per-level containment check.
+        for level, directory in enumerate((real, *real.parents)[: depth + 1]):
+            if directory.name == ".git" and level < depth:
                 if self.is_dir(directory):
                     return self._inside_git_dir(directory, real)
                 continue

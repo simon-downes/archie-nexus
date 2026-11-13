@@ -40,12 +40,14 @@ from archie_cli.tui.status import StatusBar
 from archie_cli.tui.transcript_view import WINDOW_ROWS, TranscriptView
 from archie_shared.events import (
     AssistantMessage,
+    Handshake,
     SessionStatus,
     ToolCall,
     ToolResult,
     TurnComplete,
     UserMessage,
 )
+from archie_shared.protocol import PROTOCOL_VERSION
 from archie_shared.transcript import TranscriptBuilder
 from archie_shared.workspaces import SessionLocation
 from textual.app import App
@@ -350,11 +352,7 @@ async def test_rapid_switches_leave_exactly_one_pane():
             await pilot.press("alt+down")
         await settle(
             pilot,
-            lambda: (
-                not app._switch_lock.locked()
-                and app.pane is not None
-                and app.pane.controller is not None
-            ),
+            lambda: not app.switching and app.pane is not None and app.pane.controller is not None,
         )
         assert len(app.query(SessionPane)) == 1
         assert app.pane.header.record.session_id == app.current
@@ -405,7 +403,7 @@ async def test_client_rows_and_the_draft_survive_a_switch():
         app.controller.client_error("Something local")
         pane.input.focus()
         await pilot.press(*"half typed")
-        pane.input._history = ["earlier"]
+        pane.input.set_sent_history(["earlier"])
         await app.switch_to("ws-b")
         await attached(app, pilot, "ws-b")
         assert app.pane.input.text == ""
@@ -417,7 +415,30 @@ async def test_client_rows_and_the_draft_survive_a_switch():
         keys = [row.key for row in pane.conversation.rows]
         assert keys[:2] == ["msg-u1", "msg-a1"] and keys[2].startswith("local-")
         assert pane.input.text == "half typed"
-        assert pane.input._history == ["earlier"]
+        assert pane.input.sent_history == ["earlier"]
+
+
+async def test_client_rows_come_back_after_a_409_reload():
+    client = _client(make_record("s1"), logs={"s1": [_user("u1", "first"), _assistant("a1", "r")]})
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        app.controller.client_error("Something local")
+        await apply_events(app, pilot, _user("u2", "second", turn=2))
+        client.logs["s1"].append(_user("u2", "second", turn=2))
+        await pilot.pause()
+        # The cursor is gone from the log (rotated): the pane drops its rows and the
+        # reload rebuilds them, client rows included, after their anchors.
+        client.reject_cursor_once()
+        assert await app.controller.replay() is True
+        await pilot.pause()
+        keys = [row.key for row in pane.conversation.rows]
+        assert keys[:2] == ["msg-u1", "msg-a1"] and keys[2].startswith("local-")
+        assert keys[3:] == ["msg-u2"]
+        assert _error_rows(pane) == ["Something local"]
+        # Later changes reach the transcript again.
+        await apply_events(app, pilot, _assistant("a2", "after", turn=2))
+        assert [row.key for row in pane.conversation.rows][-1] == "msg-a2"
 
 
 async def test_sidebar_click_alt_keys_and_numbers_switch():
@@ -1023,6 +1044,14 @@ def _question(text: str = "Which file should I change?"):
     return PendingQuestion(id="q1", question=text, options=[QuestionOption(label="A")])
 
 
+def _working() -> tuple[Handshake, SessionStatus]:
+    """Live frames saying the agent runs a turn (another client's, or one joined late)."""
+    return (
+        Handshake(id="h-working", protocol_version=PROTOCOL_VERSION, session_id="s1"),
+        SessionStatus(id="st-working", model_key="m", git_branch="main", state="working"),
+    )
+
+
 def _error_rows(pane) -> list[str]:
     return [w.get_copy_text() for w in pane.conversation.query(ClientErrorMessage)]
 
@@ -1199,22 +1228,47 @@ async def test_unseen_is_cleared_on_switch_and_on_update_while_shown_not_repeate
         await settle(pilot, lambda: client.patches)
         assert client.patches == [("ws-b", {"unseen": False})]
 
-        # Feed updates while that PATCH runs, or for other sessions, don't repeat it.
+        # Feed updates while that PATCH runs, or for other sessions, don't send another
+        # while it runs.
         client.publish(make_record("ws-b", started_at=_at(2), unseen=True, name="Renamed"))
         client.publish(make_record("ws-a", started_at=_at(1), status="working"))
         await settle(pilot, lambda: app.records["ws-a"].status == "working")
         assert len(client.patches) == 1
+        # Once it is answered, the ws-b record that arrived meanwhile still says unseen
+        # (a quick turn may have ended after the server cleared it): one more PATCH.
         client.patch_gate.set()
-        await settle(pilot, lambda: not app._seen_inflight)
+        await settle(pilot, lambda: len(client.patches) == 2 and not app._seen_inflight)
+        assert client.patches[1] == ("ws-b", {"unseen": False})
         client.publish(make_record("ws-a", started_at=_at(1)))
         await settle(pilot, lambda: app.records["ws-a"].status == "idle")
-        assert len(client.patches) == 1
+        assert len(client.patches) == 2
 
         # The server's echo, then a later turn end while shown: one more PATCH.
         client.publish(make_record("ws-b", started_at=_at(2), name="Renamed"))
         client.publish(make_record("ws-b", started_at=_at(2), unseen=True, name="Renamed"))
-        await settle(pilot, lambda: len(client.patches) == 2)
-        assert client.patches[1] == ("ws-b", {"unseen": False})
+        await settle(pilot, lambda: len(client.patches) == 3)
+        assert client.patches[2] == ("ws-b", {"unseen": False})
+        await settle(pilot, lambda: not app._seen_inflight)
+        assert len(client.patches) == 3
+
+
+async def test_a_turn_that_ends_while_the_unseen_patch_runs_is_cleared_too():
+    client = _client(make_record("s1", unseen=True))
+    client.patch_gate = asyncio.Event()
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot)
+        await settle(pilot, lambda: client.patches)
+        # The server applies the PATCH, its echo arrives, then a quick turn ends and
+        # sets ``unseen`` again, all before the PATCH response.
+        client.publish(make_record("s1"))
+        client.publish(make_record("s1", unseen=True, status="idle", name="Quick turn"))
+        await settle(pilot, lambda: app.records["s1"].name == "Quick turn")
+        assert len(client.patches) == 1
+        client.patch_gate.set()
+        await settle(pilot, lambda: len(client.patches) == 2 and not app._seen_inflight)
+        assert client.patches == [("s1", {"unseen": False})] * 2
+        assert client.records["s1"].unseen is False
 
 
 async def test_a_failed_unseen_patch_is_logged_not_shown(caplog):
@@ -1276,7 +1330,7 @@ async def test_background_controllers_reconnect_silently(fast_retries):
         # Shown during an outage, the pane gets the outage's one row.
         client.fail_connects(*(OSError("refused") for _ in range(1000)))
         client.stream_for("ws-b").drop(1006)
-        await _until(lambda: background._outage)
+        await _until(lambda: background.outage)
         await app.switch_to("ws-b")
         pane = await attached(app, pilot, "ws-b")
         await pilot.pause()
@@ -1306,7 +1360,7 @@ async def test_reconnect_stops_once_the_record_ends_and_the_transcript_stays(fas
         controller = app.controller
         client.fail_connects(*(OSError("refused") for _ in range(1000)))
         client.latest.drop(1006)
-        await _until(lambda: controller._outage)
+        await _until(lambda: controller.outage)
         client.publish(make_record("s1", status="exited"))
         await _until(lambda: not controller.reconnecting and not controller.live)
         attempts = len(client._connect_errors)
@@ -1323,8 +1377,8 @@ async def test_reconnect_ends_when_the_session_ends_keeping_the_transcript():
     async with app.run_test(size=SIZE) as pilot:
         pane = await attached(app, pilot)
         controller, stream = app.controller, client.latest
-        await apply_events(app, pilot, _user("u2", "still going", turn=2))
-        controller.turn_active = True
+        await apply_events(app, pilot, _user("u2", "still going", turn=2), *_working())
+        assert controller.turn_active and pane.activity.activity is not None
         client.logs["s1"] += [_user("u2", "still going", turn=2), _assistant("a2", "last", 2)]
         client.publish(make_record("s1", status="stopped"))
         await _until(lambda: not controller.live and stream.disconnect.await_count == 1)
@@ -1955,7 +2009,7 @@ async def test_editor_sends_the_saved_text_and_reconnects_the_feed_and_every_con
         # Sent as typed, on the new stream; the input is clear and keeps it in history.
         assert client.stream_for("ws-a").sent == [("message", "from the editor")]
         assert old["ws-a"].sent == []
-        assert pane.input.text == "" and pane.input._history[-1] == "from the editor"
+        assert pane.input.text == "" and pane.input.sent_history[-1] == "from the editor"
         for stream in old.values():
             stream.disconnect.assert_awaited()
         assert ("ws-a", "u1") in client.requests  # the stream's ``after`` resync
@@ -2004,6 +2058,41 @@ async def test_editor_that_cannot_run_posts_a_notice(tmp_path, monkeypatch):
         assert pane.input.text == "still here"
 
 
+async def test_an_editor_variable_with_an_unbalanced_quote_posts_a_notice(monkeypatch):
+    app = make_app()
+    monkeypatch.setenv("EDITOR", 'vim "-c set ft=markdown')
+    async with app.run_test(size=SIZE) as pilot:
+        used = _fake_suspend(app, monkeypatch)
+        pane = await attached(app, pilot)
+        pane.input.insert("still here")
+        posted = _record_notices(app)
+        app.action_editor()
+        await pilot.pause()
+        ((title, text, severity, _),) = posted
+        assert (title, severity) == ("Editor", "error")
+        assert "EDITOR" in text
+        assert used == [] and pane.input.text == "still here"
+        assert app._client.feed_connects == 1 and not app.controller.quiet
+
+
+async def test_a_saved_message_that_is_not_utf8_posts_a_notice(tmp_path, monkeypatch):
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    _editor(tmp_path, monkeypatch, "printf '\\377\\376caf\\351' > \"$1\"")
+    async with app.run_test(size=SIZE) as pilot:
+        _fake_suspend(app, monkeypatch)
+        pane = await attached(app, pilot)
+        pane.input.insert("still here")
+        posted = _record_notices(app)
+        app.action_editor()
+        await pilot.pause()
+        ((title, text, severity, _),) = posted
+        assert (title, severity) == ("Editor", "error")
+        assert "UTF-8" in text
+        assert pane.input.text == "still here" and pane.input.sent_history == []
+        assert client.latest.sent == []
+
+
 async def test_editor_does_nothing_during_a_turn_or_without_suspend_support(monkeypatch):
     from textual.app import SuspendNotSupported
 
@@ -2019,7 +2108,8 @@ async def test_editor_does_nothing_during_a_turn_or_without_suspend_support(monk
         assert app._client.feed_connects == 1 and not app.controller.quiet
         # While a turn runs, ctrl+g opens nothing.
         posted.clear()
-        app.controller.turn_active = True
+        await apply_events(app, pilot, *_working())
+        assert app.controller.turn_active
         app.action_editor()
         await pilot.pause()
         assert posted == []

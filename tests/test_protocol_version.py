@@ -20,8 +20,8 @@ def test_matching_version_no_warning():
     controller.apply(_make_session_info(protocol_version=PROTOCOL_VERSION))
 
     assert not any("Protocol version" in e for e in local_texts(controller))
-    assert controller.agent_session_id == "proj-01abc12345"
-    assert "status" in listener.names()
+    assert controller.agent_protocol == PROTOCOL_VERSION
+    assert listener.of("local") == []
 
 
 def test_older_session_version_no_warning():
@@ -57,4 +57,4 @@ def test_protocol_version_warning_does_not_disconnect():
     controller.apply(_make_session_info(protocol_version=PROTOCOL_VERSION + 99))
 
     assert len(controller.locals) == 1
-    assert controller._reconnect_task is None and not controller.reconnecting
+    assert not controller.reconnecting and controller.ws is None

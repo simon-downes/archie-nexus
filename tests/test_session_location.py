@@ -8,12 +8,18 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from archie_orchestrator import tracker as tracker_module
 from archie_orchestrator.location import (
+    MAX_CALL_PATHS,
+    MAX_COMMAND_CHARS,
+    MAX_ENTRIES,
+    MAX_LOOKUPS,
+    MAX_SEGMENTS,
     RANK_EDIT,
     RANK_GIT,
     RANK_OTHER,
@@ -23,7 +29,12 @@ from archie_orchestrator.location import (
     scan_log,
     shell_paths,
 )
-from archie_orchestrator.workspaces import locate, refresh_location
+from archie_orchestrator.workspaces import (
+    MAX_PATH_CHARS,
+    MAX_PATH_COMPONENTS,
+    locate,
+    refresh_location,
+)
 from archie_shared.workspaces import SessionLocation
 
 from tests.session_fakes import (
@@ -359,6 +370,108 @@ def test_refresh_location_rereads_the_head(workspace):
 
 
 # ---------------------------------------------------------------------------
+# Bounds on untrusted calls
+# ---------------------------------------------------------------------------
+
+
+def _timed(fn):
+    start = time.perf_counter()
+    result = fn()
+    return result, time.perf_counter() - start
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("cd a;" * 20_000, id="100KB-cd-chain"),
+        pytest.param("cd a;" * 100_000, id="500KB-cd-chain"),
+        pytest.param('echo "' + "x" * 400_000 + '"', id="400KB-quoted-word"),
+        pytest.param('cd "' + "x" * (MAX_COMMAND_CHARS - 10) + '"', id="16KB-quoted-cd"),
+        pytest.param("git" + " -C ." * 3_000, id="git-C-chain"),
+    ],
+)
+def test_huge_commands_are_parsed_within_a_bound(command):
+    (paths, _), elapsed = _timed(lambda: shell_paths(command))
+    assert elapsed < 0.1
+    assert len(paths) <= MAX_CALL_PATHS
+    assert all(len(path) <= MAX_PATH_CHARS for path in paths)
+
+
+def test_a_call_keeps_its_latest_paths():
+    paths, _ = shell_paths("cd a;" * 40)
+    assert len(paths) == MAX_CALL_PATHS
+    assert paths[-1] == "/workspace/" + "/".join(["a"] * 40)
+
+
+def test_the_segment_a_truncated_command_ends_in_is_dropped():
+    command = "cd app && git status; cd " + "b" * MAX_COMMAND_CHARS
+    assert shell_paths(command) == (["/workspace", "/workspace/app"], True)
+
+
+def test_segments_past_the_cap_are_not_parsed():
+    paths, _ = shell_paths("cd .;" * MAX_SEGMENTS + "cd app")
+    assert "/workspace/app" not in paths
+    assert shell_paths("cd .;" * (MAX_SEGMENTS - 1) + "cd app")[0][-1] == "/workspace/app"
+
+
+def test_paths_past_the_path_caps_give_no_candidate():
+    assert candidate("read", {"path": "a/" * MAX_PATH_COMPONENTS}) is None
+    assert candidate("read", {"path": "x" * (MAX_PATH_CHARS + 1)}) is None
+    # A cd past the caps ends the walk like an unresolvable target.
+    deep = "/".join(["a"] * MAX_PATH_COMPONENTS)
+    assert shell_paths(f"cd {deep} && cd /workspace/lib")[0] == ["/workspace"]
+
+
+def test_locate_rejects_paths_past_the_caps_quickly(workspace):
+    make_repo(workspace / "app")
+    found, elapsed = _timed(lambda: locate(workspace, "/workspace/app/" + "a/" * 5_000))
+    assert found is None
+    assert elapsed < 0.1
+    assert locate(workspace, "/workspace/app/" + "x" * MAX_PATH_CHARS) is None
+    # Under the caps, a deep path still walks up to its repo.
+    deep = workspace / "app" / Path(*["d"] * 200)
+    deep.mkdir(parents=True)
+    assert locate(workspace, "/workspace/app/" + "/".join(["d"] * 200)).repo == "app"
+    # A symlink that resolves past the component cap gives None too.
+    far = workspace / "far" / Path(*["d"] * MAX_PATH_COMPONENTS)
+    far.mkdir(parents=True)
+    (workspace / "link").symlink_to(far)
+    assert locate(workspace, "/workspace/link") is None
+
+
+def test_a_session_keeps_its_latest_eligible_calls(workspace):
+    make_repo(workspace / "app")
+    first = call("edit", path="app/a.py", turn=1)
+    others = [call("read", path="notes", turn=2)] * (MAX_ENTRIES - 1)
+    assert where(workspace, first, *others).repo == "app"
+    # One more call drops the oldest, the only one in a repo.
+    assert where(workspace, first, *others, call("read", path="notes", turn=2)) is None
+
+
+def test_a_location_job_resolves_at_most_max_lookups_paths(workspace):
+    make_repo(workspace / "app")
+    first = call("edit", path="app/a.py", turn=1)
+
+    def best(count: int):
+        state = LocationState()
+        calls = [first, *(call("read", path=f"n{i}", turn=2) for i in range(count))]
+        for n, (name, tool_input, turn, scope) in enumerate(calls):
+            state.on_call(scope, f"tu{n}", name, tool_input, turn)
+            state.on_result(scope, f"tu{n}")
+        resolved = []
+
+        def resolve(path):
+            resolved.append(path)
+            return locate(workspace, path)
+
+        return state.best(resolve)[0], len(resolved)
+
+    found, lookups = best(MAX_LOOKUPS - 1)
+    assert (found.repo, lookups) == ("app", MAX_LOOKUPS)
+    assert best(MAX_LOOKUPS) == (None, MAX_LOOKUPS)
+
+
+# ---------------------------------------------------------------------------
 # Log scans
 # ---------------------------------------------------------------------------
 
@@ -629,4 +742,26 @@ async def test_subagent_results_request_a_location_only_while_the_root_has_none(
         await tracker._on_frame(SID, _frame(_tool_call("s2", "edit", {"path": "lib/b"}, **scoped)))
         await tracker._on_frame(SID, _frame(_tool_result("s2", **scoped)))
     assert requests == []  # the root placed the session; subagents no longer move it
+    await tracker.close()
+
+
+async def test_the_tracker_places_a_session_after_huge_calls(root, workspace):
+    make_repo(workspace / "lib", branch="feat/big")
+    tracker = _located_tracker(root)
+    flood = _frame(_tool_call("t1", "shell", {"command": "cd a;" * 100_000}))
+    big = _frame(
+        _tool_call("t2", "shell", {"command": "cd lib && git status\necho " + "x" * 500_000})
+    )
+    start = time.perf_counter()
+    await tracker._on_frame(SID, flood)
+    await tracker._on_frame(SID, _frame(_tool_result("t1")))
+    await tracker._on_frame(SID, big)
+    elapsed = time.perf_counter() - start  # three frames parsed on the event loop
+    await tracker._on_frame(SID, _frame(_tool_result("t2")))
+    await until(lambda: tracker.live(SID).location is not None)
+    assert elapsed < 0.1
+    assert (tracker.live(SID).location.repo, tracker.live(SID).location.branch) == (
+        "lib",
+        "feat/big",
+    )
     await tracker.close()

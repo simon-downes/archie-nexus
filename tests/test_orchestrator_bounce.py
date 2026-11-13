@@ -107,7 +107,7 @@ async def test_tui_reconnect_backs_off_from_0_5s_to_8s_and_keeps_trying():
         await real_sleep(0)
 
     with patch("archie_cli.tui.session.asyncio.sleep", _fake_sleep):
-        assert await controller._reconnect() is True
+        assert await controller.ensure_connected() is True
 
     assert sleep_calls == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0]
     assert len(client.streams) == 1
@@ -163,7 +163,7 @@ async def test_tui_reconnect_stops_when_the_record_is_no_longer_live():
         return await real_stream(session_id)
 
     client.stream = counting_stream
-    assert await controller._reconnect() is False
+    assert await controller.ensure_connected() is False
     assert attempts == 3
     assert client.streams == []
     assert not controller.reconnecting

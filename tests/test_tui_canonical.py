@@ -781,15 +781,13 @@ async def test_replay_events_seeds_cost_from_ledger():
 @pytest.mark.asyncio
 async def test_replay_events_409_falls_back_to_full_replay():
     """An unknown cursor (409) resets state, tells the listener and refetches the log."""
-    client = FakeOrchestrator(
-        {"s1": [_user("hi"), _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)]}
-    )
+    log = [_user("hi"), _llm_request("l1", 0.25, input_tokens=200, output_tokens=20)]
+    client = FakeOrchestrator({"s1": list(log)})
     controller, listener = make_controller(client)
-    controller.cursor = "gone"
-    controller._seen_event_ids = {"gone"}
-    controller._seen_accounted_ids = {"old-ledger"}
-    controller.ledger.input_tokens = 999
-    controller.ledger.cost = 9.99
+    for event in log:  # already applied, so the reload must count ``l1`` again
+        controller.apply(event)
+    controller.apply(_llm_request("gone", 9.99, input_tokens=999))  # not in the log
+    assert controller.cursor == "gone"
 
     assert await controller.replay() is True
 
@@ -798,7 +796,7 @@ async def test_replay_events_409_falls_back_to_full_replay():
     assert listener.names().index("reset") < listener.calls.index(("replay", True))
     assert [turn.user.content for turn in controller.builder.turns] == ["hi"]
     assert controller.cursor == "l1"
-    assert controller._seen_accounted_ids == {"l1"}
+    # Accounting restarted from the log: ``gone`` is dropped, ``l1`` counted once.
     assert controller.ledger.input_tokens == 200
     assert controller.ledger.cost == pytest.approx(0.25)
 
@@ -888,10 +886,10 @@ async def test_first_replay_reports_loaded_once():
     controller.RECONNECT_DELAYS = (0.0,)
     client.latest.drop()
     for _ in range(20):
-        if controller._reconnect_task is not None:
+        if controller.reconnecting:
             break
         await asyncio.sleep(0)
-    await controller._reconnect_task
+    assert await controller.wait_connected() is True
     assert len(client.streams) == 2
     assert listener.names().count("loaded") == 1  # later replays do not repeat it
     await controller.close()
@@ -908,7 +906,7 @@ async def test_loaded_waits_for_the_first_replay_that_lands():
     assert "loaded" not in listener.names()
     assert local_texts(controller) == ["Initial event replay failed; retrying connection."]
 
-    await controller._reconnect_task
+    assert await controller.wait_connected() is True
     assert listener.names().count("loaded") == 1
     assert [turn.user.content for turn in controller.builder.turns] == ["hi"]
     await controller.close()
@@ -925,9 +923,119 @@ async def test_first_connect_failure_is_retried_as_an_outage():
     assert local_texts(controller) == [] and client.requests == []
     assert controller.reconnecting
 
-    assert await controller._reconnect_task is True
+    assert await controller.wait_connected() is True
     assert local_texts(controller) == [RECONNECTING_TEXT]
     assert controller.loaded and [t.user.content for t in controller.builder.turns] == ["hi"]
+    await controller.close()
+
+
+async def _until(predicate, tries: int = 200) -> None:
+    for _ in range(tries):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    assert predicate(), "condition not reached"
+
+
+@pytest.mark.asyncio
+async def test_ending_during_the_first_load_keeps_the_live_frames_it_buffered():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    client.events_gate = asyncio.Event()
+    controller, _ = make_controller(client)
+    start = asyncio.create_task(controller.start())
+    await _until(lambda: client.requests)  # the body is read; the request waits
+
+    # A frame the stream delivers meanwhile; it is in the log, but after the body.
+    late = _assistant("a1", "late")
+    stream = client.latest
+    stream.push(late)
+    client.logs["s1"].append(late)
+    await _until(lambda: stream._frames.empty())  # received while the load runs
+    controller.end()
+    await _until(lambda: not stream.connected)  # the stream closes at once
+    client.events_gate.set()
+    await start
+    await _until(lambda: len(client.requests) == 2)
+
+    (turn,) = controller.builder.turns
+    assert [getattr(item, "content", None) for item in turn.items] == ["late"]  # once
+    assert client.requests == [("s1", None), ("s1", "a1")]  # then the tail after it
+    assert controller.loaded and not controller.live
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_ending_while_the_first_connect_waits_loads_the_log_without_a_stream():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    client.stream_gate = asyncio.Event()
+    controller, _ = make_controller(client)
+    start = controller.start_soon()
+    await _until(lambda: client.stream_calls == 1)
+    controller.end()
+    await asyncio.sleep(0)
+    client.stream_gate.set()
+    await start
+    await _until(lambda: controller.loaded)
+
+    assert [turn.user.content for turn in controller.builder.turns] == ["hi"]
+    assert client.full_loads("s1") == 1
+    assert not any(stream.connected for stream in client.streams)
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_and_force_reconnect_open_no_second_stream_while_starting():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    client.stream_gate = asyncio.Event()
+    controller, _ = make_controller(client)
+    start = controller.start_soon()  # as the app starts it: in the background
+    controller.resume()  # a feed snapshot before ``start`` ran
+    await _until(lambda: client.stream_calls == 1)
+    controller.resume()  # and one while the stream opens
+    controller.force_reconnect()
+    assert controller.connecting and not controller.reconnecting
+    client.stream_gate.set()
+    await start
+    assert await controller.wait_connected() is True
+
+    assert client.stream_calls == 1 and client.opened("s1") == 1
+    assert client.full_loads("s1") == 1
+    await controller.close()
+    assert not any(stream.connected for stream in client.streams)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_lost_during_the_first_load_reconnects_once_it_lands():
+    client = FakeOrchestrator({"s1": [_user("hi")]})
+    client.events_gate = asyncio.Event()
+    controller, _ = make_controller(client)
+    controller.RECONNECT_DELAYS = (0.0,)
+    start = asyncio.create_task(controller.start())
+    await _until(lambda: client.requests)
+    client.latest.drop()
+    await asyncio.sleep(0)
+    assert not controller.reconnecting  # deferred while ``start`` loads
+    client.events_gate.set()
+    await start
+    assert await controller.wait_connected() is True
+    assert client.opened("s1") == 2 and controller.loaded
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_closes_a_stream_it_replaces():
+    client = FakeOrchestrator()
+    controller, _ = make_controller(client)
+    await controller.start()
+    first = client.latest
+    controller.RECONNECT_DELAYS = (0.0,)
+    # A failed send asks for a reconnect while the old stream still reports connected.
+    first.send_message.side_effect = RuntimeError("socket closed")
+    controller.submit("hello")
+    await _until(lambda: client.opened("s1") == 2)
+    assert await controller.wait_connected() is True
+    first.disconnect.assert_awaited()
+    assert controller.ws is client.latest and not first.connected
     await controller.close()
 
 
@@ -946,13 +1054,12 @@ async def test_reconnect_replays_after_cursor_and_deduplicates_buffered_live():
         ledger,
     )
 
-    assert await controller._reconnect() is True
+    assert await controller.ensure_connected() is True
 
     assert client.requests == [("s1", "l1")]
-    assert controller.agent_session_id == "session-1"
-    assert controller.git_branch == "main"
+    assert controller.agent_protocol == 3
+    assert controller.model_key == "m"
     assert controller.cursor == "l1"
-    assert controller._seen_accounted_ids == {"l1"}
     assert controller.ledger.input_tokens == 200
     assert controller.ledger.cost == pytest.approx(0.25)
     await controller.close()
@@ -966,7 +1073,7 @@ async def test_reconnect_retries_when_replay_fails():
     controller, listener = make_controller(client)
     controller.RECONNECT_DELAYS = (0.0, 0.0)
 
-    assert await controller._reconnect() is True
+    assert await controller.ensure_connected() is True
 
     assert len(client.streams) == 2
     assert len(client.requests) == 2

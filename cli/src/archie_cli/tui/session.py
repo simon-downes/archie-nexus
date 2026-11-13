@@ -215,7 +215,7 @@ class SessionListener(Protocol):
         ...
 
     def on_status(self) -> None:
-        """Status-bar values changed (model, branch, session id, ledger, output)."""
+        """Status-bar values changed (model, ledger, output)."""
         ...
 
     def on_turn(self) -> None:
@@ -260,8 +260,7 @@ class SessionController:
         model_key: The session's current model key.
         model_name: Display name of the model, None until a status reports it.
         supports_cache: Whether the model caches, None until a status reports it.
-        git_branch: Branch from the agent's status, None until reported.
-        agent_session_id: Session id from the agent's handshake ("" until then).
+        agent_protocol: Protocol version from the agent's handshake (0 until then).
         turn_active: A root turn is running.
         thinking: A provider request is outstanding.
         activity: The activity line's word for the turn, or None (see the property).
@@ -272,8 +271,10 @@ class SessionController:
         answer_in_flight: Id of the question an answer is being sent for.
         shell_active: A ``!`` command is running.
         quiet: Suppress connection errors and outage entries (the host was suspended).
+        connecting: ``start`` is opening the first stream and loading its history;
+            reconnects wait for it.
         reconnecting: A reconnect attempt is running.
-        started: ``start`` was called.
+        started: ``start`` was called (or ``start_soon``).
         live: The session is followed on its stream (False for an ended session,
             which only loads its log, and after ``end``).
         is_live: Whether the session's record says it is live; reconnects stop when
@@ -327,8 +328,6 @@ class SessionController:
         self.model_key = ""
         self.model_name: str | None = None
         self.supports_cache: bool | None = None
-        self.git_branch: str | None = None
-        self.agent_session_id = ""
         # Protocol of the agent from its handshake. Agents before v4 send
         # session_status without a state, which decodes as the "idle" default.
         self.agent_protocol = 0
@@ -354,7 +353,12 @@ class SessionController:
         # Connection
         self.quiet = False
         self.closing = False
+        self.connecting = False
         self.reconnecting = False
+        # Set while neither ``connecting`` nor ``reconnecting`` (``wait_connected``).
+        self._settled = asyncio.Event()
+        self._settled.set()
+        self._reconnect_deferred = False  # a reconnect was asked for while connecting
         self._receive_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._end_task: asyncio.Task | None = None
@@ -393,6 +397,14 @@ class SessionController:
         A running ``!`` command or an answer being sent keeps it.
         """
         return not self.shell_active and self.answer_in_flight is None
+
+    @property
+    def outage(self) -> bool:
+        """True while a lost stream stays down past the first back-off delay (084 D9).
+
+        An attached view shows the outage's one client entry meanwhile.
+        """
+        return self._outage
 
     # --- Listener -----------------------------------------------------------------
 
@@ -510,9 +522,7 @@ class SessionController:
         elif isinstance(event, ce.UserMessage):
             self.turn = TurnMetrics()
         elif isinstance(event, ce.Handshake):
-            self.agent_session_id = event.session_id
             self.agent_protocol = event.protocol_version
-            self._status_changed()
             if event.protocol_version > PROTOCOL_VERSION and not self._protocol_warned:
                 self._protocol_warned = True
                 self.client_error(
@@ -530,7 +540,6 @@ class SessionController:
             elif model is not None:
                 self.model_name = model.name
                 self.supports_cache = model.can_cache
-            self.git_branch = event.git_branch
             self._status_changed()
             if self.agent_protocol >= SESSION_STATE_PROTOCOL:
                 self._apply_session_state(event)
@@ -905,33 +914,78 @@ class SessionController:
 
     # --- Connection ---------------------------------------------------------------
 
+    def _update_settled(self) -> None:
+        """Track whether a connect or reconnect runs (``wait_connected`` waits on it)."""
+        if self.connecting or self.reconnecting:
+            self._settled.clear()
+        else:
+            self._settled.set()
+
+    def _set_connecting(self, value: bool) -> None:
+        self.connecting = value
+        self._update_settled()
+
+    def start_soon(self, *, live: bool = True) -> asyncio.Task:
+        """Run ``start`` in the background; ``started`` and ``connecting`` hold at once.
+
+        So a ``resume`` or ``force_reconnect`` made before the task runs opens no
+        second stream, and ``end`` waits for the first history load.
+
+        Args:
+            live: As for ``start``.
+
+        Returns:
+            The task running ``start``.
+        """
+        self.started = True
+        if live:
+            self._set_connecting(True)
+        return asyncio.create_task(self.start(live=live))
+
     async def start(self, *, live: bool = True) -> None:
         """Connect, replay history while live frames buffer, then follow the stream.
 
         Ordering: open the stream → start the receive loop (buffering) → replay
         ``/events`` → apply buffered live frames not already applied (by event id).
-        A failed connect or replay is retried like a lost stream (084 D9).
+        ``connecting`` holds until the replay landed; a reconnect asked for meanwhile
+        (the stream dropped during the replay, a failed send) runs afterwards, and
+        ``resume``/``force_reconnect`` do nothing. A failed connect or replay is
+        retried like a lost stream (084 D9).
 
         Args:
             live: False for an ended session: load ``/events`` once and open no stream
                 (084 D9).
         """
         self.started = True
-        self.live = live
-        if not live:
-            await self._load_log()
+        ended = self._end_task is not None  # ``end`` came first; it loads the log
+        self.live = live and not ended
+        if not self.live:
+            self._set_connecting(False)
+            if not ended:
+                await self._load_log()
             return
+        self._reconnect_deferred = False
+        self._set_connecting(True)
+        try:
+            await self._first_connect()
+        finally:
+            self._set_connecting(False)
+        if self._reconnect_deferred:
+            self._reconnect_deferred = False
+            self._schedule_reconnect()
+
+    async def _first_connect(self) -> None:
+        """Open the first stream and load the history behind it (``start``)."""
         try:
             ws = await self._client.stream(self.session_id)
         except Exception as e:  # noqa: BLE001 — any connect failure starts an outage
             log.warning("Session %s connect failed: %s", self.session_id, e)
-            self._schedule_reconnect()
+            self._schedule_reconnect()  # deferred until ``connecting`` clears
             return
-        self.ws = ws
-        if not self.live:  # ended while connecting
+        await self._set_ws(ws)
+        if not self.live or self.closing:  # ended or closed while connecting
             await self._disconnect()
-            await self._load_log()
-            return
+            return  # ``end`` loads the log
 
         self._event_buffer = []
         self._buffering = True
@@ -940,14 +994,16 @@ class SessionController:
         if not await self.replay():
             self._buffering = False
             self._event_buffer = []
-            if not self.quiet:
+            if not self.quiet and self.following:
                 self.client_error("Initial event replay failed; retrying connection.")
                 self._outage_reported = True  # this outage's one entry
             await self._cancel_receive()
             await self._disconnect()
-            self._schedule_reconnect()
+            self._schedule_reconnect()  # deferred until ``connecting`` clears
             return
 
+        # Frames buffered during the replay apply even if the session ended meanwhile
+        # (``end`` leaves the buffer to this replay and reads the log's tail after it).
         self._buffering = False
         self._dispatch_buffered()
         self._event_buffer = []
@@ -964,10 +1020,12 @@ class SessionController:
         """The session ended: stop following its stream and stop reconnecting.
 
         The transcript and every other state are kept. In the background the stream is
-        closed and, once history has loaded, ``/events`` is read once more after the
-        cursor, so events the stream did not deliver (an outage before the end) show.
-        A turn still running is ended and a pending question cleared. Calling it again,
-        or on a controller that only loads a log, does nothing.
+        closed and ``/events`` is read once more after the cursor, so events the stream
+        did not deliver (an outage before the end) show. When the first history load
+        is still running, it lands first, with the live frames buffered behind it; when
+        none has landed (the first connect failed), the whole log loads. A turn still
+        running is ended and a pending question cleared. Calling it again, or on a
+        controller that only loads a log, does nothing.
         """
         if not self.live or self.closing:
             return
@@ -987,26 +1045,42 @@ class SessionController:
             except Exception as exc:  # noqa: BLE001 — ending must continue
                 log.debug("Session %s reconnect ended: %s", self.session_id, exc)
         self.reconnecting = False
-        self._buffering = False
-        self._event_buffer = []
+        self._update_settled()
+        if not self.connecting:
+            # A first load still running owns the buffer and applies it when it lands.
+            self._buffering = False
+            self._event_buffer = []
         await self._cancel_receive()
         await self._disconnect()
-        if self.loaded and not self.replaying and not self.closing:
-            await self.replay()
+        if self.connecting:
+            await self._settled.wait()  # the first load lands (or gives up) first
+        if not self.closing:
+            if self.loaded:
+                if not self.replaying:
+                    await self.replay()
+            elif self.started:
+                await self._load_log()
         if self.question is not None:
             self._hide_question()
         if self.turn_active:
             self._end_turn()
 
-    async def _disconnect(self) -> None:
-        """Close the stream, if any; failures are only logged."""
-        ws = self.ws
-        if ws is None:
-            return
+    async def _set_ws(self, ws: WSClient) -> None:
+        """Make ``ws`` the stream, closing a previous one that is still connected."""
+        old, self.ws = self.ws, ws
+        if old is not None and old is not ws and old.connected:
+            await self._close_ws(old)
+
+    async def _close_ws(self, ws: WSClient) -> None:
         try:
             await ws.disconnect()
         except Exception as exc:  # noqa: BLE001 — the stream is being dropped anyway
             log.debug("Session %s stream close failed: %s", self.session_id, exc)
+
+    async def _disconnect(self) -> None:
+        """Close the stream, if any; failures are only logged."""
+        if self.ws is not None:
+            await self._close_ws(self.ws)
 
     def _dispatch_buffered(self) -> None:
         """Apply live frames received during replay; event ids suppress duplicates."""
@@ -1059,12 +1133,18 @@ class SessionController:
     def _schedule_reconnect(self, *, fresh: bool = False) -> None:
         """Start a background reconnect unless one runs or the session isn't live.
 
+        While ``start`` connects, the reconnect is deferred until it is done.
+
         Args:
             fresh: Close the current stream first and try at once (``force_reconnect``).
         """
+        if self.connecting:
+            self._reconnect_deferred = True
+            return
         if self.reconnecting or not self.following:
             return
         self.reconnecting = True
+        self._update_settled()
         task = asyncio.create_task(self._reconnect(fresh=fresh))
         self._reconnect_task = task
 
@@ -1078,33 +1158,48 @@ class SessionController:
         """Reconnect a live session whose stream is down and not being retried.
 
         The app calls this when its feed re-syncs, so a stream that stopped (a 4004 or
-        a failed send) is tried again while the record says the session is live.
+        a failed send) is tried again while the record says the session is live. Does
+        nothing before ``start`` or while it connects.
         """
-        if not self.started or (self.ws is not None and self.ws.connected):
+        if not self.started or self.connecting or (self.ws is not None and self.ws.connected):
             return
         self._schedule_reconnect()
 
     async def ensure_connected(self) -> bool:
         """Make sure the stream is connected before sending a user command.
 
-        Starts a reconnect if none runs and waits up to ``SEND_WAIT`` seconds for it.
+        Starts a reconnect if none runs (and ``start`` is not connecting) and waits up
+        to ``SEND_WAIT`` seconds for it.
         """
         if not self.reconnecting and self.ws is not None and self.ws.connected:
             return True  # (a stream being replaced may still report connected)
-        self._schedule_reconnect()
+        if not self.connecting:
+            self._schedule_reconnect()
         return await self.wait_connected(SEND_WAIT)
 
     async def wait_connected(self, timeout: float = SEND_WAIT) -> bool:
-        """Wait up to ``timeout`` seconds for a running reconnect to finish.
+        """Wait up to ``timeout`` seconds for a running connect or reconnect to finish.
 
         Returns:
-            True when the stream is connected and no reconnect runs.
+            True when the stream is connected and no connect or reconnect runs.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while self.reconnecting and not self.closing and loop.time() < deadline:
-            await asyncio.sleep(0.05)
-        return not self.reconnecting and self.ws is not None and self.ws.connected
+        while not self.closing and not self._settled.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(self._settled.wait(), remaining)
+            except TimeoutError:
+                break
+        return (
+            not self.closing
+            and not self.connecting
+            and not self.reconnecting
+            and self.ws is not None
+            and self.ws.connected
+        )
 
     async def _connected_ws(self) -> WSClient:
         if not await self.ensure_connected() or self.ws is None:
@@ -1118,10 +1213,11 @@ class SessionController:
         keepalive expired, so the current connection is not trusted: the reconnect
         closes it and tries at once, then backs off as usual. It is under way when this
         returns, so a send made afterwards waits for the new stream. Does nothing for a
-        controller that was not started, no longer follows its stream, or already
-        reconnects. ``wait_connected`` waits for the outcome.
+        controller that was not started, is still connecting (``start``), no longer
+        follows its stream, or already reconnects. ``wait_connected`` waits for the
+        outcome.
         """
-        if not self.started or self.reconnecting or not self.following:
+        if not self.started or self.connecting or self.reconnecting or not self.following:
             return
         self._schedule_reconnect(fresh=True)
 
@@ -1138,7 +1234,8 @@ class SessionController:
         Retries with ``RECONNECT_DELAYS`` (the last repeating) while ``following``;
         the first wait that passes marks an outage, which an attached view is told
         about once. On success the receive loop restarts and missed events replay,
-        deduplicated by event id.
+        deduplicated by event id. A new stream replaces the old one, closing it if it
+        is still connected.
 
         Args:
             fresh: Close the current stream first and make the first attempt at once.
@@ -1167,7 +1264,7 @@ class SessionController:
                 except Exception as e:  # noqa: BLE001 — retry on any connect failure
                     log.warning("Reconnect attempt %d failed: %s", attempt, e)
                     continue
-                self.ws = ws
+                await self._set_ws(ws)
 
                 # Reconnected: buffer live frames, replay missed events (deduplicated
                 # by id), then apply the buffered frames.
@@ -1191,10 +1288,12 @@ class SessionController:
             return False
         finally:
             self.reconnecting = False
+            self._update_settled()
 
     async def close(self) -> None:
         """Stop following the session: cancel receive and reconnect, then disconnect."""
         self.closing = True
+        self._settled.set()  # nothing waits for a connection any more
         current = asyncio.current_task()
         tasks = (self._receive_task, self._reconnect_task, self._end_task)
         for task in tasks:

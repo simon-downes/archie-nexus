@@ -290,6 +290,11 @@ class ArchieApp(App):
         """Controllers kept, least recently shown first."""
         return dict(self._controllers)
 
+    @property
+    def switching(self) -> bool:
+        """True while a switch runs (others may wait for it, D10)."""
+        return self._switch_lock.locked()
+
     # --- Feed -------------------------------------------------------------------------
 
     async def _follow_feed(self) -> None:
@@ -406,19 +411,18 @@ class ArchieApp(App):
     def _clear_unseen(self) -> None:
         """PATCH ``unseen: false`` for the on-screen session when its record has it (D18).
 
-        Sent once per record from the feed; records that arrive while a PATCH for the
-        session runs count as covered by it. Failures are logged, not shown.
+        Sent once per record from the feed, one PATCH at a time per session. A record
+        with ``unseen`` that arrives while a PATCH runs may come from a turn that ended
+        after the server applied it, so once the PATCH is answered the on-screen record
+        is checked again: if it is newer than the one the PATCH was sent for and still
+        has ``unseen``, one more PATCH goes. Failures are logged, not shown.
         """
         session_id = self.current
         record = self.records.get(session_id) if session_id is not None else None
         if session_id is None or record is None or not record.unseen or self._shutting_down:
             return
-        if self._seen_sent.get(session_id) is record:
-            return
-        if session_id in self._seen_inflight:
-            # Sent before the running PATCH was answered: that PATCH covers it.
-            self._seen_sent[session_id] = record
-            return
+        if self._seen_sent.get(session_id) is record or session_id in self._seen_inflight:
+            return  # sent for this record, or re-checked when the running PATCH returns
         self._seen_inflight.add(session_id)
         self._seen_sent[session_id] = record
         self._spawn(self._mark_seen(session_id))
@@ -430,6 +434,7 @@ class ArchieApp(App):
             log.warning("Could not mark session %s seen: %s", session_id, exc)
         finally:
             self._seen_inflight.discard(session_id)
+        self._clear_unseen()  # a record that arrived meanwhile may need one more
 
     def _initial_session(self) -> str | None:
         """``focus`` when the feed knows it, else the newest live session."""
@@ -471,8 +476,7 @@ class ArchieApp(App):
             return
         if self._shutting_down:
             return
-        controller.started = True  # ``start`` runs in the background
-        task = asyncio.create_task(controller.start(live=not record.ended))
+        task = controller.start_soon(live=not record.ended)
         self._start_tasks[session_id] = task
 
         def done(finished: asyncio.Task) -> None:
@@ -891,7 +895,11 @@ class ArchieApp(App):
         controller = self.controller
         if pane is None or controller is None or controller.turn_active or pane.input.disabled:
             return
-        command = shlex.split(os.environ.get("EDITOR", "")) or ["nano"]
+        try:
+            command = shlex.split(os.environ.get("EDITOR", "")) or ["nano"]
+        except ValueError as exc:  # an unbalanced quote
+            self.notice("Editor", f"Can't read EDITOR: {exc}", "error")
+            return
         original = pane.input.text
         with tempfile.NamedTemporaryFile(
             "w", suffix=".md", prefix="archie-", delete=False, encoding="utf-8"
@@ -917,9 +925,15 @@ class ArchieApp(App):
             except SuspendNotSupported:
                 error = "This terminal can't hand over to an editor."
             if error is None:
-                text = path.read_text(encoding="utf-8")
-                if path.stat().st_mtime_ns != before or text != original:
-                    content = text.strip()  # saved
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    error = "The saved message is not UTF-8 text; nothing was sent."
+                except OSError as exc:
+                    error = f"Could not read the saved message: {exc.strerror or exc}"
+                else:
+                    if path.stat().st_mtime_ns != before or text != original:
+                        content = text.strip()  # saved
         finally:
             path.unlink(missing_ok=True)
             if suspended:
@@ -936,9 +950,7 @@ class ArchieApp(App):
         inp = pane.input
         inp.clear()
         if content:
-            inp._history.append(content)
-            inp._history_idx = len(inp._history)
-            inp._draft = ""
+            inp.add_sent(content)
             inp.post_message(MessageInput.Submitted(content))
 
     def _recover_after_editor(self, controllers: list[SessionController]) -> None:
