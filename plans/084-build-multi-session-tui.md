@@ -1,6 +1,6 @@
 # 084 — Multi-session TUI
 
-Status: planning
+Status: building
 Branch: build-it/084-multi-session-tui (base: main @ b1edcf9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/084-multi-session-tui
 
@@ -79,28 +79,28 @@ Discovery (three read-only reviews, 2026-11-12) — facts on main @ b1edcf9:
 | D3  | New-session dialog | Workspace (from `/api/workspaces`) and backend (Archie/Kiro, default: the on-screen session's backend, else Archie). After the 202 the TUI switches to the new session; its pane shows "Starting…" until the record leaves `starting` (or shows the stored `error` for `failed`) | the prototype's full dialog; staying on the current session | Future work adds model/first message; switching is what `archie start` does | user Q1 + self |
 | D4  | Prototype | Reference for the outcome only; code is rewritten on main, adopting pieces deliberately (listed in Code structure) | port the prototype | User's instruction; its app, data layer and class swap are mock-shaped | user |
 | D5  | Package layout | Rewrite `cli/src/archie_cli/tui/` in place: new `client.py`, `session.py`, `pane.py`, `sidebar.py`, `notices.py`, `dialogs.py`, `commands.py`; rewritten `app.py`, `detail.py`; kept and adapted `transcript_view.py`, `conversation.py`, `input.py`, `question.py`, `status.py`, `theme.py`; deleted `quit_screen.py`, `throbber.py`, `models_provider.py` | a new `tui2/` package beside the old | The old app is deleted (D1); a second package leaves dead code | self |
-| D6  | Controller ↔ pane contract | `SessionController` (no widgets) owns: connection, replay cursor, `TranscriptBuilder`, a `timeline` (ordered list of root entries: model nodes from the builder's root appends and local entries — turn status, client error, shell output — as they happen), accounting and status-bar values, question, turn state and activity word, direct-shell state, input draft and history. It notifies at most one attached `SessionListener` (the pane) through: `on_changes(changes)` (builder changes; the pane forwards them to its transcript and open detail views), `on_local(entry)`, `on_status()`, `on_turn()`, `on_question()`. `SessionPane.attach(controller)` renders the current state from the controller (timeline → `TranscriptView.load`, status, question, turn) and then receives deltas; `detach()` saves the input draft into the controller | emitting widget calls from the controller; the pane re-deriving state from events | One owner per piece of state; a newly mounted pane is a pure function of the controller; tests assert controller state and a recording listener instead of patching `query_one` | self |
+| D6  | Controller ↔ pane contract | `SessionController` (no widgets) owns: connection, replay cursor, `TranscriptBuilder`, a `timeline` (ordered list of root entries: model nodes from the builder's root appends and local entries — turn status, client error, shell output — as they happen), accounting and status-bar values, question, turn state and activity word, direct-shell state, input draft and history. Local entries record an anchor: the id of the last root node when they were added (None before any). It notifies at most one attached `SessionListener` (the pane) through: `on_changes(changes)` (builder changes; the pane forwards them to its transcript and open detail views), `on_local(entry)`, `on_status()`, `on_turn()`, `on_question()`, `on_loaded()` (the first replay landed) and `on_reset()` (a 409 rebuilt the builder and cleared accounting; the pane drops its rows, pops its detail views and re-renders). `SessionPane.attach(controller)` renders the current state, then receives deltas: `TranscriptView.load(builder, locals)` rebuilds model rows from the builder's current root nodes in order (replaced streams and removed rows are already resolved there, and turns carry their items) and inserts each local entry after its anchor (at the end when the anchor is gone); status, question and turn come from the controller. `detach()` saves the input draft into the controller | emitting widget calls from the controller; the pane re-deriving state from events | One owner per piece of state; a newly mounted pane is a pure function of the controller; tests assert controller state and a recording listener instead of patching `query_one` | self |
 | D7  | Hidden sessions | Only the on-screen session has a mounted pane. Controllers of visited sessions stay connected (LRU of 5; the on-screen controller and any controller with a running `!` shell or an answer in flight are never evicted). Switching back mounts a new pane from the controller (D6) with no refetch; the pane opens at the latest rows, with the input draft restored and the question panel at its recommended option | every pane mounted (078: keypress cost grows with widget count); refetch on switch (0.7 s+ on large logs) | Bounded DOM; instant return; client rows survive | self |
 | D8  | Sidebar data | The sidebar and notices read only the SSE feed; streams exist only for controllers (D7) | a stream per live session for the sidebar | The feed carries status, question, unseen, name and location | self |
-| D9  | Connection lifecycle | A controller connects when its record is live and not `starting`; an ended record loads `/events` (log) with no stream. Stream loss retries with 0.5→8 s back-off while the feed says the session is live; a 4004 close or an ended record stops retrying. The feed reconnects forever with the same back-off and its snapshot re-syncs every row and controller. The on-screen pane shows one "Connection lost; reconnecting…" client row per outage; background controllers retry silently | today's 30 s give-up and "relaunch"; a notice per attempt | An orchestrator restart must not strand sessions | self |
+| D9  | Connection lifecycle | A controller connects when its record is live and not `starting`; an ended record loads `/events` (log) with no stream. Stream loss retries with 0.5→8 s back-off while the feed says the session is live; a 4004 close or an ended record stops retrying. The feed reconnects forever with the same back-off and its snapshot re-syncs every row and controller. The on-screen pane shows one "Connection lost; reconnecting…" client row per outage; background controllers retry silently | today's 30 s give-up and "relaunch"; a notice per attempt | An orchestrator restart must not strand sessions. M1 keeps today's stop rule (4004 or a 30 s give-up) because the feed arrives in M2; M6 replaces it. After a feed reconnect, an on-screen session missing from the snapshot (it ended meanwhile) is fetched with `GET /api/sessions/{id}`. A feed with no bytes for 40 s (the server pings after 15 s of silence) counts as dead | self |
 | D10 | Switching | Switches are serialised (an `asyncio.Lock` in the app) and carry a generation number; a switch whose number is stale when it gets the lock does nothing. Detach/attach are synchronous on the event loop, so a controller still replaying keeps building and the next attached pane renders its state | the prototype's unguarded `switch_to` | Fixes the duplicate-view race | self |
 | D11 | Two-line tool rows | Pure model in new `shared/src/archie_shared/tool_rows.py` (from `ToolNode`: `status`, `duration_ms`, `result_lines`, `result_bytes` and the input; result text only where no structured field exists), rendered by `transcript_view.ToolRow` (changed in place) | the prototype's runtime class swap; rows in `cli` only | Precedent: `shared/src/archie_shared/tool_summaries.py` and `transcript.tool_headline` already format tool calls for both clients; the old one-line row has no other user after D1 | self |
 | D12 | Row spec | `plans/tui-tool-rows.md` brought from the prototype branch, with: a running row shows the animated spinner glyph and no elapsed time (`ToolNode` has no start time); failed shell rows show `exit N` and the last output line, no line count; metrics stay left-aligned on line 1 (the doc's open question); no `description` input is added, so shell rows use `$ <first command line>` and exec rows `python · N lines` | the prototype's row code as the spec | The reviewed doc is the spec; the code drifted | self |
 | D13 | Detail views | In-pane widgets on a per-pane stack (`ToolDetailView`, `SubagentView`), fed `on_changes` so they follow live updates; Esc pops | today's `DetailScreen` modals; the prototype's static panes | Spec keeps the sidebar visible; live tools must update | self |
 | D14 | Dialogs | `ModalScreen`s from one `Dialog` frame (adapted from the prototype's `dialogs.py`); session dialogs placed over the pane, app dialogs over the window | an overlay layer inside the pane | Rename/Stop are brief; pane-scoped focus adds complexity for no use | self |
 | D15 | Session list widget | A `VerticalScroll` of `WorkspaceBand` and `SessionRow` widgets keyed by workspace/session ID and updated in place; each row lays itself out in `render()` from its own width | `OptionList` with hand-padded prompts and `set_options` per refresh (prototype) | No full rebuilds or width hacks | self |
-| D16 | Animation | One app timer at 8 Hz, running only while something animates; widgets that animate (working/starting/stopping session rows, the activity line, running tool and subagent rows in the mounted pane) register while they animate and are refreshed on each tick | a timer per widget (today's `Throbber` uses `auto_refresh = 1/15`, `throbber.py:115`) | Animated widgets in several places need one clock that stops when nothing animates | self |
+| D16 | Animation | One app timer at 8 Hz, running only while something animates, plus one 30 s timer that redraws sidebar ages; widgets that animate (working/starting/stopping session rows, the activity line, running tool and subagent rows in the mounted pane) register while they animate and are refreshed on each tick | a timer per widget (today's `Throbber` uses `auto_refresh = 1/15`, `throbber.py:115`) | Animated widgets in several places need one clock that stops when nothing animates | self |
 | D17 | Notices | A `NoticeStack` in the sidebar fed by `app.notice(title, text, severity)`; `App.notify` is not overridden | overriding `App.notify` (prototype) | Textual internals keep their own channel | self |
 | D18 | `unseen` | PATCH `unseen: false` when a session with `unseen` is on screen: on switch and on a feed update while shown | clear on leaving (prototype) | The server sets `unseen` at every root turn end, including while watched | self |
 | D19 | Entry points | `ArchieApp(client: OrchestratorClient, *, profile: ProfileInfo, focus: str \| None)`, `ProfileInfo(label, web_url, local)`. `archie start` creates, waits as today, then opens it focused on the new session; `archie attach [id]` focuses the resolved session (prefix match; several matches still pick by number), and with no ID the newest live session; no live sessions shows an empty pane prompting ctrl+n. One window talks to one orchestrator profile. `archie stop` keeps its picker | a separate `archie tui` command | Keeps the commands users know | self |
-| D20 | Local profile | `local` is true when the orchestrator URL's host is `127.0.0.1`, `localhost` or `::1` | per-profile config | `!` runs `docker exec` on the client's machine, which only reaches containers of a local orchestrator | self |
+| D20 | Local profile | `local` is true for the default profile with no `ARCHIE_HOST`, the rule `archie shell` uses (`cli.py:545-563`) | host is a loopback address (breaks `host: 0.0.0.0`, which the `serve` docstring recommends) | `!` runs `docker exec` on the client's machine, which only reaches containers of a local orchestrator | self |
 | D21 | Attach features kept | Reconnect (D9), `!` direct shell (only when `local`; otherwise a client error row), external editor (afterwards the feed and every controller reconnect, since `suspend()` stalls them all), copy, turn status rows, model switch, stop child (from the subagent view), the protocol-version warning (a client error row) | — | Parity | self |
 | D22 | Attach features dropped | Subagent picker (subagents open from rows), quit-and-terminate (Quit closes the window; Stop is a dialog), the Footer (key hints live in the sidebar), the roadmap's "toggle sidebar" action (the layout always shows it) | keep | Roadmap item 4: sidebar navigates, palette acts | self |
-| D23 | Keys | alt+↑/↓ and alt+1…9 switch sessions; tab/shift+tab move between filter, list, transcript and input; ctrl+f focuses the filter; enter/shift+enter send/new line; ctrl+n new session; alt+m change model; ctrl+p palette (Rename, Stop, Compact and Open web interface are palette-only); ctrl+c copy; ctrl+g editor; f1 keys; ctrl+q quit. Esc, first match wins: close the open dialog; kill a running `!` shell; dismiss the question; pop a detail view; interrupt a running turn; a second Esc within 1 s clears the input | the prototype's list without precedence | Navigation before interruption; today's order for the rest | self |
+| D23 | Keys | alt+↑/↓ and alt+1…9 switch sessions; tab/shift+tab move between filter, list, transcript and input; ctrl+f focuses the filter; enter/shift+enter send/new line; ctrl+n new session; alt+m change model; ctrl+p palette (Rename, Stop, Compact and Open web interface are palette-only); ctrl+c copy; ctrl+g editor; f1 keys; ctrl+q quit; ctrl+x stops the child shown in an open subagent view. Esc, first match wins: close the open dialog; kill a running `!` shell; pop a detail view; dismiss the question; interrupt a running turn; a second Esc within 0.5 s clears the input | the prototype's list without precedence | Navigation before interruption (no dismissing a question from behind a detail view); today's 0.5 s and order for the rest | self |
 | D24 | Compact | Palette action sends `/compact` as a message (`agent/.../compaction.py:62`); hidden for Kiro sessions | a new command | No compact command exists | self |
-| D25 | Location fields | `SessionLocation {repo: str, worktree: str \| None, branch: str \| None, commit: str \| None, missing: bool = False}` in `shared/src/archie_shared/workspaces.py`; `SessionDescriptor.location: SessionLocation \| None = None`; stored as JSON in a `location` column (migration 3, `_column_value` and `_from_row` branches like `question`'s) | memory only | Ended sessions on screen and `?include=ended` read the store | self |
+| D25 | Location fields | `SessionLocation {repo: str, worktree: str \| None, branch: str \| None, commit: str \| None, missing: bool = False}` in `shared/src/archie_shared/workspaces.py`; `SessionDescriptor.location: SessionLocation \| None = None`; paths in `repo` and `worktree` are relative to the workspace (`""` = the workspace itself), or absolute host paths when outside it, as `Repo.path`/`Worktree.path`; stored as JSON in a `location` column (migration 3; `store.COLUMNS`, `_column_value` and `_from_row` like `question`) | memory only | Ended sessions on screen and `?include=ended` read the store | self |
 | D26 | Location algorithm | Candidates from root `tool_call`s: shell (`cwd`, default `/workspace`; `cd` targets followed in order, stopping at one with `$`, `~` or a backtick; `git -C`), edit/write `path`, read/grep/glob/code `path`. Rank git-running shells, then edits/writes, then the rest, within the latest turn that has a resolvable candidate (newest wins), falling back to earlier turns. Subagent calls are used only when the root has no resolvable candidate | the prototype's whole-history ranking; counting subagent calls equally | One early git call shouldn't outrank later work in another repo; subagents are a third of calls and often search elsewhere, but some sessions only touch repos through them | self |
-| D27 | When location is computed | On each root `ToolResult` whose `tool_use_id` matches a candidate call (the command has run), on every stream connect (log scan, ~15 ms worst case), and a HEAD re-read every 30 s for live sessions with a location; all in a per-session coalescing background job off the event loop (pattern: `request_title`/`_title_job`, guarded by `except Exception`) | at `tool_call` time; on feed reads | A `git worktree add X && cd X` path only exists after the call | self |
+| D27 | When location is computed | On each root `ToolResult` whose `tool_use_id` matches a candidate call (and a scoped one while the root has no resolvable candidate) (the command has run), on every stream connect (log scan, ~15 ms worst case), and a HEAD re-read every 30 s for live sessions with a location; all in a per-session coalescing background job off the event loop (pattern: `request_title`/`_title_job`, guarded by `except Exception`) | at `tool_call` time; on feed reads | A `git worktree add X && cd X` path only exists after the call | self |
 | D28 | Path → location | New public `workspaces.locate(workspace_dir, container_path) -> SessionLocation \| None` on `_Reader`: walk up to a `.git`; a dir is a main checkout, a file a linked worktree resolved through `commondir` back to its repo; a path inside a `.git` component whose worktree checkout is gone gives the worktree from `.git/worktrees/<name>` with `missing: true`; a workspace that no longer resolves gives None | separate git code in the tracker | One confined reader for untrusted workspace files | self |
 | D29 | Tracker config | `SessionTracker(..., workspace_root: Callable[[], Path] \| None = None)`; the lifespan passes `lambda: expand_workspace_root(config_source.latest())`; None turns location off | read config inside the tracker | Same injection as the titler | self |
 | D30 | Sidebar row content | Line 1: glyph, `name`, age since `last_activity_at` (else `started_at`) as `now/45s/12m/3h/5d`. Line 2: `⎇ <repo name> · <branch>` where repo name is the last part of `location.repo` (the workspace name when `repo` is `""`), branch is `branch`, else the commit's first 7 characters, else `?`; `no repo` without a location. Glyphs: starting ◌ muted (animated), working spinner primary, blocked `?` warning, error `✕` error, idle `●` success (bold name when `unseen`), stopping ◌ muted (animated), stopped/exited `·` muted, failed `✕` muted | showing the worktree name | Names are titles now; the branch identifies the worktree | self |
@@ -229,7 +229,8 @@ TUI (`cli/src/archie_cli/tui/`):
 - `dialogs.py` (new, adapted from the prototype): `Dialog`, `ConfirmDialog`, `RenameDialog`,
   `NewSessionDialog`, `KeysDialog`, `QuitDialog`.
 - `commands.py` (new, adapted from the prototype): `SessionCommands`, `ModelCommands` over a
-  typed `AppActions` protocol (model prices via `model_price`).
+  typed `AppActions` protocol; the price text moves from `models_provider._cost_summary`
+  into `commands.py`.
 - `app.py` (rewritten): `ArchieApp` per D19: layout, feed loop, controller LRU, switching
   (D10), animation timer (D16), actions and keys (D23).
 - `transcript_view.py`: `TranscriptView.load(timeline)`; `ToolRow` renders the two-line
@@ -246,17 +247,24 @@ Server: `orchestrator/.../workspaces.py` `locate()` and a HEAD re-read helper;
 `scan_log`); `tracker.py` (D27, D29); `store.py` migration 3; `app.py` lifespan.
 
 Tests and when they change:
-- M1 (controller): rewrite `test_tui_canonical.py`, `test_tui_question.py`,
-  `test_tui_streaming.py`, `test_protocol_version.py`, `test_kiro_translate.py` (TUI part),
-  `test_orchestrator_bounce.py` (reconnect part) against the controller; the remaining
-  `ArchieApp`-based tests keep working because M1 keeps the single-session app.
+- M1 (controller): rewrite the state assertions of `test_tui_canonical.py`,
+  `test_tui_question.py`, `test_protocol_version.py`, `test_kiro_translate.py` (TUI part) and
+  `test_orchestrator_bounce.py` (reconnect part) against the controller and a recording
+  listener; widget assertions (input disabled, panel text, streaming fragments in
+  `test_tui_streaming.py`) stay on the host app. The thin host keeps temporary forwarding
+  shims (`_ws`, `_apply_event`, `_replay_events`, `_update_accounting_status`,
+  `_estimate_context_pct`) so `test_tui_detail.py`, `test_tui_subagents.py`,
+  `test_tui_quit.py`, `test_tui_models_provider.py` and `test_tui_window.py` keep working;
+  their `archie_cli.tui.app.httpx.AsyncClient` patches move to `archie_cli.tui.client`. The
+  shims go with the old app in M2. M1 creates `tests/tui_fakes.py` with a fake client for
+  events, stream and delete.
 - M2 (new app): `test_tui_detail.py`, `test_tui_subagents.py`, `test_tui_copy_paste.py`,
   `test_tui_models_provider.py`, `test_model_switch.py::TestModelProvider` move to the new
   app (detail views stay modal and the model provider stays until M5/M7);
   `test_tui_quit.py` is replaced by a Quit test; CLI tests updated.
 - New: `tests/tui_fakes.py`, `tests/test_tui_app.py`, `tests/test_tool_rows.py`,
   `tests/test_session_location.py`.
-- Unchanged: `test_tui_window.py`, `test_tui_error_text.py`, `test_tui_input.py`,
+- Unchanged: `test_tui_error_text.py`, `test_tui_input.py`,
   `test_tui_shell.py` (until M8), `test_markup.py`, `test_ws_client.py`.
 
 ### Data model
@@ -290,10 +298,11 @@ Tests and when they change:
 
 ### Non-functional
 
-- Switching to a visited session mounts from memory: measured in M4 on
-  `archie-01m32ky6rn.jsonl` (11.5 MB) via a `run_test` timing script; above 300 ms, the
-  previous pane stays mounted hidden (an LRU of 2 mounted panes), logged as a deviation.
-- One 8 Hz timer at most (D16).
+- Switching to a visited session mounts from memory: measured in M2 on
+  `archie-01m32ky6rn.jsonl` (11.5 MB) with `/tmp/switch_timing.py` (a `run_test` script that
+  feeds the log to a fake session and times attach); above 300 ms, the previous pane stays
+  mounted hidden (an LRU of 2 mounted panes), logged as a deviation.
+- One 8 Hz animation timer at most, plus a 30 s age timer (D16).
 - Location work runs off the event loop; the sweep reads one HEAD per live session.
 
 ### Config / infra
@@ -306,25 +315,28 @@ Tests and when they change:
 
 - **Approach:** **prefactor**. Create `client.py` (`HttpOrchestrator` for events/stream/
   delete only so far) and `session.py`. Move the per-session state and logic listed in
-  Code structure from `app.py` into `SessionController` per D6, including the timeline and
-  D9's reconnect rule. Today's `ArchieApp` becomes a thin host: it composes the same
+  Code structure from `app.py` into `SessionController` per D6, including local entries with
+  anchors and today's reconnect rule (D9's feed-driven rule is M6). Today's `ArchieApp` becomes a thin host: it composes the same
   widgets, implements `SessionListener`, and forwards actions to the controller. Rewrite
   the M1 tests (Code structure) against the controller with a recording listener.
-- **Test seam:** `SessionController` with a fake client and a recording listener.
+- **Test seam:** `SessionController` with the M1 fake client in `tests/tui_fakes.py` and a
+  recording listener; the host app for widget assertions.
 - **Deliverable:** `archie attach` behaves as before, backed by the controller.
 - **Verify:** `scripts/dev test tests/test_tui_canonical.py tests/test_tui_question.py
   tests/test_tui_streaming.py tests/test_protocol_version.py tests/test_orchestrator_bounce.py
-  tests/test_kiro_translate.py` pass; full suite.
+  tests/test_kiro_translate.py tests/test_tui_detail.py tests/test_tui_window.py` pass; full
+  suite.
 - **Outcome:**
 
 ### [ ] M2 — The new TUI lists sessions and shows the selected one
 
-- **Approach:** `client.py` gains the feed, PATCH, POST and workspaces; `pane.py`,
+- **Approach:** `client.py` gains the feed and PATCH; `pane.py`,
   `sidebar.py`, new `app.py` (D7, D8, D10, D15, D19, D30; sidebar line 2 shows `no repo` until
   M3), `tests/tui_fakes.py`. `TranscriptView.load(timeline)`. Wire `start`/`attach`; delete
   the old app and `quit_screen.py`; move the M2 tests (Code structure). Detail views stay
   modal `DetailScreen`s and `models_provider.py` stays, re-pointed at the on-screen
-  controller.
+  controller. Until M7, ctrl+q quits at once (sessions keep running). Measure switch time
+  (Non-functional) and record it in the Outcome.
 - **Test seam:** `ArchieApp(client=FakeOrchestrator)` with `run_test`.
 - **Deliverable:** `archie attach` shows the sidebar of live sessions and the selected
   session's live transcript; switching works; messages send.
@@ -340,7 +352,10 @@ Tests and when they change:
   prototype/tui-workbench:cli/src/archie_cli/tui/prototype/location.py`, plus D26); tracker
   jobs, connect scan, sweep (started in `start()`, cancelled in `close()`); migration 3;
   docs (`docs/architecture.md` record table, a location paragraph in the tracker section,
-  the datastore section). Sidebar line 2 and the status bar branch (D30, D31).
+  the datastore section). Sidebar line 2 (D30) and the status bar's branch from the
+  location (D31; the rest of D31 is M4). `/tmp/location_eval.py` is a throwaway script that
+  runs `location.scan_log` and `workspaces.locate` over the 10 newest `archie-*` logs with
+  `/workspace` as the workspace dir and prints each result.
   ⚠️ Resolve on `ToolResult`. ⚠️ All reads through `_Reader`.
 - **Test seam:** `locate`/`location` functions with real repos in `tmp_path`;
   `SessionTracker._on_frame` with frames (as the existing tracker tests); store migration;
@@ -357,9 +372,9 @@ Tests and when they change:
 ### [ ] M4 — Two-line tool rows, activity line and the pane's look
 
 - **Approach:** D11, D12, D16, D33. `tool_rows.py`; `ToolRow`; `UserMessage`; `ActivityLine`
-  replaces the throbber (delete `throbber.py`); header badge; status bar (D31);
-  `archie.tcss` and theme per the prototype's `prototype.tcss` values; animation timer.
-  Measure switch time (Non-functional).
+  replaces the throbber (delete `throbber.py`); header badge; status bar (D31 except the
+  branch); `archie.tcss` and theme per the prototype's `prototype.tcss` values; animation
+  and age timers.
 - **Test seam:** `tool_rows` functions; `run_test` for the activity line and header.
 - **Deliverable:** the pane renders per the spec; an SVG screenshot of a fake session taken
   with `app.save_screenshot()` shows two-line rows, the activity line and the header badge.
@@ -380,8 +395,9 @@ Tests and when they change:
 
 ### [ ] M6 — Notices, unseen and reconnect
 
-- **Approach:** D9, D17, D18. Feed transitions → notices; PATCH unseen; feed and stream
-  reconnect.
+- **Approach:** D9, D17, D18. Feed transitions → notices; PATCH unseen; the feed-driven
+  stream retry rule replacing M1's 30 s give-up, the single reconnecting row, feed reconnect
+  with the 40 s dead-feed rule and the missing-session fetch.
 - **Test seam:** `run_test` with a fake client that drops and restores connections.
 - **Deliverable:** background sessions announce replies and questions; a restart recovers.
 - **Verify:** `scripts/dev test tests/test_tui_app.py -k "notice or unseen or reconnect"`
@@ -390,7 +406,8 @@ Tests and when they change:
 
 ### [ ] M7 — Dialogs, palette, model picker and filter
 
-- **Approach:** D3, D14, D23, D24, D34. `dialogs.py`, `commands.py` (replacing
+- **Approach:** D3, D14, D23, D24, D34. `client.py` gains POST and workspaces; `dialogs.py`
+  (`QuitDialog` replaces M2's immediate quit), `commands.py` (replacing
   `models_provider.py`; port `test_tui_models_provider.py` and
   `test_model_switch.py::TestModelProvider`), filter, web link, keys.
 - **Test seam:** `run_test` with the fake client.
@@ -402,8 +419,10 @@ Tests and when they change:
 
 ### [ ] M8 — Direct shell, editor, copy and docs
 
-- **Approach:** D20, D21. `!` shell and the editor through the controller/pane; docs
-  (`README.md`, `docs/architecture.md` TUI sections).
+- **Approach:** D20, D21. `!` shell and the editor through the controller/pane; docs:
+  `README.md`, `docs/architecture.md` (TUI sections and the `_apply_event` mentions),
+  `docs/session-protocol-walkthrough.md` (`_apply_event`, throbber, `ToolDetailScreen`,
+  reconnect), `docs/event-spec.md`.
 - **Test seam:** ported shell and copy tests; `run_test` for the editor reconnect.
 - **Deliverable:** parity with the old TUI's remaining features.
 - **Verify:** full suite; Ruff; `rg -n "quit_screen|throbber|models_provider|DetailScreen"
@@ -421,6 +440,22 @@ Tests and when they change:
 - Location heuristics (shell parsing) will sometimes pick the wrong repo.
 
 ## Review
+
+- Plan review: 2 passes (archie-worker). Pass 1 fixed: the ❌s (client-only rows and pane
+  state lost on remount, so D6/D7 add a controller timeline and draft; the controller↔pane
+  contract, D6; ArchieApp-dependent tests between milestones, so M1 is a prefactor with a
+  test schedule; missing test files; no local-profile rule, D20), plus D3's post-create
+  switch, D10 switch serialisation, D12 spec questions, D16 spinners, D23 keys and Esc, D24
+  compact, D30 row content, D31 status bar, server error handling, the `location = None`
+  default, one constructor signature (D19), and location moved after the TUI tracer (M3).
+  Pass 2 fixed: the ❌s (shims for tests the prefactor would break; `on_reset`/`on_loaded`;
+  the non-existent `model_price`), the timeline rule (rebuild from builder roots plus
+  anchored local entries), M1's reconnect rule vs M6, D20 using `archie shell`'s rule, Esc
+  order (detail view before question; 0.5 s), ctrl+x, scoped results for subagent-only
+  location, the age timer, worktree path format, `store.COLUMNS`, snapshot-missing and
+  dead-feed rules, the docs list, the M3/M4 status-bar split, ctrl+q before M7,
+  POST/workspaces moved to M7, the switch-time measurement moved to M2, the eval script
+  described. None rejected. Stopped after two passes.
 
 ## Outcome
 
