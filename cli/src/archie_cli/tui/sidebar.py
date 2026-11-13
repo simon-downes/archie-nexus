@@ -1,11 +1,12 @@
-"""The sidebar: banner, profile line, the session list, notices and key hints (084 D15, D30).
+"""The sidebar: banner, profile line, filter, session list, notices and key hints (084 D15, D30).
 
 The session list is fed only by the sessions feed (D8). Sessions are grouped under a
 band per workspace (bands in name order, each with a count) and listed oldest first by
 ``started_at``, so a session keeps its place while its state changes. Ended sessions
 are hidden, except the one on screen. Rows and bands are widgets keyed by session ID
 and workspace and updated in place; each lays itself out in ``render()`` from its own
-width.
+width. The filter above the list keeps the sessions whose name, ID, workspace, repo or
+branch contains its text (ignoring case).
 
 The state glyph and badge helpers here are shared with the session pane's header.
 """
@@ -20,12 +21,13 @@ from archie_shared.session import SessionDescriptor
 from archie_shared.workspaces import SessionLocation
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.events import Click
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from archie_cli.tui import theme
 from archie_cli.tui.animation import PENDING_FRAMES, Animated, spinner
@@ -112,6 +114,26 @@ def branch_label(location: SessionLocation | None) -> str | None:
     return location.commit[:7] if location.commit else "?"
 
 
+def repo_name(record: SessionDescriptor) -> str | None:
+    """The last part of the location's repo path, or the workspace when it is the repo."""
+    location = record.location
+    if location is None:
+        return None
+    return location.repo.rstrip("/").rpartition("/")[2] or record.workspace
+
+
+def matches(record: SessionDescriptor, query: str) -> bool:
+    """True when the name, ID, workspace, repo or branch contains ``query`` (any case)."""
+    needle = query.strip().casefold()
+    if not needle:
+        return True
+    fields = [record.name, record.session_id, record.workspace]
+    location = record.location
+    if location is not None:
+        fields += [location.repo, repo_name(record) or "", branch_label(location) or ""]
+    return any(needle in field.casefold() for field in fields)
+
+
 def where(record: SessionDescriptor) -> Text:
     """Line 2 of a row: ``⎇ <repo name> · <branch>``, or ``no repo`` (084 D30).
 
@@ -122,9 +144,8 @@ def where(record: SessionDescriptor) -> Text:
     location = record.location
     if location is None:
         return Text("  no repo", style=theme.MUTED)  # two cells: lines up with a repo name
-    repo = location.repo.rstrip("/").rpartition("/")[2] or record.workspace
     text = Text("⎇ ", style=theme.MUTED)
-    text.append(repo, style=theme.MUTED if location.missing else "")
+    text.append(repo_name(record) or "", style=theme.MUTED if location.missing else "")
     text.append(" · ", style=theme.MUTED)
     text.append(branch_label(location) or "?", style=theme.MUTED)
     return text
@@ -269,13 +290,20 @@ class SessionList(VerticalScroll):
         """Session IDs in display order (alt+↑/↓, alt+1…9)."""
         return list(self._order)
 
-    def sync(self, records: Mapping[str, SessionDescriptor], current: str | None) -> None:
+    def sync(
+        self, records: Mapping[str, SessionDescriptor], current: str | None, query: str = ""
+    ) -> None:
         """Show ``records`` grouped and ordered (084 D15), marking ``current``.
 
-        Rows and bands that stay are updated in place; new ones are mounted at their
-        place and ones no longer listed are removed.
+        Only records that ``matches`` ``query`` are listed. Rows and bands that stay are
+        updated in place; new ones are mounted at their place and ones no longer listed
+        are removed.
         """
-        visible = [r for r in records.values() if not r.ended or r.session_id == current]
+        visible = [
+            r
+            for r in records.values()
+            if (not r.ended or r.session_id == current) and matches(r, query)
+        ]
         groups: dict[str, list[SessionDescriptor]] = {}
         for record in visible:
             groups.setdefault(record.workspace, []).append(record)
@@ -309,6 +337,7 @@ class SessionList(VerticalScroll):
         self._place(desired)
         self._shown = desired
         self._order = order
+        self._empty.update("No matching sessions" if query.strip() else "No sessions")
         self._empty.display = not desired
 
     def _place(self, desired: list[Widget]) -> None:
@@ -329,8 +358,33 @@ class SessionList(VerticalScroll):
 # --- Sidebar ------------------------------------------------------------------------
 
 
+KEY_HINTS = (("^n", "New"), ("^p", "Palette"), ("f1", "Keys"), ("^q", "Quit"))
+"""The sidebar's key hints (084 D22: they replace the footer)."""
+
+
+class SessionFilter(Input):
+    """The filter above the session list; Esc clears it, Enter moves to the list."""
+
+    DEFAULT_CSS = """
+    SessionFilter {
+        height: 3;
+        margin: 1 1 0 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "clear_filter", "Clear", show=False)]
+
+    def __init__(self) -> None:
+        super().__init__(placeholder="Filter by name, ID, repo or branch")
+
+    def action_clear_filter(self) -> None:
+        """Esc: clear the text (nothing else happens while the filter has focus)."""
+        self.value = ""
+
+
 class Sidebar(Vertical):
-    """Banner, ``v0.1.0 · N running · local ↗``, the session list, notices and key hints.
+    """Banner, ``v0.1.0 · N running · local ↗``, the filter, the session list, notices
+    and key hints.
 
     The profile label in the info line is a link to the app's ``open_web`` action.
     """
@@ -359,17 +413,19 @@ class Sidebar(Vertical):
         super().__init__(**kwargs)
         self.profile = profile
         self.info = Static(self._info(0), classes="sidebar-info")
+        self.filter = SessionFilter()
         self.sessions = SessionList()
         self.notices = NoticeStack()
+        self._records: Mapping[str, SessionDescriptor] = {}
+        self._current: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(banner(), classes="sidebar-brand")
         yield self.info
+        yield self.filter
         yield self.sessions
         yield self.notices
-        yield Static(
-            key_hints(("f1", "Keys"), ("^q", "Quit"), ("^p", "Palette")), classes="sidebar-keys"
-        )
+        yield Static(key_hints(*KEY_HINTS), classes="sidebar-keys")
 
     def _info(self, running: int) -> Content:
         facts = Content.styled(f"v{__version__} · {running} running · ", theme.MUTED)
@@ -378,8 +434,22 @@ class Sidebar(Vertical):
 
     def show(self, records: Mapping[str, SessionDescriptor], current: str | None) -> None:
         """Redraw the info line and the session list from the feed's records."""
+        self._records = records
+        self._current = current
         self.info.update(self._info(_running(records.values())))
-        self.sessions.sync(records, current)
+        self.sessions.sync(records, current, self.filter.value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """The filter changed: list the matching sessions."""
+        if event.input is self.filter:
+            event.stop()
+            self.sessions.sync(self._records, self._current, event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the filter moves to the session list."""
+        if event.input is self.filter:
+            event.stop()
+            self.sessions.focus()
 
 
 def _running(records: Iterable[SessionDescriptor]) -> int:

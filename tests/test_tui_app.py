@@ -1,4 +1,4 @@
-"""The multi-session TUI: sidebar, switching, controllers, the pane, notices and reconnect (084).
+"""The multi-session TUI: sidebar, switching, the pane, notices, reconnect, dialogs, palette (084).
 
 Everything runs against ``FakeOrchestrator`` (``tests/tui_fakes.py``) with ``run_test``.
 """
@@ -460,11 +460,13 @@ async def test_sixth_visited_session_evicts_the_least_recent_evictable_controlle
         assert list(app.controllers) == ["ws-3", "ws-4", "ws-5", "ws-6", "ws-7"]
 
 
-async def test_tab_moves_between_the_list_the_transcript_and_the_input():
+async def test_tab_moves_between_the_filter_the_list_the_transcript_and_the_input():
     app = make_app()
     async with app.run_test(size=SIZE) as pilot:
         pane = await attached(app, pilot)
         assert app.focused is pane.input
+        await pilot.press("tab")
+        assert app.focused is app.sidebar.filter
         await pilot.press("tab")
         assert app.focused is app.sidebar.sessions
         await pilot.press("tab")
@@ -793,6 +795,51 @@ async def test_http_feed_and_patch_report_failures(monkeypatch):
         async for _ in client.feed():
             pass
     assert feed_error.value.status_code == 404
+
+
+async def test_http_create_workspaces_and_delete_carry_the_servers_error_text(monkeypatch):
+    import httpx
+    from archie_cli.tui.client import HttpOrchestrator, RequestRefused
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.content))
+        if request.method == "POST":
+            if b"nope" in request.content:
+                return httpx.Response(400, json={"error": "No workspace named 'nope'"})
+            record = make_record("ws-new", status="starting", backend="kiro")
+            return httpx.Response(202, content=msgspec.json.encode(record))
+        if request.url.path == "/api/workspaces":
+            return httpx.Response(200, json=[{"name": "alpha", "live_sessions": 1}])
+        if request.method == "DELETE" and request.url.path.endswith("/ws-a"):
+            return httpx.Response(
+                200, content=msgspec.json.encode(make_record("ws-a", status="stopped"))
+            )
+        if request.method == "DELETE":
+            return httpx.Response(409, json={"error": "Session 'ws-b' is still starting"})
+        return httpx.Response(500, text="boom")
+
+    _mock_httpx(monkeypatch, handler)
+    client = HttpOrchestrator("http://orch:7600")
+    record = await client.create("ws", "kiro")
+    assert (record.session_id, record.status) == ("ws-new", "starting")
+    assert seen[0] == ("POST", "/api/sessions", b'{"workspace":"ws","backend":"kiro"}')
+    with pytest.raises(RequestRefused, match="No workspace named 'nope'") as refused:
+        await client.create("nope", "native")
+    assert refused.value.status_code == 400
+    assert [w.name for w in await client.workspaces()] == ["alpha"]
+    assert (await client.delete("ws-a")).status == "stopped"
+    with pytest.raises(RequestRefused) as conflict:
+        await client.delete("ws-b")
+    assert (str(conflict.value), conflict.value.status_code) == (
+        "Session 'ws-b' is still starting",
+        409,
+    )
+    with pytest.raises(OrchestratorError) as failed:
+        await client.session("ws-c")
+    assert not isinstance(failed.value, RequestRefused)
+    assert str(failed.value) == "session request failed: 500"
 
 
 # --- The pane's look (M4) ---------------------------------------------------------------
@@ -1364,3 +1411,469 @@ async def test_http_session_reads_one_record(monkeypatch):
     with pytest.raises(OrchestratorError) as missing:
         await client.session("ws-x")
     assert missing.value.status_code == 404
+
+
+# --- Dialogs, palette, model picker and filter (M7) --------------------------------------
+
+
+def _screen_is(app, kind) -> bool:
+    return isinstance(app.screen, kind)
+
+
+async def _open_new_session_dialog(app, pilot):
+    from archie_cli.tui.dialogs import NewSessionDialog
+
+    await pilot.press("ctrl+n")
+    await settle(pilot, lambda: _screen_is(app, NewSessionDialog))
+    return app.screen
+
+
+async def test_new_session_dialog_posts_the_workspace_and_default_backend_and_switches():
+    from archie_shared.workspaces import Workspace
+
+    client = _client(make_record("ws-a", workspace="beta"))
+    client.workspace_list = [Workspace(name="beta"), Workspace(name="alpha")]
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        dialog = await _open_new_session_dialog(app, pilot)
+        # The workspaces from /api/workspaces, the on-screen session's workspace and backend.
+        assert [str(option[0]) for option in dialog.workspace._options] == ["alpha", "beta"]
+        assert dialog.workspace.value == "beta"
+        assert dialog.backend.value == "native"
+        await pilot.press("enter")
+        await settle(pilot, lambda: app.current == "beta-new01")
+        assert client.created == [{"workspace": "beta", "backend": "native"}]
+        pane = app.pane
+        assert pane is not None and pane.record.session_id == "beta-new01"
+        await settle(pilot, lambda: pane.loading_line.display)
+        assert "Starting…" in str(pane.loading_line.render())
+        assert client.opened("beta-new01") == 0
+
+        client.publish(make_record("beta-new01", workspace="beta", status="idle"))
+        await attached(app, pilot, "beta-new01")
+        assert client.opened("beta-new01") == 1
+        assert not pane.loading_line.display
+
+
+async def test_new_session_dialog_kiro_choice_and_a_failed_start_shows_its_error():
+    client = _client(make_record("ws-a"))
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        dialog = await _open_new_session_dialog(app, pilot)
+        dialog.backend.value = "kiro"
+        await pilot.press("ctrl+j")  # ctrl+enter in most terminals
+        await settle(pilot, lambda: app.current == "ws-new01")
+        assert client.created == [{"workspace": "ws", "backend": "kiro"}]
+
+        client.publish(
+            make_record("ws-new01", backend="kiro", status="failed", error="No image archie:kiro")
+        )
+        pane = app.pane
+        await settle(pilot, lambda: pane.record.status == "failed")
+        assert str(pane.loading_line.render()) == "Failed to start: No image archie:kiro"
+        assert pane.input.disabled
+        assert ("ws-new01", None) not in client.requests  # it never ran: nothing to load
+        assert "ws-new01" in app.sidebar.sessions.rows  # ended, but on screen
+
+
+async def test_new_session_dialog_defaults_to_the_on_screen_kiro_backend_and_cancels():
+    from archie_cli.tui.dialogs import NewSessionDialog
+
+    client = _client(make_record("ws-a", backend="kiro"))
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        dialog = await _open_new_session_dialog(app, pilot)
+        assert dialog.backend.value == "kiro"
+        await pilot.press("escape")
+        await settle(pilot, lambda: not _screen_is(app, NewSessionDialog))
+        assert client.created == [] and app.current == "ws-a"
+
+
+async def test_new_session_dialog_without_a_session_defaults_to_archie_and_errors_notice():
+    from archie_cli.tui.client import RequestRefused
+
+    client = _client()
+    client.workspace_list = []
+    app = make_app(client, focus=None)
+    async with app.run_test(size=SIZE) as pilot:
+        await settle(pilot, lambda: app._snapshot_seen)
+        posted = _record_notices(app)
+        await pilot.press("ctrl+n")
+        await settle(pilot, lambda: bool(posted))
+        assert posted[-1][:3] == (
+            "No workspaces",
+            "Add a directory under the workspace root.",
+            "warning",
+        )
+
+        from archie_shared.workspaces import Workspace
+
+        client.workspace_list = [Workspace(name="alpha")]
+        dialog = await _open_new_session_dialog(app, pilot)
+        assert (dialog.workspace.value, dialog.backend.value) == ("alpha", "native")
+        client.create_error = RequestRefused("No workspace named 'alpha'", 400)
+        await pilot.press("enter")
+        await settle(pilot, lambda: len(posted) == 2)
+        assert posted[-1][:3] == ("Session not started", "No workspace named 'alpha'", "error")
+        assert app.current is None
+
+        client.workspaces_error = OrchestratorError("connection refused")
+        await pilot.press("ctrl+n")
+        await settle(pilot, lambda: len(posted) == 3)
+        assert posted[-1][:3] == ("Could not list workspaces", "connection refused", "error")
+
+
+async def _open_rename_dialog(app, pilot):
+    from archie_cli.tui.dialogs import RenameDialog
+
+    app.action_rename_session()
+    await settle(pilot, lambda: _screen_is(app, RenameDialog))
+    return app.screen
+
+
+async def test_rename_dialog_patches_the_name_resets_it_and_rejects_invalid_names():
+    from archie_cli.tui.dialogs import RenameDialog
+
+    client = _client(make_record("s1", name="Fix the parser", name_source="llm"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "s1")
+        dialog = await _open_rename_dialog(app, pilot)
+        # Over the pane, which is dimmed meanwhile; prefilled with the model's title.
+        assert dialog.over == app.query_one(tui_app.Main).region and dialog.over.x == 48
+        assert app.query_one(tui_app.Main).has_class("-dimmed")
+        assert dialog.input.value == "Fix the parser"
+
+        for invalid, error in (
+            ("x" * 81, "at most 80 characters"),
+            ("tab\there", "control characters"),
+        ):
+            dialog.input.value = invalid
+            await pilot.press("enter")
+            await pilot.pause()
+            assert dialog.error.display and error in str(dialog.error.render())
+            assert _screen_is(app, RenameDialog)
+        assert client.patches == []
+
+        dialog.input.value = "  Parser fix  "
+        await pilot.press("enter")
+        await settle(pilot, lambda: bool(client.patches))
+        assert client.patches == [("s1", {"name": "Parser fix"})]
+        await settle(pilot, lambda: not app.query_one(tui_app.Main).has_class("-dimmed"))
+        await settle(pilot, lambda: app.records["s1"].name == "Parser fix")
+
+        dialog = await _open_rename_dialog(app, pilot)
+        dialog.input.value = ""
+        await pilot.press("enter")
+        await settle(pilot, lambda: len(client.patches) == 2)
+        assert client.patches[-1] == ("s1", {"name": None})
+        await settle(pilot, lambda: app.records["s1"].name_source == "id")
+        assert app.pane.header.record.name == "s1"
+
+
+async def test_rename_dialog_starts_empty_for_an_id_name_and_shows_a_refusal_in_the_pane():
+    from archie_cli.tui.client import RequestRefused
+
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot, "s1")
+        dialog = await _open_rename_dialog(app, pilot)
+        assert dialog.input.value == "" and dialog.input.placeholder == "s1"
+        client.patch = AsyncMock(side_effect=RequestRefused("Session store unavailable", 400))
+        dialog.input.value = "New"
+        await pilot.press("enter")
+        await settle(pilot, lambda: bool(_error_rows(pane)))
+        assert _error_rows(pane) == ["Rename failed: Session store unavailable"]
+
+
+async def _open_stop_dialog(app, pilot):
+    from archie_cli.tui.dialogs import ConfirmDialog
+
+    app.action_stop_session()
+    await settle(pilot, lambda: _screen_is(app, ConfirmDialog))
+    return app.screen
+
+
+async def test_stop_dialog_sends_delete_only_when_confirmed():
+    from textual.widgets import Button
+
+    client = _client(make_record("s1", name="Fix the parser"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot, "s1")
+        dialog = await _open_stop_dialog(app, pilot)
+        assert "Fix the parser" in str(dialog.message) and "log is kept" in str(dialog.message)
+        assert dialog.over == app.query_one(tui_app.Main).region
+        assert isinstance(dialog.focused, Button) and dialog.focused.id == "cancel"
+        await pilot.press("enter")  # Cancel is focused: destructive dialogs default to safe
+        await settle(pilot, lambda: app.screen is app.screen_stack[0])
+        assert client.deleted == []
+
+        dialog = await _open_stop_dialog(app, pilot)
+        await pilot.press("right")
+        assert dialog.focused.id == "confirm"
+        await pilot.press("enter")
+        await settle(pilot, lambda: app.records["s1"].status == "stopped")
+        assert client.deleted == ["s1"]
+        assert pane.input.disabled
+        assert "s1" in app.sidebar.sessions.rows  # ended, still on screen
+
+
+async def test_stop_dialog_shows_the_servers_409_message_in_the_pane():
+    from archie_cli.tui.client import RequestRefused
+
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot, "s1")
+        client.delete_error = RequestRefused("Session 's1' is already stopping", 409)
+        await _open_stop_dialog(app, pilot)
+        await pilot.press("right", "enter")
+        await settle(pilot, lambda: bool(_error_rows(pane)))
+        assert _error_rows(pane) == ["Could not stop the session: Session 's1' is already stopping"]
+        assert client.deleted == ["s1"]
+
+
+def _command_names(app) -> list[str]:
+    from archie_cli.tui.commands import session_commands
+
+    return [command.name for command in session_commands(app)]
+
+
+ALWAYS = ["Open web interface", "Keyboard shortcuts", "Quit"]
+
+
+async def test_palette_lists_for_native_kiro_ended_and_no_session():
+    client = _client(
+        make_record("ws-a", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2), backend="kiro"),
+        make_record("ws-c", started_at=_at(3)),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        session = ["Rename session…", "Change model…"]
+        assert _command_names(app) == [
+            "New session…",
+            *session,
+            "Compact context",
+            "Stop session…",
+            *ALWAYS,
+        ]
+        await app.switch_to("ws-b")
+        await attached(app, pilot, "ws-b")
+        assert _command_names(app) == ["New session…", *session, "Stop session…", *ALWAYS]
+        await app.switch_to("ws-c")
+        await attached(app, pilot, "ws-c")
+        client.publish(make_record("ws-c", started_at=_at(3), status="exited"))
+        await settle(pilot, lambda: app.records["ws-c"].ended)
+        assert _command_names(app) == ["New session…", *ALWAYS]
+
+    empty = make_app(_client(), focus=None)
+    async with empty.run_test(size=SIZE) as pilot:
+        await settle(pilot, lambda: empty._snapshot_seen)
+        assert _command_names(empty) == ["New session…", *ALWAYS]
+
+
+def _palette_options(app) -> list:
+    from textual.command import CommandList
+
+    options = app.screen.query_one(CommandList)
+    return [options.get_option_at_index(i) for i in range(options.option_count)]
+
+
+async def test_palette_shows_only_our_commands_and_runs_them():
+    from archie_cli.tui.dialogs import KeysDialog
+    from textual.command import CommandPalette
+
+    client = _client(make_record("s1", status="starting"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await settle(pilot, lambda: app.pane is not None)
+        await pilot.press("ctrl+p")
+        await settle(pilot, lambda: _screen_is(app, CommandPalette) and _palette_options(app))
+        # No Textual system commands (theme, screenshot, …); a starting session can be
+        # renamed or stopped, not switched or compacted yet.
+        assert [option.hit.text for option in _palette_options(app)] == [
+            "New session…",
+            "Rename session…",
+            "Stop session…",
+            *ALWAYS,
+        ]
+        await pilot.press(*"keyboard")
+        await settle(pilot, lambda: len(_palette_options(app)) == 1)
+        await pilot.press("enter")
+        await settle(pilot, lambda: _screen_is(app, KeysDialog))
+
+
+async def test_model_picker_palette_marks_the_current_model_and_switches(monkeypatch):
+    from archie_cli.tui import commands
+    from archie_shared.commands import SwitchModelCommand
+    from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
+    from textual.command import CommandPalette
+
+    def entry(name: str, rate: Rate) -> ModelEntry:
+        return ModelEntry(
+            name=name, context=200_000, provider=BedrockProvider(model_id="ep"),
+            cost=CostConfig(rates=[rate]),
+        )  # fmt: skip
+
+    catalog = {
+        "model-haiku": entry("Claude Haiku 4.5", Rate(input=1.0, output=5.0)),
+        "model-sonnet": entry("Claude Sonnet 4.6", Rate(input=3.0, output=15.0)),
+    }
+    monkeypatch.setattr(commands, "_get_catalog", lambda: catalog)
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "s1")
+        app.controller.model_key = "model-sonnet"
+        await pilot.press("alt+m")
+        await settle(pilot, lambda: _screen_is(app, CommandPalette) and _palette_options(app))
+        lines = [option.hit.prompt.plain for option in _palette_options(app)]
+        assert lines == [
+            "  Claude Haiku 4.5     $1.00 /  $5.00",
+            "✓ Claude Sonnet 4.6    $3.00 / $15.00",
+        ]
+        await pilot.press(*"haiku")
+        await settle(pilot, lambda: len(_palette_options(app)) == 1)
+        await pilot.press("enter")
+        await settle(pilot, lambda: bool(client.stream_for("s1").sent))
+        (kind, command), *_ = client.stream_for("s1").sent
+        assert kind == "command" and command == SwitchModelCommand(model_key="model-haiku")
+
+
+async def test_compact_palette_action_sends_compact_for_native_sessions_only():
+    client = _client(
+        make_record("ws-a", started_at=_at(1)),
+        make_record("ws-b", started_at=_at(2), backend="kiro"),
+    )
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        app.action_compact()
+        await settle(pilot, lambda: bool(client.stream_for("ws-a").sent))
+        assert client.stream_for("ws-a").sent == [("message", "/compact")]
+        await app.switch_to("ws-b")
+        await attached(app, pilot, "ws-b")
+        app.action_compact()
+        await pilot.pause()
+        assert client.stream_for("ws-b").sent == []
+
+
+async def test_filter_matches_by_branch_workspace_name_and_id():
+    client = _client(
+        make_record(
+            "alpha-01",
+            started_at=_at(1),
+            name="Fix the parser",
+            location=SessionLocation(repo="app", branch="fix/lexer-tail"),
+        ),
+        make_record("alpha-02", started_at=_at(2), location=SessionLocation(repo="")),
+        make_record("beta-01", started_at=_at(3), name="Tidy the README"),
+    )
+    app = make_app(client, focus="alpha-01")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "alpha-01")
+        await pilot.press("ctrl+f")
+        assert app.focused is app.sidebar.filter
+        order = app.sidebar.sessions
+        for query, expected in (
+            ("LEXER", ["alpha-01"]),  # branch, any case
+            ("beta", ["beta-01"]),  # workspace (and ID)
+            ("readme", ["beta-01"]),  # name
+            ("alpha-02", ["alpha-02"]),  # session ID
+            ("app", ["alpha-01"]),  # repo
+            ("nothing", []),
+        ):
+            app.sidebar.filter.value = query
+            await settle(pilot, lambda e=expected: order.order == e)
+        assert "No matching sessions" in str(order._empty.render())
+        await pilot.press("escape")  # clears the filter; nothing is interrupted
+        await settle(pilot, lambda: order.order == ["alpha-01", "alpha-02", "beta-01"])
+        assert app.sidebar.filter.value == ""
+        await pilot.press(*"beta", "enter")
+        await settle(pilot, lambda: order.order == ["beta-01"])
+        assert app.focused is order
+
+
+async def test_ctrl_q_opens_the_quit_dialog_and_confirming_exits_without_delete():
+    from archie_cli.tui.dialogs import QuitDialog
+
+    client = _client(make_record("ws-a", status="working"), make_record("ws-b", started_at=_at(5)))
+    app = make_app(client, focus="ws-a")
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "ws-a")
+        await pilot.press("ctrl+q")
+        await settle(pilot, lambda: _screen_is(app, QuitDialog))
+        message = str(app.screen.message)
+        assert "2 sessions keep running" in message and "1 of them mid-turn" in message
+        await pilot.press("escape")
+        await settle(pilot, lambda: not _screen_is(app, QuitDialog))
+        assert app.return_code is None
+        await pilot.press("ctrl+q")
+        await settle(pilot, lambda: _screen_is(app, QuitDialog))
+        await pilot.press("enter")
+        await _until(lambda: app.return_code is not None)
+    assert app.return_code == 0
+    assert client.deleted == []
+
+
+async def test_f1_shows_the_keys_dialog_and_esc_closes_it_first():
+    from archie_cli.tui.dialogs import KEYS, KeysDialog
+
+    client = _client(make_record("s1", status="working"))
+    app = make_app(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await attached(app, pilot, "s1")
+        await pilot.press("f1")
+        await settle(pilot, lambda: _screen_is(app, KeysDialog))
+        text = str(app.screen.query_one(".dialog-body").render())
+        for _section, rows in KEYS:
+            for keys, what in rows:
+                assert keys in text and what in text
+        for key in ("ctrl+n", "alt+m", "ctrl+p", "ctrl+f", "f1", "ctrl+q", "ctrl+x"):
+            assert key in text
+        await pilot.press("escape")
+        await settle(pilot, lambda: not _screen_is(app, KeysDialog))
+        assert client.stream_for("s1").sent == []  # the dialog took Esc: no interrupt
+
+
+async def test_status_bar_keeps_the_cost_visible_at_120_columns():
+    client = _client(
+        make_record(
+            "s1",
+            name="Fix the parser",
+            location=SessionLocation(repo="app", branch="build-it/084-multi-session-tui"),
+        )
+    )
+    app = make_app(client)
+    async with app.run_test(size=(120, 40)) as pilot:
+        pane = await attached(app, pilot, "s1")
+        status = pane.status
+        status.model_name = "Claude Sonnet 4.6"
+        status.session_input = 123_456
+        status.cache_read = 2_345_678
+        status.cache_write = 34_567
+        status.session_output = 45_678
+        status.context_tokens = 156_000
+        status.context_pct = 78.0
+        status.pricing_label = "$12.3456 · 4.25 credits"
+        await pilot.pause()
+        line = status.render().plain
+        assert status.size.width < 80
+        assert line.rstrip().endswith("$12.3456 · 4.25 credits")
+        assert len(line) <= status.size.width
+        assert "s1" not in line and "2.3K" not in line  # session ID and cache dropped first
+        assert "Claude Sonnet 4.6" in line
+        # Wide enough, everything shows, the session ID on the right.
+        wide = status.fit(200).plain
+        assert "2345.7K" in wide and "build-it/084-multi-session-tui" in wide
+        assert wide.rstrip().endswith("s1")
+        # Very narrow: the model name shortens, the cost stays.
+        narrow = status.fit(30).plain
+        assert narrow.rstrip().endswith("$12.3456 · 4.25 credits")

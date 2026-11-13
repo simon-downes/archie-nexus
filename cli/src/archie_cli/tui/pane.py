@@ -239,13 +239,19 @@ class SessionPane(Vertical):
 
     def _show_loading(self) -> None:
         controller = self.controller
-        if self.record.status == "starting":
+        record = self.record
+        style = theme.MUTED
+        if record.status == "starting":
             text = "Starting…"
+        elif record.status == "failed":
+            # It never ran: there is no history to load, only the start error (084 D3).
+            text = f"Failed to start: {record.error}" if record.error else "Failed to start"
+            style = theme.ERROR
         elif controller is None or not controller.loaded:
             text = "Loading…"
         else:
             text = ""
-        self.loading_line.update(Text(text, style=theme.MUTED))
+        self.loading_line.update(Text(text, style=style))
         self.loading_line.display = bool(text)
 
     def _show_turn(self) -> None:

@@ -1,8 +1,10 @@
-"""Quitting the TUI closes the window; the sessions keep running (084 M2, until M7's dialog)."""
+"""Quitting the TUI closes the window after the quit dialog; the sessions keep running (084)."""
 
 import asyncio
 
-from tests.tui_fakes import FakeOrchestrator, attached, make_app, make_record
+from archie_cli.tui.dialogs import QuitDialog
+
+from tests.tui_fakes import FakeOrchestrator, attached, make_app, make_record, settle
 
 SIZE = (150, 30)
 
@@ -16,14 +18,22 @@ def _client() -> FakeOrchestrator:
     )
 
 
-async def test_ctrl_q_exits_at_once_without_stopping_sessions():
+async def _quit(app, pilot) -> None:
+    """ctrl+q, then confirm the quit dialog (its Quit button has focus)."""
+    await pilot.press("ctrl+q")
+    await settle(pilot, lambda: isinstance(app.screen, QuitDialog))
+    await pilot.press("enter")
+
+
+async def test_ctrl_q_exits_after_the_dialog_without_stopping_sessions():
     client = _client()
     app = make_app(client, focus="ws-a")
     async with app.run_test(size=SIZE) as pilot:
         await attached(app, pilot, "ws-a")
         await app.switch_to("ws-b")
         await attached(app, pilot, "ws-b")
-        await pilot.press("ctrl+q")
+        await _quit(app, pilot)
+        await settle(pilot, lambda: app.return_code is not None)
     assert client.deleted == []
     assert not app.controllers
     for session_id in ("ws-a", "ws-b"):
@@ -46,7 +56,8 @@ async def test_quit_cancels_a_controller_still_starting():
     app = make_app(client, focus="ws-a")
     async with app.run_test(size=SIZE) as pilot:
         await asyncio.wait_for(started.wait(), 5)
-        await pilot.press("ctrl+q")
+        await _quit(app, pilot)
+        await settle(pilot, lambda: app.return_code is not None)
     assert client.deleted == []
     client.stream_for("ws-a").disconnect.assert_awaited()
 

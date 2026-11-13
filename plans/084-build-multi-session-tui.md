@@ -461,7 +461,7 @@ Tests and when they change:
   session is fetched (404 → `exited`); `on_notice` removed. Evidence: `-k "notice or unseen
   or reconnect"` 16 passed in 8/8 runs; full suite 5384 passed; Ruff clean.
 
-### [ ] M7 — Dialogs, palette, model picker and filter
+### [x] M7 — Dialogs, palette, model picker and filter
 
 - **Approach:** D3, D14, D23, D24, D34. `client.py` gains POST and workspaces; `dialogs.py`
   (`QuitDialog` replaces M2's immediate quit), `commands.py` (replacing
@@ -472,7 +472,14 @@ Tests and when they change:
   on-screen session.
 - **Verify:** `scripts/dev test tests/test_tui_app.py -k "dialog or palette or filter"
   tests/test_model_switch.py` pass; full suite.
-- **Outcome:**
+- **Outcome:** `dialogs.py` (one `Dialog` frame; Stop, Rename with client-side name rules,
+  New session with workspace and backend, Keys, Quit; session dialogs centred over a
+  dimmed pane), `commands.py` (typed `AppActions`; our actions only, Kiro/ended/no-session
+  rules; model picker with aligned prices) replacing `models_provider.py`; client
+  `create`/`workspaces`/`RequestRefused`; keys per D23; sidebar filter; a status bar that
+  fits its width and always keeps the cost. Evidence: M7 Verify 16 passed (5/5 runs),
+  `test_model_switch.py` passes; full suite 5401 passed; Ruff clean; screenshots in
+  `/tmp/084-m7/` (synthetic) inspected.
 
 ### [ ] M8 — Direct shell, editor, copy and docs
 
@@ -488,6 +495,8 @@ Tests and when they change:
 
 ## Deviations
 
+- M7: Change model and Compact are also hidden while a session is `starting`; Esc on the
+  filter is always consumed (never interrupts from the sidebar).
 - M6: the dead-feed rule lives in the client's read timeout, because the SSE parser skips
   pings and the app never sees them. A send while disconnected waits up to 15 s for the
   reconnect before failing.

@@ -15,6 +15,12 @@ compared with its previous record and may post one notice in the sidebar; the
 on-screen session's ``unseen`` is cleared with a PATCH. Each controller asks the app
 whether its record is live, so its reconnects stop once the feed says it ended.
 
+Actions (D3, D14, D22-D24): the palette (``commands.SessionCommands``) and keys open
+dialogs (``dialogs``) and act through the orchestrator client: a new session is created
+and shown at once (its pane says "Starting…" until the record leaves ``starting``);
+rename and stop act on the session on screen, and their errors show as a client row in
+its pane. Errors of app actions (listing workspaces, creating) show as notices.
+
 Threading model: Textual runs an asyncio event loop on the main thread; the feed and
 the controllers' receive loops run as tasks on the same loop, so their notifications
 update widgets directly.
@@ -29,20 +35,32 @@ import subprocess
 import tempfile
 import webbrowser
 from collections import OrderedDict
+from collections.abc import Coroutine
+from typing import Any
 
 import msgspec
-from archie_shared.session import SessionDescriptor, container_name
+from archie_shared.session import SessionBackend, SessionDescriptor, container_name
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import CommandPalette
 from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Static
 from textual.worker import Worker
 
 from archie_cli.tui import theme
 from archie_cli.tui.animation import AnimationClock
 from archie_cli.tui.client import FeedEvent, OrchestratorClient, OrchestratorError, ProfileInfo
+from archie_cli.tui.commands import MODEL_PLACEHOLDER, ModelCommands, SessionCommands
+from archie_cli.tui.dialogs import (
+    KeysDialog,
+    NewSessionDialog,
+    QuitDialog,
+    RenameDialog,
+    stop_dialog,
+)
 from archie_cli.tui.input import MessageInput
-from archie_cli.tui.models_provider import ModelProvider
 from archie_cli.tui.notices import NOTICE_TIMEOUT, Notice, Severity
 from archie_cli.tui.pane import SessionPane
 from archie_cli.tui.session import SessionController
@@ -68,7 +86,23 @@ CONNECTING_TEXT = "Connecting…"
 QUESTION_CLIP = 80
 """Characters of a question shown in a "Needs an answer" notice."""
 
-_SWITCH_ACTIONS = frozenset({"step_session", "jump_session"})
+COMPACT_MESSAGE = "/compact"
+"""Sent as a message to compact a native session's context (084 D24)."""
+
+_MAIN_SCREEN_ACTIONS = frozenset(
+    {
+        "step_session",
+        "jump_session",
+        "cycle_focus",
+        "new_session",
+        "change_model",
+        "focus_filter",
+        "keys",
+        "quit",
+        "command_palette",
+    }
+)
+"""Key actions that act only while no dialog or palette is open."""
 
 
 def _clip(text: str, limit: int) -> str:
@@ -148,10 +182,14 @@ class ArchieApp(App):
 
     TITLE = "Archie"
     CSS_PATH = "archie.tcss"
-    COMMANDS = App.COMMANDS | {ModelProvider}
+    COMMANDS = {SessionCommands}  # our actions only: no Textual system commands
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+n", "new_session", "New session", show=False, priority=True),
+        Binding("alt+m", "change_model", "Change model", show=False, priority=True),
+        Binding("ctrl+f", "focus_filter", "Filter sessions", show=False, priority=True),
+        Binding("f1", "keys", "Keys", show=False, priority=True),
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+c", "copy_block", "Copy Block", show=False),
         Binding("ctrl+g", "editor", "Editor", show=False),
@@ -228,6 +266,11 @@ class ArchieApp(App):
     def pane(self) -> SessionPane | None:
         """The mounted session pane, or None."""
         return self._pane
+
+    @property
+    def on_screen(self) -> SessionDescriptor | None:
+        """The record of the session on screen, or None."""
+        return self.records.get(self.current) if self.current is not None else None
 
     @property
     def controller(self) -> SessionController | None:
@@ -406,9 +449,13 @@ class ArchieApp(App):
         return controller
 
     def _maybe_start(self, session_id: str, controller: SessionController) -> None:
-        """Start a controller once its record is known and has left ``starting``."""
+        """Start a controller once its record is known and has left ``starting``.
+
+        A ``failed`` session never ran, so there is nothing to load; its pane shows the
+        start error.
+        """
         record = self.records.get(session_id)
-        if controller.started or record is None or record.status == "starting":
+        if controller.started or record is None or record.status in ("starting", "failed"):
             return
         if self._shutting_down:
             return
@@ -574,8 +621,8 @@ class ArchieApp(App):
             self._request_switch(order[number - 1])
 
     def action_cycle_focus(self, step: int) -> None:
-        """tab/shift+tab: move focus between the session list, transcript and input."""
-        targets = [self.sidebar.sessions]
+        """tab/shift+tab: move focus between the filter, session list, transcript and input."""
+        targets: list[Widget] = [self.sidebar.filter, self.sidebar.sessions]
         if self._pane is not None:
             targets.append(self._pane.transcript)  # the open detail view's, if any
             if not self._pane.input.disabled:
@@ -586,13 +633,11 @@ class ArchieApp(App):
         targets[(index + step) % len(targets)].focus()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Switching and focus keys act only on the main screen; ``ctrl+x`` only while a
-        subagent view is open (otherwise the key goes on to the focused widget)."""
-        if action in _SWITCH_ACTIONS or action == "cycle_focus":
-            try:
-                return self.screen is self.screen_stack[0]
-            except Exception:  # noqa: BLE001 — no screen yet
-                return False
+        """Switching, focus and dialog keys act only on the main screen (a dialog or the
+        palette gets them otherwise); ``ctrl+x`` only while a subagent view is open
+        (otherwise the key goes on to the focused widget)."""
+        if action in _MAIN_SCREEN_ACTIONS:
+            return self._on_main_screen()
         if action == "stop_child":
             return self.active_child_key is not None
         return True
@@ -642,26 +687,180 @@ class ArchieApp(App):
                 self.notice("Copied to clipboard", timeout=COPY_NOTICE_TIMEOUT)
                 return
 
-    async def action_quit(self) -> None:
-        """Close the window at once; the sessions keep running (until M7's dialog)."""
-        await self._close_sessions()
-        self.exit()
+    def action_focus_filter(self) -> None:
+        """ctrl+f: focus the sidebar's filter."""
+        self.sidebar.filter.focus()
+
+    def _on_main_screen(self) -> bool:
+        try:
+            return self.screen is self.screen_stack[0]
+        except Exception:  # noqa: BLE001 — no screen yet
+            return False
+
+    def _acting_on(self) -> SessionDescriptor | None:
+        """The on-screen session's record when session actions apply (it has not ended)."""
+        record = self.on_screen
+        return record if record is not None and not record.ended else None
+
+    def _dialog(self, flow: Coroutine[Any, Any, None]) -> None:
+        """Run a dialog flow (it waits for the dialog) in a worker."""
+        self.run_worker(flow, group="dialog", exit_on_error=False)
+
+    async def _session_dialog[T](self, dialog: Screen[T]) -> T:
+        """Show a session dialog over the pane, dimming the pane, and wait for it (D14)."""
+        self._main.add_class("-dimmed")
+        try:
+            return await self.push_screen_wait(dialog)
+        finally:
+            self._main.remove_class("-dimmed")
+
+    def _session_error(self, session_id: str, message: str) -> None:
+        """Report a failed session action as a client row in its pane, else a notice."""
+        controller = self._controllers.get(session_id)
+        if controller is not None:
+            controller.client_error(message)
+        else:
+            record = self.records.get(session_id)
+            self.notice(record.name if record else session_id, message, "error")
+
+    def _apply_record(self, record: SessionDescriptor) -> None:
+        """Take a record an action returned (the feed sends the same change too)."""
+        if record.session_id in self.records:
+            self.records[record.session_id] = record
+            self._records_changed()
+
+    # New session (D3)
+
+    def action_new_session(self) -> None:
+        """ctrl+n: list the workspaces, ask for a workspace and backend, start it."""
+        self._dialog(self._new_session())
+
+    async def _new_session(self) -> None:
+        try:
+            workspaces = await self._client.workspaces()
+        except OrchestratorError as exc:
+            self.notice("Could not list workspaces", str(exc), "error")
+            return
+        names = sorted(workspace.name for workspace in workspaces)
+        if not names:
+            self.notice("No workspaces", "Add a directory under the workspace root.", "warning")
+            return
+        record = self.on_screen
+        workspace = record.workspace if record is not None else names[0]
+        backend = record.backend if record is not None else "native"
+        request = await self.push_screen_wait(NewSessionDialog(names, workspace, backend))
+        if request is not None:
+            await self.create_session(request.workspace, request.backend)
+
+    async def create_session(self, workspace: str, backend: SessionBackend) -> None:
+        """Start a session and show it (its pane says "Starting…" until it has started).
+
+        Args:
+            workspace: The workspace to start it in.
+            backend: ``native`` (Archie) or ``kiro``.
+        """
+        try:
+            record = await self._client.create(workspace, backend)
+        except OrchestratorError as exc:
+            self.notice("Session not started", str(exc), "error")
+            return
+        if record.session_id not in self.records:  # the feed may have sent it already
+            self.records[record.session_id] = record
+            self._records_changed()
+        await self.switch_to(record.session_id)
+
+    # Rename and stop
+
+    def action_rename_session(self) -> None:
+        """Palette: rename the session on screen (an empty name resets it)."""
+        record = self._acting_on()
+        if record is not None:
+            self._dialog(self._rename(record.session_id))
+
+    async def _rename(self, session_id: str) -> None:
+        record = self.records[session_id]
+        result = await self._session_dialog(RenameDialog(record, over=self._main.region))
+        if result is None:
+            return
+        try:
+            updated = await self._client.patch(session_id, {"name": result.name})
+        except OrchestratorError as exc:
+            self._session_error(session_id, f"Rename failed: {exc}")
+            return
+        self._apply_record(updated)
+
+    def action_stop_session(self) -> None:
+        """Palette: stop the session on screen, after confirming."""
+        record = self._acting_on()
+        if record is not None:
+            self._dialog(self._stop(record.session_id))
+
+    async def _stop(self, session_id: str) -> None:
+        record = self.records[session_id]
+        if not await self._session_dialog(stop_dialog(record, over=self._main.region)):
+            return
+        try:
+            stopped = await self._client.delete(session_id)
+        except OrchestratorError as exc:
+            self._session_error(session_id, f"Could not stop the session: {exc}")
+            return
+        self._apply_record(stopped)
+
+    # Model and compaction (D24)
 
     @property
     def session_model_key(self) -> str:
-        """The on-screen session's model key (model palette)."""
+        """The on-screen session's model key (the model picker), or ``""``."""
         controller = self.controller
-        return controller.model_key if controller is not None else ""
+        if controller is not None and controller.model_key:
+            return controller.model_key
+        record = self.on_screen
+        return (record.model_key or "") if record is not None else ""
+
+    def action_change_model(self) -> None:
+        """alt+m: the palette with only the session's models."""
+        record = self._acting_on()
+        if record is None or record.status == "starting" or CommandPalette.is_open(self):
+            return
+        self.push_screen(CommandPalette(providers=[ModelCommands], placeholder=MODEL_PLACEHOLDER))
 
     def switch_model(self, model_key: str) -> None:
-        """Ask the on-screen session to switch model (called by ModelProvider)."""
+        """Ask the on-screen session to switch model (the model picker's choice)."""
         controller = self.controller
-        if controller is None:
+        if controller is None or self._acting_on() is None or model_key == controller.model_key:
             return
         if not controller.switch_model(model_key):
             self.notice(
                 "Model not switched", "Cannot switch model during an active turn", "warning"
             )
+
+    def action_compact(self) -> None:
+        """Palette: compact a native session's context by sending ``/compact`` (D24)."""
+        record = self._acting_on()
+        controller = self.controller
+        if record is None or record.backend == "kiro" or controller is None:
+            return
+        if controller.turn_active:
+            self.notice("Not compacted", "Wait for the turn to finish.", "warning")
+            return
+        controller.submit(COMPACT_MESSAGE)
+
+    # Keys and quit
+
+    def action_keys(self) -> None:
+        """f1: the keyboard shortcuts."""
+        self.push_screen(KeysDialog())
+
+    async def action_quit(self) -> None:
+        """ctrl+q: confirm, then close the window; the sessions keep running (D22)."""
+        self._dialog(self._quit())
+
+    async def _quit(self) -> None:
+        live = [record for record in self.records.values() if not record.ended]
+        busy = sum(1 for record in live if record.status in ("working", "blocked"))
+        if await self.push_screen_wait(QuitDialog(len(live), busy)):
+            await self._close_sessions()
+            self.exit()
 
     # --- External editor --------------------------------------------------------------
 

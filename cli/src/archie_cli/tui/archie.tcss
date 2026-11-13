@@ -63,6 +63,36 @@ EmptyPane {
     color: $muted;
 }
 
+/* The sidebar's filter: a rounded field like the message input. */
+SessionFilter {
+    border: round $surface-lighten-2;
+    background: $surface;
+}
+
+SessionFilter:focus {
+    border: round $primary;
+}
+
+/* --- Dialogs and the palette (dialogs.py, commands.py) ---
+ * The Screen rule above gives every screen an opaque background, modal ones included;
+ * these restore the see-through backdrop so the window stays visible, and live, behind
+ * them. A session dialog (-pane) is nearly transparent: the app dims the session pane
+ * instead (Main.-dimmed), so the sidebar stays bright. */
+Dialog,
+CommandPalette {
+    background: $background 60%;
+}
+
+Dialog.-pane {
+    background: $background 1%;
+}
+
+/* Tint doesn't cascade, so every widget in the dimmed area takes it. */
+Main.-dimmed,
+Main.-dimmed * {
+    tint: $background 60%;
+}
+
 /* --- Session pane --- */
 SessionHeader {
     background: $surface;
@@ -196,15 +226,7 @@ SectionPanel.-error .section-title {
 
 /* --- Status bar colours --- */
 StatusBar {
-    color: $muted;
-}
-
-StatusBar #status-left {
-    color: auto;
-}
-
-StatusBar #status-right {
-    color: auto;
+    color: $foreground;
 }
 
 /* --- Input styling --- */

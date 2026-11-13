@@ -4,23 +4,29 @@ Shows: ⎇ branch │ model │ In: fresh / cache read / cache write  Out: outpu
 │ $cost, and on the right the session ID when the session has a name (the header shows
 the ID otherwise). No version: the sidebar shows it.
 
+The bar lays itself out from its own width: when everything does not fit, fields are
+dropped in order of ``DROP_ORDER`` (the session ID first, then the cache numbers, the
+token counts, the branch and the context), and then the model name is shortened. The
+cost always stays.
+
 Token counts are session totals (lifetime, only climb). Updated from
 Usage wire events which carry per-request values (accumulated client-side).
 """
 
-from rich.markup import escape
 from rich.text import Text
-from textual.app import ComposeResult
-from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Static
 
 from archie_cli.tui import theme
 
+DROP_ORDER = ("session_id", "cache", "tokens", "branch", "context")
+"""Fields dropped, first to last, until the bar fits."""
+
+_SEPARATOR = " │ "
+
 
 class StatusBar(Widget):
-    """Two-section status bar: left (metrics) and right (session info)."""
+    """One line of session metrics, laid out to fit its width."""
 
     DEFAULT_CSS = """
     StatusBar {
@@ -28,18 +34,9 @@ class StatusBar(Widget):
         margin: 0 0 1 0;
         padding: 0 1;
     }
-    StatusBar #status-left {
-        width: 1fr;
-        padding: 0;
-    }
-    StatusBar #status-right {
-        width: auto;
-        padding: 0;
-        text-align: right;
-    }
     """
 
-    # Left section — session lifetime totals
+    # Session lifetime totals; every change redraws the bar.
     model_name: reactive[str] = reactive("—")
     git_branch: reactive[str] = reactive("—")  # from the session's location (084 D31)
     session_input: reactive[int] = reactive(0)
@@ -49,90 +46,81 @@ class StatusBar(Widget):
     context_tokens: reactive[int] = reactive(0)
     context_pct: reactive[float] = reactive(0.0)
 
-    # Right section: the session ID, or "" when the header already shows it
+    # Right-hand side: the session ID, or "" when the header already shows it
     session_id: reactive[str] = reactive("")
 
     # Model capability flags
     supports_cache: reactive[bool] = reactive(True)
     pricing_label: reactive[str] = reactive("$0.0000")
 
-    def compose(self) -> ComposeResult:
-        """Build the status bar with left and right sections."""
-        with Horizontal():
-            yield Static("", id="status-left")
-            yield Static("", id="status-right")
+    def render(self) -> Text:
+        """The bar for the current width (see the module docstring)."""
+        return self.fit(self.size.width)
 
-    # --- Watchers: any reactive change triggers a display refresh ---
+    def fit(self, width: int) -> Text:
+        """The bar fitted to ``width`` cells."""
+        dropped: set[str] = set()
+        line = self._line(width, dropped, None)
+        for field in DROP_ORDER:
+            if line.cell_len <= width:
+                return line
+            dropped.add(field)
+            line = self._line(width, dropped, None)
+        if line.cell_len > width:
+            # Shorten the model name, keeping at least one character and the cost.
+            excess = line.cell_len - width
+            line = self._line(width, dropped, max(1, len(self.model_name) - excess))
+        line.truncate(max(0, width), overflow="ellipsis")
+        return line
 
-    def watch_model_name(self) -> None:
-        self._refresh_display()
+    def _line(self, width: int, dropped: set[str], model_width: int | None) -> Text:
+        parts: list[Text] = []
+        if "branch" not in dropped:
+            parts.append(Text(f"⎇ {self.git_branch}", style=theme.MUTED))
+        model = Text(self.model_name, style=theme.PRIMARY)
+        if model_width is not None:
+            model.truncate(model_width, overflow="ellipsis")
+        parts.append(model)
+        if "tokens" not in dropped:
+            parts.append(self._tokens_text(with_cache="cache" not in dropped))
+        if "context" not in dropped:
+            parts.append(self._context_text())
+        parts.append(Text(self.pricing_label, style=theme.COST))
 
-    def watch_git_branch(self) -> None:
-        self._refresh_display()
+        line = Text(" ", no_wrap=True)
+        line.append_text(Text(_SEPARATOR).join(parts))
+        if self.session_id and "session_id" not in dropped:
+            right = Text(f"{self.session_id} ", style=theme.MUTED)
+            line.pad_right(max(1, width - line.cell_len - right.cell_len))
+            line.append_text(right)
+        return line
 
-    def watch_session_input(self) -> None:
-        self._refresh_display()
-
-    def watch_session_output(self) -> None:
-        self._refresh_display()
-
-    def watch_cache_read(self) -> None:
-        self._refresh_display()
-
-    def watch_cache_write(self) -> None:
-        self._refresh_display()
-
-    def watch_context_tokens(self) -> None:
-        self._refresh_display()
-
-    def watch_context_pct(self) -> None:
-        self._refresh_display()
-
-    def watch_session_id(self) -> None:
-        self._refresh_display()
-
-    def watch_supports_cache(self) -> None:
-        self._refresh_display()
-
-    def watch_pricing_label(self) -> None:
-        self._refresh_display()
-
-    def _refresh_display(self) -> None:
-        """Render the status bar content."""
-        try:
-            left = self.query_one("#status-left", Static)
-            right = self.query_one("#status-right", Static)
-        except Exception:  # noqa: BLE001 — widget may not be mounted yet
-            return
-
-        # Input format: include cache columns only when caching is supported
-        if self.supports_cache:
-            in_val = (
+    def _tokens_text(self, *, with_cache: bool) -> Text:
+        if self.supports_cache and with_cache:
+            fresh = (
                 f"{_fmt(self.session_input)} / {_fmt(self.cache_read)} / {_fmt(self.cache_write)}"
             )
         else:
-            in_val = f"{_fmt(self.session_input)}"
-
-        # Context usage with color progression on the percentage.
-        if self.context_pct > 85:
-            pct_val = f"[bold {theme.ERROR}]{self.context_pct:.0f}%[/]"
-        elif self.context_pct >= 60:
-            pct_val = f"[bold {theme.WARNING}]{self.context_pct:.0f}%[/]"
-        else:
-            pct_val = f"[{theme.BRIGHT}]{self.context_pct:.0f}%[/]"
-        ctx_val = f"{_fmt_context(self.context_tokens)} ({pct_val})"
-
-        left.update(
-            Text.from_markup(
-                f" [{theme.MUTED}]⎇ {escape(self.git_branch)}[/]"
-                f" │ [{theme.PRIMARY}]{self.model_name}[/]"
-                f" │ In: [{theme.POSITIVE}]{in_val}[/]"
-                f"  Out: [{theme.POSITIVE_BRIGHT}]{self.session_output}[/]"
-                f" │ Ctx: {ctx_val}"
-                f" │ [{theme.COST}]{self.pricing_label}[/]"
-            )
+            fresh = _fmt(self.session_input)
+        return Text.assemble(
+            "In: ",
+            (fresh, theme.POSITIVE),
+            "  Out: ",
+            (str(self.session_output), theme.POSITIVE_BRIGHT),
         )
-        right.update(Text(f"{self.session_id} " if self.session_id else "", style=theme.MUTED))
+
+    def _context_text(self) -> Text:
+        """``Ctx: 40.0k (20%)``, the percentage coloured as it climbs."""
+        pct = self.context_pct
+        if pct > 85:
+            style = f"bold {theme.ERROR}"
+        elif pct >= 60:
+            style = f"bold {theme.WARNING}"
+        else:
+            style = theme.BRIGHT
+        return Text.assemble(
+            f"Ctx: {_fmt_context(self.context_tokens)} (", (f"{pct:.0f}%", style), ")"
+        )
 
 
 def _fmt(n: int) -> str:

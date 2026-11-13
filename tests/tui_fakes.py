@@ -9,7 +9,10 @@ and scripted bodies or errors can be queued ahead of it. ``stream()`` opens a
 sends a snapshot of the live records on every connect, then the records ``publish``
 queues, until ``drop_feed`` (``fail_feed`` makes the next connects fail, as a stopped
 orchestrator does). PATCH bodies and ``session`` fetches are recorded; ``session``
-answers 404 for an ID ``records`` lacks. ``RecordingListener`` records every
+answers 404 for an ID ``records`` lacks. ``create`` records its body, stores a
+``starting`` record and publishes it, as the orchestrator does; ``delete`` stores and
+publishes the ``stopped`` record, or raises ``delete_error``. ``workspaces`` lists
+``workspace_list``, or the records' workspaces when that is None. ``RecordingListener`` records every
 ``SessionListener`` call.
 """
 
@@ -22,6 +25,7 @@ import msgspec
 from archie_cli.tui.client import CursorNotFound, OrchestratorError, ProfileInfo
 from archie_shared.events import encode_event
 from archie_shared.session import SessionDescriptor, split_id
+from archie_shared.workspaces import Workspace
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
@@ -111,7 +115,11 @@ class FakeOrchestrator:
         requests: ``(session_id, after)`` for every ``events`` call.
         streams: Every stream opened, oldest first.
         deleted: Session ids passed to ``delete``.
-        delete_status: Status ``delete`` returns.
+        delete_error: Raised by ``delete`` when set (after recording the call).
+        created: Bodies passed to ``create``.
+        create_error: Raised by ``create`` when set (after recording the call).
+        workspace_list: What ``workspaces`` returns; None lists the records' workspaces.
+        workspaces_error: Raised by ``workspaces`` when set.
     """
 
     def __init__(
@@ -127,7 +135,11 @@ class FakeOrchestrator:
         self.streams: list[FakeStream] = []
         self.streams_by_session: dict[str, list[FakeStream]] = {}
         self.deleted: list[str] = []
-        self.delete_status = 200
+        self.delete_error: Exception | None = None
+        self.created: list[dict] = []
+        self.create_error: Exception | None = None
+        self.workspace_list: list[Workspace] | None = None
+        self.workspaces_error: Exception | None = None
         self.patches: list[tuple[str, dict]] = []
         self.patch_gate: asyncio.Event | None = None  # set: PATCHes wait for it
         self.fetched: list[str] = []
@@ -196,7 +208,12 @@ class FakeOrchestrator:
         record = self.records.get(session_id)
         if record is None:
             raise OrchestratorError("session update failed: 404", 404)
-        record = msgspec.structs.replace(record, **body)
+        changes = dict(body)
+        if "name" in changes:  # as the orchestrator: null resets the name to the ID
+            name = changes["name"]
+            changes["name"] = session_id if name is None else name
+            changes["name_source"] = "id" if name is None else "user"
+        record = msgspec.structs.replace(record, **changes)
         self.records[session_id] = record
         return record
 
@@ -253,9 +270,41 @@ class FakeOrchestrator:
         self.streams_by_session.setdefault(session_id, []).append(stream)
         return stream
 
-    async def delete(self, session_id: str) -> int:
+    async def delete(self, session_id: str) -> SessionDescriptor:
         self.deleted.append(session_id)
-        return self.delete_status
+        await asyncio.sleep(0)
+        if self.delete_error is not None:
+            raise self.delete_error
+        record = self.records.get(session_id)
+        if record is None:
+            raise OrchestratorError(f"No session with ID '{session_id}'", 404)
+        stopped = msgspec.structs.replace(record, status="stopped")
+        self.publish(stopped)
+        return stopped
+
+    async def create(self, workspace: str, backend: str) -> SessionDescriptor:
+        self.created.append({"workspace": workspace, "backend": backend})
+        await asyncio.sleep(0)
+        if self.create_error is not None:
+            raise self.create_error
+        record = make_record(
+            f"{workspace}-new{len(self.created):02d}",
+            workspace=workspace,
+            backend=backend,
+            status="starting",
+            started_at="2026-11-12T11:00:00+00:00",
+        )
+        self.publish(record)
+        return record
+
+    async def workspaces(self) -> list[Workspace]:
+        await asyncio.sleep(0)
+        if self.workspaces_error is not None:
+            raise self.workspaces_error
+        if self.workspace_list is not None:
+            return list(self.workspace_list)
+        names = sorted({record.workspace for record in self.records.values()})
+        return [Workspace(name=name) for name in names]
 
 
 class RecordingListener:

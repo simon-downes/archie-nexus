@@ -17,7 +17,8 @@ from typing import Literal, Protocol
 import httpx
 import msgspec
 from archie_shared.protocol import API_PREFIX
-from archie_shared.session import SessionDescriptor
+from archie_shared.session import SessionBackend, SessionDescriptor
+from archie_shared.workspaces import Workspace
 
 from archie_cli.ws_client import WSClient
 
@@ -28,6 +29,12 @@ EVENTS_TIMEOUT = 5.0
 
 DELETE_TIMEOUT = 15.0
 """Seconds allowed for stopping a session (the orchestrator stops its container)."""
+
+CREATE_TIMEOUT = 10.0
+"""Seconds allowed for creating a session (the container starts in the background)."""
+
+WORKSPACES_TIMEOUT = 5.0
+"""Seconds allowed for listing workspaces."""
 
 PATCH_TIMEOUT = 5.0
 """Seconds allowed for renaming a session or marking it seen."""
@@ -86,6 +93,10 @@ class OrchestratorError(Exception):
         self.status_code = status_code
 
 
+class RequestRefused(OrchestratorError):  # noqa: N818 — names the condition, as HTTP 4xx does
+    """The orchestrator refused a request (HTTP 4xx); the message is the server's ``error``."""
+
+
 class CursorNotFound(OrchestratorError):  # noqa: N818 — names the condition, as HTTP 409 does
     """``/events?after=`` named an event the log no longer has (HTTP 409)."""
 
@@ -118,11 +129,30 @@ class OrchestratorClient(Protocol):
         """Open the session's live event stream and return the connected client."""
         ...
 
-    async def delete(self, session_id: str) -> int:
-        """Stop the session and return the response's status code.
+    async def delete(self, session_id: str) -> SessionDescriptor:
+        """Stop the session and return its ``stopped`` record.
 
         Raises:
-            OrchestratorError: The request could not be completed.
+            RequestRefused: The orchestrator refused (409 while starting, stopping or
+                ended; 404 for an unknown ID), with its message.
+            OrchestratorError: The request failed.
+        """
+        ...
+
+    async def create(self, workspace: str, backend: SessionBackend) -> SessionDescriptor:
+        """Start a session in ``workspace`` and return its ``starting`` record.
+
+        Raises:
+            RequestRefused: The orchestrator refused (e.g. an unknown workspace).
+            OrchestratorError: The request failed.
+        """
+        ...
+
+    async def workspaces(self) -> list[Workspace]:
+        """Return the orchestrator's workspaces.
+
+        Raises:
+            OrchestratorError: The request failed.
         """
         ...
 
@@ -130,7 +160,8 @@ class OrchestratorClient(Protocol):
         """Change a session's ``name`` or clear ``unseen``; return the updated record.
 
         Raises:
-            OrchestratorError: The request failed or was refused.
+            RequestRefused: The orchestrator refused (an invalid name, an unknown ID).
+            OrchestratorError: The request failed.
         """
         ...
 
@@ -208,14 +239,41 @@ class HttpOrchestrator:
         await ws.connect(self.stream_url(session_id))
         return ws
 
-    async def delete(self, session_id: str) -> int:
-        """Stop the session; any status is returned for the caller to judge."""
+    async def delete(self, session_id: str) -> SessionDescriptor:
+        """Send ``DELETE /api/sessions/{id}`` and return the stopped record."""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.delete(self.session_url(session_id), timeout=DELETE_TIMEOUT)
         except httpx.HTTPError as exc:
             raise OrchestratorError(str(exc)) from exc
-        return response.status_code
+        _check(response, "stopping the session")
+        return _decode_record(response)
+
+    async def create(self, workspace: str, backend: SessionBackend) -> SessionDescriptor:
+        """Send ``POST /api/sessions`` and return the ``starting`` record (HTTP 202)."""
+        url = f"{self.base_url}{API_PREFIX}/sessions"
+        body = {"workspace": workspace, "backend": backend}
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=body, timeout=CREATE_TIMEOUT)
+        except httpx.HTTPError as exc:
+            raise OrchestratorError(str(exc)) from exc
+        _check(response, "starting a session", ok=(200, 201, 202))
+        return _decode_record(response)
+
+    async def workspaces(self) -> list[Workspace]:
+        """Send ``GET /api/workspaces`` and return the workspaces."""
+        url = f"{self.base_url}{API_PREFIX}/workspaces"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=WORKSPACES_TIMEOUT)
+        except httpx.HTTPError as exc:
+            raise OrchestratorError(str(exc)) from exc
+        _check(response, "listing workspaces")
+        try:
+            return msgspec.json.decode(response.content, type=list[Workspace])
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            raise OrchestratorError(f"unexpected workspace list: {exc}") from exc
 
     async def patch(self, session_id: str, body: dict[str, object]) -> SessionDescriptor:
         """Send ``PATCH /api/sessions/{id}`` and return the updated record."""
@@ -226,14 +284,8 @@ class HttpOrchestrator:
                 )
         except httpx.HTTPError as exc:
             raise OrchestratorError(str(exc)) from exc
-        if response.status_code != 200:
-            raise OrchestratorError(
-                f"session update failed: {response.status_code}", response.status_code
-            )
-        try:
-            return msgspec.json.decode(response.content, type=SessionDescriptor)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            raise OrchestratorError(f"unexpected session record: {exc}") from exc
+        _check(response, "session update")
+        return _decode_record(response)
 
     async def session(self, session_id: str) -> SessionDescriptor:
         """Send ``GET /api/sessions/{id}`` and return the record."""
@@ -242,14 +294,37 @@ class HttpOrchestrator:
                 response = await client.get(self.session_url(session_id), timeout=SESSION_TIMEOUT)
         except httpx.HTTPError as exc:
             raise OrchestratorError(str(exc)) from exc
-        if response.status_code != 200:
-            raise OrchestratorError(
-                f"session request failed: {response.status_code}", response.status_code
-            )
-        try:
-            return msgspec.json.decode(response.content, type=SessionDescriptor)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            raise OrchestratorError(f"unexpected session record: {exc}") from exc
+        _check(response, "session request")
+        return _decode_record(response)
+
+
+def _check(response: httpx.Response, what: str, *, ok: tuple[int, ...] = (200,)) -> None:
+    """Raise for a status outside ``ok``: ``RequestRefused`` with the server's ``error``
+    text for a 4xx, else ``OrchestratorError``."""
+    status = response.status_code
+    if status in ok:
+        return
+    message = _server_error(response) or f"{what} failed: {status}"
+    if 400 <= status < 500:
+        raise RequestRefused(message, status)
+    raise OrchestratorError(message, status)
+
+
+def _server_error(response: httpx.Response) -> str | None:
+    """The ``error`` field of a JSON error body, or None."""
+    try:
+        body = msgspec.json.decode(response.content)
+    except msgspec.DecodeError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    return error if isinstance(error, str) and error.strip() else None
+
+
+def _decode_record(response: httpx.Response) -> SessionDescriptor:
+    try:
+        return msgspec.json.decode(response.content, type=SessionDescriptor)
+    except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+        raise OrchestratorError(f"unexpected session record: {exc}") from exc
 
 
 async def parse_feed(lines: AsyncIterable[str]) -> AsyncIterator[FeedEvent]:
