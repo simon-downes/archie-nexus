@@ -10,7 +10,7 @@ Make the TUI sidebar identify sessions needing attention without relying on bold
 
 ## Context
 
-The orchestrator sets `SessionDescriptor.unseen` when a root turn completes or fails. The TUI clears it for the on-screen session and currently renders unseen names in bold. `state_glyph()` renders idle sessions green, regardless of `unseen`; the current row's purple border is rendered separately by `SessionRow`. The requested change is presentation-only and does not alter notification or unseen persistence behavior.
+The orchestrator sets `SessionDescriptor.unseen` when a root turn completes or fails. The TUI clears it for the on-screen session and currently renders unseen names in bold. `state_glyph()` is shared by the sidebar row and session header; it renders idle sessions green, regardless of `unseen`. The requested change is presentation-only and does not alter notification or unseen persistence behavior. The purple unseen idle glyph will therefore also appear in the session header when that record is still unseen; the header already bolds its title independently.
 
 ## Baseline
 
@@ -54,11 +54,11 @@ No new modules or dependencies. Follow the existing `state_glyph`, `state_badge`
 
 ### [ ] M1 — Show unseen state with a purple sidebar glyph
 
-- **Approach:** Change only idle glyph colour selection and current-row title styling in `cli/src/archie_cli/tui/sidebar.py`. Add explicit style assertions to the existing status/row tests in `tests/test_tui_app.py`.
+- **Approach:** Change idle glyph colour selection in the shared `state_glyph()` helper and current-row title styling in `cli/src/archie_cli/tui/sidebar.py`. This also updates the session header's idle glyph because `pane.py` reuses the helper. Add explicit style assertions to the existing status/row tests in `tests/test_tui_app.py`.
 - **Test seam:** `state_glyph()` and mounted `SessionRow.render()` output used by the TUI tests.
 - **Edge cases:** unseen error/blocked sessions keep their error/warning glyphs; only idle unseen sessions use the purple attention colour.
 - **Deliverable:** A non-current unseen ready session has a purple glyph and normal title text; once seen its glyph is green; the current row title is bold.
-- **Verify:** `scripts/dev test tests/test_tui_app.py -k 'glyph or notice or unseen or sidebar'` passes; `scripts/dev ruff check cli/src/archie_cli/tui/sidebar.py tests/test_tui_app.py` passes.
+- **Verify:** `scripts/dev test tests/test_tui_app.py` passes; `scripts/dev ruff check cli/src/archie_cli/tui/sidebar.py tests/test_tui_app.py` passes.
 - **Outcome:**
 
 ## Deviations
