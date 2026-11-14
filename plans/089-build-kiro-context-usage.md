@@ -1,6 +1,6 @@
 # 089 — Kiro context usage
 
-Status: planning
+Status: building
 Branch: build-it/089-kiro-context-usage (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/089-kiro-context-usage
 
@@ -73,7 +73,7 @@ Codebase facts:
 | #  | Decision | Chosen | Rejected | Why | Source |
 |----|----------|--------|----------|-----|--------|
 | D1 | Granularity of Kiro `llm_request` | keep one per turn (077 D2) | one per inferred model request (hold one back for credits) | frames match request IDs for only 39 % of requests, failing on the long turns; per-request rows would be invented | council (user-requested), 4/4 |
-| D2 | Live carrier | `SessionStatus.context_pct: float \| None = None` | a new live-only `context_usage` event; nothing live (turn end only) | `session_status` is the current-state snapshot and is sent on every connect, so a reattached TUI gets the value at once; one-hour turns need mid-turn updates | user, council |
+| D2 | Live carrier | `SessionStatus.context_pct: float \| msgspec.UNSET`, omitted until Kiro reports a value | a new live-only `context_usage` event; nothing live (turn end only); `float \| None = None`, which would encode `null` on every native status frame | `session_status` is the current-state snapshot and is sent on every connect, so a reattached TUI gets the value at once; one-hour turns need mid-turn updates; UNSET keeps native status frames byte-identical, so only Kiro frames change shape | user, council |
 | D3 | Persisted fields on `LLMRequest` | `context_pct` (turn's last `usagePercentage`), `context_pct_max`, `context_samples` (distinct percentages in the turn), `kiro_requests` (`len(turn_completion.requestIds)`); all `float/int \| msgspec.UNSET`, omitted when unset | a persisted event per frame; tokens derived from a 1M window; `context_pct_after` naming | council 4/4 on last + counts, 3/1 on max; one name (`context_pct`) is used on the status, the request, the ledger and `archie.db`, and the docs state it is Kiro's post-response figure (deviates from the council's suggested `context_pct_after`) | council, self |
 | D4 | Encoding for native requests | `UNSET`, not encoded (077 D27 pattern) | always encode `null` | native `llm_request` lines stay byte-identical | self |
 | D5 | When the turn fields are set | `context_pct`/`context_pct_max`/`context_samples` only when the turn saw at least one root context frame; `kiro_requests` only when `turn_completion` has a `requestIds` list | carry the previous turn's value | an unset field means "Kiro didn't report it", and readers keep the previous value | self |
@@ -82,22 +82,24 @@ Codebase facts:
 | D8 | TUI rule for context | a `session_status` with `context_pct` not None sets `ledger.context_pct`; a root `llm_request` with `context_pct` set sets it; a Kiro root `llm_request` without it leaves ledger context unchanged; native unchanged | let Kiro requests reset context to 0 | live frames apply after replay (buffered), so the newest value wins; without the rule each turn end would flash 0 % | self |
 | D9 | Status bar for Kiro | `Ctx: 42%` (percentage only), set by a `context_pct_only` flag the controller derives from a `kiro/` model key | `Ctx: 0 (42%)` | Kiro reports no tokens; showing 0 is wrong | self |
 | D10 | `archie.db` | `metrics_requests` gains `context_pct REAL`, `context_pct_max REAL`, `context_samples INTEGER`, `kiro_requests INTEGER` (NULL for native); `METRICS_VERSION` 6 | keep the counts in the logs only | the version bump already rebuilds the tables; the counts become a SQL query for re-evaluating D1 | self |
-| D11 | Insights and `archie stats` | turn rows gain `context_pct` = root `MAX(context_pct_max)`; request rows gain `context_pct`; the turn table's context cell and the session chart show the percentage when it is not null (chart: "Context % per main-agent turn" when every root request has one) | a shared Python formatting helper | the readers take different inputs (Jinja rows, Rich tables) and formats; the one rule is "`context_pct` not null → show the percentage", tested in each reader (deviates from the council's suggested helper) | self |
-| D12 | Protocol version | `PROTOCOL_VERSION` 5 | no bump | an older CLI rejects the new `session_status` field and would drop every status frame; the handshake warning names the mismatch | self |
-| D13 | Native sessions | `SessionStatus.context_pct` stays None; context keeps coming from `llm_request` | fill it from the native harness | native already updates per model request and replays it; nothing gained | self |
+| D11 | Insights and `archie stats` | turn rows gain `context_pct` = root `MAX(context_pct_max)`; request rows gain `context_pct`; the turn table's context cell and the session chart show the percentage when it is not null. The chart plots each root request's `context_pct` (the post-turn value; the table shows the turn's max) with the title "Context % per main-agent turn" when any root request has one; requests without it (older Kiro turns) are gaps | a shared Python formatting helper | the readers take different inputs (Jinja rows, Rich tables) and formats; the one rule is "`context_pct` not null → show the percentage", tested in each reader (deviates from the council's suggested helper) | self |
+| D12 | Protocol version | `PROTOCOL_VERSION` 5 | no bump | an older CLI, orchestrator tracker (`tracker.py` `_on_frame`) or live viewer (`web.py`) rejects a Kiro status frame carrying `context_pct` and skips it, losing state, model and question; the TUI's handshake warning names the mismatch. Agent, orchestrator and CLI deploy together on this single host | self |
+| D13 | Native sessions | `SessionStatus.context_pct` stays unset; context keeps coming from `llm_request` | fill it from the native harness | native already updates per model request and replays it; nothing gained | self |
 
 ## Requirements
 
 - MUST include Kiro's latest root `usagePercentage` in every Kiro `session_status`
-  (`context_pct`), None before the first frame.
+  (`context_pct`), unset (not encoded) before the first frame and for native sessions.
   - AC: harness test: after a fake-Kiro turn that sends 2.5 then 3.1 (each twice), the last
     captured `SessionStatus.context_pct == 3.1` and `harness.status_event().context_pct == 3.1`.
 - MUST send a `session_status` when a counted frame changes the value, and not for a repeat.
-  - AC: in that test the captured statuses carry `context_pct` values `[2.5, 3.1, 3.1]`: one
-    per change plus the existing turn-end status; no status for the duplicate frames.
+  - AC: in that test the captured statuses that carry `context_pct` have values
+    `[2.5, 3.1, 3.1]`: one per change plus the existing turn-end status; no status for the
+    duplicate frames. `encode_event` of a native `SessionStatus` has no `context_pct` key.
 - MUST ignore context frames that carry `agentSubtaskId`.
-  - AC: translator and harness unit tests: a subagent frame changes neither the status value
-    nor the turn's fields.
+  - AC: translator unit test (a subagent frame leaves the turn's fields unset) and harness
+    unit test calling `harness._on_notification(...)` directly with a subagent frame (no
+    status emitted, `status_event().context_pct` unchanged).
 - MUST write `context_pct`, `context_pct_max`, `context_samples` and `kiro_requests` on a
   Kiro turn's `llm_request` per D3/D5, and omit all four from native `llm_request` lines.
   - AC: translator test with frames 2.5, 2.5, 4.0, 3.0 and `requestIds` of length 3 →
@@ -107,12 +109,12 @@ Codebase facts:
 - MUST show the Kiro context percentage in the TUI status bar as `Ctx: <n>%`, updated from
   `session_status` live and from `llm_request` on replay, per D8/D9.
   - AC: controller test: a Kiro `SessionStatus(context_pct=42.2)` sets
-    `ledger.context_pct == 42.2`; a later Kiro `llm_request` without `context_pct` leaves it
-    at 42.2; replaying a Kiro `llm_request(context_pct=55.0)` sets 55.0. StatusBar test:
+    `ledger.context_pct == 42.2` without resetting the streamed output estimate; a later Kiro
+    `llm_request` without `context_pct` leaves it at 42.2; replaying a Kiro `llm_request(context_pct=55.0)` sets 55.0. StatusBar test:
     `context_pct_only=True, context_pct=42.2` renders `Ctx: 42%` and no token count.
 - MUST keep native TUI context behaviour unchanged.
   - AC: existing `tests/test_tui_canonical.py` context tests pass unchanged; a native
-    `SessionStatus` (context_pct None) leaves the ledger's context unchanged.
+    `SessionStatus` (no `context_pct`) leaves the ledger's context unchanged.
 - MUST index the four fields into `archie.db` `metrics_requests` (NULL for native) at
   `METRICS_VERSION` 6.
   - AC: metrics test: a Kiro request line yields the four values; a native line yields NULLs;
@@ -143,7 +145,7 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 
 ### Data model
 
-- `SessionStatus.context_pct: float | None = None` (live-only).
+- `SessionStatus.context_pct: float | UnsetType = UNSET` (live-only, omitted when unset).
 - `LLMRequest` (persisted, Kiro only, omitted when unset):
   - `context_pct: float | UnsetType` — last root `usagePercentage` of the turn (after the response).
   - `context_pct_max: float | UnsetType` — highest in the turn.
@@ -177,19 +179,24 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   `translate.py` add `context_pct(update)`. In `KiroHarness._on_notification`, for
   `session/update` call it; if not None and different from `self._context_pct`, store it and,
   when `_started` and not `_dead`, schedule `_emit_status()` (follow the `_fail` task
-  pattern, or await it directly: the callback is async). `status_event()` passes
-  `context_pct`. `fake_kiro.py`: add `context(pct)` and send `context(2.5)` twice before the
-  tool call and `context(3.1)` twice before the final chunk of the default turn. TUI: in
-  `SessionStatus` handling set `self.context_pct_only = kiro_id is not None` and, when
-  `event.context_pct is not None`, set `ledger.context_pct` and notify accounting; in
+  **await** `self._emit_status()` inline: `AcpClient` awaits `on_notification`, and the
+  translator's emits are awaited there too, so the status stays in order with the turn's
+  events. `status_event()` passes `context_pct` (UNSET until known). `fake_kiro.py`: add
+  `context(pct)` and send `context(2.5)` twice before the tool call and `context(3.1)` twice
+  before the final chunk of the default turn. TUI: in `SessionStatus` handling set
+  `self.context_pct_only = kiro_id is not None` and, when `event.context_pct` is a number, set
+  `ledger.context_pct` before the existing `_status_changed()` call (not
+  `_accounting_changed()`, which drops the streamed output estimate); in
   `_accumulate_ledger` skip the context update for `kiro/` root requests (M2 refines it).
   `pane.on_status` copies `context_pct_only`; `StatusBar` gets a `context_pct_only`
-  reactive and `_context_text` renders `Ctx: N%` when set. ⚠️ `test_ws_integration` asserts
+  reactive and `_context_text` renders `Ctx: N%` when set. Docs: `event-spec.md`
+  `session_status` row and a protocol 5 compatibility note. ⚠️ `test_ws_integration` asserts
   protocol 4; update it (it fails in this container anyway).
 - **Test seam:** `KiroHarness` with `fake_kiro.py` and a captured `event_bus.emit`;
+  `harness._on_notification` called directly for the subagent frame;
   `SessionController.apply`; `StatusBar.fit`.
 - **Deliverable:** a Kiro session's status bar shows `Ctx: 3%` live.
-- **Verify:** `scripts/dev test tests/test_kiro_harness.py tests/test_tui_canonical.py tests/test_tui_app.py tests/test_protocol_version.py -q` passes apart from baseline failures.
+- **Verify:** `scripts/dev test tests/test_kiro_harness.py tests/test_tui_canonical.py tests/test_tui_app.py tests/test_protocol_version.py -q` passes; full `scripts/dev test` shows only the baseline failures; `scripts/dev ruff check .` passes.
 - **Outcome:**
 
 ### [ ] M2 — Persist the turn's context on its `llm_request`
@@ -198,13 +205,13 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   `TurnTranslator.feed`, for counted frames track last, max and a set of values; in
   `_llm_request` set the fields per D5, `kiro_requests` from `completion["requestIds"]` when it
   is a list. TUI `_accumulate_ledger`: a root conversation request with `context_pct` set sets
-  `ledger.context_pct`; Kiro without it leaves context unchanged. Docs: `event-spec.md`
-  (fields, `session_status.context_pct`, protocol 5 note), `kiro.md` (mapping table row,
-  Limits).
+  `ledger.context_pct`; Kiro without it leaves context unchanged. `fake_kiro.py`:
+  `completion()` gains a `requestIds` list (3 IDs in the default turn). Docs: `event-spec.md`
+  `llm_request` row and compatibility note, `kiro.md` (mapping table row, Limits).
 - **Test seam:** `TurnTranslator.feed/finish`; `encode_event`/`decode_event`;
   `SessionController.apply` during replay; the harness test's log.
 - **Deliverable:** a Kiro session replayed in the TUI shows the last turn's percentage.
-- **Verify:** `scripts/dev test tests/test_kiro_translate.py tests/test_kiro_credits.py tests/test_kiro_harness.py tests/test_tui_canonical.py tests/test_canonical_session_events.py -q` passes.
+- **Verify:** `scripts/dev test tests/test_kiro_translate.py tests/test_kiro_credits.py tests/test_kiro_harness.py tests/test_tui_canonical.py tests/test_canonical_session_events.py -q` passes; full `scripts/dev test` shows only the baseline failures; `scripts/dev ruff check .` passes.
 - **Outcome:**
 
 ### [ ] M3 — Context in `archie.db`, insights and `archie stats`
@@ -212,17 +219,18 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 - **Approach:** `metrics.py`: four columns, `_REQUEST_COLUMNS`, values from the event
   (`None` when UNSET), `METRICS_VERSION = 6`. `insights.py session_detail`: turn
   `context_pct` = `MAX(r.context_pct_max)` over root requests, request `context_pct`.
-  `session.html`: turn context cell uses `m.pct(t.context_pct)` when not none; chart uses
-  `context_pct` values and a pct title when every root request has one, passing a `label`;
-  `insights.js` line chart uses `d.label` (default "Context tokens"). `stats.py
-  render_session` Context cell shows `f"{pct:.1f}%"` when not None. Docs:
+  `session.html`: turn context cell uses `m.pct(t.context_pct)` when not none; when any root
+  request has `context_pct`, the chart uses each root request's `context_pct` (null gaps)
+  and the pct title, passing a `label`; `insights.js` line chart uses `d.label` (default
+  "Context tokens"). `stats.py render_session` Context cell uses the existing
+  `_pct(t["context_pct"])` when not None. Docs:
   `architecture.md` metrics section (columns, version 6).
 - **Test seam:** `MetricsIndex.sync` on fixture logs; `insights.session_detail`; the web
   session page via the existing `tests/test_web_insights.py` client; `archie stats session`
   via `CliRunner` in `tests/test_cli_stats.py`.
 - **Deliverable:** `/ui/insights` session page and `archie stats session <id>` show Kiro
   turns' context percentage.
-- **Verify:** `scripts/dev test tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_web_insights.py tests/test_cli_stats.py -q` passes.
+- **Verify:** `scripts/dev test tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_web_insights.py tests/test_cli_stats.py -q` passes; full `scripts/dev test` shows only the baseline failures; `scripts/dev ruff check .` passes.
 - **Outcome:**
 
 ## Deviations
@@ -236,6 +244,15 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 - The metrics version bump rebuilds `metrics_*` from all logs on the first sync (seconds).
 
 ## Review
+
+- Plan review: 1 pass, 0 ❌, 4 ⚠️, 6 ℹ️, all accepted. ⚠️ emit mode → M1 awaits
+  `_emit_status()` inline. ⚠️ `_accounting_changed()` would drop the output estimate → M1
+  sets the value before `_status_changed()`. ⚠️ `None = None` encodes `null` on native
+  status frames → D2 uses UNSET; D12 names the tracker and live viewer. ℹ️ subagent seam
+  → direct `_on_notification` call. ℹ️ `requestIds` in the fake → M2. ℹ️ Verify → full
+  suite and ruff per milestone. ℹ️ chart vs table numbers and older turns → D11 (any
+  root request; gaps; chart shows the post-turn value). ℹ️ stats → `_pct`. ℹ️
+  `session_status` docs → M1. No second pass (no ❌).
 
 ## Outcome
 
