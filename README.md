@@ -34,19 +34,17 @@ Requirements: Python 3.13, `uv`, a running Docker daemon, and credentials for th
 uv sync
 archie build
 archie serve                  # keep this process running
-archie start                  # current project, when it is below workspace_root
+archie                         # open the TUI
+archie start                  # start a session explicitly, then open the TUI
 ```
 
 `archie start` creates a container only after the image exists and the orchestrator is reachable. Without `--detach`, it opens the [TUI](#terminal-ui) on the new session. Run tests and lint before submitting changes; the authoritative commands are in [Contributing](CONTRIBUTING.md).
 
 ```bash
 archie ls
-archie attach <session-id-or-prefix>       # prefix matching
 archie shell <session-id-or-prefix>        # prefix matching
-archie stop <exact-session-id>             # exact matching
 archie start --detach <workspace>
 archie start <profile>/<workspace>
-archie attach <profile>/<session-id-or-prefix>
 ```
 
 Usage insights come from the local metrics index and work without the orchestrator running. `archie stats` prints the overview; the subcommands are `sessions`, `session <id>`, `models`, `tools`, `subagents` and `errors`. Every view takes `--since` (`7d`, `all` or `YYYY-MM-DD`; default `30d`), `--until`, `--workspace`, `--model`, `--scope` (`all`, `root`, `subagent`) and `--json`. The same views, with charts and filters, are at `http://127.0.0.1:7600/insights` while `archie serve` runs.
@@ -61,7 +59,7 @@ Build the image again after changing Dockerfile or dependency layers. Source for
 
 ## Terminal UI
 
-`archie start` and `archie attach` open the same window on one orchestrator profile: a sidebar listing every live session of that orchestrator, grouped by workspace, beside the pane of the session on screen. `archie start` shows the session it created; `archie attach <id>` shows that session (a prefix that matches several asks for one by number), and `archie attach` with no ID shows the newest live session, or an empty pane when none runs. Each sidebar row shows the session's state, name, age, and the repo and branch it works in.
+`archie` opens the TUI on the default orchestrator profile: a sidebar listing every live session of that orchestrator, grouped by workspace, beside the pane of the session on screen. `archie start` creates a session explicitly, then opens the same TUI focused on it. Each sidebar row shows the session's state, name, age, and the repo and branch it works in.
 
 - Switch sessions by clicking a row, with alt+↑/↓, or with alt+1…9 (the row's place in the sidebar). ctrl+f filters the sidebar by name, ID, workspace, repo or branch; tab and shift+tab move between the filter, the list, the transcript and the input.
 - The pane shows the transcript, the activity line, any pending question, the input and a status bar. Clicking a tool or subagent row opens its view in the pane, in the transcript's place; ctrl+x stops the subagent shown in an open subagent view. esc does the first of these that applies: kill a running `!` command, close the open view, dismiss the question, interrupt the turn; a second esc within half a second clears the input.
@@ -69,7 +67,7 @@ Build the image again after changing Dockerfile or dependency layers. Source for
 - Notices in the sidebar report other sessions' replies, questions, failed turns and ends; clicking one shows that session. If the orchestrator restarts, the window reconnects on its own.
 - `!command` runs `command` in the session's container with `docker exec`, without the agent. It only works on a local orchestrator (the default profile with no `ARCHIE_HOST`); on a remote profile the pane says so and runs nothing.
 - ctrl+c copies the selection, or else the focused block; ctrl+g writes the message in `$EDITOR` (default `nano`) and sends it when you save.
-- ctrl+q quits after asking. Quitting closes the window only: every session keeps running, and `archie attach` opens it again. Stop a session from the palette or with `archie stop`.
+- ctrl+q quits after asking. Quitting closes the window only: every session keeps running. Reopen the window with `archie`; stop a session from the palette.
 
 ## Configuration and data
 

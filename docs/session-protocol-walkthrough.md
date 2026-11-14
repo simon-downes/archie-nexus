@@ -237,8 +237,9 @@ WebSocket: ws://<orchestrator>/api/sessions/<session-id>/stream
 History:   http://<orchestrator>/api/sessions/<session-id>/events
 ```
 
-`archie attach` opens the same window on an already-running session; switching to another
-session in the sidebar starts the same connection flow for it.
+`archie` opens the window on the existing live sessions; switching to another session in the
+sidebar starts the same connection flow for it. The TUI also creates and stops sessions through
+its dialogs and palette.
 
 ## 5. Initial TUI connection
 

@@ -29,9 +29,20 @@ START_POLL_INTERVAL_S = 0.5
 START_TIMEOUT_S = 60.0
 
 
-@click.group()
-def main():
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx: click.Context):
     """Archie — personal AI platform."""
+    if ctx.invoked_subcommand is None:
+        from archie_shared.schemas import get_profile, load_nexus_config
+
+        config = load_nexus_config()
+        profile = (
+            _parse_archie_host(os.environ["ARCHIE_HOST"])
+            if os.environ.get("ARCHIE_HOST")
+            else get_profile(config.orchestrator)
+        )
+        _run_tui(profile, _profile_info(None, profile), focus=None)
 
 
 # Ensure ConfigError surfaces as a clean ClickException rather than a raw traceback.
@@ -242,7 +253,7 @@ def _reject_blocking_start(url: str, response: httpx.Response) -> NoReturn:
             f"{message}\n(the session it started, {session_id}, was stopped)"
         )
     raise click.ClickException(
-        f"{message}\n(it started session {session_id}; stop it with: archie stop {session_id})"
+        f"{message}\n(it started session {session_id}; stop it from the TUI)"
     )
 
 
@@ -584,82 +595,6 @@ def shell(session_id: str | None):
     exec_cmd = ["docker", "exec", "-it", "-w", "/workspace", target.container_name, "bash"]
     result = subprocess.run(exec_cmd, check=False)
     sys.exit(result.returncode)
-
-
-@main.command()
-@click.argument("session_id", required=False)
-def attach(session_id: str | None):
-    """Open the interactive TUI on a running session.
-
-    SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
-    Supports prefix matching; several matches are picked by number. With no
-    SESSION_ID the TUI shows the newest running session (or none).
-    """
-    from archie_shared.schemas import get_profile, load_nexus_config
-
-    config = load_nexus_config()
-
-    if session_id is not None:
-        profile, sid_prefix = _resolve_target(session_id, config)
-    else:
-        profile = get_profile(config.orchestrator)
-        sid_prefix = session_id
-
-    url = _profile_url(profile)
-    sessions = _fetch_sessions(url)  # also checks the orchestrator is reachable
-    focus = None if sid_prefix is None else _resolve_prefix(sessions, sid_prefix).session_id
-    _run_tui(profile, _profile_info(session_id, profile), focus=focus)
-
-
-@main.command()
-@click.argument("session_id", required=False)
-def stop(session_id: str | None):
-    """Stop a running agent session.
-
-    SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
-    Supports prefix matching. If omitted and only one session is running,
-    stops it automatically.
-
-    The container is destroyed (--rm) but the session JSONL log is preserved
-    on the host at ~/.nexus/sessions/{session_id}.jsonl.
-    """
-    from archie_shared.schemas import get_profile, load_nexus_config
-
-    config = load_nexus_config()
-
-    if session_id is not None:
-        profile, sid_prefix = _resolve_target(session_id, config)
-    else:
-        profile = get_profile(config.orchestrator)
-        sid_prefix = session_id
-
-    url = _profile_url(profile)
-    sessions = _fetch_sessions(url)
-
-    if not sessions:
-        raise click.ClickException("No running sessions.")
-
-    target = _resolve_prefix(sessions, sid_prefix)
-
-    # Stop via orchestrator
-    try:
-        stop_response = httpx.delete(
-            f"{url}{API_PREFIX}/sessions/{target.session_id}", timeout=15.0
-        )
-    except httpx.HTTPError as exc:
-        raise click.ClickException(
-            f"Cannot reach the orchestrator at {url}: {exc}\nStart it first with: archie serve"
-        ) from None
-
-    if stop_response.status_code == 404:
-        raise click.ClickException(f"Session '{target.session_id}' is no longer running.")
-    if stop_response.status_code == 409:
-        raise click.ClickException(_error_body(stop_response))
-    if stop_response.status_code != 200:
-        raise click.ClickException(f"Failed to stop session: {_error_body(stop_response)}")
-
-    click.echo(f"✓ Stopped session: {target.session_id}")
-    click.echo(f"  Log retained at: ~/.nexus/sessions/{target.session_id}.jsonl")
 
 
 def _format_session_row(session: SessionDescriptor, prefix: str = "") -> str:
