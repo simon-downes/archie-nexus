@@ -1,6 +1,6 @@
 # 088 — Unseen sidebar indicator
 
-Status: reviewing
+Status: done
 Branch: build-it/088-unseen-sidebar (base: main @ 9b137e9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/088-unseen-sidebar
 
