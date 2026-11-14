@@ -1,6 +1,6 @@
 # 085 — Current-agent stop shortcut
 
-Status: reviewing
+Status: done
 Branch: build-it/085-current-agent-stop (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/085-current-agent-stop
 
