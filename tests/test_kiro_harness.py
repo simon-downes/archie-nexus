@@ -10,6 +10,7 @@ import sys
 import time
 from pathlib import Path
 
+import msgspec
 import pytest
 import yaml
 from archie_agent.kiro.harness import KiroHarness, KiroStartupError
@@ -18,6 +19,7 @@ from archie_shared.events import (
     AssistantMessage,
     ErrorNotice,
     LLMRequest,
+    SessionStatus,
     ToolCall,
     ToolResult,
     TurnComplete,
@@ -25,6 +27,7 @@ from archie_shared.events import (
     TurnInterrupted,
     UserMessage,
     decode_event,
+    encode_event,
 )
 from archie_shared.schemas import NexusConfig
 
@@ -137,6 +140,59 @@ async def test_turn_with_archie_tool(harness, home):
     assert messages == ["Running the command.", "Done: KIRO-OK."]
     assert isinstance(events[-1], TurnComplete)
     assert not harness.turn_active
+
+
+def _capture(harness: KiroHarness) -> list:
+    seen: list = []
+    original = harness.event_bus.emit
+
+    async def capture(event, target=None):
+        seen.append(event)
+        return await original(event, target)
+
+    harness.event_bus.emit = capture
+    return seen
+
+
+async def test_context_usage_reaches_session_status(harness):
+    """Each new root context percentage sends a status; repeats don't (089 D7)."""
+    assert harness.status_event().context_pct is msgspec.UNSET
+    assert "context_pct" not in encode_event(harness.status_event())
+    seen = _capture(harness)
+    await harness.handle_message("run it")
+    statuses = [e for e in seen if isinstance(e, SessionStatus)]
+    assert [s.context_pct for s in statuses] == [2.5, 3.1, 3.1]
+    assert [s.state for s in statuses] == ["working", "working", "idle"]
+    assert harness.status_event().context_pct == 3.1
+
+
+async def test_subagent_context_frame_is_ignored(harness):
+    seen = _capture(harness)
+    frame = {
+        "method": "session/update",
+        "params": {
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "_meta": {
+                    "kiro": {
+                        "kind": "context_usage",
+                        "usagePercentage": 9.0,
+                        "agentSubtaskId": "sub-1",
+                    }
+                },
+            }
+        },
+    }
+    await harness._on_notification(frame, time.time())
+    assert not any(isinstance(e, SessionStatus) for e in seen)
+    assert harness.status_event().context_pct is msgspec.UNSET
+
+
+def test_native_session_status_omits_context_pct():
+    status = SessionStatus(id="s", model_key="m", git_branch="main")
+    assert "context_pct" not in encode_event(status)
+    kiro = SessionStatus(id="k", model_key="kiro/m", git_branch="main", context_pct=4.5)
+    assert decode_event(encode_event(kiro)).context_pct == 4.5
 
 
 async def test_prompt_error_is_turn_error(harness, home):

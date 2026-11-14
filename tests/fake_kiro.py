@@ -137,6 +137,29 @@ def chunk(text: str, meta: dict | None = None) -> None:
     update(payload)
 
 
+def context(pct: float) -> None:
+    """One root context frame, sent twice like Kiro (percentage only, then breakdown)."""
+    update(
+        {
+            "sessionUpdate": "session_info_update",
+            "_meta": {"kiro": {"kind": "context_usage", "usagePercentage": pct}},
+        }
+    )
+    update(
+        {
+            "sessionUpdate": "session_info_update",
+            "_meta": {
+                "kiro": {
+                    "kind": "context_usage",
+                    "usagePercentage": pct,
+                    "contextUsage": {"usagePercentage": pct},
+                    "breakdown": {"tools": {"tokens": 7281, "percent": 0.7}},
+                }
+            },
+        }
+    )
+
+
 def completion(credits: float, status: str = "success") -> None:
     update(
         {
@@ -269,7 +292,9 @@ async def prompt(rid: int, params: dict) -> None:
             "rawOutput": {"message": "loaded"},
         }
     )
+    context(2.5)
     await archie_tool("tc_shell", "shell", {"command": "echo KIRO-OK"})
+    context(3.1)
     chunk("Done: KIRO-OK.")
     completion(0.5)
     send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})

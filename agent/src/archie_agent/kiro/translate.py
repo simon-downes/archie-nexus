@@ -38,6 +38,23 @@ def _kiro_meta(update: dict) -> dict:
     return kiro if isinstance(kiro, dict) else {}
 
 
+def context_pct(update: dict) -> float | None:
+    """Kiro's root context usage from a ``session/update`` ``update``, or None (089 D6).
+
+    Counts ``session_info_update`` frames of kind ``context_usage`` with a numeric
+    ``usagePercentage`` and no ``agentSubtaskId``.
+    """
+    if update.get("sessionUpdate") != "session_info_update":
+        return None
+    meta = _kiro_meta(update)
+    if meta.get("kind") != "context_usage" or meta.get("agentSubtaskId"):
+        return None
+    value = meta.get("usagePercentage")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def _iso(at: float) -> str:
     return datetime.fromtimestamp(at, UTC).isoformat()
 

@@ -264,7 +264,7 @@ A connect sends one live-only `handshake` containing protocol and session identi
 one `session_status` frame carrying the current model, Git branch, session state and any pending
 question. There is no
 `session_snapshot` or `session_info` envelope and no parallel wire event schema.
-`PROTOCOL_VERSION` is 4; clients and agents use this final contract together.
+`PROTOCOL_VERSION` is 5; clients and agents use this final contract together.
 
 The coordinator persists a persisted event before enqueueing it for broadcast. Live-only events are
 never appended. `text_delta` is intentionally excluded from history reads; assistant content is

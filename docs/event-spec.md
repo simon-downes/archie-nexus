@@ -66,7 +66,7 @@ call's `tool_use_id`) with exactly one of a 0-based `option`, a non-empty `text`
 | `turn_error` | persisted | `turn: int`, `scope: string?`, `message: string`, `subagent_index: int?` |
 | `turn_interrupted` | persisted | `turn: int`, `scope: string?`, `subagent_index: int?` |
 | `handshake` | live-only | `protocol_version: int`, `session_id: string` |
-| `session_status` | live-only | `model_key: string`, `git_branch: string`, `state: idle \| working \| blocked \| done \| error` (default `idle`), `question: {id: string, question: string, options: list[{label: string, description: string}], recommended: int?}?` |
+| `session_status` | live-only | `model_key: string`, `git_branch: string`, `state: idle \| working \| blocked \| done \| error` (default `idle`), `question: {id: string, question: string, options: list[{label: string, description: string}], recommended: int?}?`, `context_pct: float` (Kiro only; absent until Kiro reports one) |
 | `error_notice` | live-only | `kind: string`, `message: string` |
 
 Compaction operations are persisted as `compaction_start` followed by the compactor `llm_request` (omitted when the transcript cannot be fitted and no provider request is made) and exactly one `compaction_complete`. Compaction failures are reported only through a `failure` or `interrupted` completion. `estimated_next_request_cost_usd` is the active conversation model's pre-compaction estimate for a cold-cache request; it is set only for `cold_cache` compactions and repeated on the completion. Clients display it when present and `cost_saved_usd` otherwise. `skills_loaded` lists the sorted names of skills whose body was loaded when compaction started; it is set on every status and decodes as `[]` from older logs. `tokens_before` and `tokens_after` are provider-facing context estimates: heuristic estimates include the system prompt and tool configuration; provider-baseline estimates retain the provider's reported boundary. `cost_saved_usd` is a display estimate and is not an accounting source. On success it prices the removed tokens at the active model's cache write rate (its input rate when it has none): the cache write the next request avoids, assuming a cold cache. It ignores cache reads on later requests, and it overstates the saving for a compaction that happens while the cache is warm.
@@ -139,3 +139,10 @@ turn's tool calls, with `credits` summed from Kiro's turn summary, zero token co
 `cost_usd` derived from the credits (see [kiro.md](kiro.md)). Native requests omit the field,
 so their lines are unchanged. A client built before the field existed drops Kiro
 `llm_request` lines as malformed; update the CLI with the agent.
+
+`session_status.context_pct` came with protocol version 5. Kiro-backed agents send Kiro's
+latest root context usage (`usagePercentage` of a `context_usage` frame: percent of the
+window, measured after a model response) in every status, and send a new status each time
+the value changes. Native agents, and Kiro agents before the first frame, omit the field, so
+their status frames are unchanged. A client, tracker or live viewer built before protocol 5
+drops a Kiro status that carries the field as malformed; update them together.

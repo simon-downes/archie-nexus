@@ -64,7 +64,9 @@ Codebase facts:
 - Setup leftovers: none (`git status --short` clean after sync)
 - Failing before this work: 14 failed, 9 errors, all in `tests/test_question_tool.py` and
   `tests/test_ws_integration.py`: the agent app starts its Kiro lifespan in this container
-  ("No Kiro API key") and exits. 5409 passed. `ruff check .` passes.
+  ("No Kiro API key") and exits. 5409 passed. `ruff check .` passes. The cause is the
+  session's `ARCHIE_BACKEND=kiro`; with `env -u ARCHIE_BACKEND scripts/dev test` they pass, so
+  full runs use that.
 - Not included: `.DS_Store`, `plans/060-spec-container-aws-profiles.md`,
   `plans/070-build-nexus-plugins.md` (untracked in the user's checkout, unrelated)
 
@@ -173,7 +175,7 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 
 ## Milestones
 
-### [ ] M1 — Live Kiro context in the status bar
+### [x] M1 — Live Kiro context in the status bar
 
 - **Approach:** add `SessionStatus.context_pct` and bump `PROTOCOL_VERSION`. In
   `translate.py` add `context_pct(update)`. In `KiroHarness._on_notification`, for
@@ -197,7 +199,17 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   `SessionController.apply`; `StatusBar.fit`.
 - **Deliverable:** a Kiro session's status bar shows `Ctx: 3%` live.
 - **Verify:** `scripts/dev test tests/test_kiro_harness.py tests/test_tui_canonical.py tests/test_tui_app.py tests/test_protocol_version.py -q` passes; full `scripts/dev test` shows only the baseline failures; `scripts/dev ruff check .` passes.
-- **Outcome:**
+- **Outcome:** `SessionStatus.context_pct` (UNSET, omitted when unset), `PROTOCOL_VERSION`
+  5, `translate.context_pct()`, harness `_context_pct` with an awaited `_emit_status()` on
+  change, fake-Kiro `context()` frames, TUI ledger/status rule and `Ctx: N%`. Docs:
+  `event-spec.md` row and protocol-5 note, protocol 5 in `architecture.md` and the
+  walkthrough. Tests: `test_context_usage_reaches_session_status` (statuses `[2.5, 3.1, 3.1]`,
+  states working/working/idle), `test_subagent_context_frame_is_ignored`,
+  `test_native_session_status_omits_context_pct`, four TUI tests in `test_tui_canonical.py`.
+  `test_question_tool.py::test_kiro_status_and_answer_have_no_question` builds a harness
+  without `__init__`, so it now sets `_context_pct`; `test_ws_integration` checks
+  `PROTOCOL_VERSION`. Evidence: `env -u ARCHIE_BACKEND scripts/dev test` → 5439 passed;
+  `ruff check .` and `ruff format --check` on touched files pass.
 
 ### [ ] M2 — Persist the turn's context on its `llm_request`
 

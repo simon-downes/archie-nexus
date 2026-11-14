@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from archie_agent.llm._types import Done, TextDelta, Usage
+from archie_shared.protocol import PROTOCOL_VERSION
 from starlette.testclient import TestClient
 
 
@@ -163,7 +164,7 @@ def test_websocket_handshake_on_connect(client):
     with client.websocket_connect("/stream") as ws:
         handshake = json.loads(ws.receive_text())
         assert handshake["type"] == "handshake"
-        assert handshake["protocol_version"] == 4
+        assert handshake["protocol_version"] == PROTOCOL_VERSION
         assert "model_key" not in handshake
         assert handshake["session_id"] == "test-session"
         assert handshake["id"]

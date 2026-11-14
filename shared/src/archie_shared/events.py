@@ -245,7 +245,9 @@ class SessionStatus(Event, tag="session_status", tag_field="type", forbid_unknow
     """Live session status.
 
     ``state`` follows the OSC 7501 vocabulary. ``blocked`` currently always means a pending
-    question, carried in ``question``.
+    question, carried in ``question``. ``context_pct`` is Kiro's latest root context usage
+    (percent of the window, measured after a model response); it is unset, and not
+    encoded, for native sessions and before Kiro reports a value (089).
     """
 
     id: str
@@ -253,6 +255,7 @@ class SessionStatus(Event, tag="session_status", tag_field="type", forbid_unknow
     git_branch: str
     state: SessionState = "idle"
     question: PendingQuestion | None = None
+    context_pct: float | msgspec.UnsetType = msgspec.UNSET
 
 
 class ErrorNotice(Event, tag="error_notice", tag_field="type", forbid_unknown_fields=True):

@@ -51,6 +51,7 @@ class StatusBar(Widget):
 
     # Model capability flags
     supports_cache: reactive[bool] = reactive(True)
+    context_pct_only: reactive[bool] = reactive(False)  # Kiro: no token count (089 D9)
     pricing_label: reactive[str] = reactive("$0.0000")
 
     def render(self) -> Text:
@@ -110,7 +111,7 @@ class StatusBar(Widget):
         )
 
     def _context_text(self) -> Text:
-        """``Ctx: 40.0k (20%)``, the percentage coloured as it climbs."""
+        """``Ctx: 40.0k (20%)``, or ``Ctx: 20%`` for Kiro; the percentage coloured as it climbs."""
         pct = self.context_pct
         if pct > 85:
             style = f"bold {theme.ERROR}"
@@ -118,6 +119,8 @@ class StatusBar(Widget):
             style = f"bold {theme.WARNING}"
         else:
             style = theme.BRIGHT
+        if self.context_pct_only:
+            return Text.assemble("Ctx: ", (f"{pct:.0f}%", style))
         return Text.assemble(
             f"Ctx: {_fmt_context(self.context_tokens)} (", (f"{pct:.0f}%", style), ")"
         )
