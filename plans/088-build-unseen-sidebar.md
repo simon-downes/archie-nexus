@@ -72,10 +72,12 @@ No new modules or dependencies. Follow the existing `state_glyph`, `state_badge`
 ## Review
 
 - Plan review: 1 pass; fixed the shared `state_glyph()` scope and expanded verification to the full TUI app test file.
-- Code review: pending
-- Merge risk: pending
+- Code review: general reviewer, 1 round; no findings. Risk review skipped because the change has no external input, public interface, auth, shell, SQL, or per-item external work.
+- Merge risk: low: presentation-only TUI changes with full tests and no changed wire or persistence behavior.
 
 ## Outcome
+
+Implemented the unseen-session sidebar treatment. Unseen idle sessions use the purple primary glyph, seen idle sessions use the green success glyph, and only the current session title is bold. Full tests passed (5,442); Ruff lint passed. Repository-wide format checking remains blocked by the pre-existing unrelated `persona/skills/python/assets/output.py` formatting mismatch.
 
 PR: pending
 CI: pending
