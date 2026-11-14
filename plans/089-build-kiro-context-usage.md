@@ -211,7 +211,7 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   `PROTOCOL_VERSION`. Evidence: `env -u ARCHIE_BACKEND scripts/dev test` → 5439 passed;
   `ruff check .` and `ruff format --check` on touched files pass.
 
-### [ ] M2 — Persist the turn's context on its `llm_request`
+### [x] M2 — Persist the turn's context on its `llm_request`
 
 - **Approach:** add the four `LLMRequest` fields (UNSET pattern of `credits`). In
   `TurnTranslator.feed`, for counted frames track last, max and a set of values; in
@@ -224,7 +224,17 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   `SessionController.apply` during replay; the harness test's log.
 - **Deliverable:** a Kiro session replayed in the TUI shows the last turn's percentage.
 - **Verify:** `scripts/dev test tests/test_kiro_translate.py tests/test_kiro_credits.py tests/test_kiro_harness.py tests/test_tui_canonical.py tests/test_canonical_session_events.py -q` passes; full `scripts/dev test` shows only the baseline failures; `scripts/dev ruff check .` passes.
-- **Outcome:**
+- **Outcome:** `LLMRequest` gains the four UNSET fields; `TurnTranslator.feed` tracks
+  last/max/distinct root figures via `context_pct()` and `_llm_request` sets them per D5;
+  TUI replay sets `ledger.context_pct` from a Kiro request's `context_pct`; fake-Kiro
+  `completion(request_ids=3)`. Docs: `event-spec.md` row and compatibility note, `kiro.md`
+  mapping row, context paragraph and Limits. Tests: `test_turn_context_fields_from_root_frames`
+  (`(3.0, 4.0, 3, 3)`), `test_turn_without_context_frames_leaves_fields_unset`,
+  `test_context_pct_reads_only_numeric_root_context_frames`, two encoding tests in
+  `test_kiro_credits.py`, the harness log check `(3.1, 3.1, 2, 3)`,
+  `test_replayed_kiro_request_sets_context_pct`. Evidence: focused run 150 passed;
+  `env -u ARCHIE_BACKEND scripts/dev test` → 5445 passed; `ruff check .` passes; `ruff
+  format` applied to `translate.py`.
 
 ### [ ] M3 — Context in `archie.db`, insights and `archie stats`
 

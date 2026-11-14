@@ -77,6 +77,14 @@ class LLMRequest(PersistedEvent, tag="llm_request", tag_field="type", forbid_unk
     purpose: Literal["conversation", "compaction"] = "conversation"
     # Kiro-backed turns only; absent (and not encoded) for native requests.
     credits: float | msgspec.UnsetType = msgspec.UNSET
+    # Kiro-backed turns only (089): Kiro's root context usage, percent of the window measured
+    # after a model response. ``context_pct`` is the turn's last figure, ``context_pct_max``
+    # its highest, ``context_samples`` the number of distinct figures; all three are unset
+    # when the turn saw none. ``kiro_requests`` is ``len(turn_completion.requestIds)``.
+    context_pct: float | msgspec.UnsetType = msgspec.UNSET
+    context_pct_max: float | msgspec.UnsetType = msgspec.UNSET
+    context_samples: int | msgspec.UnsetType = msgspec.UNSET
+    kiro_requests: int | msgspec.UnsetType = msgspec.UNSET
 
 
 class CompactionStart(

@@ -581,6 +581,18 @@ def test_kiro_request_without_context_keeps_the_live_value():
     assert controller.ledger.context_tokens == 0
 
 
+@pytest.mark.asyncio
+async def test_replayed_kiro_request_sets_context_pct():
+    client = FakeOrchestrator(
+        {"s1": [_user("hi"), _kiro_request("k1", context_pct=55.0, context_pct_max=60.0)]}
+    )
+    controller, _ = make_controller(client)
+    assert await controller.replay() is True
+    assert controller.context_pct_only is True
+    assert controller.ledger.context_pct == 55.0  # the turn's last figure, not its max
+    assert controller.ledger.context_tokens == 0
+
+
 def test_status_without_context_leaves_context_alone():
     controller, _ = make_controller()
     controller.apply(_llm_request("l1", 0.1))

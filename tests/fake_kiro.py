@@ -160,22 +160,16 @@ def context(pct: float) -> None:
     )
 
 
-def completion(credits: float, status: str = "success") -> None:
-    update(
-        {
-            "sessionUpdate": "session_info_update",
-            "_meta": {
-                "kiro": {
-                    "kind": "turn_completion",
-                    "status": status,
-                    "elapsedTime": 1234,
-                    "promptTurnSummaries": [
-                        {"unit": "credit", "unitPlural": "credits", "usage": credits}
-                    ],
-                }
-            },
-        }
-    )
+def completion(credits: float, status: str = "success", request_ids: int | None = None) -> None:
+    meta = {
+        "kind": "turn_completion",
+        "status": status,
+        "elapsedTime": 1234,
+        "promptTurnSummaries": [{"unit": "credit", "unitPlural": "credits", "usage": credits}],
+    }
+    if request_ids is not None:
+        meta["requestIds"] = [f"req-{n}" for n in range(request_ids)]
+    update({"sessionUpdate": "session_info_update", "_meta": {"kiro": meta}})
 
 
 async def archie_tool(call_id: str, name: str, arguments: dict) -> dict:
@@ -296,7 +290,7 @@ async def prompt(rid: int, params: dict) -> None:
     await archie_tool("tc_shell", "shell", {"command": "echo KIRO-OK"})
     context(3.1)
     chunk("Done: KIRO-OK.")
-    completion(0.5)
+    completion(0.5, request_ids=3)
     send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
 
 

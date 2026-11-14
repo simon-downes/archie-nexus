@@ -629,7 +629,10 @@ class SessionController:
             if not self.context_pct_only:
                 ledger.context_tokens = event.context_tokens
                 ledger.context_pct = estimate_context_pct(event.context_tokens, event.model_key)
-            # A Kiro request has no token count; it leaves context alone (089 D8).
+            elif isinstance(event.context_pct, int | float):
+                ledger.context_pct = event.context_pct
+            # A Kiro request without a figure has no token count; it leaves context alone
+            # (089 D8).
         ledger.cost += event.cost_usd
         ledger.credits = _add_credits(ledger.credits, event)
         self._accounting_changed()

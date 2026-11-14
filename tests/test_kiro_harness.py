@@ -136,6 +136,12 @@ async def test_turn_with_archie_tool(harness, home):
     assert request.credits == 0.5
     assert request.cost_usd == 0.01
     assert request.model_key == "kiro/gpt-5.6-luna"
+    assert (
+        request.context_pct,
+        request.context_pct_max,
+        request.context_samples,
+        request.kiro_requests,
+    ) == (3.1, 3.1, 2, 3)
     messages = [e.content for e in events if isinstance(e, AssistantMessage)]
     assert messages == ["Running the command.", "Done: KIRO-OK."]
     assert isinstance(events[-1], TurnComplete)

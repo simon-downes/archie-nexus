@@ -79,6 +79,7 @@ the agent kills Kiro and ends the active turn with `turn_error`.
 | `tool_load`, "Subagent Response" | dropped |
 | any other tool | logged under its `toolId` or title, with a warning |
 | `turn_completion` + prompt result | one root `llm_request`, then `turn_complete` / `turn_interrupted` / `turn_error` |
+| `session_info_update` kind `context_usage` (root) | `session_status.context_pct` when the value changes; the turn's last, max and distinct count on its `llm_request` |
 
 For current Kiro ACP frames, an Archie tool call uses `title: "@archie/<name>"` and places
 its arguments directly in `rawInput`, for example `{"path": "foo.py"}`. The translator treats
@@ -92,6 +93,16 @@ streams text that follows a tool call. Kiro reports credits, not tokens, so each
 turns are still charged. The period's credits so far come from the session logs when the
 harness starts. The TUI shows each turn's credits after its cost in the turn summary, and the
 session's total after the cost in the status bar.
+
+Kiro reports context usage as `usagePercentage` in `context_usage` frames, about once per
+model request and in identical pairs. The harness keeps the latest root figure, puts it in
+every `session_status` and sends a new status when it changes, so the TUI status bar shows
+`Ctx: N%` live; Kiro gives no token count. The turn's `llm_request` stores the last figure
+(`context_pct`), the highest (`context_pct_max`), the number of distinct figures
+(`context_samples`) and `len(requestIds)` (`kiro_requests`), so replay, insights and
+`archie stats` show it. Archie keeps one `llm_request` per turn: in the logs checked, the
+figures matched Kiro's request IDs for only 39 % of requests, so the two counts are recorded
+to re-check that later.
 
 ## Session control
 
@@ -120,7 +131,8 @@ session's total after the cost in the status bar.
 ## Limits
 
 Kiro sessions run locally only, with no remote Kiro sessions or cloud sandboxes. The backend
-has no resume, no manual compaction and no per-request latency or token counts. It shows no
-context percentage, and turn cost limits are not enforced. Insights and `archie stats` don't
+has no resume, no manual compaction and no per-request latency or token counts. Context is a
+percentage only, for the main agent only (Kiro reports none for subagents), and turn cost
+limits are not enforced. Insights and `archie stats` don't
 show credits yet. The `tests/fake_kiro.py` scripted agent covers the ACP flow without a
 network.
