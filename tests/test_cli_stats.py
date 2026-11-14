@@ -9,7 +9,7 @@ import pytest
 from archie_cli.cli import main
 from click.testing import CliRunner
 
-from tests.session_fakes import migrated_store, record
+from tests.session_fakes import kiro_context_session, migrated_store, record
 
 
 @pytest.fixture
@@ -219,3 +219,23 @@ def test_waits_for_lock_with_notice(home, monkeypatch):
         holder.join()
     assert result.exit_code == 0
     assert "Waiting for index sync" in result.stderr
+
+
+def test_stats_session_shows_kiro_context_pct(session_logs, tmp_path):
+    w = session_logs
+    w.write("kiro-01k0000003", kiro_context_session(w))
+    migrated_store(tmp_path)
+    result = _invoke("session", "kiro-01k0000003")
+    assert result.exit_code == 0, result.output
+    assert "4.0%" in result.output
+    data = json.loads(_invoke("session", "kiro-01k0000003", "--json").output)
+    assert [t["context_pct"] for t in data["turns"]] == [None, 4.0]
+
+
+def test_stats_session_native_context_shows_tokens(session_logs, tmp_path):
+    w = session_logs
+    w.write("nat-01k0000005", [w.user("x"), w.llm(context_tokens=12345)])
+    migrated_store(tmp_path)
+    result = _invoke("session", "nat-01k0000005")
+    assert result.exit_code == 0, result.output
+    assert "12,345" in result.output

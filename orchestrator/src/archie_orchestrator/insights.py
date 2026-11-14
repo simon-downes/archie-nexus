@@ -453,6 +453,7 @@ def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
             "requests": r["requests"],
             "cost": round(r["cost"] or 0.0, 6),
             "context_tokens": r["context_tokens"],
+            "context_pct": r["context_pct"],  # Kiro turns only: the turn's max (089)
             "tool_calls": r["tool_calls"],
             "errors": (r["request_errors"] or 0) + (r["tool_errors"] or 0),
         }
@@ -465,6 +466,9 @@ def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
             "(SELECT MAX(r.context_tokens) FROM metrics_requests r "
             " WHERE r.session_id = t.session_id AND r.turn = t.turn AND r.scope IS NULL) "
             "AS context_tokens, "
+            "(SELECT MAX(r.context_pct_max) FROM metrics_requests r "
+            " WHERE r.session_id = t.session_id AND r.turn = t.turn AND r.scope IS NULL) "
+            "AS context_pct, "
             "(SELECT COUNT(*) FROM metrics_tool_calls c WHERE c.session_id = t.session_id "
             " AND c.turn = t.turn) AS tool_calls, "
             "(SELECT SUM(r.status = 'error') FROM metrics_requests r "
@@ -485,6 +489,7 @@ def session_detail(conn: sqlite3.Connection, session_id: str) -> dict:
             "status": r["status"],
             "purpose": r["purpose"],
             "context_tokens": r["context_tokens"],
+            "context_pct": r["context_pct"],  # Kiro only: the turn's last figure (089)
             "cost": round(r["cost_usd"], 6),
             "duration_ms": r["duration_ms"],
         }

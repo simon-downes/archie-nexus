@@ -10,7 +10,7 @@ from archie_orchestrator.insights import InsightsError, parse_filters, percentil
 from archie_orchestrator.metrics import MetricsIndex, connect
 from archie_orchestrator.store import SessionStore, db_path
 
-from tests.session_fakes import migrated_store, record, set_mtime
+from tests.session_fakes import kiro_context_session, migrated_store, record, set_mtime
 
 ALL = parse_filters(since="all")
 
@@ -487,3 +487,21 @@ def test_daily_series_fill_gaps(session_logs, tmp_path):
     assert daily["series"][0]["values"] == [1.0, 0.0, 0.0, 2.0]
     assert errs["days"] == daily["days"]
     assert errs["request_errors"] == [0, 0, 0, 1]
+
+
+def test_session_detail_kiro_context_pct(session_logs, tmp_path):
+    w = session_logs
+    w.write("kiro-01k0000003", kiro_context_session(w))
+    w.write("native-01k0000004", [w.user("x"), w.llm(event_id="n1", context_tokens=700)])
+    migrated_store(tmp_path)
+    conn = _sync(tmp_path)
+    try:
+        data = insights.session_detail(conn, "kiro-01k0000003")
+        assert [t["context_pct"] for t in data["turns"]] == [None, 4.0]  # the turn's max
+        assert [r["context_pct"] for r in data["requests"]] == [None, 3.0]  # its last figure
+        native = insights.session_detail(conn, "native-01k0000004")
+        assert native["turns"][0]["context_pct"] is None
+        assert native["turns"][0]["context_tokens"] == 700
+        assert native["requests"][0]["context_pct"] is None
+    finally:
+        conn.close()

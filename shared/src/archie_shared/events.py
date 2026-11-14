@@ -77,6 +77,14 @@ class LLMRequest(PersistedEvent, tag="llm_request", tag_field="type", forbid_unk
     purpose: Literal["conversation", "compaction"] = "conversation"
     # Kiro-backed turns only; absent (and not encoded) for native requests.
     credits: float | msgspec.UnsetType = msgspec.UNSET
+    # Kiro-backed turns only (089): Kiro's root context usage, percent of the window measured
+    # after a model response. ``context_pct`` is the turn's last figure, ``context_pct_max``
+    # its highest, ``context_samples`` the number of distinct figures; all three are unset
+    # when the turn saw none. ``kiro_requests`` is ``len(turn_completion.requestIds)``.
+    context_pct: float | msgspec.UnsetType = msgspec.UNSET
+    context_pct_max: float | msgspec.UnsetType = msgspec.UNSET
+    context_samples: int | msgspec.UnsetType = msgspec.UNSET
+    kiro_requests: int | msgspec.UnsetType = msgspec.UNSET
 
 
 class CompactionStart(
@@ -245,7 +253,9 @@ class SessionStatus(Event, tag="session_status", tag_field="type", forbid_unknow
     """Live session status.
 
     ``state`` follows the OSC 7501 vocabulary. ``blocked`` currently always means a pending
-    question, carried in ``question``.
+    question, carried in ``question``. ``context_pct`` is Kiro's latest root context usage
+    (percent of the window, measured after a model response); it is unset, and not
+    encoded, for native sessions and before Kiro reports a value (089).
     """
 
     id: str
@@ -253,6 +263,7 @@ class SessionStatus(Event, tag="session_status", tag_field="type", forbid_unknow
     git_branch: str
     state: SessionState = "idle"
     question: PendingQuestion | None = None
+    context_pct: float | msgspec.UnsetType = msgspec.UNSET
 
 
 class ErrorNotice(Event, tag="error_notice", tag_field="type", forbid_unknown_fields=True):

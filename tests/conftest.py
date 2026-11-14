@@ -253,8 +253,15 @@ class SessionLogWriter:
         event_id: str | None = None,
         stop_reason: str | None = None,
         credits: float | None = None,
+        context_pct: float | None = None,
+        context_pct_max: float | None = None,
+        context_samples: int | None = None,
+        kiro_requests: int | None = None,
     ) -> LLMRequest:
         import msgspec
+
+        def unset(value):
+            return msgspec.UNSET if value is None else value
 
         return LLMRequest(
             id=event_id or self._id("lr"),
@@ -275,7 +282,11 @@ class SessionLogWriter:
             error=error,
             subagent_index=index,
             purpose=purpose,
-            credits=msgspec.UNSET if credits is None else credits,
+            credits=unset(credits),
+            context_pct=unset(context_pct),
+            context_pct_max=unset(context_pct_max),
+            context_samples=unset(context_samples),
+            kiro_requests=unset(kiro_requests),
         )
 
     def tool_call(

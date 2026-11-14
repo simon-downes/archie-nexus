@@ -55,7 +55,7 @@ call's `tool_use_id`) with exactly one of a 0-based `option`, a non-empty `text`
 | `user_message` | persisted | `turn: int`, `scope: string?`, `content: string`, `subagent_index: int?` |
 | `iteration_start` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `subagent_index: int?` |
 | `text_delta` | live-only | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `text: string`, `subagent_index: int?` |
-| `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?`, `purpose: conversation \| compaction`, `credits: float` (Kiro only; absent otherwise) |
+| `llm_request` | persisted | `scope: string?`, `turn: int`, `iteration: int`, `model_key: string`, `sent_at: string`, `duration_ms: int`, `status: completed \| interrupted \| error \| no_usage`, `input_tokens: int`, `output_tokens: int`, `cache_read_tokens: int`, `cache_write_tokens: int`, `context_tokens: int`, `cost_usd: float`, `stop_reason: string?`, `error: string?`, `subagent_index: int?`, `purpose: conversation \| compaction`, `credits: float` (Kiro only; absent otherwise), `context_pct: float`, `context_pct_max: float`, `context_samples: int`, `kiro_requests: int` (Kiro only; absent when Kiro didn't report them) |
 | `compaction_start` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `tokens_before: int`, `estimated_next_request_cost_usd: float?`, `model_key: string`, `sent_at: string`, `subagent_index: int?` |
 | `compaction_complete` | persisted | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `status: success \| failure \| interrupted`, `tokens_before: int`, `tokens_after: int?`, `cost_saved_usd: float`, `duration_ms: int`, `error: string?`, `summary: string?`, `debug: string`, `subagent_index: int?`, `estimated_next_request_cost_usd: float?`, `skills_loaded: list[string]` |
 | `context_compacted` | persisted (legacy, no longer emitted) | `turn: int`, `iteration: int`, `scope: string?`, `request_id: string`, `reason: manual \| threshold \| cold_cache`, `summary: string`, `model_key: string`, `tokens_before: int`, `tokens_after: int`, `duration_ms: int`, `debug: string`, `subagent_index: int?` |
@@ -66,7 +66,7 @@ call's `tool_use_id`) with exactly one of a 0-based `option`, a non-empty `text`
 | `turn_error` | persisted | `turn: int`, `scope: string?`, `message: string`, `subagent_index: int?` |
 | `turn_interrupted` | persisted | `turn: int`, `scope: string?`, `subagent_index: int?` |
 | `handshake` | live-only | `protocol_version: int`, `session_id: string` |
-| `session_status` | live-only | `model_key: string`, `git_branch: string`, `state: idle \| working \| blocked \| done \| error` (default `idle`), `question: {id: string, question: string, options: list[{label: string, description: string}], recommended: int?}?` |
+| `session_status` | live-only | `model_key: string`, `git_branch: string`, `state: idle \| working \| blocked \| done \| error` (default `idle`), `question: {id: string, question: string, options: list[{label: string, description: string}], recommended: int?}?`, `context_pct: float` (Kiro only; absent until Kiro reports one) |
 | `error_notice` | live-only | `kind: string`, `message: string` |
 
 Compaction operations are persisted as `compaction_start` followed by the compactor `llm_request` (omitted when the transcript cannot be fitted and no provider request is made) and exactly one `compaction_complete`. Compaction failures are reported only through a `failure` or `interrupted` completion. `estimated_next_request_cost_usd` is the active conversation model's pre-compaction estimate for a cold-cache request; it is set only for `cold_cache` compactions and repeated on the completion. Clients display it when present and `cost_saved_usd` otherwise. `skills_loaded` lists the sorted names of skills whose body was loaded when compaction started; it is set on every status and decodes as `[]` from older logs. `tokens_before` and `tokens_after` are provider-facing context estimates: heuristic estimates include the system prompt and tool configuration; provider-baseline estimates retain the provider's reported boundary. `cost_saved_usd` is a display estimate and is not an accounting source. On success it prices the removed tokens at the active model's cache write rate (its input rate when it has none): the cache write the next request avoids, assuming a cold cache. It ignores cache reads on later requests, and it overstates the saving for a compaction that happens while the cache is warm.
@@ -139,3 +139,21 @@ turn's tool calls, with `credits` summed from Kiro's turn summary, zero token co
 `cost_usd` derived from the credits (see [kiro.md](kiro.md)). Native requests omit the field,
 so their lines are unchanged. A client built before the field existed drops Kiro
 `llm_request` lines as malformed; update the CLI with the agent.
+
+`llm_request.context_pct`, `context_pct_max`, `context_samples` and `kiro_requests` were added
+with protocol version 5, also on Kiro turns only. `context_pct` is the turn's last root
+`usagePercentage`, `context_pct_max` its highest and `context_samples` the number of distinct
+figures (all three absent when the turn saw no context frame); `kiro_requests` is the length
+of `turn_completion.requestIds`. They are percentages of the window measured after a model
+response, so they are not comparable with native `context_tokens` (the prompt size). Native
+requests omit all four. A client, orchestrator or metrics index built before protocol 5 drops Kiro
+`llm_request` lines that carry them as malformed (losing their cost and credits on replay and
+in `archie.db`); these lines stay in the session logs, so running older code after this change
+has that cost.
+
+`session_status.context_pct` came with protocol version 5. Kiro-backed agents send Kiro's
+latest root context usage (`usagePercentage` of a `context_usage` frame: percent of the
+window, measured after a model response) in every status, and send a new status each time
+the value changes. Native agents, and Kiro agents before the first frame, omit the field, so
+their status frames are unchanged. A client, tracker or live viewer built before protocol 5
+drops a Kiro status that carries the field as malformed; update them together.

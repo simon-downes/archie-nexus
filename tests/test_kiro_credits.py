@@ -139,6 +139,22 @@ def test_old_line_without_credits_decodes():
     assert decode_event(raw, persisted=True).credits is msgspec.UNSET
 
 
+CONTEXT_FIELDS = ("context_pct", "context_pct_max", "context_samples", "kiro_requests")
+
+
+def test_native_request_encodes_without_context_fields():
+    raw = json.loads(encode_event(_request(model_key="bedrock-x")))
+    assert not set(CONTEXT_FIELDS) & raw.keys()
+
+
+def test_kiro_context_fields_roundtrip_as_persisted():
+    request = _request(
+        credits=0.5, context_pct=3.0, context_pct_max=4.0, context_samples=3, kiro_requests=3
+    )
+    restored = decode_event(encode_event(request), persisted=True)
+    assert tuple(getattr(restored, f) for f in CONTEXT_FIELDS) == (3.0, 4.0, 3, 3)
+
+
 # --- pricing ---------------------------------------------------------------
 
 

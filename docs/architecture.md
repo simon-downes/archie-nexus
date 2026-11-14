@@ -264,7 +264,7 @@ A connect sends one live-only `handshake` containing protocol and session identi
 one `session_status` frame carrying the current model, Git branch, session state and any pending
 question. There is no
 `session_snapshot` or `session_info` envelope and no parallel wire event schema.
-`PROTOCOL_VERSION` is 4; clients and agents use this final contract together.
+`PROTOCOL_VERSION` is 5; clients and agents use this final contract together.
 
 The coordinator persists a persisted event before enqueueing it for broadcast. Live-only events are
 never appended. `text_delta` is intentionally excluded from history reads; assistant content is
@@ -313,7 +313,7 @@ The old `<ARCHIE_HOME_DIR>/metrics.db` (with its `-wal`, `-shm`, `.lock` and `.l
 
 The metrics index is the `metrics_*` tables of `archie.db`: a derived, metadata-only index of every log in `<ARCHIE_HOME_DIR>/sessions`. `MetricsIndex` (`orchestrator/src/archie_orchestrator/metrics.py`) reads each log from a byte offset stored in `metrics_ingest_files` and folds the canonical events into tables:
 
-- `metrics_requests`: one row per `llm_request`, including `status`, `stop_reason`, `error`, `subagent_index` and `purpose`. Recorded cost is never repriced.
+- `metrics_requests`: one row per `llm_request`, including `status`, `stop_reason`, `error`, `subagent_index` and `purpose`, and for Kiro turns `context_pct`, `context_pct_max`, `context_samples` and `kiro_requests` (NULL otherwise). Recorded cost is never repriced. Insights and `archie stats` show a turn's context as the percentage when it has one (Kiro), else as tokens.
 - `metrics_turns`: root turns with status (`open`, `completed`, `error`, `interrupted`) and first/last request times.
 - `metrics_tool_calls`: name, skill name for `skill` calls, request time and model, error flag, duration (`0` stored as NULL), result size, and the first line of an error result (≤200 characters).
 - `metrics_compactions`: reason, status, tokens before and after, saving and duration.
@@ -324,7 +324,7 @@ The tables join to `sessions` on `session_id` (no foreign key) for workspace, st
 
 No other message content, tool input or tool output is stored. Sync is incremental and idempotent: unchanged files are skipped by size and mtime, a trailing partial line waits for the next sync, and a log that shrank or whose first line changed is re-ingested from the start. Rows for deleted logs are kept. Invalid lines are counted and skipped; an unreadable file records its error and the sync moves on.
 
-The orchestrator syncs every 15 seconds; `/insights` pages and `archie stats` sync before they query. Each sync and rebuild first runs any pending canonical migrations, then holds the exclusive `flock` on `archie.db.lock`. The metrics schema version is the `meta` row `metrics_version` (currently 5); when it is missing or different, every `metrics_*` table is dropped and recreated, with the new version row, in one transaction and refilled from the logs, and the canonical tables are left alone. `archie migrate-sessions` rebuilds the metrics tables the same way from the migrated logs in strict mode, so a file or SQLite error fails the command; `--db` chooses the database (default `<ARCHIE_HOME_DIR>/archie.db`). Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
+The orchestrator syncs every 15 seconds; `/insights` pages and `archie stats` sync before they query. Each sync and rebuild first runs any pending canonical migrations, then holds the exclusive `flock` on `archie.db.lock`. The metrics schema version is the `meta` row `metrics_version` (currently 6); when it is missing or different, every `metrics_*` table is dropped and recreated, with the new version row, in one transaction and refilled from the logs, and the canonical tables are left alone. `archie migrate-sessions` rebuilds the metrics tables the same way from the migrated logs in strict mode, so a file or SQLite error fails the command; `--db` chooses the database (default `<ARCHIE_HOME_DIR>/archie.db`). Queries for both surfaces live in `insights.py`. The index is a view of the logs, not a replacement for the session JSONL source of truth.
 
 ## Configuration, security, and ownership
 

@@ -66,11 +66,11 @@ __all__ = [
     "schema_version",
 ]
 
-METRICS_VERSION = 5
+METRICS_VERSION = 6
 """Version of the ``metrics_*`` schema, kept in the ``meta`` row ``metrics_version``.
 
 Versions 1-4 were ``PRAGMA user_version`` of the old ``metrics.db``; 5 is the first
-``archie.db`` layout.
+``archie.db`` layout; 6 adds the Kiro context columns of ``metrics_requests`` (089).
 """
 META_KEY = "metrics_version"
 NO_SESSION_RECORD = "no session record"
@@ -89,7 +89,8 @@ _SCHEMA = (
  output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL,
  cache_write_tokens INTEGER NOT NULL, context_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL,
  duration_ms INTEGER NOT NULL, stop_reason TEXT, error TEXT, subagent_index INTEGER,
- purpose TEXT NOT NULL, UNIQUE (session_id, event_id))""",
+ purpose TEXT NOT NULL, context_pct REAL, context_pct_max REAL, context_samples INTEGER,
+ kiro_requests INTEGER, UNIQUE (session_id, event_id))""",
     """CREATE TABLE metrics_turns (
  session_id TEXT NOT NULL, turn INTEGER NOT NULL, status TEXT NOT NULL, stop_reason TEXT,
  error TEXT, started_at TEXT, ended_at TEXT, PRIMARY KEY (session_id, turn))""",
@@ -123,6 +124,8 @@ _SESSION_TABLES = (
     "metrics_compactions",
     "metrics_subagents",
 )
+# Kiro-only ``LLMRequest`` fields, stored NULL when unset (089); last in ``_REQUEST_COLUMNS``.
+_KIRO_CONTEXT_FIELDS = ("context_pct", "context_pct_max", "context_samples", "kiro_requests")
 _REQUEST_COLUMNS = (
     "timestamp",
     "turn",
@@ -141,6 +144,7 @@ _REQUEST_COLUMNS = (
     "error",
     "subagent_index",
     "purpose",
+    *_KIRO_CONTEXT_FIELDS,
 )
 
 
@@ -229,6 +233,11 @@ def _rebuild_tables(conn: sqlite3.Connection) -> None:
         conn.rollback()
         raise
     conn.commit()
+
+
+def _unset_none(value):
+    """``None`` for ``msgspec.UNSET`` (a field the request doesn't carry), else the value."""
+    return None if value is msgspec.UNSET else value
 
 
 def _clip(text: str | None, limit: int) -> str | None:
@@ -405,6 +414,7 @@ class _Folder:
             _clip(event.error, ERROR_CHARS),
             event.subagent_index,
             event.purpose,
+            *(_unset_none(getattr(event, name)) for name in _KIRO_CONTEXT_FIELDS),
         )
         cursor = self.conn.execute(
             f"INSERT OR IGNORE INTO metrics_requests (session_id, event_id, "

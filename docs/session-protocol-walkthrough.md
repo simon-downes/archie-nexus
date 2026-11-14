@@ -283,7 +283,7 @@ session_status   live-only
 {
   "type":"handshake",
   "id":"01J...",
-  "protocol_version":4,
+  "protocol_version":5,
   "session_id":"..."
 }
 ```
