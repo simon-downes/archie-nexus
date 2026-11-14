@@ -1,6 +1,6 @@
 # 085 — Current-agent stop shortcut
 
-Status: building
+Status: reviewing
 Branch: build-it/085-current-agent-stop (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/085-current-agent-stop
 
@@ -69,14 +69,14 @@ If the user cancels, no websocket command is sent. If the websocket is unavailab
 
 ## Milestones
 
-### [ ] M1 — Confirm and stop the current agent
+### [x] M1 — Confirm and stop the current agent
 
 - **Approach:** Replace the child-only `Ctrl+X` action in `app.py` with a current-agent action. Add child and main confirmation constructors in `dialogs.py`, using destructive dialogs with Cancel focused. Capture `(scope, index)` before opening a child dialog; on confirmation call `SessionController.stop_child()` with that key, or call `SessionController.cancel()` for the main agent. Update the existing child test's no-view expectation and add main-agent confirmation/cancellation tests, preserving the existing `stop_dialog` tests.
 - **Test seam:** Textual `App.run_test` with the real priority binding, `make_app`, `attached`, `settle`, and the fake websocket exposed as `app.controller.ws.sent`.
 - **Edge cases:** nested tool view → capture and target the underlying subagent; no child view → target main agent; no live on-screen session → no dialog or command; Cancel/Escape and repeated shortcut while modal → no interrupt; the existing modal handling remains authoritative.
 - **Deliverable:** `Ctrl+X` visibly warns about and confirms stopping the current child or main agent, with distinct consequences.
 - **Verify:** `scripts/dev test tests/test_tui_app.py tests/test_tui_detail.py` passes, then `scripts/dev ruff check .` and `scripts/dev ruff format --check .` pass without changes.
-- **Outcome:** pending
+- **Outcome:** Implemented current-agent selection, distinct confirmation dialogs, captured child targets, and TUI regressions. Focused tests (101) and full tests (5,432) passed; Ruff lint and targeted format checks passed. Repository format check remains blocked by pre-existing formatting in `persona/skills/python/assets/output.py`.
 
 ## Deviations
 
@@ -88,7 +88,7 @@ If the user cancels, no websocket command is sent. If the websocket is unavailab
 
 ## Review
 
-- Plan review: pending
+- Plan review: 1 pass. Fixed the inactive-turn AC, defined no-live-session behavior, documented captured child targets, specified existing test helpers, and changed format verification to `--check`.
 - Code review: pending
 - Merge risk: pending
 
