@@ -341,7 +341,8 @@ def render_session(data: dict, console: Console) -> None:
             t["status"],
             _num(t["requests"]),
             _num(t["tool_calls"]),
-            _num(t["context_tokens"]),
+            # Kiro turns carry a percentage, not tokens (089).
+            _num(t["context_tokens"]) if t.get("context_pct") is None else _pct(t["context_pct"]),
             _money(t["cost"]),
             _num(t["errors"]),
         )

@@ -15,7 +15,7 @@ from archie_orchestrator.web import VIEWER_CSP
 from archie_shared.schemas import NexusConfig
 from httpx import ASGITransport, AsyncClient
 
-from tests.session_fakes import migrated_store, record
+from tests.session_fakes import kiro_context_session, migrated_store, record
 
 PAGES = [
     "/insights",
@@ -283,3 +283,28 @@ async def test_unindexed_session_while_updating_is_200_with_notice(home):
         resp = await _get(f"/insights/sessions/{SID}")
     assert resp.status_code == 200
     assert "Index is updating" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_session_page_shows_kiro_context_pct(session_logs, tmp_path):
+    """Kiro turns show the turn's max %; the chart plots each turn's last % (089 D11)."""
+    w = session_logs
+    w.write("kiro-01k0000003", kiro_context_session(w))
+    migrated_store(tmp_path)
+    resp = await _get("/insights/sessions/kiro-01k0000003")
+    assert resp.status_code == 200
+    html = resp.text
+    assert '<td class="num">4.0%</td>' in html
+    assert "Context % per main-agent turn" in html
+    payload = json.loads(re.search(r'id="chart-context">(.*?)</script>', html).group(1))
+    assert payload["values"] == [None, 3.0]
+    assert payload["label"] == "Context %"
+
+
+@pytest.mark.asyncio
+async def test_session_page_native_context_unchanged(home):
+    html = (await _get(f"/insights/sessions/{SID}")).text
+    assert "Context tokens per main-agent request" in html
+    payload = json.loads(re.search(r'id="chart-context">(.*?)</script>', html).group(1))
+    assert payload["label"] == "Context tokens"
+    assert payload["values"] == [100, 100]

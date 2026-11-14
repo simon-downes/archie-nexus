@@ -92,7 +92,8 @@ def state_glyph(record: SessionDescriptor, frame: int = 0) -> Text:
     if status == "error":
         return Text("✕", style=f"bold {theme.ERROR}")
     if status == "idle":
-        return Text("●", style=f"bold {theme.SUCCESS}")
+        colour = theme.PRIMARY if record.unseen else theme.SUCCESS
+        return Text("●", style=f"bold {colour}")
     if status == "failed":
         return Text("✕", style=theme.MUTED)
     return Text("·", style=theme.MUTED)  # stopped, exited
@@ -207,7 +208,7 @@ class SessionRow(Animated):
         bar = ("\u258c", theme.PRIMARY) if self.current else " "
         when = age(record.last_activity_at or record.started_at)
         line = Text.assemble(bar, " ", state_glyph(record, self.frame), " ")
-        name = Text(record.name, style="bold" if self.current or record.unseen else "")
+        name = Text(record.name, style="bold" if self.current else "")
         name.truncate(max(1, width - line.cell_len - len(when) - 1), overflow="ellipsis")
         line.append_text(name)
         line.pad_right(max(0, width - line.cell_len - len(when)))

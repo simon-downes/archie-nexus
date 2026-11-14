@@ -260,6 +260,8 @@ class SessionController:
         model_key: The session's current model key.
         model_name: Display name of the model, None until a status reports it.
         supports_cache: Whether the model caches, None until a status reports it.
+        context_pct_only: Context is a percentage with no token count (Kiro, 089 D9),
+            None until a status reports the model.
         agent_protocol: Protocol version from the agent's handshake (0 until then).
         turn_active: A root turn is running.
         thinking: A provider request is outstanding.
@@ -328,6 +330,7 @@ class SessionController:
         self.model_key = ""
         self.model_name: str | None = None
         self.supports_cache: bool | None = None
+        self.context_pct_only: bool | None = None
         # Protocol of the agent from its handshake. Agents before v4 send
         # session_status without a state, which decodes as the "idle" default.
         self.agent_protocol = 0
@@ -540,6 +543,11 @@ class SessionController:
             elif model is not None:
                 self.model_name = model.name
                 self.supports_cache = model.can_cache
+            self.context_pct_only = kiro_id is not None
+            if isinstance(event.context_pct, int | float):
+                # Kiro's live figure (089 D8). Not _accounting_changed(): that would drop the
+                # streamed output estimate; _status_changed() below redraws the bar.
+                self.ledger.context_pct = event.context_pct
             self._status_changed()
             if self.agent_protocol >= SESSION_STATE_PROTOCOL:
                 self._apply_session_state(event)
@@ -617,8 +625,14 @@ class SessionController:
             # Root conversation requests are persisted, so replay tracks model
             # switches even though live-only session_status frames are absent.
             self.model_key = event.model_key
-            ledger.context_tokens = event.context_tokens
-            ledger.context_pct = estimate_context_pct(event.context_tokens, event.model_key)
+            self.context_pct_only = kiro_model_id(event.model_key) is not None
+            if not self.context_pct_only:
+                ledger.context_tokens = event.context_tokens
+                ledger.context_pct = estimate_context_pct(event.context_tokens, event.model_key)
+            elif isinstance(event.context_pct, int | float):
+                ledger.context_pct = event.context_pct
+            # A Kiro request without a figure has no token count; it leaves context alone
+            # (089 D8).
         ledger.cost += event.cost_usd
         ledger.credits = _add_credits(ledger.credits, event)
         self._accounting_changed()

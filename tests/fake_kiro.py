@@ -137,22 +137,39 @@ def chunk(text: str, meta: dict | None = None) -> None:
     update(payload)
 
 
-def completion(credits: float, status: str = "success") -> None:
+def context(pct: float) -> None:
+    """One root context frame, sent twice like Kiro (percentage only, then breakdown)."""
+    update(
+        {
+            "sessionUpdate": "session_info_update",
+            "_meta": {"kiro": {"kind": "context_usage", "usagePercentage": pct}},
+        }
+    )
     update(
         {
             "sessionUpdate": "session_info_update",
             "_meta": {
                 "kiro": {
-                    "kind": "turn_completion",
-                    "status": status,
-                    "elapsedTime": 1234,
-                    "promptTurnSummaries": [
-                        {"unit": "credit", "unitPlural": "credits", "usage": credits}
-                    ],
+                    "kind": "context_usage",
+                    "usagePercentage": pct,
+                    "contextUsage": {"usagePercentage": pct},
+                    "breakdown": {"tools": {"tokens": 7281, "percent": 0.7}},
                 }
             },
         }
     )
+
+
+def completion(credits: float, status: str = "success", request_ids: int | None = None) -> None:
+    meta = {
+        "kind": "turn_completion",
+        "status": status,
+        "elapsedTime": 1234,
+        "promptTurnSummaries": [{"unit": "credit", "unitPlural": "credits", "usage": credits}],
+    }
+    if request_ids is not None:
+        meta["requestIds"] = [f"req-{n}" for n in range(request_ids)]
+    update({"sessionUpdate": "session_info_update", "_meta": {"kiro": meta}})
 
 
 async def archie_tool(call_id: str, name: str, arguments: dict) -> dict:
@@ -271,9 +288,11 @@ async def prompt(rid: int, params: dict) -> None:
             "rawOutput": {"message": "loaded"},
         }
     )
+    context(2.5)
     await archie_tool("tc_shell", "shell", {"command": "echo KIRO-OK", "description": "Say OK"})
+    context(3.1)
     chunk("Done: KIRO-OK.")
-    completion(0.5)
+    completion(0.5, request_ids=3)
     send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
 
 

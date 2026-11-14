@@ -21,10 +21,12 @@
 </section>
 {% set turn_chart = {"labels": data.turns|map(attribute="turn")|list, "values": data.turns|map(attribute="cost")|list} %}
 {% set ctx = data.requests|selectattr("scope", "none")|list %}
-{% set ctx_chart = {"labels": range(1, ctx|length + 1)|list, "values": ctx|map(attribute="context_tokens")|list, "turns": ctx|map(attribute="turn")|list} %}
+{#- Kiro reports context as a percentage only (089): chart it when any main-agent request has one. -#}
+{% set ctx_pct = ctx|rejectattr("context_pct", "none")|list|length > 0 %}
+{% set ctx_chart = {"labels": range(1, ctx|length + 1)|list, "values": ctx|map(attribute="context_pct" if ctx_pct else "context_tokens")|list, "turns": ctx|map(attribute="turn")|list, "label": "Context %" if ctx_pct else "Context tokens", "axis": "Turn" if ctx_pct else "Request"} %}
 <div class="two-col">
 {{ m.chart("turn-cost", "bar", turn_chart, "Cost per turn (USD, includes subagents)") }}
-{{ m.chart("context", "line", ctx_chart, "Context tokens per main-agent request") }}
+{{ m.chart("context", "line", ctx_chart, "Context % per main-agent turn" if ctx_pct else "Context tokens per main-agent request") }}
 </div>
 <section class="chrome">
     <h2>Turns</h2>
@@ -32,7 +34,7 @@
         <thead><tr><th class="num">Turn</th><th>Status</th><th class="num">Requests</th><th class="num">Tool calls</th><th class="num">Max context</th><th class="num">Cost</th><th class="num">Errors</th><th>Error</th></tr></thead>
         <tbody>
         {%- for t in data.turns %}
-            <tr><td class="num">{{ t.turn }}</td><td class="status-{{ t.status }}">{{ t.status }}</td><td class="num">{{ m.num(t.requests) }}</td><td class="num">{{ m.num(t.tool_calls) }}</td><td class="num">{{ m.num(t.context_tokens) }}</td><td class="num">{{ m.money(t.cost) }}</td><td class="num{% if t.errors %} err{% endif %}">{{ m.num(t.errors) }}</td><td class="errtext">{{ t.error or "" }}</td></tr>
+            <tr><td class="num">{{ t.turn }}</td><td class="status-{{ t.status }}">{{ t.status }}</td><td class="num">{{ m.num(t.requests) }}</td><td class="num">{{ m.num(t.tool_calls) }}</td><td class="num">{% if t.context_pct is not none %}{{ m.pct(t.context_pct) }}{% else %}{{ m.num(t.context_tokens) }}{% endif %}</td><td class="num">{{ m.money(t.cost) }}</td><td class="num{% if t.errors %} err{% endif %}">{{ m.num(t.errors) }}</td><td class="errtext">{{ t.error or "" }}</td></tr>
         {%- endfor %}
         </tbody>
     </table></div>

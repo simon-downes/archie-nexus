@@ -8,14 +8,19 @@ Imports are deferred inside functions to avoid startup cost.
 
 from __future__ import annotations
 
+import asyncio
 import re
+from typing import Literal
 
 from archie_agent.exec.tools import ContentTypeError, tool
+from archie_agent.exec.tools.images import ToolImage, detect_image_format, image_from_bytes
 
 
 @tool
-async def web_fetch(url: str, mode: str = "selective", search_terms: str | None = None) -> str:
-    """Fetch content from a web URL.
+async def web_fetch(
+    url: str, mode: str = "selective", search_terms: str | None = None
+) -> str | ToolImage:
+    """Fetch content from a web URL. Images (PNG, JPEG, GIF, WebP) are returned as images.
 
     Args:
         url: The http(s) URL to fetch.
@@ -27,12 +32,19 @@ async def web_fetch(url: str, mode: str = "selective", search_terms: str | None 
         search_terms: Keywords for selective mode (space-separated terms).
 
     Returns:
-        Page content as cleaned text.
+        Page content as cleaned text. Text is recognised from the content type
+        (including +json/+xml types such as SVG); bodies with no type or
+        application/octet-stream are treated as text if they have no null bytes.
+        For image URLs, an image (downscaled for model input) with a short
+        caption; mode/search_terms are ignored.
+        Inside exec only the caption is returned — call the native `web_fetch`
+        tool to view an image.
 
     Raises:
         ConnectionError: Network failure, DNS error, or non-2xx status.
         TimeoutError: Request exceeded 30 seconds.
-        ContentTypeError: URL returned non-text content.
+        ContentTypeError: URL returned binary content that is not a supported image.
+        ImageError: Image could not be decoded or reduced to a sendable size.
     """
     import httpx
 
@@ -59,13 +71,21 @@ async def web_fetch(url: str, mode: str = "selective", search_terms: str | None 
     except httpx.HTTPError as e:
         raise ConnectionError(f"HTTP error: {e}") from e
 
-    # Check content type — reject binary
+    # Classify by content type. Text types are trusted. Binary and generic
+    # types are sniffed for a supported image format (the same check `read`
+    # uses); generic types with no null bytes are treated as text, as `read`
+    # treats files. Anything else binary is rejected.
     content_type = response.headers.get("content-type", "")
-    if _is_binary_content_type(content_type):
-        raise ContentTypeError(
-            f"Non-text content type: {content_type}. "
-            "Cannot fetch binary content (images, PDFs, etc.)."
-        )
+    kind = _classify_content_type(content_type)
+    if kind != "text":
+        head = response.content[:_SNIFF_BYTES]
+        if detect_image_format(head) is not None:
+            return await asyncio.to_thread(image_from_bytes, response.content, url)
+        if kind == "binary" or b"\x00" in head:
+            raise ContentTypeError(
+                f"Non-text content type: {content_type or 'none'}. "
+                "web_fetch supports text and PNG, JPEG, GIF and WebP images."
+            )
 
     # Decode text content
     text = response.text
@@ -135,24 +155,45 @@ async def web_search(query: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _is_binary_content_type(content_type: str) -> bool:
-    """Check if a content-type header indicates binary content."""
-    ct = content_type.lower().split(";")[0].strip()
-    # Text types are fine
-    if ct.startswith(("text/", "application/json", "application/xml", "application/javascript")):
-        return False
-    # Common text-ish application types
-    if ct in (
-        "application/xhtml+xml",
-        "application/rss+xml",
-        "application/atom+xml",
-        "application/ld+json",
+# Bytes inspected when sniffing a response body (matches `read`).
+_SNIFF_BYTES = 8192
+
+# Text media types beyond text/* and the application/json, application/xml and
+# application/javascript prefixes (structured suffixes are handled separately).
+_TEXT_PREFIXES = ("text/", "application/json", "application/xml", "application/javascript")
+_TEXT_TYPES = frozenset(
+    {
+        "application/x-javascript",
+        "application/ecmascript",
         "application/x-yaml",
         "application/yaml",
-    ):
-        return False
-    # Everything else (images, audio, video, octet-stream, pdf, zip) is binary
-    return bool(ct)
+        "application/toml",
+        "application/x-ndjson",
+        "application/x-sh",
+        "application/x-shellscript",
+        "application/sql",
+        "application/graphql",
+    }
+)
+
+# Structured-syntax suffixes (RFC 6839) that mark a text type, e.g.
+# application/problem+json, application/atom+xml, image/svg+xml.
+_TEXT_SUFFIXES = ("+json", "+xml", "+yaml")
+
+# Types that say nothing about the body; these are sniffed like `read` does.
+_GENERIC_TYPES = frozenset(
+    {"", "application/octet-stream", "binary/octet-stream", "application/unknown"}
+)
+
+
+def _classify_content_type(content_type: str) -> Literal["text", "binary", "generic"]:
+    """Classify a content-type header as text, binary, or generic (needs sniffing)."""
+    ct = content_type.lower().split(";")[0].strip()
+    if ct.startswith(_TEXT_PREFIXES) or ct in _TEXT_TYPES or ct.endswith(_TEXT_SUFFIXES):
+        return "text"
+    if ct in _GENERIC_TYPES:
+        return "generic"
+    return "binary"
 
 
 def _html_to_text(html: str) -> str:

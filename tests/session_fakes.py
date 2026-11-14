@@ -391,3 +391,26 @@ def use_runtime(app, runtime: Runtime) -> Iterator[Runtime]:
         yield runtime
     finally:
         del app.state.runtime
+
+
+def kiro_context_session(w):
+    """Events of a Kiro session (089): turn 1 without context figures (an older Kiro turn),
+    turn 2 with them (last 3.0, max 4.0)."""
+    kiro = {"model_key": "kiro/gpt-5.6-luna", "context_tokens": 0, "credits": 0.5}
+    return [
+        w.user("old", turn=1),
+        w.llm(event_id="k0", turn=1, sent_at="2026-07-04T10:00:00+00:00", **kiro),
+        w.turn_complete(turn=1),
+        w.user("go", turn=2),
+        w.llm(
+            event_id="k1",
+            turn=2,
+            sent_at="2026-07-04T10:01:00+00:00",
+            context_pct=3.0,
+            context_pct_max=4.0,
+            context_samples=3,
+            kiro_requests=3,
+            **kiro,
+        ),
+        w.turn_complete(turn=2),
+    ]

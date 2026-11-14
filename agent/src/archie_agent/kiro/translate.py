@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import msgspec
 from archie_shared.events import Event, LLMRequest
 from archie_shared.types import ImageBlock
 from ulid import ULID
@@ -36,6 +37,23 @@ def _kiro_meta(update: dict) -> dict:
         return {}
     kiro = meta.get("kiro")
     return kiro if isinstance(kiro, dict) else {}
+
+
+def context_pct(update: dict) -> float | None:
+    """Kiro's root context usage from a ``session/update`` ``update``, or None (089 D6).
+
+    Counts ``session_info_update`` frames of kind ``context_usage`` with a numeric
+    ``usagePercentage`` and no ``agentSubtaskId``.
+    """
+    if update.get("sessionUpdate") != "session_info_update":
+        return None
+    meta = _kiro_meta(update)
+    if meta.get("kind") != "context_usage" or meta.get("agentSubtaskId"):
+        return None
+    value = meta.get("usagePercentage")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _iso(at: float) -> str:
@@ -81,6 +99,9 @@ class TurnTranslator:
         self._tools: dict[str, _Tool] = {}
         self._subtasks: dict[str, str] = {}  # agentSubtaskId -> dispatch toolCallId
         self.completion: dict | None = None
+        self._context_last: float | None = None  # root context figures this turn (089 D5)
+        self._context_max: float | None = None
+        self._context_seen: set[float] = set()
 
     # -- scopes and segments ---------------------------------------------------
 
@@ -164,6 +185,13 @@ class TurnTranslator:
             meta = _kiro_meta(update)
             if meta.get("kind") == "turn_completion" and not meta.get("agentSubtaskId"):
                 self.completion = meta
+            pct = context_pct(update)
+            if pct is not None:
+                self._context_last = pct
+                self._context_max = (
+                    pct if self._context_max is None else max(self._context_max, pct)
+                )
+                self._context_seen.add(pct)
         return out
 
     def _classify(self, update: dict, at: float) -> _Tool:
@@ -367,6 +395,8 @@ class TurnTranslator:
             duration = int(elapsed) if isinstance(elapsed, (int, float)) else wall_ms
             if status == "error" and error is None:
                 error = f"Kiro turn status: {kiro_status}"
+        request_ids = completion.get("requestIds") if completion is not None else None
+        seen = self._context_last is not None
         return LLMRequest(
             id=str(ULID()),
             scope=None,
@@ -385,6 +415,10 @@ class TurnTranslator:
             stop_reason=stop_reason,
             error=error,
             credits=round(credits, 6),
+            context_pct=self._context_last if seen else msgspec.UNSET,
+            context_pct_max=self._context_max if seen else msgspec.UNSET,
+            context_samples=len(self._context_seen) if seen else msgspec.UNSET,
+            kiro_requests=len(request_ids) if isinstance(request_ids, list) else msgspec.UNSET,
         )
 
 

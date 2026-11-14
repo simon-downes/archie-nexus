@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from archie_agent.kiro.translate import NO_COMPLETION_ERROR, TurnTranslator
+import msgspec
+from archie_agent.kiro.translate import NO_COMPLETION_ERROR, TurnTranslator, context_pct
 from archie_shared.events import (
     AssistantMessage,
     IterationStart,
@@ -85,6 +86,69 @@ def test_parallel_shell_results_and_accounting():
     assert isinstance(events[-1], TurnComplete)
     assert events[-1].stop_reason == "end_turn"
     assert events[-2] is request
+
+
+def _context_frame(pct, **meta):
+    return {
+        "sessionUpdate": "session_info_update",
+        "_meta": {"kiro": {"kind": "context_usage", "usagePercentage": pct, **meta}},
+    }
+
+
+def _finish(tr):
+    return tr.finish(stop_reason="end_turn", error=None, sent_at=0.0, at=1.0, price=lambda c: c)
+
+
+def test_turn_context_fields_from_root_frames():
+    """Last, max and distinct count of root frames; subagent frames don't count (089)."""
+    tr = TurnTranslator(Path("/tmp/x.jsonl"), MODEL_KEY, 1)
+    for pct in (2.5, 2.5, 4.0, 3.0):
+        assert tr.feed(_context_frame(pct), 1.0) == []
+    tr.feed(_context_frame(9.0, agentSubtaskId="sub-1"), 1.0)
+    tr.feed(
+        {
+            "sessionUpdate": "session_info_update",
+            "_meta": {
+                "kiro": {
+                    "kind": "turn_completion",
+                    "status": "success",
+                    "promptTurnSummaries": [{"unit": "credit", "usage": 0.1}],
+                    "requestIds": ["a", "b", "c"],
+                }
+            },
+        },
+        1.0,
+    )
+    request = next(e for e in _finish(tr) if isinstance(e, LLMRequest))
+    assert (
+        request.context_pct,
+        request.context_pct_max,
+        request.context_samples,
+        request.kiro_requests,
+    ) == (3.0, 4.0, 3, 3)
+
+
+def test_turn_without_context_frames_leaves_fields_unset():
+    events = _run("run1_parallel_shell")
+    request = next(e for e in events if isinstance(e, LLMRequest))
+    for name in ("context_pct", "context_pct_max", "context_samples"):
+        assert getattr(request, name) is msgspec.UNSET
+    tr = TurnTranslator(Path("/tmp/x.jsonl"), MODEL_KEY, 1)
+    tr.feed(_context_frame(5.0, agentSubtaskId="sub-1"), 1.0)
+    request = next(e for e in _finish(tr) if isinstance(e, LLMRequest))
+    assert request.context_pct is msgspec.UNSET and request.kiro_requests is msgspec.UNSET
+
+
+def test_context_pct_reads_only_numeric_root_context_frames():
+    assert context_pct(_context_frame(1.5)) == 1.5
+    assert context_pct(_context_frame(2)) == 2.0
+    assert context_pct(_context_frame("3")) is None
+    assert context_pct(_context_frame(True)) is None
+    assert context_pct(_context_frame(1.5, agentSubtaskId="s")) is None
+    assert context_pct({"sessionUpdate": "agent_message_chunk"}) is None
+    frame = _context_frame(1.5)
+    frame["_meta"]["kiro"]["kind"] = "turn_completion"
+    assert context_pct(frame) is None
 
 
 def test_current_archie_tool_format_uses_direct_raw_input():

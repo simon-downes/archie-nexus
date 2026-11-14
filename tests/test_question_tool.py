@@ -426,6 +426,7 @@ async def test_kiro_status_and_answer_have_no_question():
 
     harness = KiroHarness.__new__(KiroHarness)
     harness._turn_active = False
+    harness._context_pct = None
     harness.session = MagicMock(model_id="kiro/claude")
     with patch("archie_agent.app._read_git_branch", return_value="main"):
         status = harness.status_event()

@@ -291,6 +291,8 @@ class SessionPane(Vertical):
             status.model_name = controller.model_name
         if controller.supports_cache is not None:
             status.supports_cache = controller.supports_cache
+        if controller.context_pct_only is not None:
+            status.context_pct_only = controller.context_pct_only
         ledger = controller.ledger
         status.session_input = ledger.input_tokens
         status.session_output = controller.session_output

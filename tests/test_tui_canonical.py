@@ -543,6 +543,80 @@ async def test_replayed_compaction_renders_after_prior_entries_with_session_wind
     assert controller.ledger.context_pct == pytest.approx(25.0)
 
 
+# --- Kiro context (089) -------------------------------------------------------------
+
+
+def _kiro_request(event_id, **fields):
+    request = _llm_request(event_id, 0.01, input_tokens=0, output_tokens=0)
+    request.model_key = "kiro/gpt-5.6-luna"
+    request.credits = 0.5
+    for name, value in fields.items():
+        setattr(request, name, value)
+    return request
+
+
+def _kiro_status(event_id="st1", **fields):
+    return SessionStatus(id=event_id, model_key="kiro/gpt-5.6-luna", git_branch="main", **fields)
+
+
+def test_kiro_status_sets_context_pct_and_keeps_output_estimate():
+    controller, _ = make_controller()
+    controller.apply(_kiro_status(context_pct=42.2))
+    assert controller.context_pct_only is True
+    assert controller.ledger.context_pct == 42.2
+    controller.apply(
+        TextDelta(id="d1", turn=1, scope=None, iteration=0, request_id="r1", text="x" * 40)
+    )
+    assert controller.session_output == 10
+    controller.apply(_kiro_status("st2", context_pct=43.0))
+    assert controller.ledger.context_pct == 43.0
+    assert controller.session_output == 10  # the streamed estimate survives a status
+
+
+def test_kiro_request_without_context_keeps_the_live_value():
+    controller, _ = make_controller()
+    controller.apply(_kiro_status(context_pct=42.2))
+    controller.apply(_kiro_request("k1"))
+    assert controller.ledger.context_pct == 42.2
+    assert controller.ledger.context_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_replayed_kiro_request_sets_context_pct():
+    client = FakeOrchestrator(
+        {"s1": [_user("hi"), _kiro_request("k1", context_pct=55.0, context_pct_max=60.0)]}
+    )
+    controller, _ = make_controller(client)
+    assert await controller.replay() is True
+    assert controller.context_pct_only is True
+    assert controller.ledger.context_pct == 55.0  # the turn's last figure, not its max
+    assert controller.ledger.context_tokens == 0
+
+
+def test_status_without_context_leaves_context_alone():
+    controller, _ = make_controller()
+    controller.apply(_llm_request("l1", 0.1))
+    before = (controller.ledger.context_tokens, controller.ledger.context_pct)
+    controller.apply(SessionStatus(id="st", model_key="m", git_branch="main"))
+    assert (controller.ledger.context_tokens, controller.ledger.context_pct) == before
+    assert controller.context_pct_only is False
+
+
+def test_status_bar_shows_percentage_only_for_kiro():
+    from archie_cli.tui.status import StatusBar
+
+    bar = StatusBar()
+    bar.context_tokens = 0
+    bar.context_pct = 42.2
+    bar.context_pct_only = True
+    line = bar.fit(200).plain
+    assert "Ctx: 42%" in line and "Ctx: 0" not in line
+    bar.context_pct_only = False
+    bar.context_tokens = 40_000
+    bar.context_pct = 20.0
+    assert "Ctx: 40.0k (20%)" in bar.fit(200).plain
+
+
 def test_automatic_compaction_does_not_end_turn():
     controller, _ = make_controller()
     controller.turn_active = True

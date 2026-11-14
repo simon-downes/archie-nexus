@@ -14,6 +14,11 @@ def _make_session_info(protocol_version: int, event_id: str = "01J00000000000000
     )
 
 
+def test_protocol_version_is_5():
+    """Protocol 5 added ``session_status.context_pct`` (089 D12)."""
+    assert PROTOCOL_VERSION == 5
+
+
 def test_matching_version_no_warning():
     """A handshake with the client's protocol version shows no warning."""
     controller, listener = make_controller()

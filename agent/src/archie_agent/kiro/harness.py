@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 from archie_shared.config import home_dir
 from archie_shared.events import ErrorNotice, SessionStatus, UserMessage
 from archie_shared.events import TurnError as CanonicalTurnError
@@ -39,7 +40,7 @@ from archie_agent.exec.tool import create_registry
 from archie_agent.kiro import agent_files
 from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpError
 from archie_agent.kiro.mcp_server import ArchieMcpServer
-from archie_agent.kiro.translate import TurnTranslator
+from archie_agent.kiro.translate import TurnTranslator, context_pct
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import discover_skills
@@ -165,6 +166,7 @@ class KiroHarness:
         self._changed = asyncio.Event()
         self._exit_code: int | None = None
         self._ledger = CreditLedger(self._kiro.credits)
+        self._context_pct: float | None = None  # Kiro's latest root context usage (089)
         self._tasks: set[asyncio.Task] = set()
 
     # -- surface used by app.py ---------------------------------------------------
@@ -445,6 +447,16 @@ class KiroHarness:
             if translator is not None:
                 for event in translator.feed(update, received):
                     await self._event_bus.emit(event)
+            pct = context_pct(update)
+            if pct is not None and pct != self._context_pct:
+                self._context_pct = pct
+                # A turn that has finished translating but not yet sent its closing status
+                # (``_turn_active`` still set) leaves the new value to that status, so the
+                # TUI never sees ``working`` after ``turn_complete`` (089 D7).
+                closing = self._turn_active and self._translator is None
+                if self._started and not self._dead and not closing:
+                    # Awaited inline, like the translator's events, so it stays in order.
+                    await self._emit_status()
         elif method == "_kiro/mcp/status":
             for server in params.get("servers") or ():
                 if isinstance(server, dict) and server.get("name") == agent_files.MCP_SERVER:
@@ -593,7 +605,7 @@ class KiroHarness:
         return None
 
     def status_event(self) -> SessionStatus:
-        """Build the live ``session_status`` frame (``working`` or ``idle``)."""
+        """Build the live ``session_status`` frame (``working`` or ``idle``, context %)."""
         from archie_agent.app import _read_git_branch
 
         return SessionStatus(
@@ -601,6 +613,7 @@ class KiroHarness:
             model_key=self.session.model_id,
             git_branch=_read_git_branch(),
             state="working" if self._turn_active else "idle",
+            context_pct=msgspec.UNSET if self._context_pct is None else self._context_pct,
         )
 
     def answer_question(self, command) -> ErrorNotice:
@@ -615,7 +628,7 @@ class KiroHarness:
         try:
             await self._event_bus.emit(self.status_event())
         except Exception:  # noqa: BLE001 — status refresh is best effort
-            log.warning("Failed to broadcast final turn status", exc_info=True)
+            log.warning("Failed to broadcast session status", exc_info=True)
 
     async def _current_runner_context(self) -> dict:
         snapshot, notice = self._tool_policy.refresh()
