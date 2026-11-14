@@ -96,8 +96,8 @@ If the user cancels, no websocket command is sent. If the websocket is unavailab
 
 Delivered and verified with 5,432 passing tests, Ruff lint passing, targeted format checks passing, and `git diff --check` passing. Repository-wide format check has one unrelated existing mismatch in `persona/skills/python/assets/output.py`.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/31
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
