@@ -1,6 +1,6 @@
 # 088 — Unseen sidebar indicator
 
-Status: building
+Status: reviewing
 Branch: build-it/088-unseen-sidebar (base: main @ 9b137e9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/088-unseen-sidebar
 
@@ -71,7 +71,7 @@ No new modules or dependencies. Follow the existing `state_glyph`, `state_badge`
 
 ## Review
 
-- Plan review: pending
+- Plan review: 1 pass; fixed the shared `state_glyph()` scope and expanded verification to the full TUI app test file.
 - Code review: pending
 - Merge risk: pending
 
