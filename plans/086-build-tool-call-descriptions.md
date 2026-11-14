@@ -1,6 +1,6 @@
 # 086 — Descriptions on shell and exec calls
 
-Status: planning
+Status: building
 Branch: build-it/086-tool-call-descriptions (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/086-tool-call-descriptions
 
@@ -37,7 +37,14 @@ Codebase facts:
   through as the canonical `tool_call` input.
 - Dispatch already tolerates an extra key: `_native_handler` drops kwargs the function
   doesn't declare, and every exec dispatch path (`harness.py`, `agents.py`, `mcp_server.py`)
-  reads only `source`.
+  reads only `source`. The exec spec's own handler, `_exec_handler(source, **kwargs)`, forwards
+  extra kwargs to `run_exec`, which would raise `TypeError` on `description`; nothing calls it
+  with model input today, but it is changed to drop `description`.
+- Kiro tests: `tests/fake_kiro.py` calls `shell` over the real MCP server without a
+  description (lines ~239 and ~272), and `tests/test_kiro_harness.py::test_turn_with_archie_tool`
+  asserts the canonical input equals `{"command": "echo KIRO-OK"}`.
+- Web viewer rows are `tool_headline` plus `tool_preview` (`transcript.py`); for shell the
+  preview skips the command's first line because the headline shows it.
 - Prior art in `_research/`: opencode had a required `description` on bash ("Clear, concise
   description of what this command does in 5-10 words", with examples) and later removed it;
   tau requires a present-participle one ("Running tests"); maki has an optional "What the
@@ -55,7 +62,17 @@ Codebase facts:
 - Setup leftovers: none (`.venv-archie/` and `.ruff_cache/` are gitignored)
 - Failing before this work: 23 tests, all timing/concurrency failures in this container:
   10 in `tests/test_question_tool.py`, 13 (4 failed, 9 errors) in `tests/test_ws_integration.py`.
-  List saved at `/tmp/086-baseline-fail.txt`. `ruff check` passes.
+  `ruff check` passes. Failing in `test_question_tool.py`: test_answer_without_pending_question_is_rejected,
+  test_dismiss_answer, test_interrupt_while_waiting_clears_question, test_manual_compaction_emits_working,
+  test_option_answer_round_trip, test_reconnect_and_status_show_pending_question,
+  test_root_llm_is_offered_the_question_tool, test_stale_or_out_of_range_answers_are_rejected,
+  test_text_answer, test_turn_start_emits_working. In `test_ws_integration.py`:
+  test_compact_command_runs_manual_compaction, test_compact_command_rejected_while_turn_active,
+  test_concurrent_message_rejection_is_targeted, test_events_complete_log_after_turn,
+  test_events_on_start_has_only_session_started, test_events_unknown_cursor_returns_409,
+  test_events_valid_cursor_slices_after, test_existing_session_does_not_duplicate_session_started,
+  test_status_includes_session_metadata, test_two_clients_receive_identical_completed_turn,
+  test_websocket_handshake_on_connect, test_websocket_message_and_events, test_websocket_tool_turn.
 - Not included: `.DS_Store`, `plans/060-spec-container-aws-profiles.md`,
   `plans/070-build-nexus-plugins.md` (untracked in the user's checkout, unrelated).
 
@@ -68,7 +85,7 @@ Codebase facts:
 | D3 | Input name | `description` | `purpose`, `summary`, `justification` | `plans/tui-tool-rows.md` and the brain note already use `description`, as do opencode, tau and maki | self |
 | D4 | Where the input is declared | Added to the model-facing `ToolSpec` schemas only (native `shell` in `native.py`, `exec` in `tool.py`); the `shell()` function signature is unchanged | A `description` parameter on `shell()` | The same `shell()` is called from exec scripts, where a required description is noise and would break existing scripts. `_native_handler` already drops undeclared kwargs and every exec dispatch reads only `source`, so no dispatch change is needed | self |
 | D5 | Property order | `description` listed first in `properties` | After `command`/`source` | The model states the purpose before writing the command or script, and the short field leads the JSON in logs | self |
-| D6 | Display text | Whitespace collapsed to one line, `/workspace` stripped on rows like every other target; blank or non-string counts as missing | Truncate to N words; treat a description equal to the command as missing (maki) | Rows already cut to width; the schema text tells the model not to repeat the command, and a repeat would still be readable | self |
+| D6 | Display text | Whitespace collapsed to one line and otherwise shown as written (no `/workspace` stripping); blank or non-string counts as missing | Truncate to N words; strip `/workspace` like other targets; treat a description equal to the command as missing (maki) | Rows already cut to width. `strip_workspace` is for paths and turns a bare `/workspace` in prose into `.`. The schema text tells the model not to repeat the command, and a repeat would still be readable | self |
 | D7 | Shell row line 2 with a description | The description, then the existing ` · in <dir>` suffix | Description plus `$ command` | The user asked for the description "rather than" the command; the command stays in the detail view and in copy | self |
 | D8 | Exec row line 2 with a description | The description only | Description plus ` · python · N lines` | Same reason as D7; the source is in the detail view | self |
 | D9 | Model guidance | The schema property's description only | Also a system-prompt guideline | The property text is shown with every tool definition; a guideline would add prompt tokens for the same instruction | self |
@@ -99,20 +116,30 @@ Codebase facts:
   - AC: existing shell and exec examples in `tests/test_tool_rows.py` pass unchanged, and a
     call with `description="  "` renders like one without.
 - MUST render a multi-line description on one line, with whitespace runs collapsed to one space.
-  - AC: description `"Run\n  tests"` renders as `Run tests`.
-- MUST use the description in place of the command (shell) or the line count (exec) in the
-  activity label, the running and finished headline, and the breadcrumb, so subagent status
-  lines, the detail header and the web viewer show it.
+  - AC: `call_description("shell", {"description": "Run\n  tests"})` is `Run tests`, and
+    `row_text` of that call shows `╰ Run tests`.
+- MUST show the description in the activity label, the headline and the breadcrumb, so
+  subagent status lines, the detail header and the web viewer show it: for shell in place
+  of the command; for exec in place of `(N lines)` in the activity label, and after the
+  `Exec` label in the headline (which shows no line count today).
   - AC: `format_tool_activity("shell", {"command": "git status", "description": "Check the tree"})`
-    is `Shell [bold]Check the tree[/]`; for exec it is `Exec [bold]Count rows[/]`.
+    is `Shell [bold]Check the tree[/]`; for exec with description "Count rows" it is `Exec [bold]Count rows[/]`.
   - AC: `tool_headline` of a finished shell call with a description contains the
-    description and not the command; of a finished exec call is
-    `Exec [bold]<description>[/] [dim]<metrics>[/]`; `tool_crumb` returns the description text.
-  - AC: a subagent's activity after a shell `tool_call` with a description is
+    description and not the command; of a running exec call is `Exec [bold]<description>[/]`;
+    of a finished exec call is `Exec [bold]<description>[/] [dim]<metrics>[/]`.
+  - AC: `tool_crumb` of a shell call with description "Check the tree" is `Shell Check the tree`
+    (the label stays, as for every other tool).
+  - AC: `plain_text` of a subagent's activity after a shell `tool_call` with a description is
     `Shell <description>`.
+- MUST keep the web viewer's shell row showing the command when the headline shows a
+  description.
+  - AC: `tool_preview` of a shell call with a description starts at the command's first
+    line; without one it still starts at the second.
 - MUST keep the full command and source in the detail view and in a row's copy text.
-  - AC: `tool_detail_sections` of a shell call still has a `Command` section with the full
-    command; `ToolRow.get_copy_text` still returns the command / source.
+  - AC: `tool_detail_sections` of a shell call with a description still has a `Command`
+    section with the full command, and no `Options` section unless another option (`cwd`,
+    `timeout`) is set; `ToolRow(tool).get_copy_text()` still returns the command / source
+    (`tests/test_tui_copy_paste.py`).
 - MUST escape Rich markup in the description wherever it goes into markup.
   - AC: description `"list a/[slug]/b"` produces markup that renders the literal brackets
     (checked with `plain_text`).
@@ -139,18 +166,25 @@ place of the command or line count when it returns non-empty text.
 - `agent/src/archie_agent/exec/native.py`: `make_native_specs` applies `with_description` to
   tools named in a new `DESCRIBED_TOOLS = frozenset({"shell"})`. `native.py` already imports
   from `tool.py` at module level; `tool.py` imports `native` lazily inside `create_registry`,
-  so there is no cycle.
+  so there is no cycle. `_exec_handler` takes `description: str | None = None` and drops it.
 - `shared/src/archie_shared/tool_summaries.py`: new public `call_description(name, tool_input)`:
   returns `" ".join(value.split())` for `shell`/`exec` when `tool_input["description"]` is a
   string, else `""`. `format_tool_pending` (shell), `format_tool_activity` (exec) and
   `_format_tool_complete` (shell, both the error and success branches) use it in place of
   the command / `(N lines)`.
 - `shared/src/archie_shared/tool_rows.py`: `_shell` and `_exec` set `row.target` to
-  `strip_workspace(call_description(...))` when non-empty.
+  `call_description(...)` when non-empty (D6: not passed through `strip_workspace`).
 - `shared/src/archie_shared/transcript.py`: `tool_headline`'s exec branch uses the
-  description; shell and crumbs pick it up through `tool_summaries`.
+  description; shell and crumbs pick it up through `tool_summaries`. `tool_preview` keeps a
+  shell command's first line when `call_description` is non-empty. `tool_detail_sections`
+  leaves `description` out of a shell call's `Options` section (the header already shows
+  it), so a call with only `command` and `description` has no `Options` section.
+- `tests/fake_kiro.py`: its `shell` calls pass a `description`;
+  `tests/test_kiro_harness.py` asserts it in the canonical input.
 - `plans/tui-tool-rows.md`: replace the "no `description` input" rule and intro sentence with
-  the description rule and add one shell and one exec example with a description.
+  the description rule, and add the two `row_text` examples from the Requirements ACs (shell
+  "Run the CLI tests" in `archie-nexus`, exec "Count failed requests per host") so the doc
+  and `tests/test_tool_rows.py` stay in step.
 
 The guidance text for `DESCRIPTION_INPUT` (D9):
 
@@ -165,18 +199,19 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
 - **Approach:** Add `DESCRIPTION_INPUT`/`with_description` to `exec/tool.py` and apply them to
   the exec schema in `create_registry` and to `shell` in `make_native_specs` (Code structure).
   Add `call_description` to `tool_summaries.py` and use it in `tool_rows._shell`/`_exec`.
-  Update the MCP tests that call `shell` (`tests/test_kiro_mcp.py`) to pass a description,
-  since the MCP server now validates it. Update `plans/tui-tool-rows.md` (Code structure).
+  Update every MCP client that calls `shell` to pass a description, since the MCP server
+  now validates it: `tests/test_kiro_mcp.py` and `tests/fake_kiro.py` (with the input
+  assertion in `tests/test_kiro_harness.py`). Make `_exec_handler` drop `description`. Update `plans/tui-tool-rows.md` (Code structure).
 - **Test seam:** `create_registry()` specs and their handlers; `get_all_tools()`;
   `ArchieMcpServer` over a real MCP client (`tests/test_kiro_mcp.py`); `row_text`/`tool_row`
   (`tests/test_tool_rows.py`).
 - **Edge cases:** description missing, blank, non-string → today's line 2; multi-line →
-  collapsed; contains `/workspace/...` → stripped; a shell call over MCP without a
+  collapsed; contains `/workspace` → shown as written; a shell call over MCP without a
   description → `isError=True` with an input validation message (documents D1 on Kiro).
 - **Deliverable:** the model is told to describe every shell and exec call, and the TUI row
   shows the description.
-- **Verify:** `scripts/dev test tests/test_tool_rows.py tests/test_native.py tests/test_exec_tool.py tests/test_kiro_mcp.py tests/test_native_dispatch.py`
-  passes, and the full suite has no failures beyond `/tmp/086-baseline-fail.txt`.
+- **Verify:** `scripts/dev test tests/test_tool_rows.py tests/test_native.py tests/test_exec_tool.py tests/test_kiro_mcp.py tests/test_kiro_harness.py tests/test_native_dispatch.py`
+  passes, and the full suite has no failures beyond the Baseline list.
 - **Outcome:**
 
 ### [ ] M2 — Description in every other summary
@@ -186,13 +221,18 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
   where `_hi(command)` becomes `_hi(desc or command)`), and `transcript.tool_headline`'s exec
   branch (`Exec [bold]<desc>[/]` running; `Exec [bold]<desc>[/] [dim]<metrics>[/]` done;
   `Exec [bold]<desc>[/] [dim red]<message>[/]` failed). Without a description every output
-  stays byte-identical to today.
+  stays byte-identical to today. In `transcript.tool_preview`, return all of a shell
+  command's preview lines when there is a description, and in `tool_detail_sections` skip
+  `description` in the shell `Options` section. With a description the exec headline
+  label is plain `Exec` with the description in bold, matching `Shell [bold]…[/]`; that
+  differs from the bold `[bold]Exec[/]` of a description-less row, and that is intended.
 - **Test seam:** `format_tool_pending`/`format_tool_activity`/`format_tool_complete`
   (`tests/test_tool_summaries.py`); `tool_headline`, `tool_crumb`, `tool_detail_sections`
-  and `TranscriptBuilder` subagent activity (`tests/test_transcript_model.py`).
+  `tool_preview` and `TranscriptBuilder` subagent activity (`tests/test_transcript_model.py`);
+  `ToolRow.get_copy_text` (`tests/test_tui_copy_paste.py`).
 - **Deliverable:** subagent status lines, detail headers, breadcrumbs and web viewer rows
   show the description.
-- **Verify:** `scripts/dev test tests/test_tool_summaries.py tests/test_transcript_model.py tests/test_markup.py tests/test_tui_subagents.py tests/test_web_session_detail.py`
+- **Verify:** `scripts/dev test tests/test_tool_summaries.py tests/test_transcript_model.py tests/test_markup.py tests/test_tui_subagents.py tests/test_web_session_detail.py tests/test_tui_copy_paste.py`
   passes, and the full suite has no failures beyond the baseline list.
 - **Outcome:**
 
@@ -207,7 +247,15 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
 
 ## Review
 
-- Plan review:
+- Plan review: one pass, 2 ❌ 2 ⚠️ 5 ℹ️, all accepted and fixed: Kiro fake client and
+  harness assertion added to M1 (❌); web viewer `tool_preview` behaviour decided and added to
+  M2 (❌); crumb and exec-headline ACs corrected (⚠️); `_exec_handler` drops `description`,
+  baseline IDs moved into the plan, `test_kiro_harness.py` added to M1 Verify, subagent and
+  multi-line ACs name their boundary (ℹ️). Second pass (for the ❌ fixes) confirmed both
+  fixes and raised 1 ⚠️ 4 ℹ️, all accepted and fixed: shell `Options` drops `description`
+  (⚠️); copy-text AC gets a milestone and test file; the new doc examples are the two
+  `row_text` ACs; exec headline styling change noted as intended; D6 now leaves
+  descriptions unstripped, since `strip_workspace` turns a bare `/workspace` into `.`.
 - Code review:
 - Merge risk:
 
