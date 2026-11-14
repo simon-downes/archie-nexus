@@ -303,19 +303,25 @@ class TestModelSwitchHandler:
 
 
 # ---------------------------------------------------------------------------
-# TUI ModelProvider tests
+# TUI model picker tests (commands.ModelCommands)
 # ---------------------------------------------------------------------------
 
 
-class TestModelProvider:
-    """Tests for the TUI ModelProvider command palette."""
+class TestModelCommands:
+    """Tests for the TUI model picker's search."""
+
+    @staticmethod
+    def _provider(app, matcher):
+        from archie_cli.tui.commands import ModelCommands
+
+        provider = ModelCommands.__new__(ModelCommands)
+        provider.matcher = lambda _q: matcher
+        provider._Provider__screen = type("FakeScreen", (), {"app": app})()
+        return provider
 
     @pytest.mark.asyncio
     async def test_search_returns_hits(self, monkeypatch):
-        """Provider yields hits matching the query."""
-        from archie_cli.tui.models_provider import ModelProvider
-
-        # Mock load_models to return a test catalog
+        """Picker yields hits matching the query, with the price and a switch."""
         test_catalog = {
             "model-haiku": ModelEntry(
                 name="Claude Haiku 4.5",
@@ -330,34 +336,35 @@ class TestModelProvider:
                 cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
             ),
         }
-        monkeypatch.setattr("archie_cli.tui.models_provider._get_catalog", lambda: test_catalog)
+        monkeypatch.setattr("archie_cli.tui.commands._get_catalog", lambda: test_catalog)
+        from textual.content import Content
 
-        # Create a minimal provider with mocked internals
         class FakeMatcher:
             def match(self, text):
                 return 80.0 if "haiku" in text.lower() else 0.0
 
             def highlight(self, text):
-                return text
+                return Content(text)
+
+        switched = []
 
         class FakeApp:
+            session_model_key = "model-sonnet"
+
             def switch_model(self, key):
-                pass
+                switched.append(key)
 
-        provider = ModelProvider.__new__(ModelProvider)
-        provider.matcher = lambda _q: FakeMatcher()
-        object.__setattr__(provider, "_app", FakeApp())
-        provider._Provider__screen = type("FakeScreen", (), {"app": FakeApp()})()
-
+        provider = self._provider(FakeApp(), FakeMatcher())
         hits = [h async for h in provider.search("haiku")]
         assert len(hits) == 1
-        assert hits[0].help == "$1.00/$5.00 per M tokens"
+        assert hits[0].text == "Claude Haiku 4.5"
+        assert hits[0].prompt.plain.endswith(" $1.00 /  $5.00")
+        hits[0].command()
+        assert switched == ["model-haiku"]
 
     @pytest.mark.asyncio
     async def test_search_no_match_returns_empty(self, monkeypatch):
-        """Provider yields nothing when no models match."""
-        from archie_cli.tui.models_provider import ModelProvider
-
+        """Picker yields nothing when no models match."""
         test_catalog = {
             "model-sonnet": ModelEntry(
                 name="Claude Sonnet 4.6",
@@ -366,7 +373,7 @@ class TestModelProvider:
                 cost=CostConfig(rates=[Rate(input=3.0, output=15.0)]),
             ),
         }
-        monkeypatch.setattr("archie_cli.tui.models_provider._get_catalog", lambda: test_catalog)
+        monkeypatch.setattr("archie_cli.tui.commands._get_catalog", lambda: test_catalog)
 
         class FakeMatcher:
             def match(self, text):
@@ -376,12 +383,11 @@ class TestModelProvider:
                 return text
 
         class FakeApp:
-            pass
+            session_model_key = ""
 
-        provider = ModelProvider.__new__(ModelProvider)
-        provider.matcher = lambda _q: FakeMatcher()
-        object.__setattr__(provider, "_app", FakeApp())
-        provider._Provider__screen = type("FakeScreen", (), {"app": FakeApp()})()
+            def switch_model(self, key):
+                raise AssertionError("nothing to pick")
 
+        provider = self._provider(FakeApp(), FakeMatcher())
         hits = [h async for h in provider.search("xyz")]
         assert hits == []

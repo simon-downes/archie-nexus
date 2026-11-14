@@ -15,6 +15,7 @@ from pathlib import Path
 
 from archie_shared.config import home_dir
 from archie_shared.protocol import API_PREFIX
+from archie_shared.schemas import expand_workspace_root
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -78,9 +79,13 @@ async def lifespan(app: Starlette):
     # Migrate archie.db, reconcile with Docker and follow running sessions before the
     # metrics loop takes its lock (D13). Tests inject a fake runtime (D16).
     runtime = getattr(app.state, "runtime", None) or DockerRuntime()
-    # Titles read the last valid config, so an invalid edit doesn't stop them (083 D10).
+    # Titles read the last valid config, so an invalid edit doesn't stop them (083 D10);
+    # so does the workspace root that session locations are read under (084 D29).
     tracker = SessionTracker(
-        SessionStore(db_path(home_dir())), runtime, titler=Titler(config_source.latest)
+        SessionStore(db_path(home_dir())),
+        runtime,
+        titler=Titler(config_source.latest),
+        workspace_root=lambda: expand_workspace_root(config_source.latest()),
     )
     await tracker.start()
     app.state.tracker = tracker

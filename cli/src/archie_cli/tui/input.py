@@ -11,7 +11,7 @@ user presses Enter with non-empty content. The parent app handles this
 message via on_message_input_submitted().
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from textual.message import Message
 from textual.widgets import TextArea
@@ -46,6 +46,34 @@ class MessageInput(TextArea):
         # Set while a question is shown: called with the key when the input is empty,
         # returning True when it consumed the key (selection keys, digits, Enter).
         self.choice_handler: Callable[[str], bool] | None = None
+
+    @property
+    def sent_history(self) -> list[str]:
+        """Messages sent from the input, oldest first (a copy; Up/Down cycle them).
+
+        Not ``history``: that is ``TextArea``'s undo history.
+        """
+        return list(self._history)
+
+    def set_sent_history(self, items: Iterable[str]) -> None:
+        """Replace the history; Up starts again from its newest entry."""
+        self._history = list(items)
+        self._history_idx = len(self._history)
+        self._draft = ""
+
+    def add_sent(self, text: str) -> None:
+        """Append a sent message; Up starts again from it."""
+        self._history.append(text)
+        self._history_idx = len(self._history)
+        self._draft = ""
+
+    def _submit(self) -> None:
+        """Send the input's text (when not blank), keep it in history, clear the input."""
+        content = self.text.strip()
+        if content:
+            self.add_sent(content)
+            self.post_message(self.Submitted(content))
+            self.clear()
 
     def _at_start(self) -> bool:
         """Return True if cursor is at row 0, col 0 (or input is empty)."""
@@ -94,25 +122,13 @@ class MessageInput(TextArea):
             # Treat numpad Enter as regular Enter (submit)
             event.prevent_default()
             event.stop()
-            content = self.text.strip()
-            if content:
-                self._history.append(content)
-                self._history_idx = len(self._history)
-                self._draft = ""
-                self.post_message(self.Submitted(content))
-                self.clear()
+            self._submit()
             return
 
         if event.key == "enter":
             event.prevent_default()
             event.stop()
-            content = self.text.strip()
-            if content:
-                self._history.append(content)
-                self._history_idx = len(self._history)
-                self._draft = ""
-                self.post_message(self.Submitted(content))
-                self.clear()
+            self._submit()
         elif event.key == "shift+enter":
             event.prevent_default()
             event.stop()

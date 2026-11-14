@@ -21,6 +21,13 @@ its ID (:meth:`SessionTracker.title_if_untitled`) and resetting a name also requ
 One title job runs per session at a time, later requests coalesce into one rerun, and at
 most :data:`TITLE_CONCURRENCY` calls run at once.
 
+Given a workspace root, the tracker also works out each live session's repo, worktree and
+branch (``location``, plan 084 D26-D29) from its tool calls (:mod:`.location`): when a
+root call's ``tool_result`` arrives (a subagent's while no root call has placed the
+session), after a log scan on every stream connect, and by re-reading HEAD every
+:data:`LOCATION_SWEEP_INTERVAL` seconds. Location jobs coalesce per session like title
+jobs and run their file reads in a worker thread.
+
 Docker is reached only through a :class:`Runtime`, so tests can substitute a fake.
 """
 
@@ -41,6 +48,8 @@ from archie_shared.events import (
     ErrorNotice,
     Handshake,
     SessionStatus,
+    ToolCall,
+    ToolResult,
     TurnComplete,
     TurnError,
     TurnInterrupted,
@@ -50,13 +59,21 @@ from archie_shared.events import (
 from archie_shared.kiro import KIRO_MODEL_PREFIX
 from archie_shared.schemas import NexusConfig
 from archie_shared.session import SessionDescriptor, container_name, split_id
+from archie_shared.workspaces import SessionLocation
 from websockets.exceptions import WebSocketException
 
 from archie_orchestrator import docker, lifecycle
 from archie_orchestrator.docker import DockerError, RunningContainer
 from archie_orchestrator.lifecycle import PreparedStart
+from archie_orchestrator.location import GAVE_UP, GaveUp, LocationState, scan_log
 from archie_orchestrator.store import SessionStore, id_start_time, import_log, now_iso
 from archie_orchestrator.titles import TitleInput, TitleResult, read_title_input
+from archie_orchestrator.workspaces import (
+    locate,
+    location_key,
+    refresh_location,
+    resolve_workspace,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +102,8 @@ TITLE_CONCURRENCY = 2
 """Most title calls running at once, across all sessions (083 D14)."""
 TITLE_VIEW_COOLDOWN = 300.0
 """Seconds after a failed title call before viewing the session tries again (083 D15)."""
+LOCATION_SWEEP_INTERVAL = 30.0
+"""Seconds between HEAD re-reads of the live sessions that have a location (084 D27)."""
 
 _UNSET: object = object()
 """Default of :meth:`SessionTracker.patch` arguments that were not given."""
@@ -107,9 +126,63 @@ class SessionTitler(Protocol):
     def generate(self, session_id: str, title_input: TitleInput) -> TitleResult: ...
 
 
+def locate_session(
+    root: Path, workspace: str, state: LocationState
+) -> tuple[SessionLocation | GaveUp | None, bool]:
+    """A session's location from its calls, and whether a root call gave it (084 D26).
+
+    Runs in a worker thread. A workspace that no longer resolves gives None; a path the
+    git reader can't handle (``OSError``, ``ValueError``) is skipped. Files are looked
+    up as their directory (:func:`location_key`). :data:`GAVE_UP` when a cap stopped
+    the search (see :meth:`LocationState.best`).
+    """
+    try:
+        directory = resolve_workspace(root, workspace)
+    except ValueError:
+        return None, False
+
+    def resolve(path: str) -> SessionLocation | None:
+        try:
+            return locate(directory, path)
+        except (OSError, ValueError) as exc:
+            log.debug("Skipping location candidate %s: %s", path, exc)
+            return None
+
+    return state.best(resolve, key=lambda path: location_key(directory, path))
+
+
+def refresh_sessions(
+    root: Path, sessions: list[tuple[str, str, SessionLocation]]
+) -> dict[str, SessionLocation | None]:
+    """Each ``(session_id, workspace, location)`` re-read from disk (the sweep, 084 D27).
+
+    Runs in a worker thread. Sessions whose location can't be read now are left out.
+    """
+    found: dict[str, SessionLocation | None] = {}
+    for session_id, workspace, location in sessions:
+        try:
+            directory = resolve_workspace(root, workspace)
+        except ValueError:
+            found[session_id] = None
+            continue
+        try:
+            found[session_id] = refresh_location(directory, location)
+        except (OSError, ValueError) as exc:
+            log.debug("Cannot re-read the location of session %s: %s", session_id, exc)
+    return found
+
+
 def resubscribe_delay(attempt: int) -> float:
     """The back-off before resubscribe attempt ``attempt`` (0-based) of one session (D14)."""
     return RESUBSCRIBE_DELAYS[min(attempt, len(RESUBSCRIBE_DELAYS) - 1)]
+
+
+def _feed(state: LocationState, event: ToolCall | ToolResult) -> bool:
+    """Give one stream event to ``state``; True if a call became eligible."""
+    if isinstance(event, ToolCall):
+        state.on_call(event.scope, event.tool_use_id, event.name, event.input, event.turn)
+        return False
+    return state.on_result(event.scope, event.tool_use_id)
 
 
 class SessionConflictError(Exception):
@@ -230,6 +303,8 @@ class SessionTracker:
         activity_interval: Minimum seconds between activity-only writes of one session.
         clock: Monotonic seconds, used to space activity-only writes.
         titler: Writes session titles; None turns titles off.
+        workspace_root: Returns the expanded ``workspace_root``, read on each use; None
+            turns locations off (084 D29).
     """
 
     def __init__(
@@ -240,9 +315,11 @@ class SessionTracker:
         activity_interval: float = ACTIVITY_INTERVAL,
         clock: Callable[[], float] = time.monotonic,
         titler: SessionTitler | None = None,
+        workspace_root: Callable[[], Path] | None = None,
     ) -> None:
         self.store = store
         self.titler = titler
+        self.workspace_root = workspace_root
         self.runtime = runtime
         self.activity_interval = activity_interval
         self.clock = clock
@@ -274,6 +351,14 @@ class SessionTracker:
         self._title_failed_at: dict[str, float] = {}
         self._title_viewed: set[str] = set()  # view checks not yet finished
         self._title_slots = asyncio.Semaphore(TITLE_CONCURRENCY)
+        # Location jobs by session, sessions asked again while their job ran, sessions
+        # whose log is to be scanned, each live session's calls, and the events that
+        # arrived while a scan ran (replayed onto its result) (084 D27).
+        self._location_tasks: dict[str, asyncio.Task] = {}
+        self._location_again: set[str] = set()
+        self._location_scan: set[str] = set()
+        self._location_states: dict[str, LocationState] = {}
+        self._location_buffers: dict[str, list[ToolCall | ToolResult]] = {}
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -291,13 +376,17 @@ class SessionTracker:
         self._unreconciled = set(self._records)
         if not await self._reconcile() or self._portless:
             self._background_task(self._retry_reconcile())
+        if self.workspace_root is not None:
+            self._background_task(self._sweep_locations())
 
     async def close(self) -> None:
         """Stop every background task and write what is pending; statuses are kept.
 
         Sessions run on without the orchestrator, so nothing is marked ended: followed
         streams are cancelled without the end check (D14), pending activity is written
-        (D11) and pending terminal writes get one last attempt (D12a).
+        (D11), and every record held in memory is written once more. A cancelled task's
+        write may still be running in its worker thread, or may have been cut short
+        (D12a's "retried with the next change" has no next change at shutdown).
         """
         tasks = [*self._tasks.values(), *self._background, *self._flush_tasks.values()]
         for task in tasks:
@@ -308,9 +397,8 @@ class SessionTracker:
         self._flush_tasks.clear()
         for session_id in list(self._pending_activity):
             await self._update(session_id)
-        for session_id, record in list(self._records.items()):
-            if record.ended:
-                await self._persist(session_id)
+        for session_id in list(self._records):
+            await self._persist(session_id)
 
     async def _reconcile(self) -> bool:
         """Match the stored records against ``docker ps`` (D13); False if Docker failed.
@@ -687,6 +775,7 @@ class SessionTracker:
                     f"ws://127.0.0.1:{port}/stream", open_timeout=10
                 ) as backend:
                     log.info("Tracking session %s", session_id)
+                    self.request_location(session_id, scan=True)
                     async for frame in backend:
                         attempt = 0
                         if isinstance(frame, str):
@@ -706,7 +795,8 @@ class SessionTracker:
         ``turn_error`` the next ``idle`` is stored as ``error`` until the next
         ``user_message``; ``turn_interrupted`` drops that pending error. ``session_status``
         sets status, model and question, and a ``kiro/`` model marks the backend. The
-        turn-1 ``user_message`` and scheduled ``turn_complete`` events request a title.
+        turn-1 ``user_message`` and scheduled ``turn_complete`` events request a title;
+        ``tool_call`` and ``tool_result`` events feed the session's location (084 D27).
         """
         try:
             event = decode_event(frame)
@@ -716,6 +806,11 @@ class SessionTracker:
         record = self._records.get(session_id)
         if record is None or record.ended:
             return
+        if isinstance(event, (ToolCall, ToolResult)) and self.workspace_root is not None:
+            try:
+                self._location_event(session_id, event)
+            except Exception:  # noqa: BLE001 — the stream must still be followed
+                log.exception("Location update for session %s failed", session_id)
         root = getattr(event, "scope", "") is None
         changes: dict[str, object] = {}
         if isinstance(event, SessionStatus):
@@ -886,6 +981,130 @@ class SessionTracker:
         if updated is not None:
             self._publish(updated)
 
+    # -- locations -----------------------------------------------------------
+
+    def _location_event(self, session_id: str, event: ToolCall | ToolResult) -> None:
+        """Feed a ``tool_call`` or ``tool_result`` to the session's calls (084 D27).
+
+        A result that makes a root call eligible requests a location job; a subagent's
+        does only while no root call has placed the session.
+        """
+        buffer = self._location_buffers.get(session_id)
+        if buffer is not None:
+            buffer.append(event)  # a scan is running; its result gets this too
+        state = self._location_states.setdefault(session_id, LocationState())
+        if _feed(state, event) and (event.scope is None or not state.from_root):
+            self.request_location(session_id)
+
+    def request_location(self, session_id: str, *, scan: bool = False) -> None:
+        """Start a location job for the session, or have the running one run again.
+
+        With ``scan`` the job first rebuilds the session's calls from its log.
+        """
+        if self.workspace_root is None:
+            return
+        if scan:
+            self._location_scan.add(session_id)
+        running = self._location_tasks.get(session_id)
+        if running is not None and not running.done():
+            self._location_again.add(session_id)
+            return
+        task = asyncio.create_task(self._location_job(session_id), name=f"location-{session_id}")
+        self._location_tasks[session_id] = task
+        self._background.add(task)
+
+        def _done(done: asyncio.Task) -> None:
+            self._background.discard(done)
+            if self._location_tasks.get(session_id) is done:
+                del self._location_tasks[session_id]
+
+        task.add_done_callback(_done)
+
+    async def _location_job(self, session_id: str) -> None:
+        while True:
+            self._location_again.discard(session_id)
+            try:
+                await self._location_once(session_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a failed location must not stop the tracker
+                log.exception("Location job for session %s failed", session_id)
+            if session_id not in self._location_again:
+                return
+
+    async def _location_once(self, session_id: str) -> None:
+        """Scan the log if asked, work out the location and publish it if it changed."""
+        workspace_root = self.workspace_root
+        record = self._records.get(session_id)
+        if workspace_root is None or record is None or record.ended:
+            return
+        if session_id in self._location_scan:
+            self._location_scan.discard(session_id)
+            self._location_buffers[session_id] = []
+            try:
+                scanned = await asyncio.to_thread(scan_log, self.log_path(session_id))
+            except OSError as exc:
+                log.debug("Cannot scan the log of session %s: %s", session_id, exc)
+                scanned = None  # keep what the stream has fed so far
+            finally:
+                buffered = self._location_buffers.pop(session_id, None) or []
+            if scanned is not None:
+                for event in buffered:
+                    _feed(scanned, event)
+                self._location_states[session_id] = scanned
+        state = self._location_states.get(session_id)
+        if state is None or not state.has_candidates:
+            return
+        snapshot = state.snapshot()
+        root = workspace_root()
+        location, from_root = await asyncio.to_thread(
+            locate_session, root, record.workspace, snapshot
+        )
+        if location is GAVE_UP:
+            return  # a cap stopped the search: unknown, so the current location stays
+        current = self._location_states.get(session_id)
+        if current is not None:
+            current.from_root = from_root
+        await self._set_location(session_id, location)
+
+    async def _set_location(self, session_id: str, location: SessionLocation | None) -> None:
+        """Write and publish a live session's new location; nothing when it is unchanged."""
+        record = self._records.get(session_id)
+        if record is None or record.ended or record.location == location:
+            return
+        await self._update(session_id, location=location)
+
+    async def _sweep_locations(self) -> None:
+        """Re-read the HEAD of every live session with a location, every 30 s (084 D27)."""
+        while True:
+            await asyncio.sleep(LOCATION_SWEEP_INTERVAL)
+            try:
+                await self._sweep_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — one bad sweep must not end the sweeps
+                log.exception("Location sweep failed")
+
+    async def _sweep_once(self) -> None:
+        workspace_root = self.workspace_root
+        if workspace_root is None:
+            return
+        sessions = [
+            (session_id, record.workspace, record.location)
+            for session_id, record in self._records.items()
+            if record.location is not None
+            and not record.ended
+            and session_id not in self._location_tasks  # a running job reads it anyway
+        ]
+        if not sessions:
+            return
+        found = await asyncio.to_thread(refresh_sessions, workspace_root(), sessions)
+        for session_id, _, before in sessions:
+            record = self._records.get(session_id)
+            if session_id not in found or record is None or record.location != before:
+                continue  # unreadable now, or a job changed it meanwhile
+            await self._set_location(session_id, found[session_id])
+
     # -- writes --------------------------------------------------------------
 
     async def _update(
@@ -941,6 +1160,8 @@ class SessionTracker:
             self._portless.discard(session_id)
             self._turn_failed.discard(session_id)
             self._activity_written.pop(session_id, None)
+            self._location_states.pop(session_id, None)  # an ended session keeps its location
+            self._location_buffers.pop(session_id, None)
         self._publish(record)
         try:
             written = await self._persist(session_id, strict=strict)

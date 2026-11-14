@@ -10,7 +10,7 @@ from archie_shared.events import AssistantMessage, TextDelta, UserMessage
 from textual.widgets import Markdown
 from textual.widgets._markdown import MarkdownStream
 
-from tests.test_tui_detail import _App, _feed
+from tests.test_tui_detail import _app, _feed
 
 USER = UserMessage(id="u1", turn=1, scope=None, content="go")
 
@@ -29,7 +29,7 @@ async def _settle(pilot) -> None:
 
 @pytest.mark.asyncio
 async def test_deltas_are_written_as_fragments_without_full_text_updates():
-    app = _App()
+    app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _feed(app, pilot, USER, _delta(0, FRAGMENTS[0]))
         await _settle(pilot)
@@ -63,7 +63,7 @@ async def test_deltas_are_written_as_fragments_without_full_text_updates():
 
 @pytest.mark.asyncio
 async def test_final_message_with_same_text_keeps_the_streamed_markdown():
-    app = _App()
+    app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _feed(app, pilot, USER, *[_delta(n, f) for n, f in enumerate(FRAGMENTS)])
         await _settle(pilot)
@@ -83,13 +83,13 @@ async def test_final_message_with_same_text_keeps_the_streamed_markdown():
         conv = app.query_one(Conversation)
         assert conv.query_one(StreamingMessage) is stream  # kept, not rebuilt
         assert not conv.query(AssistantRow)
-        assert "⟳" not in str(stream.query_one(".header").render())
+        assert stream._finished  # the stream was flushed, not replaced
         assert stream.query_one(Markdown).source.rstrip("\n") == "".join(FRAGMENTS).rstrip("\n")
 
 
 @pytest.mark.asyncio
 async def test_a_remounted_stream_row_renders_the_text_so_far_and_keeps_streaming():
-    app = _App()
+    app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
         await _feed(app, pilot, USER, _delta(0, "hello "), _delta(1, "there"))
         await _settle(pilot)

@@ -5,16 +5,21 @@ blocks, compaction rows, client-only rows) and applies the ``Change`` records th
 ``archie_shared.transcript.TranscriptBuilder.apply`` returns. Each row is built from
 its model node when it is mounted, so a row can be unmounted and rebuilt later.
 
-The main conversation shows the root transcript. A subagent screen shows one
-subagent's items with the same view class.
+The main conversation shows the root transcript. A subagent view (``detail.py``) shows
+one subagent's items with the same view class.
+
+A view built for a session that already has history is filled with ``load``: the rows
+of the builder's current root nodes, with each client-only entry put back after the
+row it followed (084 D6).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from archie_shared.session.accounting import UsageTotals
+from archie_shared.tool_rows import row_lines, tool_row
 from archie_shared.transcript import (
     CompactionNode,
     IterationNode,
@@ -27,9 +32,7 @@ from archie_shared.transcript import (
     TurnNode,
     plain_text,
     subagent_status_text,
-    tool_extra,
     tool_headline,
-    tool_preview,
 )
 from rich.style import Style
 from rich.text import Text
@@ -39,6 +42,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from archie_cli.tui import theme
+from archie_cli.tui.animation import Animated, spinner
 from archie_cli.tui.conversation import (
     AssistantMessage,
     CancelledMessage,
@@ -51,13 +55,14 @@ from archie_cli.tui.conversation import (
     TurnStatus,
     UserMessage,
 )
+from archie_cli.tui.session import ClientErrorEntry, LocalEntry, TurnStatusEntry
 
 # ---------------------------------------------------------------------------
 # Row widgets
 # ---------------------------------------------------------------------------
 
 
-def _markup(text: str) -> Text:
+def safe_markup(text: str) -> Text:
     """Rich markup to ``Text``, or the plain text when the markup can't render.
 
     ``Text.from_markup`` accepts any tag name and only fails when Textual renders the
@@ -74,29 +79,53 @@ def _markup(text: str) -> Text:
     return rendered
 
 
-def _status_glyph(status: str) -> Text:
+_GLYPH_STYLES = {
+    "running": f"bold {theme.PRIMARY}",
+    "ok": f"bold {theme.SUCCESS}",
+    "error": f"bold {theme.ERROR}",
+    "waiting": f"bold {theme.WARNING}",
+}
+_ROLE_STYLES = {
+    "label": f"bold {theme.TOOL_NAME}",
+    "muted": theme.MUTED,
+    "added": theme.SUCCESS,
+    "removed": theme.ERROR,
+    "error": theme.ERROR,
+    "target": theme.TARGET,
+}
+
+
+def status_glyph(status: str, frame: int = 0) -> Text:
+    """A node's status glyph: the spinner while it runs, else a green or red dot.
+
+    Args:
+        status: A tool's or subagent's status (``pending``/``running``, ``ok``/
+            ``complete``, ``error``/``interrupted``).
+        frame: Animation frame, which picks the spinner glyph.
+    """
     if status in {"pending", "running"}:
-        return Text("○", style=f"bold {theme.PRIMARY}")
+        return Text(spinner(frame), style=_GLYPH_STYLES["running"])
     colour = theme.ERROR if status in {"error", "interrupted"} else theme.SUCCESS
     return Text("●", style=f"bold {colour}")
 
 
-def render_tool_row(tool: ToolNode) -> Text:
-    """The tool row: status glyph, summary, 10-line exec/shell preview, extra lines."""
-    text = Text()
-    text.append_text(_status_glyph(tool.status))
-    text.append(" ")
-    text.append_text(_markup(tool_headline(tool)))
-    lines, more = tool_preview(tool)
-    for line in lines:
-        text.append("\n  ")
-        text.append(line, style="dim")
-    if more:
-        text.append(f"\n  … +{more} lines", style="dim italic")
-    extra = tool_extra(tool)
-    if extra:
-        text.append("\n")
-        text.append_text(_markup(extra))
+def render_tool_row(tool: ToolNode, width: int = 120, frame: int = 0) -> Text:
+    """The tool's two-line row at ``width`` columns (plans/tui-tool-rows.md).
+
+    Args:
+        tool: The call.
+        width: Columns available; both lines are cut to fit.
+        frame: Animation frame, which picks a running row's spinner glyph.
+    """
+    parts = tool_row(tool)
+    lines = []
+    for segments in row_lines(parts, width, spinner(frame)):
+        line = Text(no_wrap=True)
+        for text, role in segments:
+            line.append(text, _GLYPH_STYLES[parts.glyph] if role == "glyph" else _ROLE_STYLES[role])
+        lines.append(line)
+    text = Text("\n").join(lines)
+    text.no_wrap = True
     return text
 
 
@@ -115,15 +144,15 @@ def _fmt_column(value: str, width: int, *, align: str = "<") -> str:
     return f"{value:{align}{width}}"
 
 
-def render_subagent_row(sub: SubagentNode) -> Text:
+def render_subagent_row(sub: SubagentNode, frame: int = 0) -> Text:
     """One line: glyph, agent #index, context tokens, cost and current status."""
     agent = _fmt_column(sub.label, _AGENT_COLUMN)
     context = _fmt_column(_fmt_tokens(sub.context_tokens), _CONTEXT_COLUMN, align=">")
     cost = _fmt_column(f"${sub.cost_usd:.4f}", _COST_COLUMN, align=">")
     text = Text("  ")
-    text.append_text(_status_glyph(sub.status))
+    text.append_text(status_glyph(sub.status, frame))
     text.append(f" {agent} {context} {cost} - ")
-    status = _markup(subagent_status_text(sub))
+    status = safe_markup(subagent_status_text(sub))
     if sub.status == "error":
         status.stylize(theme.ERROR)
     text.append_text(status)
@@ -133,7 +162,7 @@ def render_subagent_row(sub: SubagentNode) -> Text:
 
 
 class ToolClicked(Message):
-    """A tool row was clicked; the app opens its detail screen."""
+    """A tool row was clicked; the session pane opens its detail view."""
 
     def __init__(self, tool: ToolNode) -> None:
         super().__init__()
@@ -141,19 +170,22 @@ class ToolClicked(Message):
 
 
 class SubagentClicked(Message):
-    """A subagent row was clicked; the app opens its transcript screen."""
+    """A subagent row was clicked; the session pane opens its transcript view."""
 
     def __init__(self, sub: SubagentNode) -> None:
         super().__init__()
         self.sub = sub
 
 
-class ToolRow(Static):
-    """One tool call. Clicking it opens the tool detail screen."""
+class ToolRow(Animated):
+    """One tool call as two lines, cut to the row's width. A click opens its details.
+
+    A running call's spinner follows the app's animation clock (084 D16).
+    """
 
     DEFAULT_CSS = """
     ToolRow {
-        height: auto;
+        height: 2;
     }
     ToolRow:hover {
         background: $boost;
@@ -161,11 +193,20 @@ class ToolRow(Static):
     """
 
     def __init__(self, tool: ToolNode) -> None:
+        super().__init__()
         self.tool = tool
-        super().__init__(render_tool_row(tool))
+
+    @property
+    def animating(self) -> bool:
+        """True while the call runs (a waiting question shows ``?`` instead)."""
+        return self.tool.result is None and self.tool.name != "question"
+
+    def render(self) -> Text:
+        return render_tool_row(self.tool, self.content_size.width or 120, self.frame)
 
     def refresh_node(self) -> None:
-        self.update(render_tool_row(self.tool))
+        self.refresh()
+        self.sync_animation()
 
     def on_click(self, event) -> None:
         event.stop()
@@ -181,7 +222,7 @@ class ToolRow(Static):
         return plain_text(tool_headline(self.tool))
 
 
-class SubagentRow(Static):
+class SubagentRow(Animated):
     """One subagent under its task tool. Clicking it opens the subagent transcript."""
 
     DEFAULT_CSS = """
@@ -194,11 +235,20 @@ class SubagentRow(Static):
     """
 
     def __init__(self, sub: SubagentNode) -> None:
+        super().__init__()
         self.sub = sub
-        super().__init__(render_subagent_row(sub))
+
+    @property
+    def animating(self) -> bool:
+        """True while the subagent runs."""
+        return self.sub.status == "running"
+
+    def render(self) -> Text:
+        return render_subagent_row(self.sub, self.frame)
 
     def refresh_node(self) -> None:
-        self.update(render_subagent_row(self.sub))
+        self.refresh()
+        self.sync_animation()
 
     def on_click(self, event) -> None:
         event.stop()
@@ -206,7 +256,10 @@ class SubagentRow(Static):
 
 
 class IterationBlock(Widget):
-    """The tool calls of one provider response, separated from the next by a blank line.
+    """The tool calls of one provider response.
+
+    Blocks have no margin, so the tool rows of consecutive iterations stack with no
+    gap; other rows keep a blank line from them with their own margins.
 
     Rows are a tool row per call, each followed by its subagent rows. The block
     builds its rows from the ``IterationNode`` when mounted and on each ``sync``.
@@ -216,7 +269,7 @@ class IterationBlock(Widget):
 
     DEFAULT_CSS = """
     IterationBlock {
-        margin: 0 0 1 0;
+        margin: 0;
         padding: 0 2;
         height: auto;
         border-left: thick transparent;
@@ -267,7 +320,7 @@ class SubagentBlock(Widget):
 
     DEFAULT_CSS = """
     SubagentBlock {
-        margin: 0 0 1 0;
+        margin: 0;
         padding: 0 1;
         height: auto;
     }
@@ -365,12 +418,19 @@ class _Row:
         return self.factory() if self.factory is not None else widget_for(self.node)
 
 
-# Window parameters (plan 078 D9, from Tau): mount about WINDOW_ROWS rows, move the
-# window by WINDOW_PAGE rows at a time, and let live appends overshoot by
-# WINDOW_OVERSCAN rows before the oldest mounted rows are dropped.
-WINDOW_ROWS = 200
-WINDOW_PAGE = 80
-WINDOW_OVERSCAN = 40
+# Window parameters: mount about WINDOW_ROWS rows, move the window by WINDOW_PAGE rows
+# at a time, and let live appends overshoot by WINDOW_OVERSCAN rows before the oldest
+# mounted rows are dropped. Plan 084 replaced 078 D9's 200/80/40 (from Tau) because
+# every session switch remounts the window: on archie-01m32ky6rn.jsonl (11.5 MB), a
+# window of 200 rows meant about 5,100 widgets and 5.2 s to switch back to the
+# session; a window of 40 means about 490 widgets and about 0.44 s.
+WINDOW_ROWS = 40
+WINDOW_PAGE = 20
+WINDOW_OVERSCAN = 20
+FILL_PAGES = 10
+"""Most pages added at once to fill a viewport the window's rows don't fill."""
+LAYOUT_WAITS = 5
+"""Refreshes to wait for mounted rows to be laid out before deciding to fill."""
 
 
 class WindowBoundary(Static):
@@ -402,7 +462,10 @@ class TranscriptView(VerticalScroll):
 
     Every row stays in ``rows``; only ``rows[start:end]`` (``window``) have mounted
     widgets. Scrolling to the top or bottom edge pages the window, and boundary rows
-    show how many rows are outside it.
+    show how many rows are outside it. A window whose rows are shorter than the
+    viewport can't scroll, so after the window moves or the view is resized, earlier
+    rows are added a page at a time until it can (at most :data:`FILL_PAGES` pages),
+    and the window keeps that larger size.
     """
 
     DEFAULT_CSS = """
@@ -432,12 +495,15 @@ class TranscriptView(VerticalScroll):
         self._local_ids = 0
         self._suspended = False
         self._window = window
+        self._span = window  # rows to keep mounted; grows to fill the viewport
         self._page = page
+        self._filling = False
         self._overscan = overscan
         self._start = 0
         self._end = 0
         self._shift_pending = False
         self._window_generation = 0
+        self._jumping = False  # a jump to the latest rows hasn't reached the end yet
         self._top: WindowBoundary | None = None
         self._bottom: WindowBoundary | None = None
 
@@ -446,7 +512,8 @@ class TranscriptView(VerticalScroll):
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         self._autoscroll = new_value >= self.max_scroll_y and self.window_is_latest
-        if new_value <= 1 and new_value < old_value and self._start > 0:
+        if new_value <= 1 and new_value < old_value and self._start > 0 and not self._jumping:
+            # (Not while a jump lands: rows unmounted above can clamp the offset to 0.)
             self._schedule_shift("earlier")
         elif (
             new_value >= max(0, self.max_scroll_y - 1)
@@ -470,6 +537,11 @@ class TranscriptView(VerticalScroll):
     def window_is_latest(self) -> bool:
         return self._end >= len(self._rows)
 
+    @property
+    def following(self) -> bool:
+        """True while the view follows the end of the transcript."""
+        return self._autoscroll and self.window_is_latest
+
     def _schedule_shift(self, direction: str) -> None:
         if self._shift_pending or self._suspended:
             return
@@ -488,12 +560,12 @@ class TranscriptView(VerticalScroll):
             if direction == "earlier" and start > 0:
                 anchor = self._rows[start].widget if start < end else None
                 new_start = max(0, start - self._page)
-                new_end = min(total, max(new_start + self._window, start + 1))
+                new_end = min(total, max(new_start + self._span, start + 1))
                 self._set_window(new_start, new_end)
             elif direction == "later" and end < total:
                 anchor = self._rows[end - 1].widget if end > start else None
                 new_end = min(total, end + self._page)
-                new_start = max(0, min(new_end - self._window, end - 1))
+                new_start = max(0, min(new_end - self._span, end - 1))
                 self._set_window(new_start, new_end)
         finally:
             if anchor is None:
@@ -526,19 +598,86 @@ class TranscriptView(VerticalScroll):
         """Mount the newest rows and follow the end of the transcript."""
         total = len(self._rows)
         self._window_generation += 1  # cancels a pending anchor restore
-        self._set_window(max(0, total - self._window), total)
+        self._set_window(max(0, total - self._span), total)
         self._autoscroll = True
         if not self._suspended:
+            self._jumping = True
             self.scroll_end(animate=False)
 
-    def _set_window(self, new_start: int, new_end: int) -> None:
-        """Mount exactly ``rows[new_start:new_end]``, keeping widgets already mounted."""
+            def landed() -> None:
+                self._jumping = False
+
+            self.call_after_refresh(landed)
+
+    def _set_window(self, new_start: int, new_end: int, *, fill: bool = True) -> None:
+        """Mount exactly ``rows[new_start:new_end]``, keeping widgets already mounted.
+
+        With ``fill``, earlier rows are paged in afterwards if the viewport has no
+        scroll room (``_fill_viewport``).
+        """
         for i in range(self._start, self._end):
             if not new_start <= i < new_end:
                 self._unmount(self._rows[i])
         self._start, self._end = new_start, new_end
         self._sync_boundaries()
         self._mount_missing()
+        if fill:
+            self._schedule_fill()
+
+    def on_resize(self) -> None:
+        self._schedule_fill()
+
+    def _schedule_fill(self, pages: int | None = None) -> None:
+        """Check after the next refresh (once the rows are laid out) whether to fill."""
+        if self._filling or self._suspended or not self.is_attached:
+            return
+        self._filling = True
+        self.call_after_refresh(self._fill_viewport, FILL_PAGES if pages is None else pages)
+
+    def _fill_viewport(self, pages: int, waits: int = LAYOUT_WAITS) -> None:
+        """Page earlier rows in while the mounted rows don't fill the viewport.
+
+        Without scroll room, scrolling can't reach the top edge, so earlier rows could
+        never page in. Each step adds :attr:`_page` rows above (keeping the rows below)
+        and checks again after the next refresh, up to ``pages`` steps. The window then
+        keeps its larger size, so appends don't shrink it back. A view following the
+        end stays at the end; otherwise the previous first row stays in view.
+
+        Rows mounted but not yet laid out (fewer lines than rows, as every row takes
+        at least one) are waited for, up to ``waits`` refreshes.
+        """
+        self._filling = False
+        if self._suspended or not self.is_attached or pages <= 0:
+            return
+        if self._start == 0 or self.max_scroll_y > 0:
+            return
+        window = [row.widget for row in self._rows[self._start : self._end]]
+        if self.virtual_size.height < len(window) or not all(
+            widget is not None and widget.is_mounted for widget in window
+        ):
+            if waits > 0:
+                self._filling = True
+                self.call_after_refresh(self._fill_viewport, pages, waits - 1)
+            return
+        anchor = window[0]
+        following = self._autoscroll and self.window_is_latest
+        new_start = max(0, self._start - self._page)
+        self._span = max(self._span, self._end - new_start)
+        self._set_window(new_start, self._end, fill=False)
+        generation = self._window_generation
+
+        def settle() -> None:
+            self._filling = False
+            if generation != self._window_generation:
+                return  # the window moved meanwhile (``jump_to_latest``)
+            if following:
+                self.scroll_end(animate=False, immediate=True)
+            elif anchor is not None and anchor.is_attached:
+                self.scroll_to_widget(anchor, top=True, animate=False, immediate=True)
+            self._schedule_fill(pages - 1)
+
+        self._filling = True
+        self.call_after_refresh(settle)
 
     def _mount_missing(self) -> None:
         """Mount the unmounted rows inside the window, in order, one batch per gap."""
@@ -606,12 +745,12 @@ class TranscriptView(VerticalScroll):
         mounted = self._end - self._start
         if not was_latest:
             self._sync_boundaries()  # reading earlier rows: count the new one below
-        elif mounted < self._window + self._overscan:
+        elif mounted < self._span + self._overscan:
             self._end += 1
             self._mount_missing()
         elif self._autoscroll:
             # Following the end at the cap: drop the oldest rows beyond the window.
-            self._set_window(len(self._rows) - self._window, len(self._rows))
+            self._set_window(len(self._rows) - self._span, len(self._rows))
         else:
             self._sync_boundaries()  # scrolled up at the cap: leave the window alone
 
@@ -650,13 +789,61 @@ class TranscriptView(VerticalScroll):
 
     def add_local(self, factory: Callable[[], Widget]) -> None:
         """Append a client-only row (not part of the session transcript)."""
+        self._add_local_row(factory)
+        self.scroll_if_at_bottom()
+
+    def _add_local_row(self, factory: Callable[[], Widget]) -> None:
         self._local_ids += 1
         self._add_row(_Row(key=f"local-{self._local_ids}", node=None, factory=factory))
-        self.scroll_if_at_bottom()
 
     def add_node(self, node) -> None:
         """Append a row for a model node (used to build a view from existing state)."""
         self._append_node(node)
+
+    def load(self, builder: TranscriptBuilder, locals: Sequence[LocalEntry] = ()) -> None:
+        """Fill an empty root view from the builder's current state (084 D6).
+
+        Rows come from the root nodes in order (the preamble, then each turn's user
+        message and items), so replaced streams and removed rows are already resolved.
+        Each local entry goes after the node it names as its anchor; entries whose
+        anchor is gone go at the end, in the order they were added. The latest window
+        is mounted once.
+
+        Args:
+            builder: The session's transcript model.
+            locals: Client-only entries, oldest first.
+        """
+        waiting: dict[str | None, list[LocalEntry]] = {}
+        for entry in locals:
+            waiting.setdefault(entry.anchor, []).append(entry)
+        placed: set[int] = set()
+
+        def place(anchor: str | None) -> None:
+            for entry in waiting.pop(anchor, ()):
+                placed.add(id(entry))
+                self._add_local_row(local_row(entry))
+
+        was_suspended = self._suspended
+        self._suspended = True
+        place(None)
+        for node in builder.preamble:
+            self._add_row(_Row(node.id, node))
+            place(node.id)
+        for turn in builder.turns:
+            user = turn.user
+            if user is not None and user.content:
+                self._add_row(_Row(user.id, user))
+            place(turn.id)
+            if user is not None:
+                place(user.id)
+            for item in turn.items:
+                self._add_row(_Row(item.id, item))
+                place(item.id)
+        for entry in locals:
+            if id(entry) not in placed:
+                self._add_local_row(local_row(entry))
+        if not was_suspended:
+            self.resume()
 
     def _append_node(self, node) -> None:
         if isinstance(node, TurnNode):
@@ -759,30 +946,26 @@ class TranscriptView(VerticalScroll):
                 row.widget.finish()
 
 
+def local_row(entry: LocalEntry) -> Callable[[], Widget]:
+    """The row factory for one client-only timeline entry."""
+    if isinstance(entry, TurnStatusEntry):
+        return lambda: TurnStatus(
+            entry.duration_s,
+            entry.input_tokens,
+            entry.cache_read,
+            entry.cache_write,
+            entry.output_tokens,
+            entry.cost,
+            entry.credits,
+        )
+    if isinstance(entry, ClientErrorEntry):
+        return lambda: ClientErrorMessage(entry.message)
+    return lambda: ShellOutput(entry.command, entry.output, entry.exit_code)
+
+
 class Conversation(TranscriptView):
     """The main session transcript plus client-only rows."""
 
-    def add_turn_status(
-        self,
-        duration_s: float,
-        input_tokens: int,
-        cache_read: int,
-        cache_write: int,
-        output_tokens: int,
-        cost: float,
-        credits: float | None = None,
-    ) -> None:
-        """Add a client-only summary for a completed turn."""
-        self.add_local(
-            lambda: TurnStatus(
-                duration_s, input_tokens, cache_read, cache_write, output_tokens, cost, credits
-            )
-        )
-
-    def add_client_error(self, content: str) -> None:
-        """Add a client/transport error, marked as local (not in session log)."""
-        self.add_local(lambda: ClientErrorMessage(content))
-
-    def add_shell_output(self, command: str, output: str, exit_code: int = 0) -> None:
-        """Add direct shell command output (! prefix, no LLM involvement)."""
-        self.add_local(lambda: ShellOutput(command, output, exit_code))
+    def add_entry(self, entry: LocalEntry) -> None:
+        """Append the row for a client-only timeline entry."""
+        self.add_local(local_row(entry))

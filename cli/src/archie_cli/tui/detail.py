@@ -1,19 +1,28 @@
-"""Popup screens for inspecting the transcript: tool calls and subagents.
+"""Detail views that open inside the session pane, in place of the transcript (084 D13).
 
-Each popup is a ``ModalScreen`` on the app's screen stack, so Escape closes only the
-top one and the screen below is still there. A breadcrumb header names every level
-open, from the session down to the current popup.
+The pane keeps a stack of these views (``SessionPane.open_tool``/``open_subagent``):
+the top one is shown where the transcript was, and Esc pops it. Both views read live
+model nodes and get every batch of model changes through ``node_changed``, so a
+running tool's view fills in its result and a subagent's transcript keeps growing.
 
-- ``ToolDetailScreen`` shows one tool call's input and result, syntax-highlighted.
-- ``SubagentScreen`` shows one subagent's transcript in a ``TranscriptView``; its tool
-  rows and nested subagent rows open further popups.
+- ``ToolDetailView`` shows one tool call: a headline card, then one section per input
+  and result under a full-width band (title left; language, lines and anything cut
+  right), syntax-highlighted.
+- ``SubagentView`` shows one subagent: a status card and its transcript in a
+  ``TranscriptView``; its tool and subagent rows open deeper views.
 
-Both read live model nodes, so they update when the app applies new events.
+A crumb line over each view names the levels open, ``← esc  general #0 › Shell ls``,
+with the current level's name in the theme colour and its call ID muted. The session
+isn't a level: its name is in the pane's header.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 from archie_shared.transcript import (
+    Change,
     DetailSection,
     SubagentNode,
     ToolNode,
@@ -25,41 +34,58 @@ from archie_shared.transcript import (
 )
 from rich.syntax import Syntax
 from rich.text import Text
-from textual import events
 from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
-from textual.screen import ModalScreen
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widget import Widget
 from textual.widgets import Static
 
 from archie_cli.tui import theme
+from archie_cli.tui.animation import Animated
 from archie_cli.tui.conversation import PromptMessage
-from archie_cli.tui.transcript_view import TranscriptView, _markup, _status_glyph
+from archie_cli.tui.transcript_view import TranscriptView, safe_markup, status_glyph
 
 SYNTAX_THEME = "monokai"
 _SEPARATOR = " › "
 
 
-SESSION_STYLE = f"bold {theme.ERROR}"
-HEADING_STYLE = f"bold {theme.SECONDARY}"  # the theme's bright magenta
+@dataclass(frozen=True)
+class Crumb:
+    """One level of the crumb line.
 
-
-def render_crumbs(crumbs: list[str]) -> Text:
-    """Breadcrumb line for the levels above a popup: the session, then any parents.
-
-    The popup's own level is left out because the status line under it names it.
+    Attributes:
+        name: What the level shows (``Shell ls -la``, ``general #0``).
+        ident: The tool call's ID, shown muted after the name (``""`` for none).
     """
-    text = Text()
-    for n, crumb in enumerate(crumbs[:-1] or crumbs):
+
+    name: str
+    ident: str = ""
+
+
+def crumb_line(crumbs: Sequence[Crumb]) -> Text:
+    """``← esc  Parent › Current  id``: every level open, the last one on screen.
+
+    Levels above the current one are muted; the current level's name is in the
+    primary colour and its ID muted.
+    """
+    text = Text("← esc  ", style=theme.MUTED)
+    last = len(crumbs) - 1
+    for n, crumb in enumerate(crumbs):
         if n:
             text.append(_SEPARATOR, style=theme.MUTED)
-        text.append(crumb, style=SESSION_STYLE if n == 0 else "bold")
+        if n == last:
+            text.append(crumb.name, style=f"bold {theme.PRIMARY}")
+            if crumb.ident:
+                text.append(f"  {crumb.ident}", style=theme.MUTED)
+        else:
+            text.append(crumb.name, style=theme.MUTED)
     text.no_wrap = True
     text.overflow = "ellipsis"
     return text
 
 
-def _lexer_for(section: DetailSection) -> str | None:
+def lexer_for(section: DetailSection) -> str | None:
+    """The lexer that highlights ``section``: its language, else one guessed from the
+    file name, else None (plain text)."""
     if section.language:
         return section.language
     if section.filename:
@@ -68,166 +94,360 @@ def _lexer_for(section: DetailSection) -> str | None:
     return None
 
 
-def render_section(section: DetailSection) -> Text:
-    """One input/result block: a title, then highlighted (or plain) text.
+def section_body(section: DetailSection) -> Text:
+    """A section's text, highlighted on the pane's colour when it has a lexer.
 
-    The block is a single ``Text`` so Textual can select and copy it; a ``Syntax``
-    or ``Group`` renderable gives the screen no text offsets to select by.
+    The body is a single ``Text`` so Textual can select and copy it; a ``Syntax``
+    renderable gives the screen no text offsets to select by. Text cut by the
+    preview limit ends with a dim count of what was left out.
     """
-    text = Text()
-    text.append(section.title.upper(), style=HEADING_STYLE)
-    text.append("\n")
-    lexer = _lexer_for(section)
     body = section.text.rstrip("\n")
+    lexer = lexer_for(section)
     if lexer:
-        syntax = Syntax(body, lexer, theme=SYNTAX_THEME, background_color=theme.SURFACE)
-        highlighted = syntax.highlight(body)
-        highlighted.rstrip()  # ``highlight`` adds a trailing newline
-        text.append_text(highlighted)
+        syntax = Syntax(body, lexer, theme=SYNTAX_THEME, background_color=theme.PANE)
+        text = syntax.highlight(body)
+        text.rstrip()  # ``highlight`` adds a trailing newline
     else:
-        text.append(body)
+        text = Text(body)
     if section.omitted:
         text.append(f"\n… {section.omitted:,} more characters", style="dim italic")
-    text.append("\n")
     return text
 
 
-class DetailScreen(ModalScreen[None]):
-    """A popup with a breadcrumb header. Escape closes it and nothing else."""
+def section_facts(section: DetailSection) -> str:
+    """The right side of a section's band: ``python · 12 lines · 1,000 more chars``."""
+    facts = []
+    lexer = lexer_for(section)
+    if lexer:
+        facts.append(lexer)
+    body = section.text.rstrip("\n")
+    lines = body.count("\n") + 1 if body else 0
+    facts.append(f"{lines:,} {'line' if lines == 1 else 'lines'}")
+    if section.omitted:
+        facts.append(f"{section.omitted:,} more chars")
+    return " · ".join(facts)
 
-    BINDINGS = [Binding("escape", "dismiss", "Back", show=True)]
+
+def is_error_section(section: DetailSection) -> bool:
+    """True for a failed call's result, which gets a red band."""
+    return section.title == "Error"
+
+
+class SectionPanel(Vertical):
+    """One input or result block under a full-width band naming it."""
 
     DEFAULT_CSS = """
-    DetailScreen {
-        align: center middle;
-        background: $background 70%;
-    }
-    DetailScreen > Vertical {
-        width: 92%;
-        height: 88%;
-        background: $surface;
-        border: round $primary;
-    }
-    DetailScreen .detail-crumbs {
-        height: 1;
-        padding: 0 1;
-        margin-bottom: 1;
-    }
-    DetailScreen .detail-status {
+    SectionPanel {
         height: auto;
-        padding: 0 1;
     }
-    DetailScreen .detail-body {
-        height: 1fr;
-        padding: 0 1;
+    SectionPanel > .section-band {
+        height: 1;
+        padding: 0 2;
+    }
+    SectionPanel .section-title {
+        width: 1fr;
+    }
+    SectionPanel .section-facts {
+        width: auto;
+    }
+    SectionPanel > .section-body {
+        height: auto;
+        padding: 1 2;
     }
     """
 
-    def __init__(self, crumbs: list[str]) -> None:
+    def __init__(self, section: DetailSection) -> None:
         super().__init__()
-        self.crumbs = crumbs
-
-    def compose_body(self) -> ComposeResult:
-        yield from ()
+        self.section: DetailSection | None = None
+        self.title = Static("", classes="section-title")
+        self.facts = Static("", classes="section-facts")
+        self.body = Static("", classes="section-body")
+        self.show(section)
 
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static(render_crumbs(self.crumbs), classes="detail-crumbs")
-            yield Static("", classes="detail-status")
-            yield from self.compose_body()
+        with Horizontal(classes="section-band"):
+            yield self.title
+            yield self.facts
+        yield self.body
 
-    def on_click(self, event: events.Click) -> None:
-        # A click on the dimmed backdrop lands on the screen itself, not the frame.
-        if event.widget is self:
-            event.stop()
-            self.dismiss()
+    def show(self, section: DetailSection) -> None:
+        """Draw ``section`` (nothing to do when it is the one shown)."""
+        if section == self.section:
+            return
+        self.section = section
+        self.set_class(is_error_section(section), "-error")
+        self.title.update(Text(section.title.upper()))
+        self.facts.update(Text(section_facts(section)))
+        self.body.update(section_body(section))
 
-    _ready = False  # set in ``on_mount``; changes before that are drawn from state
+    def get_copy_text(self) -> str:
+        """The section's text, for copying."""
+        return self.section.text if self.section is not None else ""
+
+
+class ToolCard(Animated):
+    """The tool view's headline: status glyph and the call's one-line summary."""
+
+    DEFAULT_CSS = """
+    ToolCard {
+        height: auto;
+        padding: 1 2;
+        margin: 0 0 1 0;
+    }
+    """
+
+    def __init__(self, tool: ToolNode) -> None:
+        super().__init__(classes="detail-card")
+        self.tool = tool
+
+    @property
+    def animating(self) -> bool:
+        """True while the call runs (a waiting question shows no spinner)."""
+        return self.tool.result is None and self.tool.name != "question"
+
+    def render(self) -> Text:
+        tool = self.tool
+        text = Text.assemble(status_glyph(tool.status, self.frame), " ")
+        headline = safe_markup(tool_headline(tool))
+        text.append_text(headline.split("\n")[0])
+        text.no_wrap = True
+        text.overflow = "ellipsis"
+        return text
+
+    def refresh_node(self) -> None:
+        """Redraw from the node and start or stop the spinner."""
+        self.refresh(layout=True)
+        self.sync_animation()
+
+
+class SubagentCard(Animated):
+    """The subagent view's headline: glyph and label, then status, cost and activity."""
+
+    DEFAULT_CSS = """
+    SubagentCard {
+        height: auto;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, sub: SubagentNode) -> None:
+        super().__init__(classes="detail-card")
+        self.sub = sub
+
+    @property
+    def animating(self) -> bool:
+        """True while the subagent runs."""
+        return self.sub.status == "running"
+
+    def render(self) -> Text:
+        sub = self.sub
+        text = Text.assemble(status_glyph(sub.status, self.frame), (f" {sub.label}", "bold"))
+        text.append("\n")
+        text.append("subagent", style=f"bold {theme.ANSWER}")
+        text.append(f"  {sub.status}", style=theme.SUCCESS if sub.status == "complete" else "")
+        text.append(f" · ${sub.cost_usd:.4f}", style=theme.MUTED)
+        if sub.context_tokens:
+            text.append(f" · {sub.context_tokens:,} context tokens", style=theme.MUTED)
+        status = subagent_status_text(sub)
+        if status and status != "Completed":
+            text.append(" · ", style=theme.MUTED)
+            # An error is the agent's raw text; activities are markup.
+            if sub.status == "error":
+                text.append(status, style=theme.ERROR)
+            else:
+                text.append_text(safe_markup(status))
+        text.no_wrap = True
+        text.overflow = "ellipsis"
+        return text
+
+    def refresh_node(self) -> None:
+        """Redraw from the node and start or stop the spinner."""
+        self.refresh()
+        self.sync_animation()
+
+
+class DetailView(Vertical):
+    """Base of the views on a session pane's stack: the crumb line, then a body.
+
+    Attributes:
+        crumbs: Every level open, this view's last.
+    """
+
+    DEFAULT_CSS = """
+    DetailView {
+        width: 1fr;
+        height: 1fr;
+    }
+    DetailView > .detail-crumbs {
+        height: 1;
+        padding: 0 2;
+        margin: 1 0;
+    }
+    DetailView .detail-body {
+        height: 1fr;
+        padding: 0;
+    }
+    """
+
+    def __init__(self, crumbs: Sequence[Crumb]) -> None:
+        super().__init__()
+        self.crumbs = list(crumbs)
+        self._ready = False  # set in ``on_mount``; changes before that are drawn from state
+
+    def compose(self) -> ComposeResult:
+        yield Static(crumb_line(self.crumbs), classes="detail-crumbs")
+        yield from self.compose_body()
+
+    def compose_body(self) -> ComposeResult:
+        """The widgets under the crumb line."""
+        yield from ()
+
+    @property
+    def body(self) -> Widget:
+        """The scrolling part, which takes focus."""
+        raise NotImplementedError
 
     def on_mount(self) -> None:
         self._ready = True
-        self.update_state()
+        self.draw()
 
-    def update_state(self) -> None:
-        """Redraw from the live node."""
+    def draw(self) -> None:
+        """Draw from the live node."""
 
-    def node_changed(self, builder: TranscriptBuilder, changes) -> None:
-        """Called for every batch of model changes while this screen is open."""
-        self.update_state()
+    def node_changed(self, builder: TranscriptBuilder, changes: list[Change]) -> None:
+        """Follow one batch of model changes (every batch, while the view is open)."""
+        if self._ready:
+            self.draw()
 
 
-class ToolDetailScreen(DetailScreen):
-    """Input and result of one tool call."""
+class ToolDetailView(DetailView):
+    """Input and result of one tool call, redrawn when the call changes.
 
-    def __init__(self, tool: ToolNode, crumbs: list[str]) -> None:
-        super().__init__([*crumbs, tool_crumb(tool)])
+    Attributes:
+        tool: The live node.
+    """
+
+    DEFAULT_CSS = """
+    ToolDetailView .detail-sections {
+        height: auto;
+    }
+    ToolDetailView .detail-running {
+        height: auto;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, tool: ToolNode, crumbs: Sequence[Crumb] = ()) -> None:
+        """Create the view.
+
+        Args:
+            tool: The call to show.
+            crumbs: The levels above this one.
+        """
+        super().__init__([*crumbs, Crumb(tool_crumb(tool), tool.tool_use_id)])
         self.tool = tool
+        self.card = ToolCard(tool)
+        self.sections = Vertical(classes="detail-sections")
+        self.running = Static(Text("Running…", style="dim italic"), classes="detail-running")
+        self._scroll = VerticalScroll(classes="detail-body")
         self._shown: tuple | None = None
 
     def compose_body(self) -> ComposeResult:
-        with VerticalScroll(classes="detail-body"):
-            yield Static("", id="tool-sections")
+        with self._scroll:
+            yield self.card
+            yield self.sections
+            yield self.running
 
-    def _status_line(self) -> Text:
-        tool = self.tool
-        text = Text()
-        text.append_text(_status_glyph(tool.status))
-        text.append(" ")
-        # The headline names the tool and its duration; the glyph shows the status.
-        text.append_text(_markup(tool_headline(tool)))
-        return text
+    @property
+    def body(self) -> Widget:
+        """The scrolling card and sections."""
+        return self._scroll
 
-    def update_state(self) -> None:
+    @property
+    def panels(self) -> list[SectionPanel]:
+        """The section panels shown, in order."""
+        return [child for child in self.sections.children if isinstance(child, SectionPanel)]
+
+    def draw(self) -> None:
+        """Redraw the card and sections when the call's status or result changed."""
         tool = self.tool
-        key = (tool.status, tool.result is None, tool.duration_ms)
-        if key == self._shown or not self._ready:
-            return  # unchanged, or not mounted yet (``on_mount`` draws it)
+        key = (tool.status, tool.result, tool.duration_ms, tool.result_lines, tool.result_bytes)
+        if key == self._shown:
+            return
         self._shown = key
-        self.query_one(".detail-status", Static).update(self._status_line())
-        sections = [render_section(s) for s in tool_detail_sections(tool)]
-        if tool.result is None:
-            sections.append(Text("Running…", style="dim italic"))
-        self.query_one("#tool-sections", Static).update(Text("\n").join(sections))
+        self.card.refresh_node()
+        sections = tool_detail_sections(tool)
+        panels = self.panels
+        for panel, section in zip(panels, sections, strict=False):
+            panel.show(section)
+        for panel in panels[len(sections) :]:
+            panel.remove()
+        new = [SectionPanel(section) for section in sections[len(panels) :]]
+        if new:
+            self.sections.mount(*new)
+        self.running.display = tool.result is None
+
+    def get_copy_text(self) -> str:
+        """Every section as ``TITLE`` and text, for copying the whole call."""
+        return "\n\n".join(
+            f"{section.title.upper()}\n{section.text.rstrip()}"
+            for section in tool_detail_sections(self.tool)
+        )
 
 
-class SubagentScreen(DetailScreen):
-    """The transcript of one subagent, live."""
+class SubagentView(DetailView):
+    """One subagent's live transcript under its status card.
 
-    def __init__(self, sub: SubagentNode, crumbs: list[str]) -> None:
-        super().__init__([*crumbs, sub.label])
+    Attributes:
+        sub: The live node.
+        view: The subagent's transcript.
+    """
+
+    def __init__(self, sub: SubagentNode, crumbs: Sequence[Crumb] = ()) -> None:
+        """Create the view.
+
+        Args:
+            sub: The subagent to show.
+            crumbs: The levels above this one.
+        """
+        super().__init__([*crumbs, Crumb(sub.label)])
         self.sub = sub
+        self.card = SubagentCard(sub)
         self.view = TranscriptView(root_slot=sub.items_id, classes="detail-body")
 
     def compose_body(self) -> ComposeResult:
+        yield self.card
         yield self.view
+
+    @property
+    def body(self) -> Widget:
+        """The subagent's transcript."""
+        return self.view
+
+    @property
+    def child_key(self) -> tuple[str, int]:
+        """``(scope, index)`` of the subagent, the target of ``ctrl+x``."""
+        return (self.sub.scope, self.sub.index)
 
     def on_mount(self) -> None:
         # Build the rows from the node's current items, then follow live changes.
-        self.view.suspend()
+        view = self.view
+        view.suspend()
         if self.sub.prompt.strip():
             prompt = self.sub.prompt
-            self.view.add_local(lambda: PromptMessage(prompt))
+            view.add_local(lambda: PromptMessage(prompt))
         for item in self.sub.items:
-            self.view.add_node(item)
-        self.view.resume()
-        self._ready = True
-        self.view.scroll_end(animate=False)
-        self.update_state()
+            view.add_node(item)
+        view.resume()
+        super().on_mount()
 
-    def update_state(self) -> None:
-        sub = self.sub
-        text = Text()
-        text.append_text(_status_glyph(sub.status))
-        text.append(f" {sub.label}", style="bold")
-        text.append(f"  {sub.status} · ${sub.cost_usd:.4f}")
-        if sub.context_tokens:
-            text.append(f" · {sub.context_tokens:,} context tokens")
-        text.append("  ")
-        text.append_text(_markup(subagent_status_text(sub)))
-        self.query_one(".detail-status", Static).update(text)
+    def draw(self) -> None:
+        """Redraw the status card."""
+        self.card.refresh_node()
 
-    def node_changed(self, builder: TranscriptBuilder, changes) -> None:
+    def node_changed(self, builder: TranscriptBuilder, changes: list[Change]) -> None:
+        """Apply the changes to the transcript and redraw the card."""
         if not self._ready:
             return  # ``on_mount`` builds the rows from the node's latest state
         self.view.apply_changes(builder, changes)
-        self.update_state()
+        self.draw()

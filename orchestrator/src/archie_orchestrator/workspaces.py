@@ -22,16 +22,20 @@ make a scan arbitrarily slow.
 Recorded paths (a ``.git`` file's ``gitdir:`` line, a worktree's ``gitdir`` file) are
 container paths under ``/workspace`` when git ran inside a session, and host paths
 when it ran on the host; container paths are mapped to the host workspace directory.
+
+:func:`locate` uses the same confined reads to find the repo, worktree and branch that
+hold a path from a session's tool call (plan 084 D28).
 """
 
 import logging
 import os
+import posixpath
 import re
 import stat
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
-from archie_shared.workspaces import Repo, Workspace, Worktree
+from archie_shared.workspaces import Repo, SessionLocation, Workspace, Worktree
 
 from archie_orchestrator.docker import CONTAINER_WORKSPACE_DIR as CONTAINER_WORKSPACE
 
@@ -46,6 +50,12 @@ MAX_REPOS = 100
 
 MAX_WORKTREES = 100
 """Most worktrees listed per repo."""
+
+MAX_PATH_CHARS = 4096
+"""Longest session path :func:`locate` accepts (Linux PATH_MAX)."""
+
+MAX_PATH_COMPONENTS = 256
+"""Most components a session path :func:`locate` accepts may have."""
 
 REFTABLE_HEAD = "refs/heads/.invalid"
 """The placeholder HEAD of a repo whose refs are in a reftable."""
@@ -149,6 +159,64 @@ def scan_repos(directory: Path) -> list[Repo]:
         if repo is not None:
             repos.append(repo)
     return repos
+
+
+def locate(workspace_dir: Path, container_path: str) -> SessionLocation | None:
+    """The repo, worktree and HEAD of the checkout holding a session's path (084 D28).
+
+    Walks up from ``container_path`` (a ``/workspace/...`` path from a tool call, mapped
+    to ``workspace_dir``) to the first ``.git`` at or below the workspace directory:
+
+    - a ``.git`` directory is a main checkout: ``repo`` is that directory;
+    - a ``.git`` file whose git dir has a ``commondir`` is a linked worktree: its
+      branch and commit come from its own HEAD (refs from the common dir), ``repo``
+      from the common dir;
+    - a path inside a repo's ``.git`` (``.git/build-it-worktrees/<name>/...``) is the
+      worktree recorded in ``.git/worktrees`` whose checkout holds it, with
+      ``missing`` when that checkout has gone, else the repo itself.
+
+    Every read is confined to the workspace directory as for :func:`scan_repos`, and
+    a path that is (or resolves) outside it gives None. Paths in the result are
+    relative to the workspace (``""`` is the workspace itself).
+
+    Raises:
+        OSError, ValueError: For session-written files the reader can't handle (NUL
+            bytes, odd modes); callers skip the path.
+    """
+    return _Reader(workspace_dir).locate(container_path)
+
+
+def location_key(workspace_dir: Path, container_path: str) -> str:
+    """The path to :func:`locate` in place of ``container_path``, with the same answer.
+
+    A regular file (not a symlink) gives its directory: its walk up is the directory's
+    with one level (the file, which holds no ``.git``) in front, so 100 files in one
+    folder are one lookup. Anything else (a directory, a symlink, a missing path) is
+    kept. One ``lstat``, no reads.
+    """
+    path = posixpath.normpath(container_path)
+    if not path.startswith(CONTAINER_WORKSPACE + "/"):
+        return container_path
+    mapped = workspace_dir / path.removeprefix(CONTAINER_WORKSPACE).lstrip("/")
+    try:
+        if stat.S_ISREG(mapped.lstat().st_mode):
+            return posixpath.dirname(path)
+    except (OSError, ValueError):
+        pass
+    return container_path
+
+
+def refresh_location(workspace_dir: Path, location: SessionLocation) -> SessionLocation | None:
+    """``location`` re-read from disk: its branch and commit now, or None if it has gone.
+
+    Looks up the worktree's (else the repo's) own directory with :func:`locate`, so a
+    branch switch, a new commit or a removed worktree shows up. Locations outside the
+    workspace (absolute paths) are returned unchanged.
+    """
+    place = location.worktree if location.worktree is not None else location.repo
+    if place.startswith("/"):
+        return location
+    return locate(workspace_dir, posixpath.join(CONTAINER_WORKSPACE, place))
 
 
 class _Head(NamedTuple):
@@ -317,6 +385,110 @@ class _Reader:
                 log.debug("Skipping unreadable worktree %s: %s", entry, exc)
         return found
 
+    # -- session locations ---------------------------------------------------
+
+    def locate(self, container_path: str) -> SessionLocation | None:
+        """The repo or worktree holding a ``/workspace/...`` path (see :func:`locate`).
+
+        Paths past :data:`MAX_PATH_CHARS` or :data:`MAX_PATH_COMPONENTS` (before or
+        after resolving symlinks) give None, so a walk up is one pass over at most
+        :data:`MAX_PATH_COMPONENTS` levels.
+        """
+        if len(container_path) > MAX_PATH_CHARS:
+            return None
+        path = posixpath.normpath(container_path)
+        if path != CONTAINER_WORKSPACE and not path.startswith(CONTAINER_WORKSPACE + "/"):
+            return None
+        if path.count("/") > MAX_PATH_COMPONENTS:
+            return None
+        mapped = self.workspace / path.removeprefix(CONTAINER_WORKSPACE).lstrip("/")
+        real = self._confined(mapped)
+        if real is None:
+            return None
+        depth = len(real.parts) - len(self.workspace.parts)
+        if depth > MAX_PATH_COMPONENTS:
+            return None
+        # real is inside the workspace, so its first depth + 1 levels (real up to the
+        # workspace) are too: walk exactly those, with no per-level containment check.
+        for level, directory in enumerate((real, *real.parents)[: depth + 1]):
+            if directory.name == ".git" and level < depth:
+                # real is resolved and confined, so a plain lstat is enough here (no
+                # realpath per level, which would make a path of .git names quadratic).
+                if _lstat_is_dir(directory):
+                    return self._inside_git_dir(directory, real)
+                continue
+            dotgit = directory / ".git"
+            try:
+                mode = dotgit.lstat().st_mode
+            except OSError:
+                continue
+            if stat.S_ISDIR(mode):
+                return self._checkout(directory, dotgit)
+            if stat.S_ISREG(mode):
+                found = self._linked(directory, dotgit)
+                if found is not None:
+                    return found
+        return None
+
+    def _checkout(self, checkout: Path, git_dir: Path) -> SessionLocation:
+        """A main checkout (``.git`` directory, or a ``.git`` file with no commondir)."""
+        branch, commit = self._head_of(git_dir, git_dir)
+        return SessionLocation(repo=self.relative(checkout), branch=branch, commit=commit)
+
+    def _linked(self, checkout: Path, dotgit: Path) -> SessionLocation | None:
+        """The location of a checkout with a ``.git`` file, or None if it can't be read.
+
+        A git dir with a ``commondir`` is a linked worktree: its HEAD is its own, its
+        refs and repo come from the common dir. Without one (``--separate-git-dir``, a
+        submodule) the checkout is a repo of its own.
+        """
+        git_dir = self._gitdir_from_file(dotgit)
+        if git_dir is None or not self.is_dir(git_dir):
+            return None
+        recorded = self.read(git_dir / "commondir")
+        if recorded is None or not recorded.strip():
+            if os.path.lexists(git_dir / "commondir"):
+                return None  # a commondir that can't be read: the repo is unknown
+            return self._checkout(checkout, git_dir)
+        common = self.host_path(recorded.strip(), git_dir)
+        if not self.is_dir(common):
+            return None
+        branch, commit = self._head_of(git_dir, common)
+        return SessionLocation(
+            repo=self.relative(common.parent if common.name == ".git" else common),
+            worktree=self.relative(checkout),
+            branch=branch,
+            commit=commit,
+        )
+
+    def _inside_git_dir(self, git_dir: Path, path: Path) -> SessionLocation:
+        """A path inside a repo's ``.git``: a recorded worktree checkout there, else the repo.
+
+        A worktree checked out under ``.git`` (``.git/build-it-worktrees/<name>``) whose
+        checkout has gone is still found from ``.git/worktrees/<name>``, as ``missing``.
+        """
+        for tree, head in self._worktrees(git_dir):
+            checkout = tree.parent
+            if path == checkout or path.is_relative_to(checkout):
+                commit = head.commit
+                if commit is None and head.ref:
+                    commit = self._resolve(git_dir, {head.ref}).get(head.ref)
+                return SessionLocation(
+                    repo=self.relative(git_dir.parent),
+                    worktree=self.relative(checkout),
+                    branch=head.branch,
+                    commit=commit,
+                    missing=not _lexists(tree),
+                )
+        return self._checkout(git_dir.parent, git_dir)
+
+    def _head_of(self, git_dir: Path, common: Path) -> tuple[str | None, str | None]:
+        """``(branch, commit)`` of the HEAD in ``git_dir``, its refs read from ``common``."""
+        head = self._head(git_dir / "HEAD")
+        if head.commit is not None or head.ref is None:
+            return head.branch, head.commit
+        return head.branch, self._resolve(common, {head.ref}).get(head.ref)
+
     # -- refs ----------------------------------------------------------------
 
     def _head(self, head: Path) -> _Head:
@@ -385,6 +557,14 @@ def _lexists(path: Path) -> bool:
     try:
         return os.path.lexists(path)
     except ValueError:
+        return False
+
+
+def _lstat_is_dir(path: Path) -> bool:
+    """Whether ``path`` itself (not a symlink target) is a directory."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except (OSError, ValueError):
         return False
 
 

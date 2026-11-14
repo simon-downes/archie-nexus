@@ -187,14 +187,35 @@ def start(detach: bool, kiro: bool, workspace: str | None):
     if detach:
         click.echo(f"Container: {descriptor.container_name}")
     else:
-        from archie_cli.tui.app import ArchieApp
+        _run_tui(profile, _profile_info(workspace, profile), focus=descriptor.session_id)
 
-        base = _profile_url(profile)
-        ws_base = base.replace("http://", "ws://")
-        ws_url = f"{ws_base}{API_PREFIX}/sessions/{descriptor.session_id}/stream"
-        api_url = f"{base}{API_PREFIX}/sessions/{descriptor.session_id}"
-        app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=descriptor.container_name)
-        app.run()
+
+def _run_tui(profile, info, *, focus: str | None) -> None:
+    """Open the multi-session TUI on ``profile``'s orchestrator (084 D19)."""
+    from archie_cli.tui.app import ArchieApp
+    from archie_cli.tui.client import HttpOrchestrator
+
+    app = ArchieApp(HttpOrchestrator(_profile_url(profile)), profile=info, focus=focus)
+    app.run()
+
+
+def _profile_info(arg: str | None, profile):
+    """The ``ProfileInfo`` for the profile a ``[profile/]value`` argument resolved to.
+
+    The label is ``local`` for the default profile, the profile's name for a named one,
+    or the ``ARCHIE_HOST`` value. ``local`` follows ``archie shell``'s rule: only the
+    default profile with no ``ARCHIE_HOST`` reaches containers with ``docker exec``
+    (084 D20). The web link is the profile's ``public_url``, else ``http://host:port``.
+    """
+    from archie_cli.tui.client import ProfileInfo
+
+    base = (profile.public_url or _profile_url(profile)).rstrip("/")
+    env_host = os.environ.get("ARCHIE_HOST", "")
+    if env_host:
+        return ProfileInfo(label=env_host, web_url=f"{base}/", local=False)
+    if arg is not None and "/" in arg:
+        return ProfileInfo(label=arg.split("/", 1)[0], web_url=f"{base}/", local=False)
+    return ProfileInfo(label="local", web_url=f"{base}/", local=True)
 
 
 def _reject_blocking_start(url: str, response: httpx.Response) -> NoReturn:
@@ -568,11 +589,11 @@ def shell(session_id: str | None):
 @main.command()
 @click.argument("session_id", required=False)
 def attach(session_id: str | None):
-    """Attach an interactive TUI to a running session.
+    """Open the interactive TUI on a running session.
 
     SESSION_ID may be prefixed with a profile: 'gpu-box/session-id'.
-    Supports prefix matching. If no session specified and only one is running,
-    attaches automatically.
+    Supports prefix matching; several matches are picked by number. With no
+    SESSION_ID the TUI shows the newest running session (or none).
     """
     from archie_shared.schemas import get_profile, load_nexus_config
 
@@ -585,18 +606,9 @@ def attach(session_id: str | None):
         sid_prefix = session_id
 
     url = _profile_url(profile)
-    sessions = _fetch_sessions(url)
-    target = _resolve_prefix(sessions, sid_prefix)
-
-    base = _profile_url(profile)
-    ws_base = base.replace("http://", "ws://")
-    ws_url = f"{ws_base}{API_PREFIX}/sessions/{target.session_id}/stream"
-    api_url = f"{base}{API_PREFIX}/sessions/{target.session_id}"
-
-    from archie_cli.tui.app import ArchieApp
-
-    app = ArchieApp(ws_url=ws_url, api_url=api_url, container_name=target.container_name)
-    app.run()
+    sessions = _fetch_sessions(url)  # also checks the orchestrator is reachable
+    focus = None if sid_prefix is None else _resolve_prefix(sessions, sid_prefix).session_id
+    _run_tui(profile, _profile_info(session_id, profile), focus=focus)
 
 
 @main.command()

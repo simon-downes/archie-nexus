@@ -5,7 +5,8 @@ never rebuilt: once a session ends its row stops changing, so it is the historic
 record too. The schema is versioned with ``PRAGMA user_version`` and changed only by the
 ordered migrations in :data:`MIGRATIONS`, which run under an exclusive ``flock`` on
 ``archie.db.lock``. Migration 1 imports every existing session log once as a ``stopped``
-row; migration 2 moves a name's source into the name itself and drops ``name_fixed``.
+row; migration 2 moves a name's source into the name itself and drops ``name_fixed``;
+migration 3 adds the ``location`` column (JSON, plan 084 D25).
 
 A stored ``name`` is ``<source>:<name>`` (``id:proj-01kx77jkz8``, ``user:Review PR 26``,
 ``llm:Workspaces API``), so queries show where a name came from. Only this module knows
@@ -30,6 +31,7 @@ import msgspec
 from archie_shared.events import PendingQuestion
 from archie_shared.kiro import KIRO_MODEL_PREFIX
 from archie_shared.session import SessionDescriptor, split_id
+from archie_shared.workspaces import SessionLocation
 
 from archie_orchestrator.session_index import session_start
 
@@ -52,6 +54,7 @@ COLUMNS = (
     "started_at",
     "last_activity_at",
     "ended_at",
+    "location",
 )
 _ENDED_SQL = "('stopped', 'exited', 'failed')"
 
@@ -251,7 +254,17 @@ def _migration_2(conn: sqlite3.Connection, sessions_dir: Path) -> None:
     conn.execute("ALTER TABLE sessions DROP COLUMN name_fixed")
 
 
-MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (_migration_1, _migration_2)
+def _migration_3(conn: sqlite3.Connection, sessions_dir: Path) -> None:
+    """Add the nullable ``location`` column (JSON); existing rows keep null."""
+    del sessions_dir
+    conn.execute("ALTER TABLE sessions ADD COLUMN location TEXT")
+
+
+MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (
+    _migration_1,
+    _migration_2,
+    _migration_3,
+)
 """Canonical schema migrations; migration N brings ``user_version`` to N."""
 
 
@@ -322,7 +335,7 @@ _SAVE_SQL = (
 def _column_value(column: str, value: object) -> object:
     if column == "unseen":
         return int(bool(value))
-    if column == "question" and value is not None:
+    if column in ("question", "location") and value is not None:
         return msgspec.json.encode(value).decode("utf-8")
     return value
 
@@ -343,6 +356,12 @@ def _from_row(row: sqlite3.Row) -> SessionDescriptor:
             question = msgspec.json.decode(row["question"], type=PendingQuestion)
         except (msgspec.DecodeError, msgspec.ValidationError):
             log.warning("Ignoring an unreadable question for session %s", row["session_id"])
+    location = None
+    if row["location"]:
+        try:
+            location = msgspec.json.decode(row["location"], type=SessionLocation)
+        except (msgspec.DecodeError, msgspec.ValidationError):
+            log.warning("Ignoring an unreadable location for session %s", row["session_id"])
     name, name_source = decode_name(row["name"], row["session_id"])
     return SessionDescriptor(
         session_id=row["session_id"],
@@ -358,6 +377,7 @@ def _from_row(row: sqlite3.Row) -> SessionDescriptor:
         model_key=row["model_key"],
         last_activity_at=row["last_activity_at"],
         ended_at=row["ended_at"],
+        location=location,
     )
 
 

@@ -2,8 +2,8 @@
 
 ``transcript_view.TranscriptView`` mounts these as rows. Each message type has
 its own styling:
-- UserMessage: highlighted background so your messages stand out
-- AssistantMessage: rendered Markdown for rich formatting
+- UserMessage: the text beside a purple left bar, no header
+- AssistantMessage: rendered Markdown, no header, lined up with the tool rows
 - StreamingMessage: Markdown that updates live during generation
 - ErrorMessage: red styling for agent/server errors (recorded in the session)
 - ClientErrorMessage: warning styling for client/transport errors (local only,
@@ -12,7 +12,10 @@ its own styling:
 The streaming flow:
 1. When the model starts generating, a StreamingMessage row is mounted
 2. Text fragments are written to a MarkdownStream as they arrive
-3. When generation completes, the streaming indicator is removed
+3. When generation completes, the stream is flushed and the final text rendered
+
+The activity line under the transcript (``pane.ActivityLine``) says when a reply is
+streaming, so messages carry no header or spinner.
 """
 
 import asyncio
@@ -32,7 +35,7 @@ class TurnStatus(Static):
 
     DEFAULT_CSS = """
     TurnStatus {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 0 2;
         height: auto;
     }
@@ -84,13 +87,13 @@ def _fmt_tokens(value: int) -> str:
 
 
 class UserMessage(Static):
-    """A user message block with highlighted background."""
+    """A user message: its text beside a purple left bar, with no header."""
 
     can_focus = True
 
     DEFAULT_CSS = """
     UserMessage {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 1 2;
     }
     """
@@ -100,12 +103,8 @@ class UserMessage(Static):
         super().__init__()
 
     def compose(self) -> ComposeResult:
-        """Build the user message widget."""
-        header_text = Text.assemble(
-            ("▶ You\n", Style(color=theme.SECONDARY, bold=True)),
-            self._content,
-        )
-        yield Static(header_text)
+        """The message text (the bar is the widget's left border)."""
+        yield Static(Text(self._content))
 
     def get_copy_text(self) -> str:
         """Return the plain text content for clipboard copy."""
@@ -171,7 +170,7 @@ class PromptMessage(Widget):
 
     DEFAULT_CSS = """
     PromptMessage {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 1 2;
         height: auto;
     }
@@ -215,17 +214,17 @@ class PromptMessage(Widget):
 
 
 class AssistantMessage(Widget):
-    """A finalised assistant message with full Markdown rendering."""
+    """A finalised assistant message with full Markdown rendering and no header.
+
+    Its transparent left border lines the text up with the tool rows.
+    """
 
     can_focus = True
 
     DEFAULT_CSS = """
     AssistantMessage {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 0 2;
-        height: auto;
-    }
-    AssistantMessage > .header {
         height: auto;
     }
     AssistantMessage > Markdown {
@@ -243,11 +242,7 @@ class AssistantMessage(Widget):
         self._content = content
 
     def compose(self) -> ComposeResult:
-        """Build the assistant message widget with header and markdown."""
-        yield Static(
-            Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True))),
-            classes="header",
-        )
+        """The reply as Markdown."""
         yield Markdown(self._content)
 
     def get_copy_text(self) -> str:
@@ -274,11 +269,8 @@ class StreamingMessage(Widget):
 
     DEFAULT_CSS = """
     StreamingMessage {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 0 2;
-        height: auto;
-    }
-    StreamingMessage > .header {
         height: auto;
     }
     StreamingMessage > Markdown {
@@ -299,11 +291,7 @@ class StreamingMessage(Widget):
         self._finished = False
 
     def compose(self) -> ComposeResult:
-        """Build the streaming message widget with spinner and Markdown."""
-        yield Static(
-            Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)), (" ⟳")),
-            classes="header",
-        )
+        """The reply so far as Markdown (the activity line says it is streaming)."""
         # Start empty and write the text so far through the stream: a Markdown
         # built with text records its last parsed line past a trailing blank line,
         # and the first ``append`` would then overwrite the last block.
@@ -338,15 +326,9 @@ class StreamingMessage(Widget):
         self._wake.set()
 
     def finish(self) -> None:
-        """Flush the stream and remove the streaming indicator."""
+        """Flush the stream and render the final text."""
         self._finished = True
         self._wake.set()
-        try:
-            self.query_one(".header", Static).update(
-                Text.assemble(("● Archie", Style(color=theme.PRIMARY, bold=True)))
-            )
-        except NoMatches:  # not composed yet
-            pass
 
 
 class CancelledMessage(Static):
@@ -355,7 +337,7 @@ class CancelledMessage(Static):
     DEFAULT_CSS = """
     CancelledMessage {
         padding: 1 2;
-        margin: 0 0 1 0;
+        margin: 1 0;
         color: $error;
     }
     """
@@ -379,7 +361,7 @@ class ErrorMessage(Static):
     DEFAULT_CSS = """
     ErrorMessage {
         padding: 1 2;
-        margin: 0 0 1 0;
+        margin: 1 0;
     }
     """
 
@@ -407,7 +389,7 @@ class ClientErrorMessage(Static):
     DEFAULT_CSS = """
     ClientErrorMessage {
         padding: 1 2;
-        margin: 0 0 1 0;
+        margin: 1 0;
         border-left: thick $warning;
     }
     """
@@ -437,7 +419,7 @@ class ShellOutput(Widget):
 
     DEFAULT_CSS = """
     ShellOutput {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 1 2;
         height: auto;
     }
@@ -484,7 +466,7 @@ class CompactionEntry(Widget):
     DEFAULT_CSS = """
     CompactionEntry {
         height: auto;
-        margin: 0;
+        margin: 1 0;
         padding: 0 2;
     }
     CompactionEntry > .tool-header {
@@ -530,7 +512,7 @@ class CompactionMarker(Widget):
 
     DEFAULT_CSS = """
     CompactionMarker {
-        margin: 0 0 1 0;
+        margin: 1 0;
         padding: 1 2;
         height: auto;
     }
