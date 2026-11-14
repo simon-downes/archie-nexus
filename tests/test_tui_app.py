@@ -181,6 +181,11 @@ def test_one_glyph_and_badge_per_status():
         assert state_badge(record)[0] == badge, status
     unseen = make_record(status="idle", unseen=True)
     assert state_badge(unseen)[0] == "NEW REPLY"
+    assert str(state_glyph(unseen).style) == f"bold {tui_app.theme.PRIMARY}"
+    assert str(state_glyph(make_record(status="idle")).style) == f"bold {tui_app.theme.SUCCESS}"
+    assert str(state_glyph(make_record(status="blocked", unseen=True)).style) == (
+        f"bold {tui_app.theme.WARNING}"
+    )
     # Working spins; failed is muted, a failed turn is red.
     assert state_glyph(make_record(status="working"), 1).plain == "⠙"
     assert str(state_glyph(make_record(status="failed")).style) != str(
@@ -211,6 +216,17 @@ async def test_row_content_marks_the_session_on_screen():
         assert first.rstrip().endswith(age(_at(3)))
         assert second == "▌   no repo"
         assert _row_text(app, "ws-b").split("\n")[1] == "    no repo"
+        assert any(
+            span.start <= 4 < span.end and str(span.style) == "bold"
+            for span in app.sidebar.sessions.rows["ws-a"].render().spans
+        )
+        unseen = make_record("ws-b", started_at=_at(2), unseen=True)
+        client.publish(unseen)
+        await settle(pilot, lambda: app.sidebar.sessions.rows["ws-b"].record.unseen)
+        row = app.sidebar.sessions.rows["ws-b"]
+        assert not any(
+            span.start <= 4 < span.end and str(span.style) == "bold" for span in row.render().spans
+        )
         width = app.sidebar.sessions.rows["ws-a"].size.width
         assert len(first) == width
 

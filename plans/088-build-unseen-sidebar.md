@@ -1,6 +1,6 @@
 # 088 — Unseen sidebar indicator
 
-Status: planning
+Status: building
 Branch: build-it/088-unseen-sidebar (base: main @ 9b137e9)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/088-unseen-sidebar
 
@@ -52,18 +52,18 @@ No new modules or dependencies. Follow the existing `state_glyph`, `state_badge`
 
 ## Milestones
 
-### [ ] M1 — Show unseen state with a purple sidebar glyph
+### [x] M1 — Show unseen state with a purple sidebar glyph
 
 - **Approach:** Change idle glyph colour selection in the shared `state_glyph()` helper and current-row title styling in `cli/src/archie_cli/tui/sidebar.py`. This also updates the session header's idle glyph because `pane.py` reuses the helper. Add explicit style assertions to the existing status/row tests in `tests/test_tui_app.py`.
 - **Test seam:** `state_glyph()` and mounted `SessionRow.render()` output used by the TUI tests.
 - **Edge cases:** unseen error/blocked sessions keep their error/warning glyphs; only idle unseen sessions use the purple attention colour.
 - **Deliverable:** A non-current unseen ready session has a purple glyph and normal title text; once seen its glyph is green; the current row title is bold.
 - **Verify:** `scripts/dev test tests/test_tui_app.py` passes; `scripts/dev ruff check cli/src/archie_cli/tui/sidebar.py tests/test_tui_app.py` passes.
-- **Outcome:**
+- **Outcome:** Updated the shared idle glyph to use `theme.PRIMARY` while unseen and `theme.SUCCESS` once seen; changed row title bolding to current-only; added style tests for idle, blocked, current, and unseen rows. `scripts/dev test tests/test_tui_app.py` passed with 78 tests and the focused Ruff check passed.
 
 ## Deviations
 
-- None.
+- M1: The shared `state_glyph()` helper is also used by the session header, so the purple unseen idle glyph applies there too. The plan review identified this shared use and the behavior is documented and covered by the existing header rendering path.
 
 ## Risks
 
