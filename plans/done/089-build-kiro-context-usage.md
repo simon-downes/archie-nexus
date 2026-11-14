@@ -326,8 +326,8 @@ percentage column and the "Context % per main-agent turn" chart.
 Not verified: a live Kiro session against real `kiro-cli` (the fake ACP agent covers the
 flow), and the TUI against a running orchestrator.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/35
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
