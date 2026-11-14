@@ -1,16 +1,42 @@
 """Tests for web_fetch and web_search exec tools."""
 
+import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from archie_agent.exec.tools import ContentTypeError, get_all_tools
+from archie_agent.exec.tools.images import MAX_LONG_EDGE, ImageError, ToolImage
 from archie_agent.exec.tools.web import (
+    _classify_content_type,
     _extract_selective,
     _html_to_text,
-    _is_binary_content_type,
     web_fetch,
     web_search,
 )
+from PIL import Image
+
+
+def _png(size=(32, 16)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, (255, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _client_returning(content_type: str, content: bytes) -> AsyncMock:
+    """Build a mocked httpx.AsyncClient whose GET returns ``content``."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"content-type": content_type}
+    mock_response.content = content
+    mock_response.text = content.decode("utf-8", errors="replace")
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return mock_client
+
 
 # ---------------------------------------------------------------------------
 # Registration tests
@@ -41,8 +67,8 @@ class TestRegistration:
 # ---------------------------------------------------------------------------
 
 
-class TestIsBinaryContentType:
-    """Tests for content type detection."""
+class TestClassifyContentType:
+    """Tests for content type classification."""
 
     @pytest.mark.parametrize(
         "ct",
@@ -55,16 +81,25 @@ class TestIsBinaryContentType:
             "application/json; charset=utf-8",
             "application/xml",
             "application/javascript",
+            "application/x-javascript",
             "application/xhtml+xml",
             "application/rss+xml",
             "application/atom+xml",
             "application/ld+json",
+            "application/problem+json",
+            "application/vnd.api+json",
+            "image/svg+xml",
             "application/x-yaml",
             "application/yaml",
+            "application/toml",
+            "application/x-ndjson",
+            "application/x-sh",
+            "application/sql",
+            "APPLICATION/TOML",
         ],
     )
     def test_text_types(self, ct):
-        assert _is_binary_content_type(ct) is False
+        assert _classify_content_type(ct) == "text"
 
     @pytest.mark.parametrize(
         "ct",
@@ -72,17 +107,19 @@ class TestIsBinaryContentType:
             "image/png",
             "image/jpeg",
             "application/pdf",
-            "application/octet-stream",
             "application/zip",
             "audio/mpeg",
             "video/mp4",
         ],
     )
     def test_binary_types(self, ct):
-        assert _is_binary_content_type(ct) is True
+        assert _classify_content_type(ct) == "binary"
 
-    def test_empty_content_type(self):
-        assert _is_binary_content_type("") is False
+    @pytest.mark.parametrize(
+        "ct", ["", "application/octet-stream", "binary/octet-stream", "application/unknown"]
+    )
+    def test_generic_types(self, ct):
+        assert _classify_content_type(ct) == "generic"
 
 
 # ---------------------------------------------------------------------------
@@ -322,22 +359,88 @@ class TestWebFetch:
 
     @pytest.mark.asyncio
     async def test_binary_content_type_raises(self):
-        """Binary content types raise ContentTypeError."""
+        """Binary content that is not a supported image raises ContentTypeError."""
+        mock_client = _client_returning("application/pdf", b"%PDF-1.7\n\x00\x01binary")
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(ContentTypeError, match="Non-text"):
+                await web_fetch("https://example.com/doc.pdf")
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "image/png"}
-        mock_response.text = "binary data"
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
+    @pytest.mark.asyncio
+    async def test_image_content_type_with_non_image_body_raises(self):
+        mock_client = _client_returning("image/png", b"not really a png")
         with patch("httpx.AsyncClient", return_value=mock_client):
             with pytest.raises(ContentTypeError, match="Non-text"):
                 await web_fetch("https://example.com/image.png")
+
+    @pytest.mark.asyncio
+    async def test_svg_returned_as_text(self):
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>'
+        with patch("httpx.AsyncClient", return_value=_client_returning("image/svg+xml", svg)):
+            result = await web_fetch("https://example.com/logo.svg", mode="full")
+        assert isinstance(result, str)
+        assert "Type: image/svg+xml" in result
+        assert '<circle r="4"/>' in result  # XML is kept, not stripped like HTML
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ct", ["application/octet-stream", ""])
+    async def test_generic_type_text_body_returned_as_text(self, ct):
+        body = b"[tool.ruff]\nline-length = 100\n"
+        with patch("httpx.AsyncClient", return_value=_client_returning(ct, body)):
+            result = await web_fetch("https://example.com/pyproject.toml", mode="full")
+        assert isinstance(result, str)
+        assert "line-length = 100" in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ct", ["application/octet-stream", ""])
+    async def test_generic_type_binary_body_raises(self, ct):
+        body = b"PK\x03\x04\x00\x00binary zip"
+        with patch("httpx.AsyncClient", return_value=_client_returning(ct, body)):
+            with pytest.raises(ContentTypeError, match="Non-text"):
+                await web_fetch("https://example.com/archive.zip")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ct", ["image/png", "application/octet-stream", ""])
+    async def test_image_returns_tool_image(self, ct):
+        """Image bytes come back as a ToolImage, whatever binary type the server sends."""
+        data = _png()
+        url = "https://example.com/a.png"
+        with patch("httpx.AsyncClient", return_value=_client_returning(ct, data)):
+            result = await web_fetch(url, mode="full", search_terms="ignored")
+        assert isinstance(result, ToolImage)
+        assert result.image.data == data
+        assert result.image.format == "png"
+        assert result.image.source == url
+        assert result.caption.startswith(f"Image: {url} (PNG, 32x16")
+
+    @pytest.mark.asyncio
+    async def test_large_image_is_downscaled(self):
+        data = _png(size=(4000, 2000))
+        with patch("httpx.AsyncClient", return_value=_client_returning("image/png", data)):
+            result = await web_fetch("https://example.com/big.png")
+        assert isinstance(result, ToolImage)
+        assert max(result.image.width, result.image.height) <= MAX_LONG_EDGE
+        assert "resized from 4000x2000" in result.caption
+
+    @pytest.mark.asyncio
+    async def test_corrupt_image_raises(self):
+        body = b"\x89PNG\r\n\x1a\n" + b"\x00garbage" * 10
+        with patch("httpx.AsyncClient", return_value=_client_returning("image/png", body)):
+            with pytest.raises(ImageError):
+                await web_fetch("https://example.com/bad.png")
+
+    @pytest.mark.asyncio
+    async def test_image_inside_exec_returns_caption_text(self):
+        from archie_agent.exec.runner import _wrap_for_audit
+
+        calls = []
+        client = _client_returning("image/png", _png())
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await _wrap_for_audit(web_fetch, "web_fetch", calls)(
+                "https://example.com/a.png"
+            )
+        assert isinstance(result, str)
+        assert "Image: https://example.com/a.png" in result
+        assert "native `web_fetch`" in result
 
     @pytest.mark.asyncio
     async def test_timeout_raises(self):
