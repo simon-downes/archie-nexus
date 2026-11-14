@@ -3,14 +3,14 @@
 The two-line tool rows of the multi-session TUI (plan 084, D11 and D12). Brought from the
 `prototype/tui-workbench` branch's reviewed draft, with D12's corrections applied: a
 running row shows the spinner and no elapsed time, a failed shell row shows the exit
-code and the last output line, metrics are left-aligned, and shell and exec rows have
-no `description` input.
+code and the last output line, and metrics are left-aligned. Plan 086 added the
+`description` input that shell and exec rows show on line 2.
 
 The row model is `shared/src/archie_shared/tool_rows.py`; `cli/src/archie_cli/tui/transcript_view.py`
 `ToolRow` draws it. `tests/test_tool_rows.py` checks every example below. Most inputs,
 results and timings come from real calls in `~/.nexus/sessions`; the image read, the
 shell timeout, the exec error, the skill references, the web search with results and
-the fetch with search terms are made up.
+the fetch with search terms and the described shell and exec calls are made up.
 
 ## Layout
 
@@ -63,8 +63,11 @@ No grouping of consecutive calls for now.
 - **Shell working directory:** shown as `· in <dir>` at the end of line 2 when it isn't
   the workspace root. The command is cut to make room, so the directory is never the
   part that's lost.
-- **Shell and exec targets:** there is no `description` input. Shell shows the command's
-  first line after `$`; exec shows `python · N lines` (the source's size).
+- **Shell and exec targets:** the call's `description` input (plan 086), on one line with
+  runs of whitespace collapsed and otherwise as written (`/workspace` isn't stripped from
+  it). A shell row keeps its `· in <dir>` suffix. Without a usable description (absent,
+  blank, not a string, as in logs from before 086), shell shows the command's first line
+  after `$` and exec shows `python · N lines` (the source's size).
 
 ## Examples
 
@@ -159,10 +162,13 @@ doesn't say how many places a `replace_all` edit changed, so there's no count.
 
 ✕ Shell · timed out after 30s
 ╰ $ archie serve
+
+● Shell · 3 lines · 41ms
+╰ Run the CLI tests · in archie-nexus
 ```
 
-Line 2 is the command's first line after `$`; the whole command is in the detail
-view. The second example shows `/workspace` stripped from a command the model wrote
+Line 2 is the description, or without one the command's first line after `$`; the whole
+command is in the detail view. The second example shows `/workspace` stripped from a command the model wrote
 as `cd /workspace/archie-nexus && …`.
 
 ### exec
@@ -173,6 +179,9 @@ as `cd /workspace/archie-nexus && …`.
 
 ✕ Exec · 1.1s · KeyError: 'team'
 ╰ python · 14 lines
+
+● Exec · returned 1 line · 273ms
+╰ Count failed requests per host
 ```
 
 ### web_fetch

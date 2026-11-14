@@ -60,6 +60,15 @@ async def test_lists_registry_tools_without_skill_or_task(server):
     assert "question" not in names
     shell = next(t for t in tools if t.name == "shell")
     assert "command" in shell.inputSchema["properties"]
+    for tool in (shell, next(t for t in tools if t.name == "exec")):
+        assert "description" in tool.inputSchema["required"]
+
+
+async def test_shell_without_a_description_is_rejected(server):
+    """The MCP server validates the schema, so Kiro gets the miss back and retries (086 D1)."""
+    result = await _call(server.url, "shell", {"command": "echo hi"})
+    assert result.isError is True
+    assert "description" in result.content[0].text
 
 
 async def test_read_png_returns_image_content(server, tmp_path):
@@ -75,13 +84,13 @@ async def test_read_png_returns_image_content(server, tmp_path):
 
 
 async def test_shell_nonzero_exit_is_error(server):
-    result = await _call(server.url, "shell", {"command": "exit 3"})
+    result = await _call(server.url, "shell", {"command": "exit 3", "description": "Exit with 3"})
     assert result.isError is True
     assert result.content[0].text.startswith("[exit: 3]")
 
 
 async def test_shell_success_is_not_error(server):
-    result = await _call(server.url, "shell", {"command": "echo hi"})
+    result = await _call(server.url, "shell", {"command": "echo hi", "description": "Say hi"})
     assert result.isError is False
     assert "hi" in result.content[0].text
 
@@ -97,7 +106,11 @@ async def test_large_result_is_capped(server):
 async def test_cancel_all_kills_running_shell(server, tmp_path):
     pid_file = tmp_path / "pid"
     call = asyncio.create_task(
-        _call(server.url, "shell", {"command": f"echo $$ > {pid_file}; sleep 30"})
+        _call(
+            server.url,
+            "shell",
+            {"command": f"echo $$ > {pid_file}; sleep 30", "description": "Sleep"},
+        )
     )
     deadline = time.monotonic() + 10
     while not pid_file.exists() or not pid_file.read_text().strip():

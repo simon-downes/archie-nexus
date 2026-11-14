@@ -115,6 +115,19 @@ def _format_diff_block(diff: str) -> str:
     return "\n".join(rendered)
 
 
+def call_description(name: str, tool_input: dict) -> str:
+    """The model's ``description`` of a shell or exec call, on one line (plan 086).
+
+    Summaries show it in place of the command or source. Returns ``""`` for other tools
+    and when the input has no usable description (absent, blank, not a string), so
+    callers fall back to the command.
+    """
+    if name not in ("shell", "exec"):
+        return ""
+    value = tool_input.get("description")
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
 def format_tool_pending(name: str, input_dict: dict) -> str:
     """Produce the summary shown while the tool is running (Rich markup).
 

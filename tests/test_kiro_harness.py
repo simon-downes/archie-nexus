@@ -126,7 +126,10 @@ async def test_turn_with_archie_tool(harness, home):
     events = _log(home)
     assert isinstance(events[0], UserMessage)
     call = next(e for e in events if isinstance(e, ToolCall))
-    assert (call.name, call.input) == ("shell", {"command": "echo KIRO-OK"})
+    assert (call.name, call.input) == (
+        "shell",
+        {"command": "echo KIRO-OK", "description": "Say OK"},
+    )
     result = next(e for e in events if isinstance(e, ToolResult))
     assert "KIRO-OK" in result.content and not result.is_error
     request = next(e for e in events if isinstance(e, LLMRequest))

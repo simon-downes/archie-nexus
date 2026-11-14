@@ -15,7 +15,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, Union, get_args, get_origin
 
-from archie_agent.exec.tool import truncate_result
+from archie_agent.exec.tool import truncate_result, with_description
 from archie_agent.exec.tools import get_all_tools
 from archie_agent.exec.tools.images import ToolImage
 from archie_agent.tools import ToolSpec
@@ -29,6 +29,10 @@ _TYPE_MAP: dict[type, str] = {
     bool: "boolean",
     float: "number",
 }
+
+DESCRIBED_TOOLS = frozenset({"shell"})
+"""Native tools whose schema gets a required ``description`` (plan 086). The function
+signature stays as it is, so exec scripts call them without one, and the handler drops it."""
 
 
 def _schema_from_signature(fn: Callable) -> dict[str, Any]:
@@ -309,11 +313,14 @@ def make_native_specs() -> list[ToolSpec]:
 
     for name in sorted(tools):
         fn = tools[name]
+        schema = _schema_from_signature(fn)
+        if name in DESCRIBED_TOOLS:
+            schema = with_description(schema)
         specs.append(
             ToolSpec(
                 name=name,
                 description=_tool_description(fn),
-                schema=_schema_from_signature(fn),
+                schema=schema,
                 handler=_native_handler(fn),
             )
         )

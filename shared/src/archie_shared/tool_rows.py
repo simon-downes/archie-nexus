@@ -29,6 +29,7 @@ from archie_shared.tool_summaries import (
     QUESTION_ANSWERED_PREFIX,
     QUESTION_DISMISSED_RESULT,
     QUESTION_SELECTED_PREFIX,
+    call_description,
 )
 from archie_shared.transcript import ToolNode
 
@@ -429,7 +430,8 @@ def _code(tool: ToolNode, row: _Draft) -> None:
 
 def _shell(tool: ToolNode, row: _Draft) -> None:
     command = strip_workspace(_first_line(tool.input.get("command")))
-    row.target = f"$ {command}" if command else "$"
+    fallback = f"$ {command}" if command else "$"
+    row.target = call_description(tool.name, tool.input) or fallback
     cwd = display_path(tool.input.get("cwd"))
     row.suffix = f" · in {cwd}" if cwd else ""
     result = tool.result
@@ -457,7 +459,7 @@ def _shell(tool: ToolNode, row: _Draft) -> None:
 def _exec(tool: ToolNode, row: _Draft) -> None:
     source = tool.input.get("source")
     lines = len(source.splitlines()) if isinstance(source, str) else 0
-    row.target = f"python · {_count(lines, 'line')}"
+    row.target = call_description(tool.name, tool.input) or f"python · {_count(lines, 'line')}"
     if tool.status == "ok" and tool.result is not None:
         returned = _result_lines(tool)
         row.metric(f"returned {_count(returned, 'line')}" if returned else "no output")

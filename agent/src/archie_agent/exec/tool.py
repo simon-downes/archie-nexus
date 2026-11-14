@@ -27,6 +27,24 @@ _RUNS_ROOT = Path("/tmp/archie-runs")
 PYTHON = "/opt/archie/venv/bin/python"
 _MAX_RESULT_CHARS = 32_000
 
+DESCRIPTION_INPUT: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "What this call does and why, in 5-10 words, for a person watching the session "
+        '(e.g. "Run the CLI tests", "Count failed requests per host"). Describe the '
+        "purpose, not the command or code itself."
+    ),
+}
+"""The ``description`` input of the shell and exec tools (plan 086): the TUI shows it in
+place of the command or source. Model-facing only; the tools ignore it."""
+
+
+def with_description(schema: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a tool's input schema with a required ``description`` listed first."""
+    properties = {"description": DESCRIPTION_INPUT, **schema.get("properties", {})}
+    required = ["description", *(r for r in schema.get("required", []) if r != "description")]
+    return {**schema, "properties": properties, "required": required}
+
 
 def truncate_result(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
     """Cap a model-facing result at ``limit`` characters with a marker that says how to get the rest."""
@@ -227,8 +245,11 @@ def _build_exec_description() -> str:
     return header
 
 
-async def _exec_handler(source: str, **kwargs) -> str:
-    """Handler for the exec ToolSpec — runs source and formats result."""
+async def _exec_handler(source: str, description: str | None = None, **kwargs) -> str:
+    """Handler for the exec ToolSpec — runs source and formats result.
+
+    ``description`` is for display only and is dropped.
+    """
     envelope = await run_exec(source, **kwargs)
     return format_result(envelope)
 
@@ -252,11 +273,15 @@ def create_registry() -> ToolRegistry:
         ToolSpec(
             name="exec",
             description=_build_exec_description(),
-            schema={
-                "type": "object",
-                "properties": {"source": {"type": "string", "description": "Python source code"}},
-                "required": ["source"],
-            },
+            schema=with_description(
+                {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "description": "Python source code"}
+                    },
+                    "required": ["source"],
+                }
+            ),
             handler=_exec_handler,
         )
     )

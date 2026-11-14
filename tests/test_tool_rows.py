@@ -358,6 +358,60 @@ def test_exec_error_keeps_the_exception_class():
     _check(tool, "✕ Exec · 1.1s · KeyError: 'team'\n╰ python · 14 lines")
 
 
+# --- shell and exec descriptions (086) --------------------------------------------------
+
+
+def test_shell_description_replaces_the_command_and_keeps_the_directory():
+    tool = _tool(
+        "shell",
+        {
+            "description": "Run the CLI tests",
+            "command": "scripts/dev test cli",
+            "cwd": "/workspace/archie-nexus",
+        },
+        "[exit: 0]\na\nb\nc",
+        ms=41,
+    )
+    _check(tool, "● Shell · 3 lines · 41ms\n╰ Run the CLI tests · in archie-nexus")
+
+
+def test_exec_description_replaces_the_source_size():
+    tool = _tool(
+        "exec", {"description": "Count failed requests per host", "source": _lines(9)}, "42", ms=273
+    )
+    _check(tool, "● Exec · returned 1 line · 273ms\n╰ Count failed requests per host")
+
+
+def test_running_and_failed_rows_show_the_description():
+    running = _tool("shell", {"description": "Start the server", "command": "archie serve"})
+    _check(running, "⠋ Shell\n╰ Start the server")
+    failed = _tool(
+        "shell", {"description": "Check it fails", "command": "false"}, "[exit: 2]\nboom", ms=5
+    )
+    _check(failed, "✕ Shell · exit 2 · 5ms · boom\n╰ Check it fails")
+
+
+def test_description_is_one_line_and_shown_as_written():
+    tool = _tool("shell", {"description": "Check  disk use\n  in /workspace", "command": "du"})
+    _check(tool, "⠋ Shell\n╰ Check disk use in /workspace")
+
+
+@pytest.mark.parametrize("description", ["", "   ", None, 3, ["x"]])
+def test_unusable_description_falls_back(description):
+    shell = _tool("shell", {"description": description, "command": "true"}, "[exit: 0]", ms=3)
+    _check(shell, "● Shell · no output · 3ms\n╰ $ true")
+    exec_tool = _tool("exec", {"description": description, "source": _lines(9)}, "42", ms=273)
+    _check(exec_tool, "● Exec · returned 1 line · 273ms\n╰ python · 9 lines")
+
+
+def test_long_description_is_cut_before_the_directory():
+    tool = _tool(
+        "shell",
+        {"description": "Run every test in the repository", "command": "x", "cwd": "app"},
+    )
+    assert row_text(tool, 30).split("\n")[1] == "╰ Run every test in … · in app"
+
+
 # --- web, brain, skill -----------------------------------------------------------------
 
 URL = "https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/ingress/ingress_class/"

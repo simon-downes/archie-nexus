@@ -194,7 +194,7 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
 
 ## Milestones
 
-### [ ] M1 — Required description in schemas, shown on tool rows
+### [x] M1 — Required description in schemas, shown on tool rows
 
 - **Approach:** Add `DESCRIPTION_INPUT`/`with_description` to `exec/tool.py` and apply them to
   the exec schema in `create_registry` and to `shell` in `make_native_specs` (Code structure).
@@ -212,7 +212,14 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
   shows the description.
 - **Verify:** `scripts/dev test tests/test_tool_rows.py tests/test_native.py tests/test_exec_tool.py tests/test_kiro_mcp.py tests/test_kiro_harness.py tests/test_native_dispatch.py`
   passes, and the full suite has no failures beyond the Baseline list.
-- **Outcome:**
+- **Outcome:** `with_description`/`DESCRIPTION_INPUT` in `exec/tool.py`, applied to exec and
+  (via `DESCRIBED_TOOLS`) to native shell; `_exec_handler` drops `description`;
+  `call_description` in `tool_summaries.py` drives `tool_rows._shell`/`_exec`. New tests in
+  `test_exec_tool.py` (schemas, exec-namespace signature, handlers ignore it),
+  `test_tool_rows.py` (description rows, fallback, collapsing, cutting) and `test_kiro_mcp.py`
+  (required over MCP; a call without one is rejected). Kiro fake and harness test pass a
+  description. Verify command: 168 passed. Full suite: the same 23 baseline failures, no new
+  ones; `ruff check` and `ruff format --check` clean.
 
 ### [ ] M2 — Description in every other summary
 
