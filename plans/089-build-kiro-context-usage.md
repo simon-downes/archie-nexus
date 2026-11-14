@@ -78,9 +78,9 @@ Codebase facts:
 | D2 | Live carrier | `SessionStatus.context_pct: float \| msgspec.UNSET`, omitted until Kiro reports a value | a new live-only `context_usage` event; nothing live (turn end only); `float \| None = None`, which would encode `null` on every native status frame | `session_status` is the current-state snapshot and is sent on every connect, so a reattached TUI gets the value at once; one-hour turns need mid-turn updates; UNSET keeps native status frames byte-identical, so only Kiro frames change shape | user, council |
 | D3 | Persisted fields on `LLMRequest` | `context_pct` (turn's last `usagePercentage`), `context_pct_max`, `context_samples` (distinct percentages in the turn), `kiro_requests` (`len(turn_completion.requestIds)`); all `float/int \| msgspec.UNSET`, omitted when unset | a persisted event per frame; tokens derived from a 1M window; `context_pct_after` naming | council 4/4 on last + counts, 3/1 on max; one name (`context_pct`) is used on the status, the request, the ledger and `archie.db`, and the docs state it is Kiro's post-response figure (deviates from the council's suggested `context_pct_after`) | council, self |
 | D4 | Encoding for native requests | `UNSET`, not encoded (077 D27 pattern) | always encode `null` | native `llm_request` lines stay byte-identical | self |
-| D5 | When the turn fields are set | `context_pct`/`context_pct_max`/`context_samples` only when the turn saw at least one root context frame; `kiro_requests` only when `turn_completion` has a `requestIds` list | carry the previous turn's value | an unset field means "Kiro didn't report it", and readers keep the previous value | self |
+| D5 | When the turn fields are set | `context_pct`/`context_pct_max`/`context_samples` only when the turn saw at least one root context frame; `kiro_requests` only when `turn_completion` has a `requestIds` list | carry the previous turn's value | an unset field means "Kiro didn't report it", and readers keep the previous value. The turn covers frames up to the `session/prompt` result; a changed figure just after it (2 of ~200 turns in the logs) reaches only the next status and the next turn | self |
 | D6 | Which frames count | `session_info_update`, `_meta.kiro.kind == "context_usage"`, numeric `usagePercentage`, no `agentSubtaskId` | include subagent frames | the root context is what compacts; none seen with a subagent ID, so this is defensive | self |
-| D7 | When the agent sends `session_status` | as today, plus whenever a counted frame changes the harness's latest value, after startup and while the backend is alive | every frame; throttled | frames come in identical pairs, ~1 per 20 s at most; dedupe removes the duplicate | self |
+| D7 | When the agent sends `session_status` | as today, plus whenever a counted frame changes the harness's latest value, after startup and while the backend is alive, except while a turn is closing (translator gone, `_turn_active` still set), when the closing status carries it | every frame; throttled | frames come in identical pairs, ~1 per 20 s at most; dedupe removes the duplicate | self |
 | D8 | TUI rule for context | a `session_status` with `context_pct` not None sets `ledger.context_pct`; a root `llm_request` with `context_pct` set sets it; a Kiro root `llm_request` without it leaves ledger context unchanged; native unchanged | let Kiro requests reset context to 0 | live frames apply after replay (buffered), so the newest value wins; without the rule each turn end would flash 0 % | self |
 | D9 | Status bar for Kiro | `Ctx: 42%` (percentage only), set by a `context_pct_only` flag the controller derives from a `kiro/` model key | `Ctx: 0 (42%)` | Kiro reports no tokens; showing 0 is wrong | self |
 | D10 | `archie.db` | `metrics_requests` gains `context_pct REAL`, `context_pct_max REAL`, `context_samples INTEGER`, `kiro_requests INTEGER` (NULL for native); `METRICS_VERSION` 6 | keep the counts in the logs only | the version bump already rebuilds the tables; the counts become a SQL query for re-evaluating D1 | self |
@@ -267,6 +267,10 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 
 ## Deviations
 
+- Review: D7 gained the closing-turn exception (a post-response frame with a new value sent
+  `working` after `turn_complete`); D5 documents that such a figure isn't in the turn's
+  fields. No scope change.
+
 ## Risks
 
 - Kiro may change the frame cadence or semantics; values would still be Kiro's own figure,
@@ -274,6 +278,10 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 - The `context_samples`/`kiro_requests` mismatch cause is unknown; they are recorded, not
   interpreted.
 - The metrics version bump rebuilds `metrics_*` from all logs on the first sync (seconds).
+  Until the running orchestrator restarts on the new code, it (v5) and a new `archie stats`
+  (v6) each rebuild the tables when they see the other's version; restart it with the update.
+- Older code reading the session logs written by this change drops Kiro `llm_request` lines
+  (they carry the new fields), losing their cost on replay; a revert has that cost.
 
 ## Review
 
@@ -285,6 +293,20 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   suite and ruff per milestone. ℹ️ chart vs table numbers and older turns → D11 (any
   root request; gaps; chart shows the post-turn value). ℹ️ stats → `_pct`. ℹ️
   `session_status` docs → M1. No second pass (no ❌).
+- Code review: `general` and `risk` (the diff changes the wire schema, `archie.db` and
+  `archie stats --json`), one round, 0 ❌. Fixed: ⚠️ pane copy of `context_pct_only` untested →
+  `test_kiro_status_shows_context_percentage_in_the_bar`; ℹ️ misleading log text → "Failed to
+  broadcast session status"; ℹ️ `status.py` docstring; ℹ️ `_KIRO_CONTEXT_FIELDS` duplicated in
+  `_REQUEST_COLUMNS` → spliced in; ℹ️ protocol 5 unpinned → `test_protocol_version_is_5`;
+  ℹ️ Kiro chart axis/tooltip said "Request" → `axis: "Turn"`; ℹ️ (risk) event-spec now says
+  older code drops the new persisted lines; ℹ️ (risk) a post-response frame with a new value
+  sent `working` after `turn_complete` → D7 closing exception and
+  `test_context_frame_while_turn_closes_waits_for_the_closing_status`. ❓ (general) frames
+  after the prompt result aren't in the turn's fields → intended, documented in D5 and
+  `kiro.md`. ❓ (risk) deploy order for the `METRICS_VERSION` bump → pre-existing behaviour of
+  every bump; stated in the PR body and Risks. Evidence: `env -u ARCHIE_BACKEND scripts/dev
+  test` → 5455 passed; `ruff check .` and `ruff format --check` on the 25 touched Python
+  files pass.
 
 ## Outcome
 

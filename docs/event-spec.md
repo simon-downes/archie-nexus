@@ -146,7 +146,10 @@ with protocol version 5, also on Kiro turns only. `context_pct` is the turn's la
 figures (all three absent when the turn saw no context frame); `kiro_requests` is the length
 of `turn_completion.requestIds`. They are percentages of the window measured after a model
 response, so they are not comparable with native `context_tokens` (the prompt size). Native
-requests omit all four.
+requests omit all four. A client, orchestrator or metrics index built before protocol 5 drops Kiro
+`llm_request` lines that carry them as malformed (losing their cost and credits on replay and
+in `archie.db`); these lines stay in the session logs, so running older code after this change
+has that cost.
 
 `session_status.context_pct` came with protocol version 5. Kiro-backed agents send Kiro's
 latest root context usage (`usagePercentage` of a `context_usage` frame: percent of the

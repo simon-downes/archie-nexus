@@ -450,8 +450,12 @@ class KiroHarness:
             pct = context_pct(update)
             if pct is not None and pct != self._context_pct:
                 self._context_pct = pct
-                if self._started and not self._dead:
-                    # Awaited inline, like the translator's events, so it stays in order (089 D7).
+                # A turn that has finished translating but not yet sent its closing status
+                # (``_turn_active`` still set) leaves the new value to that status, so the
+                # TUI never sees ``working`` after ``turn_complete`` (089 D7).
+                closing = self._turn_active and self._translator is None
+                if self._started and not self._dead and not closing:
+                    # Awaited inline, like the translator's events, so it stays in order.
                     await self._emit_status()
         elif method == "_kiro/mcp/status":
             for server in params.get("servers") or ():
@@ -624,7 +628,7 @@ class KiroHarness:
         try:
             await self._event_bus.emit(self.status_event())
         except Exception:  # noqa: BLE001 — status refresh is best effort
-            log.warning("Failed to broadcast final turn status", exc_info=True)
+            log.warning("Failed to broadcast session status", exc_info=True)
 
     async def _current_runner_context(self) -> dict:
         snapshot, notice = self._tool_policy.refresh()

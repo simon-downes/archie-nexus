@@ -100,7 +100,7 @@ every `session_status` and sends a new status when it changes, so the TUI status
 `Ctx: N%` live; Kiro gives no token count. The turn's `llm_request` stores the last figure
 (`context_pct`), the highest (`context_pct_max`), the number of distinct figures
 (`context_samples`) and `len(requestIds)` (`kiro_requests`), so replay, insights and
-`archie stats` show it. Archie keeps one `llm_request` per turn: in the logs checked, the
+`archie stats` show it. The turn's fields cover frames up to the `session/prompt` result; Kiro usually repeats the last figure just after it, and a changed figure there reaches the next `session_status` (and the next turn) only. Archie keeps one `llm_request` per turn: in the logs checked, the
 figures matched Kiro's request IDs for only 39 % of requests, so the two counts are recorded
 to re-check that later.
 

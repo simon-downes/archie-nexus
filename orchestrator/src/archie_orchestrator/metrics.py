@@ -124,6 +124,8 @@ _SESSION_TABLES = (
     "metrics_compactions",
     "metrics_subagents",
 )
+# Kiro-only ``LLMRequest`` fields, stored NULL when unset (089); last in ``_REQUEST_COLUMNS``.
+_KIRO_CONTEXT_FIELDS = ("context_pct", "context_pct_max", "context_samples", "kiro_requests")
 _REQUEST_COLUMNS = (
     "timestamp",
     "turn",
@@ -142,10 +144,7 @@ _REQUEST_COLUMNS = (
     "error",
     "subagent_index",
     "purpose",
-    "context_pct",
-    "context_pct_max",
-    "context_samples",
-    "kiro_requests",
+    *_KIRO_CONTEXT_FIELDS,
 )
 
 
@@ -234,9 +233,6 @@ def _rebuild_tables(conn: sqlite3.Connection) -> None:
         conn.rollback()
         raise
     conn.commit()
-
-
-_KIRO_CONTEXT_FIELDS = ("context_pct", "context_pct_max", "context_samples", "kiro_requests")
 
 
 def _unset_none(value):

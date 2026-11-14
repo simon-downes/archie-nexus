@@ -81,13 +81,15 @@
                 options: opts,
             };
         },
-        // {labels, values, turns, label?} — context tokens per root request, or Kiro's
+        // {labels, values, turns, label?, axis?} — context tokens per root request, or Kiro's
         // context % per turn (089); null values are gaps
         "line": function (d, opts) {
             opts.plugins.legend.display = false;
-            opts.scales.x.title = { display: true, text: "Request", color: opts.scales.x.ticks.color };
+            var axis = d.axis || "Request";  // "Turn" for Kiro: one root request per turn
+            opts.scales.x.title = { display: true, text: axis, color: opts.scales.x.ticks.color };
             opts.plugins.tooltip = { callbacks: { title: function (items) {
                 var i = items[0].dataIndex;
+                if (axis === "Turn") { return "Turn " + d.turns[i]; }
                 return "Request " + d.labels[i] + " (turn " + d.turns[i] + ")";
             } } };
             return {

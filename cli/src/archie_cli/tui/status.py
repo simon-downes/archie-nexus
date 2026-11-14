@@ -1,8 +1,9 @@
 """Status bar widget with session metrics (084 D31).
 
 Shows: ⎇ branch │ model │ In: fresh / cache read / cache write  Out: output │ Ctx: N (P%)
-│ $cost, and on the right the session ID when the session has a name (the header shows
-the ID otherwise). No version: the sidebar shows it.
+(``Ctx: P%`` for Kiro, which reports no token count) │ $cost, and on the right the session
+ID when the session has a name (the header shows the ID otherwise). No version: the sidebar
+shows it.
 
 The bar lays itself out from its own width: when everything does not fit, fields are
 dropped in order of ``DROP_ORDER`` (the session ID first, then the cache numbers, the

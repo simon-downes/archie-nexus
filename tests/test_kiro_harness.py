@@ -194,6 +194,31 @@ async def test_subagent_context_frame_is_ignored(harness):
     assert harness.status_event().context_pct is msgspec.UNSET
 
 
+async def test_context_frame_while_turn_closes_waits_for_the_closing_status(harness):
+    """After the translator is gone but before the closing status, no ``working`` status."""
+    seen = _capture(harness)
+    harness._turn_active = True  # finish() has run; handle_message's finally hasn't
+    frame = {
+        "method": "session/update",
+        "params": {
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "_meta": {"kiro": {"kind": "context_usage", "usagePercentage": 48.9}},
+            }
+        },
+    }
+    await harness._on_notification(frame, time.time())
+    assert not any(isinstance(e, SessionStatus) for e in seen)
+    harness._turn_active = False
+    assert harness.status_event().context_pct == 48.9  # carried by the closing status
+    await harness._on_notification(frame, time.time())
+    assert not any(isinstance(e, SessionStatus) for e in seen)  # a repeat sends nothing
+    frame["params"]["update"]["_meta"]["kiro"]["usagePercentage"] = 48.7
+    await harness._on_notification(frame, time.time())  # between turns: sent at once
+    statuses = [e for e in seen if isinstance(e, SessionStatus)]
+    assert [(s.state, s.context_pct) for s in statuses] == [("idle", 48.7)]
+
+
 def test_native_session_status_omits_context_pct():
     status = SessionStatus(id="s", model_key="m", git_branch="main")
     assert "context_pct" not in encode_event(status)

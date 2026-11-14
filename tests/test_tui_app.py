@@ -1935,6 +1935,25 @@ async def test_status_bar_keeps_the_cost_visible_at_120_columns():
         assert narrow.rstrip().endswith("$12.3456 · 4.25 credits")
 
 
+async def test_kiro_status_shows_context_percentage_in_the_bar():
+    """The pane copies the controller's Kiro flag and figure to the status bar (089)."""
+    client = _client(make_record("s1"))
+    app = make_app(client)
+    async with app.run_test(size=(200, 40)) as pilot:
+        pane = await attached(app, pilot, "s1")
+        await apply_events(
+            app,
+            pilot,
+            Handshake(id="h", protocol_version=PROTOCOL_VERSION, session_id="agent-s1"),
+            SessionStatus(
+                id="st", model_key="kiro/gpt-5.6-luna", git_branch="main", context_pct=42.2
+            ),
+        )
+        assert pane.status.context_pct_only is True
+        line = pane.status.fit(200).plain
+        assert "Ctx: 42%" in line and "Ctx: 0" not in line
+
+
 # --- External editor (M8) ---------------------------------------------------------------
 
 

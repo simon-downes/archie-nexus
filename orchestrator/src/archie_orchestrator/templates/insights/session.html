@@ -23,7 +23,7 @@
 {% set ctx = data.requests|selectattr("scope", "none")|list %}
 {#- Kiro reports context as a percentage only (089): chart it when any main-agent request has one. -#}
 {% set ctx_pct = ctx|rejectattr("context_pct", "none")|list|length > 0 %}
-{% set ctx_chart = {"labels": range(1, ctx|length + 1)|list, "values": ctx|map(attribute="context_pct" if ctx_pct else "context_tokens")|list, "turns": ctx|map(attribute="turn")|list, "label": "Context %" if ctx_pct else "Context tokens"} %}
+{% set ctx_chart = {"labels": range(1, ctx|length + 1)|list, "values": ctx|map(attribute="context_pct" if ctx_pct else "context_tokens")|list, "turns": ctx|map(attribute="turn")|list, "label": "Context %" if ctx_pct else "Context tokens", "axis": "Turn" if ctx_pct else "Request"} %}
 <div class="two-col">
 {{ m.chart("turn-cost", "bar", turn_chart, "Cost per turn (USD, includes subagents)") }}
 {{ m.chart("context", "line", ctx_chart, "Context % per main-agent turn" if ctx_pct else "Context tokens per main-agent request") }}
