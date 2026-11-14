@@ -1,0 +1,85 @@
+# 088 — Unseen sidebar indicator
+
+Status: planning
+Branch: build-it/088-unseen-sidebar (base: main @ 9b137e9)
+Worktree: /workspace/archie-nexus/.git/build-it-worktrees/088-unseen-sidebar
+
+## Objective
+
+Make the TUI sidebar identify sessions needing attention without relying on bold text. An unseen ready session will use the same purple as the current-session border; seen ready sessions will remain green. The current session name will be bold, while unseen background session names will use normal weight.
+
+## Context
+
+The orchestrator sets `SessionDescriptor.unseen` when a root turn completes or fails. The TUI clears it for the on-screen session and currently renders unseen names in bold. `state_glyph()` renders idle sessions green, regardless of `unseen`; the current row's purple border is rendered separately by `SessionRow`. The requested change is presentation-only and does not alter notification or unseen persistence behavior.
+
+## Baseline
+
+- Check commands: `scripts/dev test`; `scripts/dev ruff check .`; `scripts/dev ruff format .`
+- Setup: none
+- Setup leftovers: none
+- Failing before this work: none; focused TUI tests passed (13 passed)
+- Not included: `.DS_Store`, `plans/060-spec-container-aws-profiles.md`, and `plans/070-build-nexus-plugins.md` in the user's checkout
+
+## Decisions
+
+| # | Decision | Chosen | Rejected | Why | Source |
+|---|---|---|---|---|---|
+| D1 | Base branch for the build | `main` at `9b137e9` | Current checkout branch | User explicitly requested a branch from main; checkout had unrelated feature work | user |
+| D2 | Unseen visual treatment | Purple idle glyph using `theme.PRIMARY`; seen idle glyph remains green | Bold unseen name or a new marker | Reuses the existing current-row border colour and keeps the two-cell row layout unchanged | user |
+| D3 | Title weight | Bold only for the current row | Bold unseen names | Makes current focus explicit and leaves attention state to the glyph | user |
+| D4 | Scope | Sidebar rendering and focused tests only | Notification/state semantics changes | User confirmed notifications are working; the issue is identifying sessions needing attention | self |
+
+## Requirements
+
+- MUST render an idle session's glyph in `theme.PRIMARY` when `unseen=True` and in `theme.SUCCESS` when `unseen=False`.
+  - AC: sidebar glyph tests assert the idle unseen and idle seen styles differ and equal the corresponding theme colours.
+- MUST bold the session title only when its row is current.
+  - AC: row rendering tests assert a current row's title has bold style and an unseen non-current row's title does not.
+- MUST preserve existing status glyphs and notification behavior for non-idle statuses.
+  - AC: existing TUI status and notification tests pass unchanged.
+
+Out of scope: changing what sets or clears `unseen`, notification text/timing, the session feed contract, or pane header badges.
+
+## Design
+
+### Overview
+
+Update `cli/src/archie_cli/tui/sidebar.py`: make `state_glyph()` select the idle colour from `record.unseen`, and make `SessionRow.render()` derive title weight only from `self.current`. Extend `tests/test_tui_app.py` at the existing sidebar rendering seams.
+
+### Code structure
+
+No new modules or dependencies. Follow the existing `state_glyph`, `state_badge`, and `SessionRow.render()` patterns in `cli/src/archie_cli/tui/sidebar.py`.
+
+## Milestones
+
+### [ ] M1 — Show unseen state with a purple sidebar glyph
+
+- **Approach:** Change only idle glyph colour selection and current-row title styling in `cli/src/archie_cli/tui/sidebar.py`. Add explicit style assertions to the existing status/row tests in `tests/test_tui_app.py`.
+- **Test seam:** `state_glyph()` and mounted `SessionRow.render()` output used by the TUI tests.
+- **Edge cases:** unseen error/blocked sessions keep their error/warning glyphs; only idle unseen sessions use the purple attention colour.
+- **Deliverable:** A non-current unseen ready session has a purple glyph and normal title text; once seen its glyph is green; the current row title is bold.
+- **Verify:** `scripts/dev test tests/test_tui_app.py -k 'glyph or notice or unseen or sidebar'` passes; `scripts/dev ruff check cli/src/archie_cli/tui/sidebar.py tests/test_tui_app.py` passes.
+- **Outcome:**
+
+## Deviations
+
+- None.
+
+## Risks
+
+- None known.
+
+## Review
+
+- Plan review: pending
+- Code review: pending
+- Merge risk: pending
+
+## Outcome
+
+PR: pending
+CI: pending
+
+## Follow-ups
+
+- None.
