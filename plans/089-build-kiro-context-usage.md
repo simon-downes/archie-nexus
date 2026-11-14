@@ -236,7 +236,7 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   `env -u ARCHIE_BACKEND scripts/dev test` → 5445 passed; `ruff check .` passes; `ruff
   format` applied to `translate.py`.
 
-### [ ] M3 — Context in `archie.db`, insights and `archie stats`
+### [x] M3 — Context in `archie.db`, insights and `archie stats`
 
 - **Approach:** `metrics.py`: four columns, `_REQUEST_COLUMNS`, values from the event
   (`None` when UNSET), `METRICS_VERSION = 6`. `insights.py session_detail`: turn
@@ -253,7 +253,17 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
 - **Deliverable:** `/ui/insights` session page and `archie stats session <id>` show Kiro
   turns' context percentage.
 - **Verify:** `scripts/dev test tests/test_orchestrator_metrics.py tests/test_insights.py tests/test_web_insights.py tests/test_cli_stats.py -q` passes; full `scripts/dev test` shows only the baseline failures; `scripts/dev ruff check .` passes.
-- **Outcome:**
+- **Outcome:** `metrics_requests` gains the four nullable columns (UNSET → NULL),
+  `METRICS_VERSION = 6`; `session_detail` turn rows carry `context_pct` (root
+  `MAX(context_pct_max)`), request rows `context_pct`; the session page shows `4.0%` in the
+  turn table and charts Kiro's % ("Context % per main-agent turn", null gaps for older
+  turns) with a `label` the line chart now reads; `archie stats session` uses `_pct`. Docs:
+  `architecture.md` metrics section and version 6. Tests: two in
+  `test_orchestrator_metrics.py` (columns, v5 → v6 rebuild), one in `test_insights.py`, two
+  in `test_web_insights.py` (Kiro page, native unchanged), two in `test_cli_stats.py`; the
+  shared fixture is `session_fakes.kiro_context_session`, and the `conftest` writer's
+  `llm()` takes the four fields. Evidence: focused run 134 passed; `env -u ARCHIE_BACKEND
+  scripts/dev test` → 5452 passed; `ruff check .` and `ruff format --check` pass.
 
 ## Deviations
 

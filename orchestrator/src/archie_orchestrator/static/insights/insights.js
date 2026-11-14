@@ -81,7 +81,8 @@
                 options: opts,
             };
         },
-        // {labels, values, turns} — context tokens per root request
+        // {labels, values, turns, label?} — context tokens per root request, or Kiro's
+        // context % per turn (089); null values are gaps
         "line": function (d, opts) {
             opts.plugins.legend.display = false;
             opts.scales.x.title = { display: true, text: "Request", color: opts.scales.x.ticks.color };
@@ -92,7 +93,7 @@
             return {
                 type: "line",
                 data: { labels: d.labels,
-                        datasets: [{ label: "Context tokens", data: d.values,
+                        datasets: [{ label: d.label || "Context tokens", data: d.values,
                                      borderColor: PALETTE[0], pointRadius: 0, tension: 0.1 }] },
                 options: opts,
             };

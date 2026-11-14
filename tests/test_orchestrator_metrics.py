@@ -712,3 +712,66 @@ def test_turn_request_after_tool_calls_backfills_timestamp(session_logs, tmp_pat
             "model_key": "m1",
         },
     ]
+
+
+def test_kiro_context_columns_indexed_native_null(session_logs, tmp_path):
+    """Kiro requests index their context fields; native requests store NULL (089)."""
+    w = session_logs
+    w.write(
+        SID,
+        [
+            w.user("go", turn=1),
+            w.llm(
+                event_id="k1",
+                model_key="kiro/gpt-5.6-luna",
+                context_tokens=0,
+                credits=0.5,
+                context_pct=3.0,
+                context_pct_max=4.0,
+                context_samples=3,
+                kiro_requests=3,
+            ),
+            w.llm(event_id="n1", turn=2),
+        ],
+    )
+    migrated_store(tmp_path)
+    _index(tmp_path).sync()
+    rows = _rows(
+        tmp_path,
+        "SELECT event_id, context_pct, context_pct_max, context_samples, kiro_requests "
+        "FROM metrics_requests ORDER BY id",
+    )
+    assert rows == [
+        {
+            "event_id": "k1",
+            "context_pct": 3.0,
+            "context_pct_max": 4.0,
+            "context_samples": 3,
+            "kiro_requests": 3,
+        },
+        {
+            "event_id": "n1",
+            "context_pct": None,
+            "context_pct_max": None,
+            "context_samples": None,
+            "kiro_requests": None,
+        },
+    ]
+
+
+def test_metrics_version_is_6_and_v5_tables_are_rebuilt(session_logs, tmp_path):
+    assert METRICS_VERSION == 6
+    w = session_logs
+    w.write(SID, [w.user("go"), w.llm(event_id="r1")])
+    migrated_store(tmp_path)
+    _index(tmp_path).sync()
+    conn = sqlite3.connect(tmp_path / "archie.db")
+    conn.execute("UPDATE meta SET value = '5' WHERE key = 'metrics_version'")
+    conn.execute("ALTER TABLE metrics_requests DROP COLUMN kiro_requests")
+    conn.commit()
+    conn.close()
+    _index(tmp_path).sync()
+    assert metrics.schema_version(tmp_path / "archie.db") == 6
+    assert _rows(tmp_path, "SELECT event_id, kiro_requests FROM metrics_requests") == [
+        {"event_id": "r1", "kiro_requests": None}
+    ]
