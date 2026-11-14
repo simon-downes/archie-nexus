@@ -80,7 +80,7 @@ No new modules or dependencies. Follow the existing `state_glyph`, `state_badge`
 Implemented the unseen-session sidebar treatment. Unseen idle sessions use the purple primary glyph, seen idle sessions use the green success glyph, and only the current session title is bold. Full tests passed (5,442); Ruff lint passed. Repository-wide format checking remains blocked by the pre-existing unrelated `persona/skills/python/assets/output.py` formatting mismatch.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/32
-CI: pending
+CI: none (no checks configured on the PR)
 
 ## Follow-ups
 
