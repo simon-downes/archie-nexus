@@ -63,6 +63,10 @@ _config: "NexusConfig | None" = None
 # Strong references to active tasks (prevents GC of fire-and-forget coroutines)
 _active_tasks: set[asyncio.Task] = set()
 
+SHUTDOWN_GRACE_S = 8.0
+"""How long shutdown waits for an interrupted turn to log its end (under docker
+stop's 10 s before SIGKILL)."""
+
 # Workspace path where .git/HEAD lives
 _WORKSPACE = "/workspace"
 
@@ -89,6 +93,27 @@ def _read_git_branch() -> str:
 
     # Detached HEAD: raw commit hash
     return content[:8]
+
+
+async def _end_active_turn(agent: "AgentHarness | KiroHarness", grace: float) -> None:
+    """Interrupt a running turn and wait for it to log its end before shutdown.
+
+    The interrupt stops the turn's subagents and kills its tool processes; the turn
+    then writes its partial text, cancelled tool results and terminal events, so the
+    session log ends consistent. A turn still running after ``grace`` seconds is
+    cancelled, and its own cleanup writes a fallback terminal event.
+    """
+    tasks = [task for task in _active_tasks if not task.done()]
+    if not tasks:
+        return
+    log.info("Interrupting the active turn before shutdown")
+    agent.interrupt()
+    _, pending = await asyncio.wait(tasks, timeout=grace)
+    if pending:
+        log.warning("Turn did not end within %.0fs of shutdown; cancelling it", grace)
+        for task in pending:
+            task.cancel()
+        await asyncio.wait(pending, timeout=1.0)
 
 
 def _backend() -> str:
@@ -177,6 +202,7 @@ async def lifespan(app):
     )
     yield
     log.info("Agent shutting down")
+    await _end_active_turn(_agent, SHUTDOWN_GRACE_S)
 
 
 @asynccontextmanager
@@ -235,6 +261,7 @@ async def _kiro_lifespan(config: "NexusConfig"):
         yield
     finally:
         log.info("Agent shutting down")
+        await _end_active_turn(harness, SHUTDOWN_GRACE_S)
         await harness.close()
 
 

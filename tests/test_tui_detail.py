@@ -23,7 +23,6 @@ from archie_cli.tui.transcript_view import (
     ToolClicked,
     ToolRow,
 )
-from archie_shared.commands import InterruptCommand
 from archie_shared.events import (
     AssistantMessage,
     ToolCall,
@@ -246,7 +245,32 @@ async def test_escape_pops_the_view_without_interrupting_then_interrupts():
         await settle(pilot, lambda: ("interrupt", None) in stream.sent)
 
 
-async def test_escape_kills_a_running_shell_before_popping_a_view():
+async def test_activity_line_is_blank_while_a_view_is_open():
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        pane = await attached(app, pilot)
+        await pilot.press(*"go", "enter")
+        stream = app.controller.ws
+        await settle(pilot, lambda: stream.sent)
+        stream.push(USER, _call("t1", "read", {"path": "a.py"}))
+        await settle(pilot, lambda: pane.conversation.query(ToolRow))
+        assert pane.activity.activity == "Working"
+
+        await pilot.click(ToolRow)
+        await pilot.pause()
+        assert isinstance(_top(app), ToolDetailView)
+        assert pane.activity.activity is None and pane.activity.render().plain == ""
+        # Turn changes while the view is open keep it blank.
+        stream.push(_result("t1", "x = 1"))
+        await settle(pilot, lambda: _top(app).tool.result is not None)
+        assert pane.activity.activity is None
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert pane.activity.activity == "Working"
+
+
+async def test_escape_in_a_view_goes_back_without_killing_the_shell():
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, _call("t1", "read", {"path": "a.py"}))
@@ -262,12 +286,11 @@ async def test_escape_kills_a_running_shell_before_popping_a_view():
         await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
-        assert killed == [True]
-        assert isinstance(_top(app), ToolDetailView)
-        controller.shell_active, controller._shell_proc = False, None
+        assert killed == [] and _top(app) is None
+        # Back on the transcript, Esc kills the running shell.
         await pilot.press("escape")
         await pilot.pause()
-        assert _top(app) is None
+        assert killed == [True]
 
 
 async def test_popping_the_last_view_shows_the_transcript_where_it_was():
@@ -383,50 +406,39 @@ async def test_clicking_a_tool_inside_the_subagent_view():
         assert _titles(tool_view) == ["COMMAND", "RESULT"]
 
 
-async def test_ctrl_x_stops_the_child_of_the_open_subagent_view():
-    app = _app()
+async def test_ctrl_x_asks_to_stop_the_session_from_any_view():
+    from archie_cli.tui.dialogs import ConfirmDialog
+
+    client = FakeOrchestrator(sessions=[make_record("s1", name="Fix the parser")])
+    app = make_app(client)
     async with app.run_test(size=SIZE) as pilot:
         await _feed(app, pilot, USER, TASK, CHILD_SHELL)
         pane = app.pane
         stream = app.controller.ws
-        assert app.active_child_key is None
-        # Without a subagent view, ctrl+x asks before interrupting the main agent.
-        pane.input.focus()
-        await pilot.press(*"abc", "ctrl+x")
-        await pilot.pause()
-        assert pane.input.text == "abc" and not stream.sent
-        assert "main agent" in str(app.screen.message)
-        await pilot.press("enter")  # Cancel is focused.
-        await pilot.pause()
-        assert pane.input.text == "abc" and not stream.sent
-
         app.controller.turn_active = True
-        await pilot.press("ctrl+x", "right", "enter")
-        await settle(pilot, lambda: stream.sent)
-        assert stream.sent == [("interrupt", None)]
-        stream.sent.clear()
-
         await pilot.click(SubagentRow)
         await pilot.pause()
-        assert app.active_child_key == ("tk", 0)
-        # A tool view over it: ctrl+x still stops the subagent under it.
         _top(app).view.query_one(ToolRow).post_message(
             ToolClicked(_top(app).view.query_one(ToolRow).tool)
         )
         await pilot.pause()
         assert isinstance(_top(app), ToolDetailView)
         pane.input.focus()
-        await pilot.press("ctrl+x")
-        await pilot.pause()
-        assert not stream.sent
-        assert "subagent" in str(app.screen.message)
-        await pilot.press("right", "enter")
-        await settle(pilot, lambda: stream.sent)
-        assert stream.sent == [("command", InterruptCommand(scope="tk", subagent_index=0))]
+        await pilot.press(*"abc", "ctrl+x")
+        await settle(pilot, lambda: isinstance(app.screen, ConfirmDialog))
+        assert app.screen.dialog_title == "Stop session"
+        assert "Fix the parser" in str(app.screen.message)
+        await pilot.press("enter")  # Cancel is focused.
+        await settle(pilot, lambda: app.screen is app.screen_stack[0])
+        assert client.deleted == [] and pane.input.text == "abc"
 
-        await pilot.press("escape", "escape")
-        await pilot.pause()
-        assert app.active_child_key is None
+        await pilot.press("ctrl+x")
+        await settle(pilot, lambda: isinstance(app.screen, ConfirmDialog))
+        await pilot.press("right", "enter")
+        await settle(pilot, lambda: app.records["s1"].status == "stopped")
+        assert client.deleted == ["s1"]
+        # The stop goes through the orchestrator; the agent ends the turn on shutdown.
+        assert stream.sent == []
 
 
 async def test_subagent_status_updates_in_row_and_view():

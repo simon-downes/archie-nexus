@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from archie_shared import events as ce
-from archie_shared.commands import AnswerCommand, InterruptCommand, SwitchModelCommand
+from archie_shared.commands import AnswerCommand, SwitchModelCommand
 from archie_shared.events import LLMRequest, decode_event
 from archie_shared.kiro import kiro_model_id
 from archie_shared.models import load_models
@@ -791,10 +791,6 @@ class SessionController:
             self._fire(lambda ws: ws.send_interrupt())
             return "interrupt"
         return None
-
-    def stop_child(self, scope: str, index: int) -> None:
-        """Interrupt one subagent while its siblings keep running."""
-        self._fire(lambda ws: ws.send_command(InterruptCommand(scope=scope, subagent_index=index)))
 
     def switch_model(self, model_key: str) -> bool:
         """Ask the agent to switch model; False (nothing sent) while a turn runs."""
