@@ -1,4 +1,4 @@
-"""Tests for archie start and archie stop CLI commands (orchestrator API path)."""
+"""Tests for the explicit archie start CLI command (orchestrator API path)."""
 
 import itertools
 from contextlib import contextmanager
@@ -318,7 +318,7 @@ def test_start_older_orchestrator_stop_failure_is_reported_not_raised(monkeypatc
         )
         assert result.exit_code == 1
         assert OLDER in result.output
-        assert f"stop it with: archie stop {SID}" in result.output
+        assert "stop it from the TUI" in result.output
         mock_httpx.delete.assert_called_once()
 
 
@@ -383,116 +383,6 @@ def test_start_launches_tui_when_not_detached(monkeypatch, tmp_path):
         "focus": "myproject-01abc12345",
     }
     mock_tui.return_value.run.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# archie stop
-# ---------------------------------------------------------------------------
-
-
-def _make_sessions(*args) -> list[SessionDescriptor]:
-    return [_record(sid, status) for sid, status in args]
-
-
-def test_stop_sends_delete_for_matching_session(monkeypatch, tmp_path):
-    """archie stop with prefix → resolves and sends DELETE /api/sessions/{id}."""
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-
-    import httpx as real_httpx
-
-    sessions = _make_sessions(("myproject-01abc12345", "idle"))
-    sessions_resp = _sessions_list_response(sessions)
-    stop_resp = _session_response(status="stopped", status_code=200)
-
-    with patch("archie_cli.cli.httpx") as mock_httpx:
-        mock_httpx.get.return_value = sessions_resp
-        mock_httpx.delete.return_value = stop_resp
-        mock_httpx.ConnectError = real_httpx.ConnectError
-        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
-        runner = CliRunner()
-        result = runner.invoke(main, ["stop", "myproject"])
-
-    assert result.exit_code == 0
-    assert "myproject-01abc12345" in result.output
-    mock_httpx.delete.assert_called_once()
-    assert mock_httpx.get.call_args[0][0] == "http://127.0.0.1:7600/api/sessions"
-    assert (
-        mock_httpx.delete.call_args[0][0]
-        == "http://127.0.0.1:7600/api/sessions/myproject-01abc12345"
-    )
-
-
-def _stop(stop_resp: MagicMock):
-    """Run ``archie stop myproject`` against one running session and a DELETE response."""
-    import httpx as real_httpx
-
-    sessions_resp = _sessions_list_response(_make_sessions((SID, "idle")))
-    with patch("archie_cli.cli.httpx") as mock_httpx:
-        mock_httpx.get.return_value = sessions_resp
-        mock_httpx.delete.return_value = stop_resp
-        mock_httpx.HTTPError = real_httpx.HTTPError
-        mock_httpx.ConnectError = real_httpx.ConnectError
-        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
-        return CliRunner().invoke(main, ["stop", "myproject"])
-
-
-def test_stop_reports_a_session_that_is_no_longer_running(monkeypatch, tmp_path):
-    """A 404 from DELETE means the session has gone."""
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    result = _stop(_error_response(404, f"No session with ID '{SID}'"))
-    assert result.exit_code == 1
-    assert f"Session '{SID}' is no longer running." in result.output
-
-
-def test_stop_reports_a_conflict(monkeypatch, tmp_path):
-    """A 409 from DELETE shows the orchestrator's reason (starting, stopping or ended)."""
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    result = _stop(_error_response(409, f"Session '{SID}' is already stopping"))
-    assert result.exit_code == 1
-    assert f"Error: Session '{SID}' is already stopping" in result.output
-    assert "Stopped session" not in result.output
-
-
-def test_stop_reports_a_failed_stop(monkeypatch, tmp_path):
-    """Any other status is a failure with the error body."""
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    result = _stop(_error_response(500, "Docker command failed: daemon busy"))
-    assert result.exit_code == 1
-    assert "Failed to stop session: Docker command failed: daemon busy" in result.output
-
-
-def test_stop_no_sessions(monkeypatch, tmp_path):
-    """archie stop with no sessions → clear error."""
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-
-    import httpx as real_httpx
-
-    with patch("archie_cli.cli.httpx") as mock_httpx:
-        mock_httpx.get.return_value = _sessions_list_response([])
-        mock_httpx.ConnectError = real_httpx.ConnectError
-        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
-        runner = CliRunner()
-        result = runner.invoke(main, ["stop"])
-
-    assert result.exit_code != 0
-    assert "No running sessions" in result.output
-
-
-def test_stop_orchestrator_unreachable(monkeypatch, tmp_path):
-    """archie stop when orchestrator unreachable → error with 'archie serve'."""
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-
-    import httpx as real_httpx
-
-    with patch("archie_cli.cli.httpx") as mock_httpx:
-        mock_httpx.get.side_effect = real_httpx.ConnectError("refused")
-        mock_httpx.ConnectError = real_httpx.ConnectError
-        mock_httpx.HTTPStatusError = real_httpx.HTTPStatusError
-        runner = CliRunner()
-        result = runner.invoke(main, ["stop"])
-
-    assert result.exit_code != 0
-    assert "archie serve" in result.output
 
 
 def test_start_kiro_posts_backend(monkeypatch, tmp_path):
