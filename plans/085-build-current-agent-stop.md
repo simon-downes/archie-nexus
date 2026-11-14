@@ -89,16 +89,16 @@ If the user cancels, no websocket command is sent. If the websocket is unavailab
 ## Review
 
 - Plan review: 1 pass. Fixed the inactive-turn AC, defined no-live-session behavior, documented captured child targets, specified existing test helpers, and changed format verification to `--check`.
-- Code review: pending
-- Merge risk: pending
+- Code review: general and risk, 1 round; both reported no findings. The general reviewer mentioned an unrelated full-suite failure, but the recorded full run in this worktree passed all 5,432 tests; no failure was reproducible. Risk reviewer confirmed no external-input, API, security, or performance issue.
+- Merge risk: Low: the change is confined to the TUI shortcut and confirmation path, with no wire or persistence changes; cancellation remains the default and existing full tests passed.
 
 ## Outcome
 
-Pending implementation and verification.
+Delivered and verified with 5,432 passing tests, Ruff lint passing, targeted format checks passing, and `git diff --check` passing. Repository-wide format check has one unrelated existing mismatch in `persona/skills/python/assets/output.py`.
 
 PR: pending
 CI: pending
 
 ## Follow-ups
 
-- None.
+- Repository-wide `scripts/dev ruff format --check .` remains red because `persona/skills/python/assets/output.py` would be reformatted; this file is unrelated and was left unchanged.
