@@ -667,7 +667,9 @@ as a subagent row under its `task` tool. The child's transcript appears in the s
 
 The model keeps every row of the session. The TUI's `TranscriptView` mounts only a window of
 about 40 top-level rows (`WINDOW_ROWS`). Scrolling to either edge pages earlier or later rows in, keeping the
-row at the edge in place, and boundary rows show how many rows are hidden. Live rows are mounted
+rows in view in place, and boundary rows show how many rows are hidden. Rows paged past stay mounted,
+up to 200 (`WINDOW_SCROLL_ROWS`), so scrolling back over them is free; returning to the end of the
+latest rows mounts 40 again. Home and End jump to the first or latest rows. Live rows are mounted
 while the window shows the latest rows. While you read history, they only increase the hidden
 count below.
 

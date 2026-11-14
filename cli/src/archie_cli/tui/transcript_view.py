@@ -36,6 +36,7 @@ from archie_shared.transcript import (
 )
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.containers import VerticalScroll
 from textual.message import Message
 from textual.widget import Widget
@@ -427,6 +428,18 @@ class _Row:
 WINDOW_ROWS = 40
 WINDOW_PAGE = 20
 WINDOW_OVERSCAN = 20
+WINDOW_SCROLL_ROWS = 200
+"""Most rows paging keeps mounted before it drops rows at the far end.
+
+Scrolling pages rows in without dropping the ones already mounted, up to this many, so
+scrolling back over them mounts nothing; returning to the end of the latest rows
+(scrolling there, End, a jump, or the first live row while following) trims back to
+:data:`WINDOW_ROWS`. Measured on
+archie-01m32ky6rn.jsonl (162 rows; a 20-row page costs 0.4-1.6 s of mounting): wheeling
+to the top and back took 7 + 7 pages at 40 rows and 7 + 0 at 200, while a 200-row window
+made a height change 0.17 -> 0.84 s and leaving the pane 0.1 -> 0.27 s. The 200 is 078
+D9's window; switching still mounts only :data:`WINDOW_ROWS`.
+"""
 FILL_PAGES = 10
 """Most pages added at once to fill a viewport the window's rows don't fill."""
 LAYOUT_WAITS = 5
@@ -484,6 +497,7 @@ class TranscriptView(VerticalScroll):
         window: int = WINDOW_ROWS,
         page: int = WINDOW_PAGE,
         overscan: int = WINDOW_OVERSCAN,
+        scroll_span: int = WINDOW_SCROLL_ROWS,
         **kwargs,
     ) -> None:
         """``root_slot`` is the model slot whose items are rows: ``None`` for the
@@ -496,12 +510,16 @@ class TranscriptView(VerticalScroll):
         self._suspended = False
         self._window = window
         self._span = window  # rows to keep mounted; grows to fill the viewport
+        self._scroll_span = scroll_span  # rows paging keeps mounted (at least ``_span``)
         self._page = page
         self._filling = False
         self._overscan = overscan
         self._start = 0
         self._end = 0
         self._shift_pending = False
+        self._wanted_page: str | None = None  # a scroll at an edge while a page was pending
+        self._pending_direction: str | None = None  # the pending (or last) page's direction
+        self._shifts = 0  # pages so far; only the latest page's restore runs
         self._window_generation = 0
         self._jumping = False  # a jump to the latest rows hasn't reached the end yet
         self._top: WindowBoundary | None = None
@@ -512,15 +530,103 @@ class TranscriptView(VerticalScroll):
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         self._autoscroll = new_value >= self.max_scroll_y and self.window_is_latest
+        direction: str | None = None
         if new_value <= 1 and new_value < old_value and self._start > 0 and not self._jumping:
             # (Not while a jump lands: rows unmounted above can clamp the offset to 0.)
-            self._schedule_shift("earlier")
+            direction = "earlier"
         elif (
             new_value >= max(0, self.max_scroll_y - 1)
             and new_value > old_value
             and self._end < len(self._rows)
         ):
-            self._schedule_shift("later")
+            direction = "later"
+        if direction is not None:
+            if not self._shift_pending:
+                self._schedule_shift(direction)
+            elif direction == self._pending_direction:
+                # Checked again once the pending page lands (``_retry_page``): a
+                # scrollbar drag held at the edge doesn't change ``scroll_y`` again.
+                # (Not the other way: the pending page's layout clamps the offset there.)
+                self._wanted_page = direction
+        elif (
+            self._autoscroll
+            and new_value > old_value
+            and not self._shift_pending
+            and not self._jumping
+        ):
+            self._schedule_trim()  # scrolled back to the end
+
+    # A scroll toward an edge the view is already at doesn't change ``scroll_y``, so
+    # ``watch_scroll_y`` can't page. That happens when the view reached the edge while a
+    # page was pending (its trigger was dropped) or when a page added no lines (rows
+    # that aren't displayed). The wheel and scroll keys page there instead.
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if not (event.ctrl or event.shift) and self._page_at_edge("later"):
+            event.prevent_default()
+            event.stop()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if not (event.ctrl or event.shift) and self._page_at_edge("earlier"):
+            event.prevent_default()
+            event.stop()
+
+    def action_scroll_down(self) -> None:
+        if not self._page_at_edge("later"):
+            super().action_scroll_down()
+
+    def action_page_down(self) -> None:
+        if not self._page_at_edge("later"):
+            super().action_page_down()
+
+    def action_scroll_end(self) -> None:
+        if self.window_is_latest or self._suspended:
+            super().action_scroll_end()
+        else:
+            self.jump_to_latest()
+
+    def action_scroll_up(self) -> None:
+        if not self._page_at_edge("earlier"):
+            super().action_scroll_up()
+
+    def action_page_up(self) -> None:
+        if not self._page_at_edge("earlier"):
+            super().action_page_up()
+
+    def action_scroll_home(self) -> None:
+        if self._start == 0 or self._suspended:
+            super().action_scroll_home()
+        else:
+            self.jump_to_first()
+
+    def _page_at_edge(self, direction: str) -> bool:
+        """Page ``direction`` if the view is at that edge and rows lie beyond the window.
+
+        A scroll that arrives while a page is pending is remembered and checked again
+        once that page has landed (``_retry_page``).
+
+        Returns:
+            True if the scroll is handled here (paged or remembered).
+        """
+        if self._suspended:
+            return False
+        if direction == "later":
+            at_edge = self._end < len(self._rows) and self.scroll_y >= self.max_scroll_y
+        else:
+            at_edge = self._start > 0 and self.scroll_y <= 0 and not self._jumping
+        if not at_edge:
+            return False
+        if self._shift_pending:
+            self._wanted_page = direction
+        else:
+            self._schedule_shift(direction)
+        return True
+
+    def _retry_page(self) -> None:
+        """Apply a scroll that arrived at an edge while the last page was pending."""
+        direction, self._wanted_page = self._wanted_page, None
+        if direction is not None:
+            self._page_at_edge(direction)
 
     def scroll_if_at_bottom(self) -> None:
         if self._autoscroll and not self._suspended and self.window_is_latest:
@@ -546,68 +652,150 @@ class TranscriptView(VerticalScroll):
         if self._shift_pending or self._suspended:
             return
         self._shift_pending = True
+        self._pending_direction = direction
         self.call_later(self.shift_window, direction)
 
     def shift_window(self, direction: str) -> None:
         """Page the window one step ``"earlier"`` or ``"later"``.
 
-        The row at the edge being paged stays mounted and is scrolled back to where
-        it was (top edge for earlier, bottom edge for later) after the next refresh.
+        Rows already mounted stay mounted up to ``scroll_span`` rows; beyond that the
+        rows at the far end are dropped. The first row in view that stays mounted is the
+        anchor: after the next refresh the view scrolls so that row is back at the same
+        offset from the view's top, so the content in view doesn't move.
         """
-        anchor: Widget | None = None
+        anchor: tuple[Widget, int] | None = None
+        self._pending_direction = direction
+        start, end, total = self._start, self._end, len(self._rows)
+        if direction == "earlier" and start > 0:
+            new_start = max(0, start - self._page)
+            new_end = min(total, max(new_start + self._span, start + 1))
+            new_end = max(new_end, min(end, new_start + self._scroll_span))
+        elif direction == "later" and end < total:
+            new_end = min(total, end + self._page)
+            new_start = max(0, min(new_end - self._span, end - 1))
+            new_start = min(new_start, max(start, new_end - self._scroll_span))
+        else:
+            self._shift_pending = False
+            self._wanted_page = None
+            return
         try:
-            start, end, total = self._start, self._end, len(self._rows)
-            if direction == "earlier" and start > 0:
-                anchor = self._rows[start].widget if start < end else None
-                new_start = max(0, start - self._page)
-                new_end = min(total, max(new_start + self._span, start + 1))
-                self._set_window(new_start, new_end)
-            elif direction == "later" and end < total:
-                anchor = self._rows[end - 1].widget if end > start else None
-                new_end = min(total, end + self._page)
-                new_start = max(0, min(new_end - self._span, end - 1))
-                self._set_window(new_start, new_end)
+            anchor = self._anchor(new_start, new_end)
+            self._set_window(new_start, new_end)
+        except BaseException:
+            self._shift_pending = False  # no restore will clear it
+            raise
         finally:
-            if anchor is None:
-                self._shift_pending = False
+            self._shifts += 1
+        # Pending until the restore lands: scrolls that reach an edge meanwhile only ask
+        # for another page, checked once the restore has landed (``_retry_page``).
+        self._shift_pending = anchor is not None
         if not self.window_is_latest:
             self._autoscroll = False  # before the anchor restore lands
 
         if anchor is None:
+            self._retry_page()
             return
 
-        generation = self._window_generation
+        widget, offset = anchor
+        current = self._shifts, self._window_generation
 
         def restore() -> None:
+            if current != (self._shifts, self._window_generation):
+                return  # the window moved again; that move restores (or follows the end)
+            wanted = self._wanted_page
             try:
-                # Skip if the window moved again first (``jump_to_latest``).
-                if anchor.is_attached and generation == self._window_generation:
-                    self.scroll_to_widget(
-                        anchor,
-                        top=direction == "earlier",
+                if widget.is_attached:
+                    self.scroll_to(
+                        y=widget.virtual_region.y - offset,
                         animate=False,
                         immediate=True,
                         force=True,
                     )
             finally:
+                # The restore's own scroll isn't a request to page: when rows were
+                # dropped beyond the edge it lands there, and paging back would undo this.
+                self._wanted_page = wanted
                 self._shift_pending = False
+            self._retry_page()
 
         self.call_after_refresh(restore)
+
+    def _anchor(self, new_start: int, new_end: int) -> tuple[Widget, int] | None:
+        """The first laid-out row in view that stays in ``rows[new_start:new_end]``.
+
+        Returns:
+            The row's widget and its top's offset from the view's top, or None if no
+            row that stays is laid out (nothing to keep in place).
+        """
+        top = round(self.scroll_y)
+        fallback: tuple[Widget, int] | None = None
+        for i in range(max(self._start, new_start), min(self._end, new_end)):
+            widget = self._rows[i].widget
+            if widget is None or not widget.is_attached or not widget.display:
+                continue
+            region = widget.virtual_region
+            if not region.height:
+                continue  # not laid out yet
+            if region.bottom > top:
+                return widget, region.y - top
+            fallback = widget, region.y - top
+        return fallback
 
     def jump_to_latest(self) -> None:
         """Mount the newest rows and follow the end of the transcript."""
         total = len(self._rows)
+        self._jump(max(0, total - self._span), total, to_end=True)
+
+    def jump_to_first(self) -> None:
+        """Mount the first rows and scroll to the top."""
+        self._jump(0, min(len(self._rows), self._span), to_end=False)
+
+    def _jump(self, start: int, end: int, *, to_end: bool) -> None:
+        """Mount ``rows[start:end]`` and scroll to the end or the top."""
         self._window_generation += 1  # cancels a pending anchor restore
-        self._set_window(max(0, total - self._span), total)
-        self._autoscroll = True
+        self._shift_pending = False
+        self._wanted_page = None
+        self._set_window(start, end)
+        self._autoscroll = to_end
         if not self._suspended:
             self._jumping = True
-            self.scroll_end(animate=False)
+            if to_end:
+                self.scroll_end(animate=False)
+            else:
+                self.scroll_home(animate=False)
 
             def landed() -> None:
                 self._jumping = False
 
             self.call_after_refresh(landed)
+
+    def _schedule_trim(self) -> None:
+        """After the next refresh, trim a grown window if the view still follows the end."""
+        if self._grown and not self._suspended:
+            self.call_after_refresh(self._trim_to_span)
+
+    @property
+    def _grown(self) -> bool:
+        """True if paging left more rows mounted than live appends would."""
+        return self._end - self._start > self._span + self._overscan
+
+    def _trim_to_span(self) -> None:
+        """Mount only the latest ``_span`` rows again while the view follows the end.
+
+        Rows paged in by scrolling up stay mounted (up to ``scroll_span``) so scrolling
+        back over them is free; once the view is back at the end they only make every
+        layout slower (a 200-row window turns a height change from 0.17 s into 0.84 s).
+        Up to ``overscan`` extra rows stay, as for live appends.
+        """
+        if (
+            self._suspended
+            or self._shift_pending
+            or self._jumping
+            or not self.following
+            or not self._grown
+        ):
+            return
+        self.jump_to_latest()
 
     def _set_window(self, new_start: int, new_end: int, *, fill: bool = True) -> None:
         """Mount exactly ``rows[new_start:new_end]``, keeping widgets already mounted.
@@ -626,6 +814,8 @@ class TranscriptView(VerticalScroll):
 
     def on_resize(self) -> None:
         self._schedule_fill()
+        if self.following:
+            self._schedule_trim()  # after the fill check, so a trimmed window refills
 
     def _schedule_fill(self, pages: int | None = None) -> None:
         """Check after the next refresh (once the rows are laid out) whether to fill."""
@@ -937,6 +1127,7 @@ class TranscriptView(VerticalScroll):
         self._start = self._end = 0
         self._top = self._bottom = None
         self._shift_pending = False
+        self._wanted_page = None
         await self.remove_children()
 
     def finish_streams(self) -> None:
