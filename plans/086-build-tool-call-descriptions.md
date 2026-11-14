@@ -1,6 +1,6 @@
 # 086 — Descriptions on shell and exec calls
 
-Status: building
+Status: reviewing
 Branch: build-it/086-tool-call-descriptions (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/086-tool-call-descriptions
 
