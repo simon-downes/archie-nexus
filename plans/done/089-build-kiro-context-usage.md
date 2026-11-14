@@ -1,6 +1,6 @@
 # 089 — Kiro context usage
 
-Status: reviewing
+Status: done
 Branch: build-it/089-kiro-context-usage (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/089-kiro-context-usage
 
@@ -307,13 +307,32 @@ max and distinct set for the turn's `llm_request`. Both read the same frames in
   every bump; stated in the PR body and Risks. Evidence: `env -u ARCHIE_BACKEND scripts/dev
   test` → 5455 passed; `ruff check .` and `ruff format --check` on the 25 touched Python
   files pass.
+- Merge risk: Medium: older code reading this change's Kiro session lines or status frames
+  rejects them (`forbid_unknown_fields`) and drops their cost or state; limited because native
+  lines and status frames are byte-identical, and agent, orchestrator and CLI deploy together
+  on this single host.
 
 ## Outcome
+
+Kiro sessions now show live context usage in the TUI status bar (`Ctx: N%`, from
+`session_status.context_pct`, protocol 5), and each Kiro turn's `llm_request` stores the
+turn's last and highest figure plus `context_samples` and `kiro_requests`. TUI replay,
+`archie.db` (`METRICS_VERSION` 6), the insights session page and `archie stats session` show
+the percentage. Evidence: `env -u ARCHIE_BACKEND scripts/dev test` gives 5455 passed;
+`ruff check .` and `ruff format --check` pass. Browser: `/insights/sessions/<id>` served
+from the worktree (uvicorn, lifespan off) over a synthetic Kiro log, 1280x900, showed the
+percentage column and the "Context % per main-agent turn" chart.
+
+Not verified: a live Kiro session against real `kiro-cli` (the fake ACP agent covers the
+flow), and the TUI against a running orchestrator.
 
 PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Kiro turns with no context figure (older logs) show `0` in the insights and stats context
+  column (the token fallback); `—` would be clearer.
 
 - Re-evaluate per-request Kiro `llm_request` once `context_samples` vs `kiro_requests` data
   explains the mismatched turns.
