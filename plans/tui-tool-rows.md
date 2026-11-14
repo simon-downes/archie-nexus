@@ -54,15 +54,15 @@ No grouping of consecutive calls for now.
     line count.
   - A call interrupted before it finished (the result `cancelled`) shows `cancelled`
     and no duration.
-- **`/workspace`:** stripped everywhere on the row, even when the model included it: in
-  paths, working directories, commands and error text. `/workspace/archie-nexus/cli`
-  shows as `archie-nexus/cli`; `/workspace` on its own isn't shown. The detail view
-  keeps the exact input.
+- **`/workspace`:** stripped everywhere on the row except a shell or exec description,
+  even when the model included it: in paths, working directories, commands and error
+  text. `/workspace/archie-nexus/cli` shows as `archie-nexus/cli`; `/workspace` on its own
+  isn't shown. The detail view keeps the exact input.
 - **Other paths:** `~` for the session container's home directory. A path that doesn't
   fit loses its middle (`archie-nexus/…/prototype/data.py`) so the filename stays.
 - **Shell working directory:** shown as `· in <dir>` at the end of line 2 when it isn't
-  the workspace root. The command is cut to make room, so the directory is never the
-  part that's lost.
+  the workspace root. The command or description is cut to make room, so the directory
+  is never the part that's lost.
 - **Shell and exec targets:** the call's `description` input (plan 086), on one line with
   runs of whitespace collapsed and otherwise as written (`/workspace` isn't stripped from
   it). A shell row keeps its `· in <dir>` suffix. Without a usable description (absent,
@@ -168,8 +168,8 @@ doesn't say how many places a `replace_all` edit changed, so there's no count.
 ```
 
 Line 2 is the description, or without one the command's first line after `$`; the whole
-command is in the detail view. The second example shows `/workspace` stripped from a command the model wrote
-as `cd /workspace/archie-nexus && …`.
+command is in the detail view. The second example shows `/workspace` stripped from a
+command the model wrote as `cd /workspace/archie-nexus && …`.
 
 ### exec
 

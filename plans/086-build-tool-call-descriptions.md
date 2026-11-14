@@ -1,6 +1,6 @@
 # 086 — Descriptions on shell and exec calls
 
-Status: reviewing
+Status: done
 Branch: build-it/086-tool-call-descriptions (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/086-tool-call-descriptions
 
@@ -270,10 +270,30 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
   (⚠️); copy-text AC gets a milestone and test file; the new doc examples are the two
   `row_text` ACs; exec headline styling change noted as intended; D6 now leaves
   descriptions unstripped, since `strip_workspace` turns a bare `/workspace` into `.`.
-- Code review:
-- Merge risk:
+- Code review: one round, `general` and `risk` (the diff changes the model-facing tool
+  schemas, a public interface consumed by every backend and by Kiro's MCP validation).
+  `risk`: no findings; it confirmed the MCP server validates inputs by default, that every
+  dispatch path drops or ignores `description`, and that markup is escaped. `general`: 2 ℹ️,
+  both accepted and fixed in `plans/tui-tool-rows.md` (the `/workspace` and working-directory
+  rules now name the description exception; a paragraph rewrapped).
+- Spec check: every MUST traces to code and a passing test (`test_exec_tool.py`,
+  `test_kiro_mcp.py`, `test_kiro_harness.py`, `test_tool_rows.py`, `test_tool_summaries.py`,
+  `test_transcript_model.py`, `test_tui_copy_paste.py`); no untraced changes.
+- Merge risk: Medium: on Kiro, a shell or exec call without a description is now rejected
+  before it runs, which costs a retry; the Anthropic/OpenAI/Ollama paths don't validate, and
+  every display falls back to the command when the description is missing.
 
 ## Outcome
+
+`shell` and `exec` now require a `description` in their model-facing schemas on every
+backend; the tools ignore it, and the exec-namespace `shell()` is unchanged. TUI tool rows,
+subagent status lines, detail headers, breadcrumbs and web viewer rows show it in place of
+the command or `python · N lines`, falling back to today's text without one. Evidence: full
+`scripts/dev test` has the same 23 baseline failures and no new ones; `ruff check .` and
+`ruff format --check agent shared cli tests` are clean. Not verified: a live session with a
+real model (whether models write good descriptions, and how often Kiro rejects a call), and
+the web viewer in a browser (it needs a running orchestrator and Docker, which this
+container can't run; its rows come from the tested shared formatters).
 
 PR: pending
 CI: pending
