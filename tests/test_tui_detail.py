@@ -390,11 +390,21 @@ async def test_ctrl_x_stops_the_child_of_the_open_subagent_view():
         pane = app.pane
         stream = app.controller.ws
         assert app.active_child_key is None
-        # Without a subagent view, ctrl+x is the input's (cut the line).
+        # Without a subagent view, ctrl+x asks before interrupting the main agent.
         pane.input.focus()
         await pilot.press(*"abc", "ctrl+x")
         await pilot.pause()
-        assert pane.input.text == "" and not stream.sent
+        assert pane.input.text == "abc" and not stream.sent
+        assert "main agent" in str(app.screen.message)
+        await pilot.press("enter")  # Cancel is focused.
+        await pilot.pause()
+        assert pane.input.text == "abc" and not stream.sent
+
+        app.controller.turn_active = True
+        await pilot.press("ctrl+x", "right", "enter")
+        await settle(pilot, lambda: stream.sent)
+        assert stream.sent == [("interrupt", None)]
+        stream.sent.clear()
 
         await pilot.click(SubagentRow)
         await pilot.pause()
@@ -407,6 +417,10 @@ async def test_ctrl_x_stops_the_child_of_the_open_subagent_view():
         assert isinstance(_top(app), ToolDetailView)
         pane.input.focus()
         await pilot.press("ctrl+x")
+        await pilot.pause()
+        assert not stream.sent
+        assert "subagent" in str(app.screen.message)
+        await pilot.press("right", "enter")
         await settle(pilot, lambda: stream.sent)
         assert stream.sent == [("command", InterruptCommand(scope="tk", subagent_index=0))]
 

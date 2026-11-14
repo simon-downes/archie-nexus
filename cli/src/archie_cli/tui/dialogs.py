@@ -201,6 +201,40 @@ class ConfirmDialog(Dialog[bool]):
         self.dismiss(event.button.id == "confirm")
 
 
+def child_agent_stop_dialog(
+    record: SessionDescriptor, *, over: Region | None = None
+) -> ConfirmDialog:
+    """Confirm interrupting the currently shown subagent."""
+    message = Text.assemble(
+        "Stop the subagent in ",
+        (record.name, "bold"),
+        "?\n\n",
+        (
+            "This ends the selected subagent's work. The main agent and other subagents "
+            "continue running.",
+            theme.MUTED,
+        ),
+    )
+    return ConfirmDialog("Stop subagent", message, "Stop subagent", destructive=True, over=over)
+
+
+def main_agent_stop_dialog(
+    record: SessionDescriptor, *, over: Region | None = None
+) -> ConfirmDialog:
+    """Confirm interrupting the main session agent."""
+    message = Text.assemble(
+        "Stop the main agent in ",
+        (record.name, "bold"),
+        "?\n\n",
+        (
+            "This interrupts the current turn and prevents its remaining work from running. "
+            "Any subagents may also stop.",
+            theme.MUTED,
+        ),
+    )
+    return ConfirmDialog("Stop main agent", message, "Stop main agent", destructive=True, over=over)
+
+
 def stop_dialog(record: SessionDescriptor, *, over: Region | None = None) -> ConfirmDialog:
     """Confirm stopping a session: what it does, with Cancel focused."""
     message = Text.assemble(
@@ -438,7 +472,7 @@ KEYS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("alt+m", "change model"),
             ("ctrl+c", "copy the selection or the focused block"),
             ("ctrl+g", "write the message in $EDITOR (saving sends it)"),
-            ("ctrl+x", "stop the subagent shown in a subagent view"),
+            ("ctrl+x", "stop the current agent after confirmation"),
         ),
     ),
     (

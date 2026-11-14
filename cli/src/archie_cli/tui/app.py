@@ -66,6 +66,8 @@ from archie_cli.tui.dialogs import (
     NewSessionDialog,
     QuitDialog,
     RenameDialog,
+    child_agent_stop_dialog,
+    main_agent_stop_dialog,
     stop_dialog,
 )
 from archie_cli.tui.input import MessageInput
@@ -201,9 +203,8 @@ class ArchieApp(App):
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+c", "copy_block", "Copy Block", show=False),
         Binding("ctrl+g", "editor", "Editor", show=False),
-        # Priority, so it reaches the app while the input (where ctrl+x cuts) has focus;
-        # ``check_action`` passes the key on when no subagent view is open.
-        Binding("ctrl+x", "stop_child", "Stop selected child", show=False, priority=True),
+        # Priority, so it reaches the app while the input has focus.
+        Binding("ctrl+x", "stop_current_agent", "Stop current agent", show=False, priority=True),
         Binding("alt+up", "step_session(-1)", "Previous session", show=False, priority=True),
         Binding("alt+down", "step_session(1)", "Next session", show=False, priority=True),
         *(
@@ -650,25 +651,45 @@ class ArchieApp(App):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Switching, focus and dialog keys act only on the main screen (a dialog or the
-        palette gets them otherwise); ``ctrl+x`` only while a subagent view is open
-        (otherwise the key goes on to the focused widget)."""
+        palette gets them otherwise); ``ctrl+x`` acts on the current agent."""
         if action in _MAIN_SCREEN_ACTIONS:
             return self._on_main_screen()
-        if action == "stop_child":
-            return self.active_child_key is not None
+        if action == "stop_current_agent":
+            return self._on_main_screen()
         return True
 
     # --- Subagent views ---------------------------------------------------------------
 
     @property
     def active_child_key(self) -> tuple[str, int] | None:
-        """The subagent ``ctrl+x`` stops (the pane's topmost subagent view's), or None."""
+        """The current subagent target, or None when the main agent is shown."""
         return self._pane.active_child_key if self._pane is not None else None
 
-    def action_stop_child(self) -> None:
-        """ctrl+x: stop the child shown in the open subagent view; siblings keep running."""
-        if self._pane is not None:
-            self._pane.stop_child()
+    def action_stop_current_agent(self) -> None:
+        """ctrl+x: confirm stopping the agent whose conversation is shown."""
+        record = self._acting_on()
+        if record is None or self._pane is None or self._pane.controller is None:
+            return
+        child_key = self.active_child_key
+        self._dialog(self._stop_current_agent(record, child_key))
+
+    async def _stop_current_agent(
+        self, record: SessionDescriptor, child_key: tuple[str, int] | None
+    ) -> None:
+        dialog = (
+            child_agent_stop_dialog(record, over=self._main.region)
+            if child_key is not None
+            else main_agent_stop_dialog(record, over=self._main.region)
+        )
+        if not await self._session_dialog(dialog):
+            return
+        controller = self._pane.controller if self._pane is not None else None
+        if controller is None:
+            return
+        if child_key is None:
+            controller.cancel()
+        else:
+            controller.stop_child(*child_key)
 
     # --- Actions ----------------------------------------------------------------------
 
