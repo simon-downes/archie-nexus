@@ -296,7 +296,7 @@ the web viewer in a browser (it needs a running orchestrator and Docker, which t
 container can't run; its rows come from the tested shared formatters).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/33
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
