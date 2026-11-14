@@ -172,7 +172,7 @@ def format_tool_pending(name: str, input_dict: dict) -> str:
             return f"Grep {_hi(pattern)} in {target}"
 
         case "shell":
-            command = input_dict.get("command", "")
+            command = call_description(name, input_dict) or input_dict.get("command", "")
             return f"Shell {_hi(command)}"
 
         case "code":
@@ -246,6 +246,9 @@ def _question_answer(result: str) -> str:
 def format_tool_activity(name: str, input_dict: dict) -> str:
     """Produce a compact one-line activity label for any tool."""
     if name == "exec":
+        description = call_description(name, input_dict)
+        if description:
+            return f"Exec {_hi(description)}"
         source = input_dict.get("source", "")
         line_count = len(source.splitlines())
         return f"Exec ({line_count} lines)"
@@ -267,7 +270,7 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
     if is_error:
         first_line = result.splitlines()[0] if result.splitlines() else ""
         if name == "shell":
-            command = input_dict.get("command", "")
+            command = call_description(name, input_dict) or input_dict.get("command", "")
             line_count = len(result.splitlines())
             status = first_line
             if first_line.startswith("[exit:"):
@@ -357,7 +360,7 @@ def _format_tool_complete(name: str, input_dict: dict, result: str, is_error: bo
             )
 
         case "shell":
-            command = input_dict.get("command", "")
+            command = call_description(name, input_dict) or input_dict.get("command", "")
             # Parse exit code from "[exit: N]"
             exit_code = None
             first_line = result.splitlines()[0] if result.splitlines() else ""

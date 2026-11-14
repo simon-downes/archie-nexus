@@ -221,7 +221,7 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
   description. Verify command: 168 passed. Full suite: the same 23 baseline failures, no new
   ones; `ruff check` and `ruff format --check` clean.
 
-### [ ] M2 — Description in every other summary
+### [x] M2 — Description in every other summary
 
 - **Approach:** Use `call_description` in `format_tool_pending` (shell), `format_tool_activity`
   (exec, `Exec [bold]<desc>[/]`), `_format_tool_complete` (shell error and success branches,
@@ -241,7 +241,14 @@ The guidance text for `DESCRIPTION_INPUT` (D9):
   show the description.
 - **Verify:** `scripts/dev test tests/test_tool_summaries.py tests/test_transcript_model.py tests/test_markup.py tests/test_tui_subagents.py tests/test_web_session_detail.py tests/test_tui_copy_paste.py`
   passes, and the full suite has no failures beyond the baseline list.
-- **Outcome:**
+- **Outcome:** `call_description` used in `format_tool_pending`/`_format_tool_complete`
+  (shell) and `format_tool_activity` (exec); `tool_headline`'s exec branch shows
+  `Exec [bold]<desc>[/]`; `tool_preview` keeps the command's first line with a description;
+  shell `Options` leaves `description` out. New tests in `test_tool_summaries.py`,
+  `test_transcript_model.py` (headline, crumb, preview, detail sections, subagent activity)
+  and `test_tui_copy_paste.py` (copy text). Verify command: 2126 passed (12 new
+  description tests selected with `-k description`). Full suite: the same 23 baseline
+  failures, none new; `ruff check` and `ruff format --check` clean.
 
 ## Deviations
 

@@ -49,7 +49,11 @@ from archie_shared.events import (
 from archie_shared.markup import escape as _esc
 from archie_shared.markup import plain_text
 from archie_shared.session.accounting import UsageTotals
-from archie_shared.tool_summaries import format_tool_activity, format_tool_complete
+from archie_shared.tool_summaries import (
+    call_description,
+    format_tool_activity,
+    format_tool_complete,
+)
 
 PREVIEW_CHARS = 8000
 """Characters of one input or result section that a detail view shows."""
@@ -278,12 +282,15 @@ def _completed_summary(tool: ToolNode) -> str:
 def tool_headline(tool: ToolNode) -> str:
     """One-line Rich-markup summary of a tool row (no status glyph)."""
     if tool.name == "exec":
+        # With a description the label is plain, like ``Shell [bold]…[/]`` (086).
+        description = call_description(tool.name, tool.input)
+        label = f"Exec [bold]{_esc(description)}[/]" if description else "[bold]Exec[/]"
         if tool.result is None:
-            return "[bold]Exec[/]"
+            return label
         if tool.status == "error":
             message = _first_line(tool.result)[:120] or "error"
-            return f"[bold]Exec[/] [dim red]{_esc(message)}[/]"
-        return f"[bold]Exec[/] [dim]{_exec_metrics(tool)}[/]"
+            return f"{label} [dim red]{_esc(message)}[/]"
+        return f"{label} [dim]{_exec_metrics(tool)}[/]"
     if tool.result is None:
         tool_input = tool.input
         if tool.name == "shell" and isinstance(tool_input.get("command"), str):
@@ -316,8 +323,9 @@ def tool_preview(tool: ToolNode) -> tuple[list[str], int]:
     """Plain source lines previewed in the row (exec source, shell command), and how
     many more lines the detail view holds.
 
-    The shell headline already shows the command's first line, so its preview starts
-    at the second line and counts the first towards the limit.
+    The shell headline shows the command's first line unless the call has a description
+    (086), so without one the preview starts at the second line and counts the first
+    towards the limit.
     """
     if tool.name == "exec":
         source = tool.input.get("source")
@@ -327,6 +335,8 @@ def tool_preview(tool: ToolNode) -> tuple[list[str], int]:
         if not isinstance(command, str):
             return [], 0
         lines, omitted = source_preview(command)
+        if call_description(tool.name, tool.input):
+            return lines, omitted
         return lines[1:], omitted
     return [], 0
 
@@ -402,8 +412,10 @@ def tool_detail_sections(tool: ToolNode) -> list[DetailSection]:
         sections.append(_section("Source", tool_input["source"], "python"))
     elif tool.name == "shell" and isinstance(tool_input.get("command"), str):
         sections.append(_section("Command", tool_input["command"], "bash"))
-        if rest("command"):
-            sections.append(_section("Options", _json_text(rest("command")), "json"))
+        # The header shows the description (086), so Options leaves it out.
+        if rest("command", "description"):
+            options = _json_text(rest("command", "description"))
+            sections.append(_section("Options", options, "json"))
     elif tool.name == "write" and isinstance(tool_input.get("content"), str):
         sections.append(_section("Content", tool_input["content"], filename=path))
     elif tool.name == "edit" and isinstance(tool_input.get("old"), str):

@@ -172,3 +172,13 @@ async def test_ctrl_c_in_a_tool_view_copies_the_whole_call_without_a_selection()
         await pilot.press("ctrl+c")
         assert app.clipboard == "SOURCE\nprint(1)\n\nRESULT\n1"
         assert [n.title for n in app.sidebar.notices.notices] == ["Copied to clipboard"]
+
+
+def test_tool_row_copies_the_command_or_source_not_the_description():
+    from archie_cli.tui.transcript_view import ToolRow
+    from archie_shared.transcript import ToolNode
+
+    shell = ToolNode("tool-s", "s", "shell", {"description": "List files", "command": "ls -la"})
+    assert ToolRow(shell).get_copy_text() == "ls -la"
+    exec_tool = ToolNode("tool-e", "e", "exec", {"description": "Print one", "source": "print(1)"})
+    assert ToolRow(exec_tool).get_copy_text() == "print(1)"
