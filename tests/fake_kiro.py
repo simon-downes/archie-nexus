@@ -253,7 +253,9 @@ async def prompt(rid: int, params: dict) -> None:
         os._exit(3)
     if text == "sleep":
         chunk("Sleeping.")
-        task = asyncio.create_task(archie_tool("tc_sleep", "shell", {"command": "sleep 30"}))
+        task = asyncio.create_task(
+            archie_tool("tc_sleep", "shell", {"command": "sleep 30", "description": "Sleep"})
+        )
         await cancelled.wait()
         completion(0.25, "aborted")
         update(
@@ -287,7 +289,7 @@ async def prompt(rid: int, params: dict) -> None:
         }
     )
     context(2.5)
-    await archie_tool("tc_shell", "shell", {"command": "echo KIRO-OK"})
+    await archie_tool("tc_shell", "shell", {"command": "echo KIRO-OK", "description": "Say OK"})
     context(3.1)
     chunk("Done: KIRO-OK.")
     completion(0.5, request_ids=3)

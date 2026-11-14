@@ -1,10 +1,55 @@
 """Tests for shared tool summary formatting."""
 
+import pytest
+from archie_shared.markup import plain_text
 from archie_shared.tool_summaries import (
+    call_description,
     format_tool_activity,
     format_tool_complete,
     format_tool_pending,
 )
+
+# --- descriptions (086) ---
+
+
+def test_call_description_is_one_line_for_shell_and_exec_only():
+    assert call_description("shell", {"description": "Run\n  tests"}) == "Run tests"
+    assert call_description("exec", {"description": " Count rows "}) == "Count rows"
+    assert call_description("read", {"description": "x"}) == ""
+    for value in (None, "", "  ", 3):
+        assert call_description("shell", {"description": value}) == ""
+    assert call_description("shell", {}) == ""
+
+
+def test_activity_shows_the_description():
+    shell = {"command": "git status", "description": "Check the tree"}
+    assert format_tool_activity("shell", shell) == "Shell [bold]Check the tree[/]"
+    assert format_tool_pending("shell", shell) == "Shell [bold]Check the tree[/]"
+    exec_input = {"source": "x\ny", "description": "Count rows"}
+    assert format_tool_activity("exec", exec_input) == "Exec [bold]Count rows[/]"
+
+
+@pytest.mark.parametrize(
+    ("result", "is_error"),
+    [("[exit: 0]\nhi", False), ("[exit: 1]\nboom", False), ("[exit: 1]\nboom", True)],
+)
+def test_finished_shell_summary_shows_the_description(result, is_error):
+    tool_input = {"command": "echo hi", "description": "Say hi"}
+    summary = format_tool_complete("shell", tool_input, result, is_error, 12)
+    first = plain_text(summary.split("\n")[0])
+    assert first.startswith("Shell Say hi") and "echo" not in first
+
+
+def test_description_markup_is_escaped():
+    tool_input = {"command": "ls", "description": "list a/[slug]/b"}
+    assert plain_text(format_tool_activity("shell", tool_input)) == "Shell list a/[slug]/b"
+    exec_input = {"source": "x", "description": "[bold]x"}
+    assert plain_text(format_tool_activity("exec", exec_input)) == "Exec [bold]x"
+
+
+def test_summaries_without_a_description_are_unchanged():
+    assert format_tool_activity("shell", {"command": "ls"}) == "Shell [bold]ls[/]"
+    assert format_tool_activity("exec", {"source": "x\ny"}) == "Exec (2 lines)"
 
 
 def test_tool_activity_uses_shared_exec_line_count():

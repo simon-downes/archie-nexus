@@ -3,15 +3,18 @@
 Tests use sys.executable as the Python interpreter and tmp_path as run_root.
 """
 
+import inspect
 import sys
 
 import pytest
 from archie_agent.exec.envelope import Envelope, ErrorInfo
 from archie_agent.exec.tool import (
+    DESCRIPTION_INPUT,
     _build_exec_description,
     create_registry,
     format_result,
     run_exec,
+    with_description,
 )
 
 
@@ -224,6 +227,61 @@ def test_create_registry_no_name_collision():
     # but exec should exist and not be overwritten
     spec = reg.get("exec")
     assert spec.schema["properties"].get("source") is not None
+
+
+# --- description input (086) ---
+
+
+@pytest.mark.parametrize("name", ["shell", "exec"])
+def test_shell_and_exec_schemas_require_a_description_first(name):
+    schema = create_registry().get(name).schema
+    assert next(iter(schema["properties"])) == "description"
+    assert schema["properties"]["description"] == DESCRIPTION_INPUT
+    assert DESCRIPTION_INPUT["type"] == "string"
+    assert "not the command or code itself" in DESCRIPTION_INPUT["description"]
+    assert "description" in schema["required"]
+    assert {"shell": "command", "exec": "source"}[name] in schema["required"]
+
+
+def test_other_tools_have_no_description_input():
+    for spec in create_registry().to_tool_config():
+        if spec["name"] not in ("shell", "exec"):
+            assert "description" not in spec["input_schema"]["properties"], spec["name"]
+
+
+def test_exec_namespace_shell_takes_no_description():
+    from archie_agent.exec.tools import get_all_tools
+
+    assert "description" not in inspect.signature(get_all_tools()["shell"]).parameters
+    shell_line = next(
+        line for line in _build_exec_description().splitlines() if line.startswith("  shell(")
+    )
+    assert "description" not in shell_line
+
+
+async def test_native_shell_ignores_the_description():
+    handler = create_registry().get("shell").handler
+    assert await handler(command="echo hi", description="Say hi") == "[exit: 0]\nhi"
+
+
+async def test_exec_handler_ignores_the_description(run_root):
+    handler = create_registry().get("exec").handler
+    result = await handler(
+        source="async def main():\n    return 'ok'\n",
+        description="Return ok",
+        run_root=run_root,
+        python=sys.executable,
+    )
+    assert result == "ok"
+
+
+def test_with_description_keeps_the_schema_and_does_not_mutate_it():
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+    described = with_description(schema)
+    assert list(described["properties"]) == ["description", "q"]
+    assert described["required"] == ["description", "q"]
+    assert schema == {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+    assert with_description(described)["required"] == ["description", "q"]
 
 
 # --- error_envelope ---

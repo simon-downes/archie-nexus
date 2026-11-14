@@ -9,6 +9,7 @@ from archie_shared.events import (
     TurnError,
     TurnInterrupted,
 )
+from archie_shared.markup import plain_text
 from archie_shared.transcript import (
     CHILD_CONTENT_FILTERED_MESSAGE,
     CompactionNode,
@@ -22,6 +23,7 @@ from archie_shared.transcript import (
     build,
     source_preview,
     subagent_status_text,
+    tool_crumb,
     tool_detail_sections,
     tool_headline,
     tool_preview,
@@ -299,6 +301,56 @@ def test_exec_headline_shows_metrics_or_error():
     assert tool_headline(tool) == "[bold]Exec[/] [dim]1.5s · 3 lines[/]"
     tool.status, tool.result = "error", "Traceback [x]\nmore"
     assert "Traceback \\[x]" in tool_headline(tool)
+
+
+# -- descriptions (086) -------------------------------------------------------
+
+
+def test_exec_headline_with_a_description():
+    tool = ToolNode("tool-e", "e", "exec", {"description": "Count [rows]", "source": "x"})
+    assert tool_headline(tool) == "Exec [bold]Count \\[rows][/]"
+    assert plain_text(tool_headline(tool)) == "Exec Count [rows]"
+    tool.result, tool.status, tool.duration_ms, tool.result_lines = "ok", "ok", 1500, 3
+    assert tool_headline(tool) == "Exec [bold]Count \\[rows][/] [dim]1.5s · 3 lines[/]"
+    tool.status, tool.result = "error", "KeyError: 'team'"
+    assert tool_headline(tool) == "Exec [bold]Count \\[rows][/] [dim red]KeyError: 'team'[/]"
+
+
+def test_shell_headline_crumb_and_preview_with_a_description():
+    command = "set -e\n" + "echo hi\n" * 12
+    shell = ToolNode("tool-s", "s", "shell", {"description": "Say hi", "command": command})
+    assert plain_text(tool_headline(shell)) == "Shell Say hi"
+    assert tool_crumb(shell) == "Shell Say hi"
+    lines, omitted = tool_preview(shell)
+    assert lines[0] == "set -e" and len(lines) == 10 and omitted == 3
+    shell.result, shell.status, shell.duration_ms = "[exit: 0]\nhi", "ok", 12
+    headline = plain_text(tool_headline(shell))
+    assert headline.startswith("Shell Say hi") and "set -e" not in headline
+    shell.result, shell.status = "[exit: 1]\nboom", "error"
+    headline = plain_text(tool_headline(shell))
+    assert headline.startswith("Shell Say hi") and "set -e" not in headline
+
+
+def test_detail_sections_keep_the_command_and_leave_the_description_out_of_options():
+    tool_input = {"description": "List files", "command": "ls"}
+    shell = ToolNode("b", "b", "shell", tool_input, result="a", status="ok")
+    sections = tool_detail_sections(shell)
+    assert [s.title for s in sections] == ["Command", "Result"]
+    assert sections[0].text == "ls"
+    shell.input = {**tool_input, "cwd": "app"}
+    options = tool_detail_sections(shell)[1]
+    assert options.title == "Options" and "description" not in options.text
+
+
+def test_subagent_activity_shows_the_description(session_logs):
+    w = session_logs
+    b = TranscriptBuilder()
+    b.apply(w.user("go"))
+    b.apply(w.tool_call("task", {"tasks": [{"agent": "general", "prompt": "p"}]}, tool_use_id="tk"))
+    b.apply(w.user("child prompt", scope="tk", index=0))
+    tool_input = {"description": "Check the tree", "command": "git status"}
+    b.apply(w.tool_call("shell", tool_input, tool_use_id="c1", scope="tk", index=0))
+    assert plain_text(b.subagents[("tk", 0)].activity) == "Shell Check the tree"
 
 
 def test_detail_sections_choose_languages():
