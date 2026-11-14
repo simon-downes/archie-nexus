@@ -1,6 +1,7 @@
 """Pure agent loop — async generator that drives streamed tool turns."""
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import threading
@@ -213,6 +214,7 @@ async def run_loop(
             history_boundary=_latest_history_boundary(working_messages),
             result=result,
             request_id=request_context.request_id,
+            interrupt_async=interrupt_async,
         ):
             yield event
         if request_context_factory is not None:
@@ -317,10 +319,25 @@ async def stream_once(
     history_boundary: str | None,
     result: _RequestResult,
     request_id: str,
+    interrupt_async: asyncio.Event | None = None,
 ) -> AsyncGenerator[AgentEvent]:
-    """Stream one request while supporting older test doubles."""
+    """Stream one request while supporting older test doubles.
+
+    The threading ``interrupt`` is seen only when the provider sends an event. When
+    ``interrupt_async`` is given, setting it ends the request at once, even while the
+    provider sends nothing (a long wait for the first token); the worker thread is
+    left to notice ``interrupt`` and close the provider stream on its next event.
+    """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[StreamEvent | _WorkerError | object] = asyncio.Queue()
+    # Set when this call stops waiting; ``interrupt`` is cleared by the next turn, so
+    # an abandoned worker needs its own signal to close the old provider stream.
+    stop = threading.Event()
+
+    def _post(item: object) -> None:
+        # The loop may be gone once an interrupted request has stopped waiting.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(queue.put_nowait, item)
 
     def _worker() -> None:
         gen: Generator[StreamEvent] | None = None
@@ -334,25 +351,40 @@ async def stream_once(
                 kwargs["history_boundary"] = history_boundary
             gen = llm.stream(**kwargs)
             for event in gen:
-                if interrupt.is_set():
+                if interrupt.is_set() or stop.is_set():
                     gen.close()
                     break
-                loop.call_soon_threadsafe(queue.put_nowait, event)
+                _post(event)
         except Exception as error:
             log.exception("Stream worker error")
-            loop.call_soon_threadsafe(
-                queue.put_nowait, _WorkerError(f"{type(error).__name__}: {error}")
-            )
+            _post(_WorkerError(f"{type(error).__name__}: {error}"))
         finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL_DONE)
+            _post(_SENTINEL_DONE)
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
     current_tool_use_id = ""
     current_tool_name = ""
+    interrupt_wait = (
+        asyncio.ensure_future(interrupt_async.wait()) if interrupt_async is not None else None
+    )
+    abandoned = False
     try:
         while True:
-            event = await queue.get()
+            if interrupt_wait is None:
+                event = await queue.get()
+            else:
+                get = asyncio.ensure_future(queue.get())
+                done, _ = await asyncio.wait(
+                    {get, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if get not in done:
+                    # Interrupted while the provider is silent: stop waiting for it.
+                    get.cancel()
+                    result.interrupted = True
+                    abandoned = True
+                    break
+                event = get.result()
             if event is _SENTINEL_DONE:
                 if interrupt.is_set():
                     result.interrupted = True
@@ -365,6 +397,9 @@ async def stream_once(
                 break
             if interrupt.is_set():
                 result.interrupted = True
+                if interrupt_wait is not None:
+                    abandoned = True  # don't wait for a silent provider to close
+                    break
                 while await queue.get() is not _SENTINEL_DONE:
                     pass
                 break
@@ -391,8 +426,15 @@ async def stream_once(
             elif isinstance(event, Done):
                 result.stop_reason = event.stop_reason
     finally:
-        thread.join(timeout=5.0)
-        if thread.is_alive():
-            log.warning(
-                "Stream worker thread did not exit within 5s (likely blocked on network I/O)"
-            )
+        if interrupt_wait is not None:
+            interrupt_wait.cancel()
+        if abandoned:
+            # The worker stops at its next provider event; a daemon thread, so it
+            # cannot hold up shutdown, and joining here would block the event loop.
+            stop.set()
+        else:
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                log.warning(
+                    "Stream worker thread did not exit within 5s (likely blocked on network I/O)"
+                )

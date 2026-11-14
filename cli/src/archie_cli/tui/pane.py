@@ -258,7 +258,8 @@ class SessionPane(Vertical):
         controller = self.controller
         if controller is None:
             return
-        self.activity.show(controller.activity)
+        # The activity line describes the main conversation: blank while a view is open.
+        self.activity.show(None if self._views else controller.activity)
         self.input.disabled = controller.input_locked or self.record.ended
 
     # --- SessionListener ----------------------------------------------------------
@@ -381,19 +382,18 @@ class SessionPane(Vertical):
         return False
 
     def cancel(self) -> None:
-        """Esc, first match wins (084 D23): kill a running ``!`` command, pop a detail
-        view, dismiss the question, interrupt the turn.
+        """Esc (084 D23). In a tool or subagent view it only goes back to the view or
+        transcript under it. On the transcript, first match wins: kill a running ``!``
+        command, dismiss the question, interrupt the turn.
 
         When there is nothing to cancel, a second Esc within 0.5 s clears the input.
         (An open dialog is a modal screen and takes Esc before it reaches the app.)
         """
-        controller = self.controller
-        if controller is not None and controller.kill_shell():
-            return
         if self._views:
             self.pop_view()
             self._last_esc_time = 0
             return
+        controller = self.controller
         action = controller.cancel() if controller is not None else None
         if action is not None:
             self._last_esc_time = 0
@@ -465,6 +465,7 @@ class SessionPane(Vertical):
             conversation.display = False
         self._views.append(view)
         self.mount(view, before=self.activity)
+        self._show_turn()
         if move_focus:
             view.body.focus()
 
@@ -479,6 +480,7 @@ class SessionPane(Vertical):
             top.display = True
         else:
             self._show_transcript()
+        self._show_turn()
         if move_focus:
             self.transcript.focus()
 
@@ -489,6 +491,7 @@ class SessionPane(Vertical):
             await view.remove()
         if views:
             self._show_transcript()
+            self._show_turn()
 
     def _show_transcript(self) -> None:
         """Show the transcript again at the scroll position it was left at.
@@ -513,17 +516,3 @@ class SessionPane(Vertical):
                 self.call_after_refresh(restore, waits - 1, settled)
 
         self.call_after_refresh(restore, LAYOUT_WAITS, -1)
-
-    @property
-    def active_child_key(self) -> tuple[str, int] | None:
-        """The subagent ``ctrl+x`` stops: the topmost open subagent view's."""
-        for view in reversed(self._views):
-            if isinstance(view, SubagentView):
-                return view.child_key
-        return None
-
-    def stop_child(self) -> None:
-        """Stop the subagent of the topmost open subagent view, if any."""
-        key = self.active_child_key
-        if key is not None and self.controller is not None:
-            self.controller.stop_child(*key)

@@ -201,40 +201,6 @@ class ConfirmDialog(Dialog[bool]):
         self.dismiss(event.button.id == "confirm")
 
 
-def child_agent_stop_dialog(
-    record: SessionDescriptor, *, over: Region | None = None
-) -> ConfirmDialog:
-    """Confirm interrupting the currently shown subagent."""
-    message = Text.assemble(
-        "Stop the subagent in ",
-        (record.name, "bold"),
-        "?\n\n",
-        (
-            "This ends the selected subagent's work. The main agent and other subagents "
-            "continue running.",
-            theme.MUTED,
-        ),
-    )
-    return ConfirmDialog("Stop subagent", message, "Stop subagent", destructive=True, over=over)
-
-
-def main_agent_stop_dialog(
-    record: SessionDescriptor, *, over: Region | None = None
-) -> ConfirmDialog:
-    """Confirm interrupting the main session agent."""
-    message = Text.assemble(
-        "Stop the main agent in ",
-        (record.name, "bold"),
-        "?\n\n",
-        (
-            "This interrupts the current turn and prevents its remaining work from running. "
-            "Any subagents may also stop.",
-            theme.MUTED,
-        ),
-    )
-    return ConfirmDialog("Stop main agent", message, "Stop main agent", destructive=True, over=over)
-
-
 def stop_dialog(record: SessionDescriptor, *, over: Region | None = None) -> ConfirmDialog:
     """Confirm stopping a session: what it does, with Cancel focused."""
     message = Text.assemble(
@@ -242,7 +208,8 @@ def stop_dialog(record: SessionDescriptor, *, over: Region | None = None) -> Con
         (record.name, "bold"),
         "?\n\n",
         (
-            "Archie interrupts any running turn and removes the session's container. "
+            "Archie interrupts any running turn, including its tool calls and subagents, "
+            "and records how it ended, then removes the session's container. "
             "The session log is kept; the session leaves the sidebar once you switch away.",
             theme.MUTED,
         ),
@@ -467,12 +434,12 @@ KEYS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Session on screen",
         (
             ("enter / shift+enter", "send / new line"),
-            ("esc", "stop a ! command, close a view, dismiss a question, interrupt"),
+            ("esc", "close a view; else stop a ! command, dismiss a question, interrupt"),
             ("esc esc", "clear the input"),
             ("alt+m", "change model"),
             ("ctrl+c", "copy the selection or the focused block"),
             ("ctrl+g", "write the message in $EDITOR (saving sends it)"),
-            ("ctrl+x", "stop the current agent after confirmation"),
+            ("ctrl+x", "stop the session after confirmation"),
         ),
     ),
     (
