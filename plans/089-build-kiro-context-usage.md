@@ -1,6 +1,6 @@
 # 089 — Kiro context usage
 
-Status: building
+Status: reviewing
 Branch: build-it/089-kiro-context-usage (base: feat/default-tui-entrypoint @ 68ed85c)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/089-kiro-context-usage
 
