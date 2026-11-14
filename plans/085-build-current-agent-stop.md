@@ -29,7 +29,7 @@ The source checkout contains unrelated untracked `.DS_Store`, `plans/060-spec-co
 | D1 | What does `Ctrl+X` target? | The topmost open subagent view, otherwise the main session agent | Keep it child-only and let the input cut text | The requested behavior is current-conversation semantics, and the existing app already knows the open-view stack | user |
 | D2 | Should either stop happen immediately? | Confirm both, with separate messages and labels | Reuse the child interrupt without confirmation | Main-agent interruption is destructive, and confirmation also prevents accidental child cancellation; the existing `ConfirmDialog` is the established pattern | self |
 | D3 | How should the main-agent interrupt be sent? | Reuse `SessionController.cancel()` after confirmation | Add a second websocket command path | `cancel()` already sends the root interrupt and preserves the existing session behavior | self |
-| D4 | What happens when no agent turn is active? | Open the relevant warning and let the controller handle the command as it currently does | Add a new active-turn state gate | The existing interrupt methods are safe no-ops at the transport boundary, and this keeps shortcut behavior predictable without inventing state semantics | self |
+| D4 | What happens when no agent turn is active? | Open the relevant warning and let the controller handle the command as it currently does | Add a new active-turn state gate | the main interrupt is already a no-op when no turn is active, while the child command is retained for the selected live child; the shortcut is inert when no live session/view exists | self |
 
 ## Requirements
 
@@ -38,7 +38,9 @@ The source checkout contains unrelated untracked `.DS_Store`, `plans/060-spec-co
 - MUST make `Ctrl+X` target the main session agent when no subagent view is open.
   - AC: the main confirmation opens from the main transcript and confirming sends the root interrupt through the controller.
 - MUST require confirmation before either shortcut stop is sent.
-  - AC: dismissing or accepting the default Cancel choice sends no interrupt; selecting Stop sends exactly one interrupt.
+  - AC: dismissing or accepting the default Cancel choice sends no interrupt; selecting Stop sends exactly one interrupt when the selected controller path is active.
+- MUST leave the shortcut inert when there is no on-screen live session or no current agent view to act on.
+  - AC: pressing `Ctrl+X` in those states opens no dialog and sends no command.
 - MUST use distinct warning text that explains child stops preserve the main agent and siblings, while main-agent stops interrupt the main turn and may end its remaining work.
   - AC: child and main dialog titles, button labels, and messages differ and contain those consequences.
 - MUST preserve normal input editing when the shortcut confirmation is not applicable because a dialog is already open.
@@ -50,7 +52,7 @@ Out of scope: changing `Esc`, the command palette's session/container stop, back
 
 ### Overview
 
-`App.check_action` will allow the priority `Ctrl+X` action on the main screen regardless of whether a child view is open. `App.action_stop_current` will select the topmost child key or the main controller, open a purpose-built `ConfirmDialog`, and only invoke the selected interrupt after confirmation. The existing pane view stack remains the source of truth for the current conversation.
+`App.check_action` will allow the priority `Ctrl+X` action on the main screen regardless of whether a child view is open. `App.action_stop_current` will capture the topmost child key, or the main-session target, before opening a purpose-built `ConfirmDialog`; confirmation then invokes that captured target. It will do nothing without a live on-screen session. The existing pane view stack remains the source of truth for the current conversation.
 
 ### Code structure
 
@@ -69,11 +71,11 @@ If the user cancels, no websocket command is sent. If the websocket is unavailab
 
 ### [ ] M1 — Confirm and stop the current agent
 
-- **Approach:** Replace the child-only `Ctrl+X` action in `app.py` with a current-agent action. Add child and main confirmation constructors in `dialogs.py`, using destructive dialogs with Cancel focused. On confirmation, call `SessionController.stop_child()` for the selected child or `SessionController.cancel()` for the main agent. Update the existing child test and add main-agent confirmation/cancellation tests, preserving the existing `stop_dialog` tests.
-- **Test seam:** Textual `App.run_test` with the real priority binding, confirmation dialog, fake websocket, and `SessionController`.
-- **Edge cases:** nested tool view → target the underlying subagent; no child view → target main agent; Cancel/Escape → no interrupt; dialog open → modal handling remains authoritative.
+- **Approach:** Replace the child-only `Ctrl+X` action in `app.py` with a current-agent action. Add child and main confirmation constructors in `dialogs.py`, using destructive dialogs with Cancel focused. Capture `(scope, index)` before opening a child dialog; on confirmation call `SessionController.stop_child()` with that key, or call `SessionController.cancel()` for the main agent. Update the existing child test's no-view expectation and add main-agent confirmation/cancellation tests, preserving the existing `stop_dialog` tests.
+- **Test seam:** Textual `App.run_test` with the real priority binding, `make_app`, `attached`, `settle`, and the fake websocket exposed as `app.controller.ws.sent`.
+- **Edge cases:** nested tool view → capture and target the underlying subagent; no child view → target main agent; no live on-screen session → no dialog or command; Cancel/Escape and repeated shortcut while modal → no interrupt; the existing modal handling remains authoritative.
 - **Deliverable:** `Ctrl+X` visibly warns about and confirms stopping the current child or main agent, with distinct consequences.
-- **Verify:** `scripts/dev test tests/test_tui_app.py tests/test_tui_detail.py` passes, then `scripts/dev ruff check .` and `scripts/dev ruff format .` report no issues.
+- **Verify:** `scripts/dev test tests/test_tui_app.py tests/test_tui_detail.py` passes, then `scripts/dev ruff check .` and `scripts/dev ruff format --check .` pass without changes.
 - **Outcome:** pending
 
 ## Deviations
