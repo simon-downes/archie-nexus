@@ -1,6 +1,6 @@
 # 091 — Kiro /compact and question tool
 
-Status: planning
+Status: building
 Branch: build-it/091-kiro-compact-question (base: main @ 8cdad07)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/091-kiro-compact-question
 
@@ -61,7 +61,7 @@ Codebase facts:
   (`cli/src/archie_cli/tui/conversation.py:463`), `_complete_compaction`
   (`cli/src/archie_cli/tui/transcript_view.py:353`), web `compaction_text`
   (`orchestrator/src/archie_orchestrator/transcript.py:163`). The shared
-  `CompactionNode` (`shared/src/archie_shared/transcript.py:135`) is built from
+  `CompactionNode` (`shared/src/archie_shared/transcript.py:130`) is built from
   `CompactionStart`, which carries `model_key`.
 - Test doubles: `tests/fake_kiro.py` (scripted ACP agent), `tests/test_kiro_harness.py`,
   `tests/test_kiro_translate.py`, `tests/test_kiro_mcp.py`, `tests/test_question_tool.py`.
@@ -87,14 +87,14 @@ Codebase facts:
 |----|----------|--------|----------|-----|--------|
 | D1 | Automatic compactions | Map Kiro's mid-turn `summarization_*` frames to `compaction_start`/`compaction_complete` (reason `threshold`) and drop the placeholder 20 % context figure | Manual `/compact` only | Without it the context drops and filler replies appear with nothing explaining why | user Q1 |
 | D2 | Event shape for Kiro compactions | Reuse `compaction_start`/`compaction_complete` with `tokens_before=0`, `tokens_after=null`, `cost_saved_usd=0`, `model_key=kiro/<id>` on the start; no new fields | New optional `context_pct_*` fields on both events; an `error_notice`-only result | No wire change (both events are `forbid_unknown_fields`, so new fields break older CLIs); metrics, replay and the TUI end-of-turn logic already handle these events; Kiro reports no tokens, and no context figure after a manual compaction | self |
-| D3 | Display of Kiro compaction rows | `CompactionNode.model_key` (new, from `compaction_start`); TUI and web rows for a `kiro/` model show no token or cost figures: `Compaction manual (Kiro, 8204ms)`, failure `Compaction manual (Kiro, 8204ms) Failed: <error>`, pending `Compaction manual (Kiro)` | Showing `0 → ?` tokens | Zero tokens is misleading; `CompactionNode` is not a wire type | self |
+| D3 | Display of Kiro compaction rows | `CompactionNode.model_key` (new, from `compaction_start`); a node is Kiro when `kiro_model_id(node.model_key)` (`shared/src/archie_shared/kiro.py`) is not None. Kiro rows show no token or cost figures and use the plain reason (`manual`, `threshold`) as the label. TUI: pending `○ Compaction manual (Kiro)`, success `● Compaction manual (Kiro, 8204ms)`, failure `● Compaction manual (Kiro, 8204ms) Failed: <error>`. Web `compaction_text`: pending (`Compacting (manual)`, `Kiro`), success (`Compaction success (manual)`, `Kiro, 8204ms`), failure unchanged (error text) | Showing `0 → ?` tokens | Zero tokens is misleading; `CompactionNode` is not a wire type | self |
 | D4 | Manual compaction flow | `run_manual_compaction`: dead backend → `manual_compaction_failed` notice with `DEAD_MESSAGE`; no turn yet → `manual_compaction_failed` "Nothing to compact" (native wording); else `working` status, `compaction_start` (reason `manual`, `turn=session.turn_index`, `iteration=0`), `_kiro/session/compact` with a 120 s timeout, then `compaction_complete`: `success` with the summary from the `summarization_completed` frame (or `null` if none came); `failure` with "Kiro did not compact: a turn or compaction is in progress" for `{success: false}`; `failure` with the error text for a JSON-RPC error, timeout or Kiro exit. Always releases the turn flag and sends a status | A notice per outcome without events | Mirrors `AgentHarness.run_manual_compaction` (`harness.py:563`), so the TUI's manual end-of-turn path works unchanged | self |
-| D5 | Interrupt during manual compaction | Ignored: no `session/cancel` while compacting; the request finishes or times out | Sending `session/cancel` | Kiro's compact has no cancel and its own summary call is capped at 60 s; a cancel with no prompt active has unknown effect | self |
+| D5 | Interrupt during manual compaction | No `session/cancel` while compacting; `interrupt()` sends a live `error_notice` (kind `compaction_not_cancellable`, "Kiro can't cancel a compaction; it finishes on its own") to all clients, and the request finishes or times out | Sending `session/cancel`; ignoring it silently | Kiro's compact has no cancel and its own summary call is capped at 60 s; a cancel with no prompt active has unknown effect | self |
 | D6 | Where summarization frames are handled | `translate.py` gets `summarization(update) -> (kind, summary, reason) \| None`; the harness captures the summary for manual compaction when no translator is active; `TurnTranslator.feed` maps them during a turn | One owner for both | During a turn the translator owns iteration and request ids; between turns there is no translator | self |
 | D7 | Automatic compaction mapping | `summarization_started` → flush segment text, `compaction_start` (reason `threshold`, scope from `agentSubtaskId`, current iteration or 0, new `request_id`); `summarization_completed` → `compaction_complete` `success` with the summary and `duration_ms` from the start (a start is synthesised with duration 0 when none came); `summarization_failed` → `failure` (reason `error`) or `interrupted` (reason `canceled`); an open compaction at `finish()` → `interrupted`. The next text or tool call opens a new iteration | Mapping only root compactions | The events carry `scope`; the transcript keys compactions by scope | self |
-| D8 | Placeholder context figure | `RootContext` in `translate.py`: after a root `summarization_completed`, root `context_usage` frames with exactly 20 are dropped until a frame with another value arrives; the harness (live `session_status`) and each `TurnTranslator` (turn stats) use it | Dropping the next N frames; no filter | The spike showed exactly 20 in a pair right after the summary, then real figures; a real 20 is repeated by later frames | self |
+| D8 | Placeholder context figure | `RootContext` in `translate.py` with `feed(update) -> float \| None`: after a root `summarization_completed`, root `context_usage` frames with exactly 20 are dropped until a frame with another value arrives. Two owners, each fed every update it sees, in order: the harness owns one for live `session_status` (fed every `session/update`, so a manual compaction's frame arms it too; Kiro sent no 20 after a manual compaction in the spike, and the first other value disarms it), and each `TurnTranslator` owns one for its turn stats (fed every update of its turn) | Dropping the next N frames; no filter | The spike showed exactly 20 in a pair right after the summary, then real figures; a real 20 is repeated by later frames | self |
 | D9 | Question tool on Kiro | `KiroHarness` owns a `QuestionBroker(self._emit_status)` and adds the question tool to its MCP registry, wrapped so each call's id is a new ULID (any `_tool_use_id` argument is dropped); `pending_question`, `status_event` (`blocked` plus the question) and `answer_question` match `AgentHarness` | MCP elicitation (`_kiro/mcp/elicitation`); correlating with ACP `toolCallId` | The MCP handler never sees `toolCallId`, and the TUI treats `question.id` as opaque; elicitation adds a round trip through Kiro for no gain | self |
-| D10 | Clearing a question Kiro abandons | New `QuestionBroker.cancel()` fails the pending answer with `QuestionError("question_cancelled", "the turn ended before an answer")`, so the handler returns `Error: …` and the broker clears and publishes status; `KiroHarness.interrupt` and the end of every `handle_message` call it | Cancelling the MCP handler task | Kiro doesn't cancel the MCP request on `session/cancel` (spike); a returned error ends the MCP call cleanly | self |
+| D10 | Clearing a question Kiro abandons | New `QuestionBroker.cancel()` clears `_pending` synchronously and fails the pending answer with `QuestionError("question_cancelled", "the turn ended before an answer")`, so the handler returns `Error: …` (its `finally` then publishes status); no-op when nothing is pending. Called by `KiroHarness.interrupt`, by `handle_message`'s `finally` before the turn flag is released and the closing status is sent, and when the translator ends a `question` tool call while a question is still pending (Kiro timed the MCP call out or failed it), found through new `TurnTranslator.tool_name(call_id)` | Cancelling the MCP handler task | Kiro doesn't cancel the MCP request on `session/cancel` (spike); a returned error ends the MCP call cleanly | self |
 | D11 | Keeping `question` from the worker | `worker_agent_config(mcp_url, tools)` lists `@archie/<name>` for every served tool except `question`; the root keeps `@archie` | Removing it at the MCP server per caller | Both agents share one MCP server; the spike showed the explicit list hides the tool | self |
 | D12 | TUI palette | "Compact context" is listed for Kiro sessions and `action_compact` sends `/compact` for them | Keeping it native-only | The agent now supports it; typed `/compact` already reaches Kiro | self |
 
@@ -111,8 +111,8 @@ Codebase facts:
     to compact" and no request sent; dead backend → `manual_compaction_failed`. In each case
     `turn_active` is false afterwards.
 - MUST NOT send `session/cancel` when interrupted during a manual compaction.
-  - AC: `interrupt()` during a slow fake compaction sends no `session/cancel`, and the
-    compaction completes.
+  - AC: `interrupt()` during a slow fake compaction sends no `session/cancel`, emits the D5
+    `compaction_not_cancellable` notice, and the compaction completes.
 - MUST render Kiro compaction rows without token or cost figures in the TUI and the web
   viewer (D3).
   - AC: TUI conversation host shows `● Compaction manual (Kiro, 8204ms)`; web
@@ -136,7 +136,8 @@ Codebase facts:
 - MUST clear a pending Kiro question when the turn is interrupted or ends.
   - AC: `interrupt()` while waiting → `turn_interrupted`, `pending_question is None`, a
     `session_status` with `question=null`, and the MCP call returns an `Error:` result; the
-    next turn runs.
+    next turn runs. A `question` tool call that Kiro fails while the broker waits clears the
+    question at once.
 - MUST update `docs/kiro.md` and the README palette line for both features.
   - AC: `docs/kiro.md` no longer says `/compact` is not available or that `question` is
     excluded, and describes the event mapping for compactions.
@@ -164,8 +165,8 @@ clearing questions that Kiro abandons.
 - `agent/src/archie_agent/kiro/harness.py`: `run_manual_compaction` (D4), interrupt guard
   (D5), `QuestionBroker` wiring (D9, D10), status with `blocked`, `RootContext` for live
   status, worker tool list for `agent_files`.
-- `agent/src/archie_agent/kiro/agent_files.py`: `worker_agent_config(mcp_url, tools)` and
-  `write_agent_files(..., worker_tools=...)` (D11).
+- `agent/src/archie_agent/kiro/agent_files.py`: `worker_agent_config(mcp_url, tools=None)` and
+  `write_agent_files(..., worker_tools=None)` (D11); `None` keeps today's `["@archie"]`.
 - `agent/src/archie_agent/kiro/mcp_server.py`: `tool_names()` (served names, excluding
   `skill`/`task`).
 - `agent/src/archie_agent/question.py`: `QuestionBroker.cancel()` (D10).
@@ -181,6 +182,9 @@ clearing questions that Kiro abandons.
   `question`.
 - Docs: `docs/kiro.md`, `README.md` palette line, `docs/event-spec.md` note on Kiro
   compaction fields.
+- No prompt change: `persona/prompts/kiro.md` already says the tool names in the prompt
+  are `archie::<name>` tools loaded with `tool_load`, and `identity.md`'s question rule is
+  conditional on having the tool.
 
 ### Data flow
 
@@ -208,21 +212,23 @@ clearing questions that Kiro abandons.
   request; `ok` sends a `summarization_completed` frame then `{success: true}`; `busy` →
   `{success: false}`; `error` → JSON-RPC error; `slow` → waits 1 s first). Harness flow per
   D4 following `AgentHarness.run_manual_compaction`. `CompactionNode.model_key` and the
-  Kiro row text per D3. Palette per D12. Replace `test_compact_is_not_available`. Docs:
+  Kiro row text per D3. Palette per D12, including the `commands.py` module docstring and
+  the `COMPACT_MESSAGE`/`action_compact` docstrings in `tui/app.py`. Replace
+  `test_compact_is_not_available`. D5 notice. Docs:
   `docs/kiro.md` session control `/compact` and limits, `README.md` palette line,
   `docs/event-spec.md` note that Kiro compactions carry `tokens_before` 0 and
   `tokens_after` null.
 - **Test seam:** `KiroHarness` against `tests/fake_kiro.py` (`tests/test_kiro_harness.py`);
-  `_ConversationHost` in `tests/test_tui_canonical.py`; `compaction_text` in
-  `tests/test_web_session_detail.py` (or the closest existing web transcript test);
-  palette in `tests/test_tui_app.py`.
+  `_ConversationHost` in `tests/test_tui_canonical.py`; `compaction_text` called directly
+  in `tests/test_web_session_detail.py`; palette in `tests/test_tui_app.py`.
 - **Edge cases:** no turn yet → notice, no request; `busy` → failure; `error` → failure;
   dead backend → notice; interrupt during `slow` → no `session/cancel`.
 - **Deliverable:** `/compact` on a Kiro session shows a Kiro compaction row and ends the
   turn.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_kiro_harness.py
   tests/test_tui_canonical.py tests/test_tui_app.py tests/test_web_session_detail.py -q`
-  passes.
+  passes, and `rg -n "not available|no manual compaction|Archie sessions only"
+  docs/kiro.md README.md` finds nothing.
 - **Outcome:**
 
 ### [ ] M2 — Automatic compaction mapping
@@ -230,7 +236,9 @@ clearing questions that Kiro abandons.
 - **Approach:** D7 and D8 in `translate.py`; the harness uses `RootContext` for live
   status. Fake Kiro prompt `autocompact` sends started, completed (summary), `context(20)`
   twice, `context(4.2)`, text, completion; `autocompact_fail` sends started then
-  `summarization_failed`. Docs: `docs/kiro.md` event-mapping rows for `summarization_*`
+  `summarization_failed`. In `finish()`, an open compaction's `compaction_complete`
+  (`interrupted`) is written after the open tool results and child scopes and before the
+  root flush, `llm_request` and terminal event. Docs: `docs/kiro.md` event-mapping rows for `summarization_*`
   and the placeholder.
 - **Test seam:** `TurnTranslator.feed`/`finish` in `tests/test_kiro_translate.py`;
   harness against the fake in `tests/test_kiro_harness.py`.
@@ -244,23 +252,24 @@ clearing questions that Kiro abandons.
 
 - **Approach:** D9–D11. `QuestionBroker.cancel()`; harness registry =
   `create_registry()` plus the wrapped question tool; `ArchieMcpServer.tool_names()`;
-  worker tools list via `agent_files`. Fake Kiro prompt `question` calls the MCP
+  worker tools list via `agent_files`; `TurnTranslator.tool_name()` for the D10
+  tool-end check. Fake Kiro prompt `question` calls the MCP
   `question` tool and waits for its result (on `session/cancel` it sends the `failed`
   update and a `cancelled` result without waiting, like real Kiro). Update
-  `test_kiro_status_and_answer_have_no_question` and `test_kiro_mcp.py`'s "question not
+  `test_kiro_status_and_answer_have_no_question` (`tests/test_question_tool.py:424`) and `test_kiro_mcp.py`'s "question not
   listed" assertion (its registry has no question tool; keep that assertion and add the
   harness-level one). Docs: `docs/kiro.md` tools and subagents lines.
 - **Test seam:** `KiroHarness` against the fake (`tests/test_kiro_harness.py`);
   `QuestionBroker` unit test in `tests/test_question_tool.py`; agent JSON in
-  `tests/test_kiro_harness.py`.
+  `tests/test_kiro_agent_files.py` (existing calls keep passing via the `None` default).
 - **Edge cases:** wrong id → `question_not_pending`; interrupt while waiting → cleared,
-  `Error:` result, next turn runs; Kiro exits while waiting → cleared by the turn end.
+  `Error:` result, next turn runs; Kiro exits while waiting → cleared by the turn end;
+  Kiro fails the `question` tool call while the broker waits → cleared at once.
 - **Deliverable:** a Kiro agent can ask a question, the TUI panel shows it, and the answer
   reaches the model.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_kiro_harness.py
-  tests/test_question_tool.py tests/test_kiro_mcp.py -q` passes, and
-  `rg -n "not available|or \`question\`|Archie sessions only" docs/kiro.md README.md` finds
-  nothing.
+  tests/test_question_tool.py tests/test_kiro_mcp.py tests/test_kiro_agent_files.py -q`
+  passes, and `rg -n "or \`question\`" docs/kiro.md` finds nothing.
 - **Outcome:**
 
 ## Deviations
@@ -275,6 +284,8 @@ clearing questions that Kiro abandons.
   include.
 
 ## Review
+
+- Plan review: 1 pass, 6 ⚠️ and 11 ℹ️, all accepted. Fixed: `worker_agent_config`/`write_agent_files` get `None` defaults and `tests/test_kiro_agent_files.py` joins M3's seam and Verify; test locations named; web seam is `compaction_text` in `tests/test_web_session_detail.py`; M1 Verify checks its docs, including the "no manual compaction" Limits sentence; D3 gives the threshold label and the web strings, and names `kiro_model_id`; D8 names the two owners and what feeds them, and that a manual frame arms the harness filter; Context line ref corrected; M1 updates the `commands.py`/`app.py` docstrings; D10 clears `_pending` synchronously, runs before the closing status, and also clears a question whose tool call Kiro ends (covers a `requestTimeout` cut-off); D5 now sends a `compaction_not_cancellable` notice; the Design notes why no prompt change is needed; M2 places the `interrupted` compaction in `finish()` before the root terminal. No ❌, so no second pass.
 
 ## Outcome
 
