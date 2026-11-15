@@ -540,7 +540,7 @@ Not verified: a real session container end to end (Docker isn't available inside
 session), and reachability on Docker Desktop or native Linux (only colima was probed, and
 only with `curl`).
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/37
 CI: pending
 
 ## Follow-ups
