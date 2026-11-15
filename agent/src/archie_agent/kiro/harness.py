@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import time
@@ -26,6 +27,7 @@ from archie_shared.events import (
     CompactionStart,
     ErrorNotice,
     SessionStatus,
+    ToolResult,
     UserMessage,
 )
 from archie_shared.events import TurnError as CanonicalTurnError
@@ -49,10 +51,12 @@ from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpE
 from archie_agent.kiro.mcp_server import ArchieMcpServer
 from archie_agent.kiro.translate import RootContext, TurnTranslator, summarization
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
+from archie_agent.question import Answer, QuestionBroker, QuestionError, create_question_tool
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import discover_skills
 
 if TYPE_CHECKING:
+    from archie_shared.events import PendingQuestion
     from archie_shared.schemas import NexusConfig
 
     from archie_agent.tool_policy_live import LiveToolPolicy
@@ -69,6 +73,8 @@ DEAD_MESSAGE = "Kiro backend stopped; start a new session"
 COMPACT_TIMEOUT_S = 120.0
 COMPACT_BUSY_MESSAGE = "Kiro did not compact: a turn or compaction is in progress"
 COMPACT_NOT_CANCELLABLE = "Kiro can't cancel a compaction; it finishes on its own"
+QUESTION_TOOL = "question"
+QUESTION_ABANDONED = "Kiro ended the question tool call before an answer"
 
 
 class KiroStartupError(RuntimeError):
@@ -111,6 +117,20 @@ def resolve_api_key() -> str | None:
         credential = None
     key = getattr(credential, "api_key", None) if credential is not None else None
     return key or os.environ.get("KIRO_API_KEY") or None
+
+
+def kiro_question_tool(broker: QuestionBroker):
+    """The ``question`` tool for Kiro's MCP server, with a fresh id per call (091 D9).
+
+    The MCP handler never sees ACP's ``toolCallId``; the TUI treats the id as opaque.
+    """
+    base = create_question_tool(broker)
+
+    async def handler(**kwargs):
+        kwargs.pop("_tool_use_id", None)
+        return await base.handler(**kwargs, _tool_use_id=str(ULID()))
+
+    return dataclasses.replace(base, handler=handler)
 
 
 def config_value(options: Any, config_id: str) -> Any:
@@ -160,9 +180,11 @@ class KiroHarness:
             exec_kwargs["python"] = exec_python
         if exec_run_root:
             exec_kwargs["run_root"] = exec_run_root
-        self._mcp = ArchieMcpServer(
-            create_registry(), self._current_runner_context, exec_kwargs=exec_kwargs
-        )
+        # Root-only, like native sessions: the worker's agent file leaves it out (091 D11).
+        self._questions = QuestionBroker(self._emit_status)
+        registry = create_registry()
+        registry.register(kiro_question_tool(self._questions))
+        self._mcp = ArchieMcpServer(registry, self._current_runner_context, exec_kwargs=exec_kwargs)
         self._acp: AcpClient | None = None
         self._kiro_session_id: str | None = None
         self.config_options: list = []
@@ -246,6 +268,11 @@ class KiroHarness:
             root_prompt=build_kiro_prompt(self._workspace),
             worker_prompt=build_kiro_worker_prompt(DEFAULT_AGENT.body, self._workspace),
             skill_paths=[entry.path for entry in skills.values()],
+            worker_tools=[
+                f"@{agent_files.MCP_SERVER}/{name}"
+                for name in self._mcp.tool_names()
+                if name != QUESTION_TOOL
+            ],
         )
 
         env = dict(os.environ)
@@ -465,6 +492,12 @@ class KiroHarness:
             if translator is not None:
                 for event in translator.feed(update, received):
                     await self._event_bus.emit(event)
+                    if (
+                        isinstance(event, ToolResult)
+                        and translator.tool_name(event.tool_use_id) == QUESTION_TOOL
+                    ):
+                        # Kiro ended the call (failed or timed out) while it still waits.
+                        self._questions.cancel(QUESTION_ABANDONED)
             pct = self._root_context.feed(update)
             if pct is not None and pct != self._context_pct:
                 self._context_pct = pct
@@ -526,6 +559,8 @@ class KiroHarness:
             await self._notice("storage_error", str(exc))
         finally:
             self._translator = None
+            # Kiro doesn't cancel an MCP call when the turn ends (091 D10).
+            self._questions.cancel()
             self._turn_active = False
             await self._emit_status()
 
@@ -589,6 +624,8 @@ class KiroHarness:
             # Kiro's compaction has no cancel; say so rather than ignore the key (091 D5).
             self._spawn(self._notice("compaction_not_cancellable", COMPACT_NOT_CANCELLABLE))
             return
+        # Kiro doesn't cancel the MCP call, so end the wait here (091 D10).
+        self._questions.cancel()
         self._mcp.cancel_all()
         self._spawn(self._send_cancel())
 
@@ -691,29 +728,40 @@ class KiroHarness:
             log.warning("Failed to send %s notice", kind, exc_info=True)
 
     @property
-    def pending_question(self) -> None:
-        """Kiro sessions have no ``question`` tool, so nothing is ever pending."""
-        return None
+    def pending_question(self) -> PendingQuestion | None:
+        """The question the root turn is waiting on, or ``None``."""
+        return self._questions.pending
 
     def status_event(self) -> SessionStatus:
-        """Build the live ``session_status`` frame (``working`` or ``idle``, context %)."""
+        """Build the live ``session_status`` frame (state, pending question, context %)."""
         from archie_agent.app import _read_git_branch
 
+        question = self._questions.pending
+        if question is not None:
+            state = "blocked"
+        elif self._turn_active:
+            state = "working"
+        else:
+            state = "idle"
         return SessionStatus(
             id=str(ULID()),
             model_key=self.session.model_id,
             git_branch=_read_git_branch(),
-            state="working" if self._turn_active else "idle",
+            state=state,
+            question=question,
             context_pct=msgspec.UNSET if self._context_pct is None else self._context_pct,
         )
 
-    def answer_question(self, command) -> ErrorNotice:
-        """Reject answers: Kiro sessions never have a pending question."""
-        return ErrorNotice(
-            id=str(ULID()),
-            kind="question_not_pending",
-            message=f"No pending question {command.question_id!r}",
-        )
+    def answer_question(self, command) -> ErrorNotice | None:
+        """Route an ``answer`` command; return a targeted notice when it doesn't fit."""
+        try:
+            self._questions.answer(
+                command.question_id,
+                Answer(option=command.option, text=command.text, dismiss=command.dismiss),
+            )
+        except QuestionError as exc:
+            return ErrorNotice(id=str(ULID()), kind=exc.kind, message=str(exc))
+        return None
 
     async def _emit_status(self) -> None:
         try:

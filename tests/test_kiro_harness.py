@@ -15,6 +15,7 @@ import pytest
 import yaml
 from archie_agent.kiro.harness import KiroHarness, KiroStartupError
 from archie_agent.tool_policy_live import LiveToolPolicy
+from archie_shared.commands import AnswerCommand
 from archie_shared.events import (
     AssistantMessage,
     CompactionComplete,
@@ -419,6 +420,80 @@ async def test_failed_automatic_compaction_is_logged(harness, home):
     await harness.handle_message("autocompact_fail")
     (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
     assert (complete.status, complete.error) == ("failure", "Kiro compaction failed: error")
+
+
+async def _until(predicate, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not met in time")
+
+
+def _recorded(tmp_path: Path, key: str):
+    return next((r[key] for r in _record(tmp_path) if key in r), None)
+
+
+async def test_question_tool_is_root_only(harness, tmp_path):
+    """091 D11: the root agent gets every Archie tool; the worker lists all but question."""
+    assert "question" in harness._mcp.tool_names()
+    root = json.loads((tmp_path / "kiro" / "agents" / "archie.json").read_text())
+    worker = json.loads((tmp_path / "kiro" / "agents" / "archie-worker.json").read_text())
+    assert "@archie" in root["tools"]
+    assert "@archie/question" not in worker["tools"]
+    expected = {f"@archie/{n}" for n in harness._mcp.tool_names()} - {"@archie/question"}
+    assert set(worker["tools"]) == expected and "@archie/shell" in expected
+
+
+async def test_question_blocks_until_answered(harness, home):
+    """091 D9: a Kiro question waits for the answer and shows as live state."""
+    seen = _capture(harness)
+    task = asyncio.create_task(harness.handle_message("question"))
+    pending = await _until(lambda: harness.pending_question)
+    assert [o.label for o in pending.options] == ["Blue", "Red"]  # recommended first
+    status = harness.status_event()
+    assert (status.state, status.question) == ("blocked", pending)
+    wrong = harness.answer_question(AnswerCommand(question_id="nope", option=0))
+    assert wrong.kind == "question_not_pending"
+    assert harness.answer_question(AnswerCommand(question_id=pending.id, option=0)) is None
+    await task
+    events = _log(home)
+    call = next(e for e in events if isinstance(e, ToolCall))
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert call.name == "question" and result.content == "User selected option 1: Blue"
+    assert isinstance(events[-1], TurnComplete)
+    statuses = [e for e in seen if isinstance(e, SessionStatus)]
+    assert any(s.state == "blocked" and s.question == pending for s in statuses)
+    assert (statuses[-1].state, statuses[-1].question) == ("idle", None)
+
+
+async def test_interrupt_clears_a_pending_question(harness, home, tmp_path):
+    """091 D10: Kiro doesn't cancel the MCP call, so the harness ends the wait."""
+    seen = _capture(harness)
+    task = asyncio.create_task(harness.handle_message("question"))
+    await _until(lambda: harness.pending_question)
+    harness.interrupt()
+    await task
+    assert isinstance(_log(home)[-1], TurnInterrupted)
+    assert harness.pending_question is None
+    last = [e for e in seen if isinstance(e, SessionStatus)][-1]
+    assert (last.state, last.question) == ("idle", None)
+    late = await _until(lambda: _recorded(tmp_path, "question_after_cancel"))
+    assert late == "Error: the turn ended before an answer"
+    await harness.handle_message("run it")
+    assert isinstance(_log(home)[-1], TurnComplete)
+
+
+async def test_question_call_failed_by_kiro_clears_it(harness, home, tmp_path):
+    """091 D10: a question tool call Kiro ends (a timeout) doesn't leave a stale question."""
+    await harness.handle_message("question_fail")
+    assert harness.pending_question is None
+    late = _recorded(tmp_path, "question_after_fail")
+    assert late == "Error: Kiro ended the question tool call before an answer"
+    result = next(e for e in _log(home) if isinstance(e, ToolResult))
+    assert result.is_error
 
 
 async def test_switch_model(harness, tmp_path):

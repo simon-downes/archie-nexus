@@ -50,6 +50,17 @@ def test_worker_agent_config():
     assert "toolsSettings" not in config
 
 
+def test_worker_agent_config_with_an_explicit_tool_list(tmp_path):
+    """091 D11: the harness lists the worker's tools to leave out question."""
+    tools = ["@archie/shell", "@archie/read"]
+    assert worker_agent_config(URL, tools)["tools"] == tools
+    paths = write_agent_files(
+        tmp_path, mcp_url=URL, root_prompt="R", worker_prompt="W", worker_tools=tools
+    )
+    assert json.loads(paths["worker_agent"].read_text())["tools"] == tools
+    assert json.loads(paths["root_agent"].read_text())["tools"][0] == "@archie"
+
+
 def test_write_agent_files_keeps_prompts_outside_agents_dir(tmp_path):
     paths = write_agent_files(tmp_path, mcp_url=URL, root_prompt="ROOT", worker_prompt="WORKER")
     assert (tmp_path / "archie" / "archie.md").read_text() == "ROOT"

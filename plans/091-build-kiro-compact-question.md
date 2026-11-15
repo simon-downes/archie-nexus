@@ -248,7 +248,7 @@ clearing questions that Kiro abandons.
   tests/test_kiro_harness.py -q` passes.
 - **Outcome:** `RootContext` and the `TurnTranslator` compaction mapping (`_summarization`, `_start_compaction`, `_end_compaction`; open compactions closed first in `finish()`); the harness feeds its own `RootContext` for live status. Fake prompts `autocompact`/`autocompact_fail`. Docs: `docs/kiro.md` mapping row and placeholder note. Verify: `tests/test_kiro_translate.py tests/test_kiro_harness.py` 65 passed; `ruff check .` passed.
 
-### [ ] M3 — Question tool on Kiro
+### [x] M3 — Question tool on Kiro
 
 - **Approach:** D9–D11. `QuestionBroker.cancel()`; harness registry =
   `create_registry()` plus the wrapped question tool; `ArchieMcpServer.tool_names()`;
@@ -270,7 +270,7 @@ clearing questions that Kiro abandons.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_kiro_harness.py
   tests/test_question_tool.py tests/test_kiro_mcp.py tests/test_kiro_agent_files.py -q`
   passes, and `rg -n "or \`question\`" docs/kiro.md` finds nothing.
-- **Outcome:**
+- **Outcome:** `QuestionBroker.cancel()` (and `ask` no longer clears a newer question); `kiro_question_tool` with a ULID per call registered in the Kiro MCP registry; `pending_question`/`status_event` (`blocked`)/`answer_question` on `KiroHarness`; clearing on interrupt, at turn end, and when the translator ends a `question` call (`TurnTranslator.tool_name`); `ArchieMcpServer.tool_names()`; worker agent file lists every tool but `question`. Fake prompts `question`/`question_fail`. Docs: `docs/kiro.md` tools, subagents, session control. Verify: 101 passed; `rg -n "or \`question\`" docs/kiro.md` finds nothing.
 
 ## Deviations
 

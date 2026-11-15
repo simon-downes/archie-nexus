@@ -279,6 +279,11 @@ class TurnTranslator:
                 self._context_seen.add(pct)
         return out
 
+    def tool_name(self, call_id: str) -> str | None:
+        """The Archie tool name of a tool call this turn, or None (091 D10)."""
+        tool = self._tools.get(call_id)
+        return tool.name if tool is not None and tool.kind == "archie" else None
+
     # -- automatic compaction (091 D7) -------------------------------------------
 
     def _summarization(
