@@ -1,6 +1,6 @@
 # 090 — Agent config and credentials from the orchestrator
 
-Status: planning
+Status: building
 Branch: build-it/090-agent-config-fetch (base: main @ 8cdad07)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/090-agent-config-fetch
 
@@ -101,6 +101,8 @@ questions were needed).
 | D24 | Failed sync after startup | a periodic or early sync that fails (unreachable, 401, 5xx, or `credential_errors` for a held name) logs a warning and keeps the held value; a miss that fails raises `HostConfigError` | replace held values with errors | keeps last-good behaviour (`_runtime_env._last_good`, `LiveToolPolicy`); a mid-edit invalid `credentials.yaml` mustn't break running sessions | self |
 | D25 | Settings route | `GET /plugins/{plugin_id}/settings` returns `resolved_settings(pid, config.plugins, manifests)` for any manifest id, enabled or not; no manifest → 404 | raw `config.plugins.<id>.settings`, or only enabled plugins | manifest defaults apply as in the runner context; the `gh` wrapper reads `work_orgs` today whether or not the plugin is enabled | self |
 | D26 | `host_config.current()` with nothing installed | builds lazily from `source_from_env()` and starts it | raise | the exec runner and stray callers still fail loudly (no token); tests calling `load_policy_snapshot()` or `discover_skills()` without a lifespan work through the patched factory | self |
+| D28 | Error types | `HostConfigError(ValueError)` for transport, 401, 5xx and per-name errors on a miss; a `config_error` at start (or lazy start) raises `ConfigError(<message>)` | one new exception type everywhere | existing handlers catch these: `skills._enabled_plugin_ids` (`ConfigError`), `resolve_api_key` (`KeyError, ValueError`), `_runtime_env._compute` (quotes `ConfigError` messages), plugins (`Exception`) | self |
+| D29 | Who handles sync failures | `HostConfig.sync()` raises `HostConfigError` on transport, 401 and 5xx; it applies a response itself, dropping `credential_errors` for held names with a warning and clearing `config_error` when the response has none; `sync_loop` and the early OAuth sync catch and log; a miss lets the error propagate | handling everything in the loop | one place applies responses; callers choose whether a failure is fatal | self |
 | D27 | Orchestrator URL | `http://host.docker.internal:{get_profile(config.orchestrator).port}` (the call `archie serve` uses) | hard-coded 7600, `ARCHIE_HOST` | follows a configured default-profile port | self |
 
 ## Requirements
@@ -244,8 +246,9 @@ in `shared` makes any leftover file read in a container raise.
   config_error: str | None, credentials: dict[str, SyncItem], credential_errors: dict[str, str]}`.
   Config `value` is `msgspec.to_builtins(NexusConfig)`; a credential `value` is the raw
   store entry or null.
-- `HostConfig` state: config + version, config_error, `{name: (version, entry)}`, a
-  `generation` int bumped on every change, last early-sync time per name.
+- `HostConfig` state: config + version, `config_error` (set by a response that has one,
+  cleared by a response that doesn't), `{name: (version, entry)}`, a `generation` int
+  bumped on every change, last early-sync time per name.
 
 ### Data flow
 
@@ -275,7 +278,10 @@ in `shared` makes any leftover file read in a container raise.
 - Token: 32 random bytes (`secrets.token_urlsafe`), stored only as SHA-256 hex (D1), never in
   argv (D2), removed from the agent's `os.environ`. It stays readable in `/proc/1/environ`
   and in `docker exec` shells, which the threat model (incidental exposure) accepts.
-- Socket: parent directory mode 0700 in the container's `/tmp`, GET-only routes.
+- Socket: parent directory mode 0700 in the container's `/tmp`, GET-only routes. It serves
+  every provider's credential (OAuth tokens and `bedrock` included) to any process running
+  as the container user, the model's shell among them. That is deliberate access, which the
+  threat model accepts; D16 keeps only the rest of the config out of subprocesses.
 - Request volume: one sync per session every 300 s, plus misses and early OAuth syncs.
 
 ### Config / infra
@@ -296,13 +302,22 @@ in `shared` makes any leftover file read in a container raise.
   `ARCHIE_AGENT_TOKEN` must be exported; `agent_api.py` with `answer_sync()` and the route
   (auth via `request.app.state.tracker`: store lookup in a thread, then `tracker.live()`);
   `host_config.py` with `source_from_env()` (flag check, URL, token popped), `HttpSource`,
-  `HostConfig.start()`/`sync()` for config and `config_error`, lazy `current()` (D26);
+  `HostConfig.start()`/`sync()` for config and `config_error` (D28, D29), lazy `current()`
+  (D26); `PreparedStart.agent_token` uses `field(repr=False)`; `run_container` merges its
+  `env` into `os.environ` (the docker CLI needs `PATH`, `HOME`, `DOCKER_HOST`);
   `app.py` lifespans (native and Kiro) build config from `HostConfig`;
   `tool_policy_live.py` (loader raises `ConfigError(config_error)` when set) and
   `skills.py` read `host_config`. Add `FileSource` and the autouse fixtures to the root
-  `conftest.py`. Update the live-reload tests in `tests/test_tool_policy_live.py` and
-  `tests/test_tool_policy_live_exec.py` to call `host_config.current().sync()` after
-  editing `config.yaml`, and the tests that patch `run_container` with `captured.extend`.
+  `conftest.py`; `app.py` calls `host_config.source_from_env()` as a module attribute so
+  the patch applies, and the conftest keeps the original as a `real_source_from_env`
+  fixture for the tests of the real function. Update the live-reload tests in
+  `tests/test_tool_policy_live.py`, `tests/test_tool_policy_live_exec.py` and
+  `tests/test_plugin_enabled.py` (skills) to call `host_config.current().sync()` after
+  editing `config.yaml`; the `migrate(...) == 3` assertions in
+  `tests/test_session_store.py` to 4; and the tests that patch `run_container` with
+  `captured.extend`. Tests that set `ARCHIE_AGENT_CONTAINER=1` set it only around
+  `source_from_env()` (and, in M5, the guard calls): `FileSource` and the in-process
+  orchestrator routes read the host files, which the M5 guard forbids under the flag.
   ⚠️ `HttpSource` takes an injectable `httpx.Client` so tests can pass a Starlette
   `TestClient` over the orchestrator routes.
 - **Test seam:** `answer_sync()`; the `/api/agent/sync` route through `TestClient`;
@@ -314,15 +329,16 @@ in `shared` makes any leftover file read in a container raise.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test -q tests/test_agent_sync_api.py
   tests/test_host_config.py tests/test_session_store.py tests/test_orchestrator_lifecycle.py
   tests/test_ws_integration.py tests/test_tool_policy_live.py
-  tests/test_tool_policy_live_exec.py tests/test_kiro_harness.py tests/test_plugin_loader.py`
-  passes, then the full suite.
+  tests/test_tool_policy_live_exec.py tests/test_plugin_enabled.py tests/test_kiro_harness.py
+  tests/test_plugin_loader.py` passes, then the full suite.
 - **Outcome:**
 
 ### [ ] M2 — Credentials through the pull-through cache
 
 - **Approach:** `HostConfig.get_credential()` (miss fetch, cached absence, typed with
-  `CREDENTIAL_TYPES` like `store.get_credential`), OAuth early sync with spacing, a
-  `refresh(name)` for Bedrock; module `get_credential()`. Switch Bedrock (both paths),
+  `CREDENTIAL_TYPES` like `store.get_credential`), `sync()` extended to send and apply
+  every held credential version (D29), OAuth early sync with spacing, a `refresh(name)`
+  for Bedrock; module `get_credential()`. Switch Bedrock (both paths),
   Bedrock-OpenAI, OpenAI, `kiro/harness.resolve_api_key`; `runtime_environment(lookup=)`
   and `_runtime_env` keyed on `generation`. Update tests that relied on per-call re-reads
   (`tests/test_openai_api.py`, `tests/test_runtime_env_live.py`) to sync first.
@@ -354,8 +370,9 @@ in `shared` makes any leftover file read in a container raise.
   a `host_config` loader (D17); rewrite `container/bin/gh` and
   `plugins/aws/bin/credential-process` reads as `curl -sf --unix-socket "$sock"`; rewrite
   `tests/test_gh_wrapper.py`, `plugins/aws/tests/test_aws_credential_process.py` and
-  `tests/test_plugin_sdk.py::test_credential_source_reads_store_every_call` against the
-  root-conftest `fake_agent_socket` fixture.
+  `tests/test_plugin_sdk.py::test_credential_source_reads_store_every_call` and
+  `::test_credential_source_only_reads_its_own_plugin` against the root-conftest
+  `fake_agent_socket` fixture.
 - **Test seam:** the socket app over a real UDS; `CredentialSource.get()`; the two scripts
   as subprocesses.
 - **Deliverable:** `gh`, AWS and exec plugins get credentials without the files.
@@ -366,8 +383,7 @@ in `shared` makes any leftover file read in a container raise.
 
 ### [ ] M5 — Fail-loud guard, prompt and docs
 
-- **Approach:** `guard_host_files()` and its calls; root conftest clears the flag;
-  `scripts/dev` unsets it; `tests/test_host_file_guard.py` (runtime cases, and a scanner
+- **Approach:** `guard_host_files()` and its calls; `scripts/dev` unsets the flag; `tests/test_host_file_guard.py` (runtime cases, and a scanner
   function tested on the repo and on fixture strings); remove the file names from
   `persona/prompts/environment.md`; update `docs/architecture.md`,
   `docs/auth-credentials.md`, `docs/config.md`, `docs/plugins.md` and the plugin READMEs
@@ -407,7 +423,14 @@ in `shared` makes any leftover file read in a container raise.
   route; guard message contents; D15 cites `kiro/mcp_server.py` and the reason for the
   override (uvicorn's `capture_signals` swaps SIGTERM handlers); D26 lazy `current()`;
   D27 port source; startup order and `os.environ` export; plugin READMEs in M5; the
-  `wait_for_ready` hint. Second pass: pending.
+  `wait_for_ready` hint. Second pass: one ❌ (exception types for a missing config or a
+  failed miss) fixed with D28; all ⚠️ fixed (skills tests added to M1; the flag is set
+  only around `source_from_env()` and guard calls because the in-process answer paths read
+  the files; M2 owns the credential half of `sync()`; D29 splits failure handling between
+  `sync()` and its callers); all ℹ️ fixed (`config_error` clearing, socket exposure stated
+  in Non-functional, M5 dedupe, `migrate == 4` updates, the second `test_plugin_sdk` test,
+  `run_container` env merge, `field(repr=False)`, module-attribute call and
+  `real_source_from_env`). Stopped after two passes, as the process allows.
 
 ## Outcome
 
