@@ -295,8 +295,8 @@ clearing questions that Kiro abandons.
 
 Kiro sessions now support `/compact` (typed or from the palette) through `_kiro/session/compact`, logged as a manual compaction with Kiro's summary and shown without token figures; Kiro's automatic mid-turn compactions appear as `threshold` compaction rows and the placeholder 20 % context figure is dropped; and the Kiro root agent has the `question` tool, which blocks until answered, shows as `blocked` live state, is cleared on interrupt, turn end or a failed call, and is kept from `archie-worker`. Evidence: full suite 5555 passed (`env -u ARCHIE_BACKEND scripts/dev test`); `ruff check .` passed; `ruff format --check .` only the baseline file. A live run of `KiroHarness` against kiro-cli 3.1.0 (scratch homes, `gpt-5.6-luna`) asked a question and got "User selected option 2: Red", cleared an interrupted question (`pending: None`, `idle`), compacted in 4.1 s with a summary, and the model answered "Red" after the compaction. Not verified: an automatic compaction from real Kiro through the harness (the frames come from the 091 spike, replayed by the fake), MCP waits over 600 s, and the web viewer in a browser (covered by a `compaction_text` unit test).
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/38
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
