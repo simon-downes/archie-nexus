@@ -19,7 +19,8 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
   ``autocompact_fail`` → a compaction that fails; ``question`` → MCP ``question`` until it
   returns or ``session/cancel`` (then the result is recorded as ``question_after_cancel``);
   ``question_fail`` → fails the ``question`` call after 0.5 s, like a Kiro timeout, and
-  records the late MCP result as ``question_after_fail``; anything else → text, ``tool_load``, MCP
+  records the late MCP result as ``question_after_fail``; ``question_twice`` → two parallel
+  ``question`` calls (the second fails at once); anything else → text, ``tool_load``, MCP
   ``shell echo KIRO-OK``, text.
 """
 
@@ -338,6 +339,14 @@ async def prompt(rid: int, params: dict) -> None:
             )
         chunk("Ready.")
         completion(0.3)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        return
+    if text == "question_twice":
+        first = asyncio.create_task(archie_tool("tc_q1", "question", QUESTION))
+        await asyncio.sleep(0.2)
+        await archie_tool("tc_q2", "question", QUESTION)
+        chunk(f"Got: {(await first)['text']}")
+        completion(0.2)
         send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
         return
     if text in ("question", "question_fail"):

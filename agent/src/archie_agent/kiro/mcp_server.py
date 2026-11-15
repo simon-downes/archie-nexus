@@ -82,17 +82,19 @@ class ArchieMcpServer:
                 types.Tool(
                     name=t["name"], description=t["description"], inputSchema=t["input_schema"]
                 )
-                for t in self._registry.to_tool_config()
-                if t["name"] not in _EXCLUDED
+                for t in self._served()
             ]
 
         @self._mcp.call_tool()
         async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             return await self.call(name, arguments)
 
+    def _served(self) -> list[dict]:
+        return [t for t in self._registry.to_tool_config() if t["name"] not in _EXCLUDED]
+
     def tool_names(self) -> list[str]:
-        """Names of the tools this server lists."""
-        return [t["name"] for t in self._registry.to_tool_config() if t["name"] not in _EXCLUDED]
+        """Names of the tools this server lists (the worker's agent file uses them)."""
+        return [t["name"] for t in self._served()]
 
     async def call(self, name: str, arguments: dict) -> types.CallToolResult:
         """Run one tool and shape its result for MCP."""

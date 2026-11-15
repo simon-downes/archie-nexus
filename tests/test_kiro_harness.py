@@ -436,15 +436,24 @@ def _recorded(tmp_path: Path, key: str):
     return next((r[key] for r in _record(tmp_path) if key in r), None)
 
 
+async def _served_tools(url: str) -> set[str]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async with streamable_http_client(url) as (read, write, _), ClientSession(read, write) as s:
+        await s.initialize()
+        return {t.name for t in (await s.list_tools()).tools}
+
+
 async def test_question_tool_is_root_only(harness, tmp_path):
     """091 D11: the root agent gets every Archie tool; the worker lists all but question."""
-    assert "question" in harness._mcp.tool_names()
+    served = await _served_tools(harness.mcp_url)
+    assert {"question", "shell", "exec"} <= served and not served & {"skill", "task"}
     root = json.loads((tmp_path / "kiro" / "agents" / "archie.json").read_text())
     worker = json.loads((tmp_path / "kiro" / "agents" / "archie-worker.json").read_text())
     assert "@archie" in root["tools"]
     assert "@archie/question" not in worker["tools"]
-    expected = {f"@archie/{n}" for n in harness._mcp.tool_names()} - {"@archie/question"}
-    assert set(worker["tools"]) == expected and "@archie/shell" in expected
+    assert set(worker["tools"]) == {f"@archie/{n}" for n in served - {"question"}}
 
 
 async def test_question_blocks_until_answered(harness, home):
@@ -486,6 +495,18 @@ async def test_interrupt_clears_a_pending_question(harness, home, tmp_path):
     assert isinstance(_log(home)[-1], TurnComplete)
 
 
+async def test_a_second_question_does_not_cancel_the_first(harness, home):
+    """Only a failed question call clears the wait; a rejected second call doesn't."""
+    task = asyncio.create_task(harness.handle_message("question_twice"))
+    first = await _until(lambda: harness.pending_question)
+    await _until(lambda: sum(isinstance(e, ToolResult) for e in _safe_log(home)) == 1)
+    assert harness.pending_question == first
+    assert harness.answer_question(AnswerCommand(question_id=first.id, option=0)) is None
+    await task
+    results = sorted(e.content for e in _log(home) if isinstance(e, ToolResult))
+    assert results == ["Error: another question is already waiting", "User selected option 1: Blue"]
+
+
 async def test_question_call_failed_by_kiro_clears_it(harness, home, tmp_path):
     """091 D10: a question tool call Kiro ends (a timeout) doesn't leave a stale question."""
     await harness.handle_message("question_fail")
@@ -494,6 +515,29 @@ async def test_question_call_failed_by_kiro_clears_it(harness, home, tmp_path):
     assert late == "Error: Kiro ended the question tool call before an answer"
     result = next(e for e in _log(home) if isinstance(e, ToolResult))
     assert result.is_error
+
+
+async def test_compaction_cancelled_by_shutdown_still_completes(home, tmp_path, monkeypatch):
+    """Every compaction_start gets a compaction_complete, even when the task is cancelled."""
+    monkeypatch.setenv("FAKE_KIRO_COMPACT", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        assert h.try_begin_turn()
+        task = asyncio.create_task(h.run_manual_compaction())
+        await _until(lambda: _compact_requests(tmp_path))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await h.close()
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error) == (
+        "interrupted",
+        "The session stopped during the compaction",
+    )
+    assert not h.turn_active
 
 
 async def test_switch_model(harness, tmp_path):

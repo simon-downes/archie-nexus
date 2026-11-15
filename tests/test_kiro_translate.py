@@ -401,6 +401,20 @@ def test_turn_ending_mid_compaction_interrupts_it_before_the_terminal():
     assert complete.status == "interrupted" and complete.duration_ms == 10_000
 
 
+def test_turn_error_mid_compaction_keeps_the_turn_error_text():
+    tr = TurnTranslator(Path("/tmp/x.jsonl"), MODEL_KEY, 2)
+    tr.feed(_started(), 10.0)
+    events = tr.finish(
+        stop_reason=None, error="Kiro backend stopped", sent_at=9.0, at=11.0, price=lambda c: c
+    )
+    request = next(e for e in events if isinstance(e, LLMRequest))
+    assert request.error == "Kiro backend stopped"
+    assert next(e for e in events if isinstance(e, TurnError)).message == "Kiro backend stopped"
+    cancelled = _feed([_started()], stop="cancelled")
+    # No turn_completion came, so the usual error, not the compaction's.
+    assert next(e for e in cancelled if isinstance(e, LLMRequest)).error == NO_COMPLETION_ERROR
+
+
 def test_root_context_drops_the_placeholder_after_a_summary():
     ctx = RootContext()
     assert ctx.feed(_ctx(20)) == 20.0  # not armed: a real 20 passes

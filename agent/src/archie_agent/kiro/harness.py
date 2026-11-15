@@ -494,9 +494,11 @@ class KiroHarness:
                     await self._event_bus.emit(event)
                     if (
                         isinstance(event, ToolResult)
+                        and event.is_error
                         and translator.tool_name(event.tool_use_id) == QUESTION_TOOL
                     ):
-                        # Kiro ended the call (failed or timed out) while it still waits.
+                        # Kiro failed the call (or timed it out) while it still waits. A
+                        # second question's own error result comes back ``completed``.
                         self._questions.cancel(QUESTION_ABANDONED)
             pct = self._root_context.feed(update)
             if pct is not None and pct != self._context_pct:
@@ -653,6 +655,9 @@ class KiroHarness:
             if self.session.turn_index == 0:
                 await self._notice("manual_compaction_failed", "Nothing to compact")
                 return
+            # Set before the first await, so an interrupt never sends session/cancel (D5).
+            self._compacting = True
+            self._compaction_summary = None
             await self._emit_status()
             await self._compact()
         except LogAppendError as exc:
@@ -681,9 +686,25 @@ class KiroHarness:
                 sent_at=now_utc(),
             )
         )
-        self._compacting = True
-        self._compaction_summary = None
         started = time.monotonic()
+
+        def complete(status: str, error: str | None) -> CompactionComplete:
+            return CompactionComplete(
+                id=str(ULID()),
+                turn=turn,
+                iteration=0,
+                scope=None,
+                request_id=request_id,
+                reason="manual",
+                status=status,
+                tokens_before=0,
+                tokens_after=None,
+                cost_saved_usd=0.0,
+                duration_ms=round((time.monotonic() - started) * 1000),
+                error=error,
+                summary=self._compaction_summary if status == "success" else None,
+            )
+
         error: str | None = None
         try:
             result = await self._acp.request(
@@ -697,25 +718,13 @@ class KiroHarness:
             error = f"Kiro compaction failed: {exc}"
         except TimeoutError:
             error = f"Kiro compaction timed out after {COMPACT_TIMEOUT_S:.0f}s"
-        finally:
-            self._compacting = False
-        await self._event_bus.emit(
-            CompactionComplete(
-                id=str(ULID()),
-                turn=turn,
-                iteration=0,
-                scope=None,
-                request_id=request_id,
-                reason="manual",
-                status="failure" if error else "success",
-                tokens_before=0,
-                tokens_after=None,
-                cost_saved_usd=0.0,
-                duration_ms=round((time.monotonic() - started) * 1000),
-                error=error,
-                summary=None if error else self._compaction_summary,
-            )
-        )
+        except asyncio.CancelledError:
+            # Shutdown cancelled the wait: every compaction_start still gets its completion.
+            event = complete("interrupted", "The session stopped during the compaction")
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._event_bus.emit(event))
+            raise
+        await self._event_bus.emit(complete("failure" if error else "success", error))
 
     # -- helpers -------------------------------------------------------------------
 

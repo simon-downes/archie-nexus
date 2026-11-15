@@ -1,6 +1,6 @@
 # 091 — Kiro /compact and question tool
 
-Status: reviewing
+Status: done
 Branch: build-it/091-kiro-compact-question (base: main @ 8cdad07)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/091-kiro-compact-question
 
@@ -288,10 +288,17 @@ clearing questions that Kiro abandons.
 ## Review
 
 - Plan review: 1 pass, 6 ⚠️ and 11 ℹ️, all accepted. Fixed: `worker_agent_config`/`write_agent_files` get `None` defaults and `tests/test_kiro_agent_files.py` joins M3's seam and Verify; test locations named; web seam is `compaction_text` in `tests/test_web_session_detail.py`; M1 Verify checks its docs, including the "no manual compaction" Limits sentence; D3 gives the threshold label and the web strings, and names `kiro_model_id`; D8 names the two owners and what feeds them, and that a manual frame arms the harness filter; Context line ref corrected; M1 updates the `commands.py`/`app.py` docstrings; D10 clears `_pending` synchronously, runs before the closing status, and also clears a question whose tool call Kiro ends (covers a `requestTimeout` cut-off); D5 now sends a `compaction_not_cancellable` notice; the Design notes why no prompt change is needed; M2 places the `interrupted` compaction in `finish()` before the root terminal. No ❌, so no second pass.
+- Code review: `general` and `risk` (the diff changes which tools Kiro agents get, the TUI palette, and handles model-supplied question input), one round. Fixed: ⚠️ (general) `finish()` overwrote its `error` parameter when a compaction was open, so a turn error's text and `llm_request.error` became "Turn ended during the compaction" → renamed the local, `test_turn_error_mid_compaction_keeps_the_turn_error_text`; ⚠️ (both) a `/compact` cancelled by shutdown left a `compaction_start` without a completion → `_compact` writes a shielded `interrupted` completion on `CancelledError` (`test_compaction_cancelled_by_shutdown_still_completes`); ⚠️ (risk) and ❓ (general) any `question` `ToolResult` cancelled the pending question, so a rejected second parallel call cleared the first → only an error result (Kiro failed the call) cancels (`test_a_second_question_does_not_cancel_the_first`); ℹ️ (risk) `_compacting` was set after the first await, so an early interrupt could send `session/cancel` → set before it in `run_manual_compaction`, which now owns the flag (also resolves the ℹ️ duplicate reset); ℹ️ `tool_names()` duplicated `list_tools`' filter → shared `_served()`; ℹ️ double `pop` in `_summarization` → explicit synthesised-start branch; ℹ️ tautological root-only test → it lists tools over MCP from the running server. No ❌, so no second round. Full suite 5555 passed; `ruff check .` passed.
+- Merge risk: Medium: the worst reachable failure is a Kiro session showing a wrong or stuck compaction row or question panel (for example if a later Kiro renames its frames); interrupt and turn end still clear questions, compaction always completes, and native sessions share only `QuestionBroker.ask`'s guarded clean-up and a defaulted `CompactionNode.model_key`.
 
 ## Outcome
+
+Kiro sessions now support `/compact` (typed or from the palette) through `_kiro/session/compact`, logged as a manual compaction with Kiro's summary and shown without token figures; Kiro's automatic mid-turn compactions appear as `threshold` compaction rows and the placeholder 20 % context figure is dropped; and the Kiro root agent has the `question` tool, which blocks until answered, shows as `blocked` live state, is cleared on interrupt, turn end or a failed call, and is kept from `archie-worker`. Evidence: full suite 5555 passed (`env -u ARCHIE_BACKEND scripts/dev test`); `ruff check .` passed; `ruff format --check .` only the baseline file. A live run of `KiroHarness` against kiro-cli 3.1.0 (scratch homes, `gpt-5.6-luna`) asked a question and got "User selected option 2: Red", cleared an interrupted question (`pending: None`, `idle`), compacted in 4.1 s with a summary, and the model answered "Red" after the compaction. Not verified: an automatic compaction from real Kiro through the harness (the frames come from the 091 spike, replayed by the fake), MCP waits over 600 s, and the web viewer in a browser (covered by a `compaction_text` unit test).
 
 PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Check a real Kiro automatic compaction in a long session against the D7/D8 mapping.
+- Insights averages over `metrics_compactions` include Kiro rows with `tokens_before` 0.

@@ -294,8 +294,11 @@ class TurnTranslator:
             if scope not in self._compactions:
                 self._start_compaction(state, at, out)
             return
-        compaction = self._compactions.pop(scope, None) or self._start_compaction(state, at, out)
-        self._compactions.pop(scope, None)
+        compaction = self._compactions.pop(scope, None)
+        if compaction is None:
+            # Kiro sent no ``started`` frame: write the start now, and don't leave it open.
+            compaction = self._start_compaction(state, at, out)
+            del self._compactions[scope]
         if info.kind == "completed":
             self._end_compaction(state, compaction, "success", None, info.summary, at, out)
         elif info.reason == "canceled":
@@ -501,9 +504,10 @@ class TurnTranslator:
         cancelled = stop_reason == "cancelled"
         # First, so every compaction ends before its scope's terminal event (091 D7).
         for scope, compaction in list(self._compactions.items()):
-            error = "Turn ended during the compaction"
+            # Not ``error``: that parameter still carries the turn's own failure.
+            ended = "Turn ended during the compaction"
             self._end_compaction(
-                self._scope(scope), compaction, "interrupted", error, None, at, out
+                self._scope(scope), compaction, "interrupted", ended, None, at, out
             )
         self._compactions.clear()
         for call_id, tool in self._tools.items():
