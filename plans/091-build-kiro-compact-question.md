@@ -1,6 +1,6 @@
 # 091 — Kiro /compact and question tool
 
-Status: building
+Status: reviewing
 Branch: build-it/091-kiro-compact-question (base: main @ 8cdad07)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/091-kiro-compact-question
 
