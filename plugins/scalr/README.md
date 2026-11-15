@@ -48,9 +48,9 @@ and hides login and status for the provider.
 `shared/src/archie_shared/credentials/runtime.py` (`runtime_environment()`) builds the
 environment for each shell command and exec run: the stored `token` as `SCALR_TOKEN`
 (skipped when no credential is stored), and each setting that declares `env` in the
-manifest, when its value is set. The agent recomputes it when `config.yaml` or
-`credentials.yaml` changes, so a new login or settings edit reaches running sessions at the
-next command. `archie auth login scalr` prompts for the token when `SCALR_TOKEN` is unset,
+manifest, when its value is set. The agent recomputes it when a sync from the orchestrator
+changes its config or credentials (every 5 minutes), so a new login or settings edit reaches
+running sessions within that time. `archie auth login scalr` prompts for the token when `SCALR_TOKEN` is unset,
 and for `hostname` and `account` when they aren't in `config.yaml`. If two plugins claim the
 same variable, the agent keeps the last good variables, or shows a warning if it has none.
 

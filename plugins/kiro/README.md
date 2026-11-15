@@ -19,7 +19,7 @@ KIRO_API_KEY=... archie auth login kiro
 ```
 
 `set_env: false`: the key is not exported into containers or into tool commands. The Kiro
-backend reads the stored `kiro.api_key` from the shared credentials file (falling back to a
+backend gets the stored `kiro.api_key` from the orchestrator (falling back to a
 `KIRO_API_KEY` variable already set in the agent's environment) and passes it only to the
 `kiro-cli` process.
 

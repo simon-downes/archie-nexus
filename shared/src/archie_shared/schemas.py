@@ -11,7 +11,7 @@ from typing import Annotated
 
 import msgspec
 
-from archie_shared.config import ConfigError, home_dir, load_config
+from archie_shared.config import ConfigError, guard_host_files, home_dir, load_config
 from archie_shared.plugins.config import PluginConfig, validate_plugins
 from archie_shared.plugins.errors import PluginManifestError
 from archie_shared.plugins.manifest import load_manifests
@@ -209,6 +209,7 @@ def load_nexus_config(path: Path | None = None) -> NexusConfig:
     if path is not None:
         return _load(Path(path))
 
+    guard_host_files("load_nexus_config")
     default_path = home_dir() / "config.yaml"
     if not default_path.exists():
         return NexusConfig()

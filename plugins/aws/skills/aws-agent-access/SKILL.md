@@ -14,9 +14,9 @@ description: >
   credentials stay in Archie's credential store; they are not in your environment. They can only assume the
   configured roles.
 - At session start Archie writes `~/.aws/config` from `plugins.aws.settings.profiles` (profile name → role ARN).
-  Each role profile uses `source_profile = archie-base`. The `archie-base` profile reads the stored base
-  credentials through `credential_process` on every use, so a new host login works in this session without a
-  restart.
+  Each role profile uses `source_profile = archie-base`. The `archie-base` profile gets the stored base
+  credentials through `credential_process` on every use, so a new host login works in this session within
+  about 5 minutes, without a restart.
 - Never edit `~/.aws/config`; it is container-local and overwritten on every start. To change profiles, the user
   edits `plugins.aws.settings.profiles` in their Archie config and starts a new session.
 - `~/.aws` must not be mounted into the container when `plugins.aws.settings.profiles` is set; Archie refuses to

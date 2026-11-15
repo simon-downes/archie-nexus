@@ -14,12 +14,18 @@ from pathlib import Path
 import msgspec
 import yaml
 
-from archie_shared.config import home_dir
+from archie_shared.config import guard_host_files, home_dir
 from archie_shared.credentials.models import CREDENTIAL_TYPES
 
 
 def store_path() -> Path:
-    """Resolve the credential store file path."""
+    """Resolve the credential store file path.
+
+    Raises:
+        HostFileAccessError: In an agent container (plan 090), so every store read and
+            write fails loudly there.
+    """
+    guard_host_files("store_path")
     return home_dir() / "credentials.yaml"
 
 

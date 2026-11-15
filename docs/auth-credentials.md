@@ -22,7 +22,7 @@ By default:
 ~/.nexus/credentials.yaml
 ```
 
-`ARCHIE_HOME_DIR` changes this location for both the host-side orchestrator and agent containers.
+`ARCHIE_HOME_DIR` changes this location for the host-side orchestrator and CLI. Agent containers don't read the file: they get credentials from the orchestrator (see [Agent container access](#agent-container-access)).
 
 ## Supported providers
 
@@ -309,15 +309,11 @@ Performs non-interactive OAuth refresh and returns redacted credential status.
 
 ## Agent container access
 
-The orchestrator mounts the host Nexus home directory into each agent container:
+The host Nexus home is still mounted into each agent container, but the agent never reads `credentials.yaml` (plan 090). It asks the orchestrator with `POST /api/agent/sync`, authenticated by the session's `ARCHIE_AGENT_TOKEN`, and keeps each credential it has been asked for in memory: the first read fetches it, later reads use the held value, and an absent credential is held as absent. See [Agent config and credentials](architecture.md#agent-config-and-credentials) for the protocol. Bedrock integrations read the typed `bedrock` entry this way and fall back to the normal AWS chain when appropriate.
 
-```text
-host <ARCHIE_HOME_DIR> → /home/archie/.nexus
-```
+A new login on the host reaches a running session at the agent's next sync, every 5 minutes. A held OAuth credential within 3 minutes of its `expires_at` is synced when it is read (at most once per 30 seconds), and the orchestrator refreshes OAuth tokens 4–5 minutes before they expire, so an hourly token is replaced before the held one runs out. Bedrock syncs immediately after an expired-token error. The projected environment (see [Command environment projection](#command-environment-projection)) is rebuilt after a sync changes anything. The `gh` wrapper (see [GitHub CLI token selection](#github-cli-token-selection)), the AWS `credential_process` helper (see [AWS credential refresh](#aws-credential-refresh)) and plugin code in exec runs ask the agent over its local socket (`ARCHIE_AGENT_SOCKET`) on every call. A process that is already running, such as a long-lived server started from a shell, keeps the values it loaded.
 
-The agent therefore sees the same credentials file at its container-side `ARCHIE_HOME_DIR` and can use the shared credential APIs. Bedrock integrations explicitly read the typed `bedrock` entry and fall back to the normal AWS chain when appropriate.
-
-Credential updates do not send a live control-plane event to running agents. A running process may already have loaded credentials. New containers see the latest persisted file. The agent rebuilds the projected environment for each new shell command and exec run (see [Command environment projection](#command-environment-projection)), so a new login reaches running sessions at the next command. The `gh` wrapper (see [GitHub CLI token selection](#github-cli-token-selection)) and the AWS `credential_process` helper (see [AWS credential refresh](#aws-credential-refresh)) also read the store on every call. A process that is already running, such as the agent's own LLM client or a long-lived server started from a shell, keeps the values it loaded.
+In an agent container (`ARCHIE_AGENT_CONTAINER=1`) the shared store functions raise `HostFileAccessError`, so code that still tries to read the file fails instead of using the mounted copy.
 
 ### Command environment projection
 
@@ -336,13 +332,13 @@ Current mappings are:
 | `cloudflare` | `api_token` → `CLOUDFLARE_API_TOKEN` | `true` |
 | `openai` | `api_key` → `OPENAI_API_KEY` | `false` |
 
-The `aws` mapping is unused by default: containers get AWS access through the generated profiles, which read the store on every call (see [AWS credential refresh](#aws-credential-refresh)). Setting `plugins.aws.auth.set_env: true` projects the base credentials again. Profile calls ignore them, but calls without a profile would use them.
+The `aws` mapping is unused by default: containers get AWS access through the generated profiles, which ask the agent for the base credentials on every call (see [AWS credential refresh](#aws-credential-refresh)). Setting `plugins.aws.auth.set_env: true` projects the base credentials again. Profile calls ignore them, but calls without a profile would use them.
 
 Plugin settings fields that declare `env` in their manifest are projected too, when the resolved value is set: `plugins.scalr.settings.hostname` → `SCALR_HOSTNAME`, `plugins.scalr.settings.account` → `SCALR_ACCOUNT`, `plugins.cloudflare.settings.account_id` → `CLOUDFLARE_ACCOUNT_ID`. Non-scalar settings cannot be projected: a manifest that puts `env` on a non-scalar or nested field is rejected at load. A plugin with `enabled: false` projects neither credentials nor settings.
 
 Only explicitly enabled providers are projected. Missing providers are skipped. Environment values are never logged.
 
-The agent computes the variables from the current `config.yaml` and `credentials.yaml` and caches them until either file's modification time or size changes. `grep`, `glob` and `code` subprocesses don't get them. If the variables can't be computed, for example because `config.yaml` fails validation, a store entry is invalid, or a mapping names an unknown credential field, an invalid environment name or a variable that two owners claim, the agent keeps using the last variables it computed successfully, as the live tool policy keeps its last valid snapshot. If it has none yet, the command runs without them and its stderr starts with an `[archie warning: …]` line. For errors outside `config.yaml` the warning gives only the exception type, so it never quotes the store.
+The agent computes the variables from the config and credentials it holds (see [Agent container access](#agent-container-access)) and caches them until a sync changes either. `grep`, `glob` and `code` subprocesses don't get them. If the variables can't be computed, for example because the host config fails validation when the session starts, a store entry is invalid, the orchestrator can't send a credential, or a mapping names an unknown credential field, an invalid environment name or a variable that two owners claim, the agent keeps using the last variables it computed successfully, as the live tool policy keeps its last valid snapshot. If it has none yet, the command runs without them and its stderr starts with an `[archie warning: …]` line. For errors other than config and orchestrator errors the warning gives only the exception type, so it never quotes a credential. Shells started inside an exec run reuse the variables the agent gave the runner.
 
 The orchestrator no longer passes these variables to `docker run`. Environment variables are inherited by processes inside the container and may be visible to processes with access to the container, so mappings should remain limited to tools that need them.
 
@@ -351,8 +347,8 @@ The orchestrator no longer passes these variables to `docker run`. Environment v
 GitHub credentials are not projected into the container environment. The image installs the real GitHub CLI as `gh-base` and puts a wrapper at `/usr/local/bin/gh` (source: `container/bin/gh`). On each call the wrapper:
 
 1. Finds the target owner, in this order: a `gh api` endpoint (path or full URL) starting `repos/`, `orgs/` or `users/<owner>`, the repository argument of `gh repo <subcommand>`, or the owner argument of `gh repo list`; then `--owner`; then `-R`/`--repo`; then `GH_REPO`; then the GitHub remote gh treats as the base repository (the one `gh repo set-default` marked, then `upstream`, `github`, `origin`, then the first). Remotes on other hosts are ignored.
-2. Reads `plugins.github.settings.work_orgs` from `config.yaml` with `yq`. If the owner matches an entry exactly, ignoring case, it uses `github.work_token`. Otherwise it uses `github.personal_token`.
-3. Reads that one token from `credentials.yaml` with `yq` and runs `gh-base` with all arguments unchanged and `GH_TOKEN` set only in that process.
+2. Asks the agent's local socket for the github plugin's settings (`GET /plugins/github/settings`) and reads `work_orgs` with `jq`. If the owner matches an entry exactly, ignoring case, it uses `github.work_token`. Otherwise it uses `github.personal_token`.
+3. Asks the socket for the `github` credential (`GET /credentials/github`), takes that one token and runs `gh-base` with all arguments unchanged and `GH_TOKEN` set only in that process.
 
 ```yaml
 plugins:
@@ -361,7 +357,7 @@ plugins:
       work_orgs: [tillo]
 ```
 
-Both files are read on every call, so changes apply to running sessions. If the caller already set `GH_TOKEN` or `GITHUB_TOKEN`, the wrapper leaves the environment alone. If the selected token is missing or not a string, or a file cannot be parsed, the wrapper prints a warning to stderr and runs `gh-base` without a token; gh then falls back to its own stored login, if one exists in the container.
+The wrapper asks on every call, so changes apply to running sessions after the agent's next sync. If the caller already set `GH_TOKEN` or `GITHUB_TOKEN`, the wrapper leaves the environment alone. If the settings can't be fetched, it uses the personal token. If the selected token is missing or not a string, or the agent can't answer, the wrapper prints a warning to stderr and runs `gh-base` without a token; gh then falls back to its own stored login, if one exists in the container.
 
 Owner detection uses argument patterns rather than gh's flag definitions. A `gh repo` argument that directly follows another flag is skipped, because it may be that flag's value (`gh repo view -b feature/x`). The cost is that `gh repo view --web o/r` uses the remote's token. A command that names its repository only through a URL argument (for example `gh pr view https://github.com/o/r/pull/1`) also uses the token for the current directory's remote. Pass `-R owner/repo` in those cases.
 
@@ -384,18 +380,18 @@ role_arn = arn:aws:iam::111111111111:role/agent-access
 source_profile = archie-base
 ```
 
-`credential-process` reads the `aws` entry from `credentials.yaml` with `yq` each time it runs and prints it as `credential_process` JSON. It writes nothing and keeps nothing in the environment. To renew expired credentials, run `aws-vault exec <profile> -- archie auth login aws` (or another login that refreshes the AWS chain) on the host; running sessions pick up the new values without a restart:
+`credential-process` asks the agent's local socket for the `aws` entry (`GET /credentials/aws`) each time it runs and prints it as `credential_process` JSON. It writes nothing and keeps nothing in the environment. To renew expired credentials, run `aws-vault exec <profile> -- archie auth login aws` (or another login that refreshes the AWS chain) on the host; running sessions pick up the new values after the agent's next sync, without a restart:
 
-- Role credentials are reused until about 15 minutes before they expire. The AWS CLI caches them under `~/.aws/cli/cache` across calls; an SDK session keeps them in memory. When they are due for renewal, the client gets base credentials from the helper, which reads the store, and assumes the role again. A new login therefore takes effect at the next role renewal (within an hour with the default role session length), and immediately for a profile with no cached role credentials.
+- Role credentials are reused until about 15 minutes before they expire. The AWS CLI caches them under `~/.aws/cli/cache` across calls; an SDK session keeps them in memory. When they are due for renewal, the client gets base credentials from the helper, which asks the agent, and assumes the role again. A new login therefore takes effect at the next role renewal (within an hour with the default role session length), and immediately for a profile with no cached role credentials.
 - The helper reports an `Expiration` 20 minutes ahead, because the store does not record the real one. Clients treat credentials within 15 minutes of `Expiration` as due for refresh, so a long-running SDK session never holds base credentials for more than about 5 minutes before it runs the helper again. Without an `Expiration`, SDK sessions would keep the first base credentials forever.
 
-If the store has no usable `aws` entry, the helper exits 1 with a message naming `archie auth login aws`, and the AWS CLI reports that error.
+If no usable `aws` entry is stored, the helper exits 1 with a message naming `archie auth login aws`; if the agent can't answer, it exits 1 saying so. The AWS CLI reports either error.
 
 ## Security model
 
 The auth API follows the current trusted local deployment model:
 
-- There is no client-to-orchestrator authentication or authorization layer.
+- There is no client-to-orchestrator authentication or authorization layer, except for `/api/agent/*`, which needs a live session's agent token (it identifies the session only and carries none of the user's authority).
 - The orchestrator API is intended for the trusted local host/network boundary.
 - Credential values are accepted over the local HTTP API and persisted in the shared store.
 - Static credential responses and OAuth flow responses are redacted.

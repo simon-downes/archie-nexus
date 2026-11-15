@@ -6,9 +6,12 @@ Provides:
 - plugins_dir(): resolve ARCHIE_PLUGINS_DIR (repo-tracked plugins)
 - load_config(): load YAML file and validate against a msgspec Struct schema
 - ConfigError: custom exception for all config-related failures
+- guard_host_files(): fail loudly when an agent container reads the host's config or
+  credential files (plan 090)
 """
 
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,43 @@ get config and credentials from the orchestrator, never from the host files."""
 
 class ConfigError(Exception):
     """Raised on config load failures (missing file, bad YAML, validation)."""
+
+
+class HostFileAccessError(RuntimeError):
+    """A host config or credential file was read inside an agent container (plan 090)."""
+
+
+_SHARED_DIR = str(Path(__file__).resolve().parent)
+
+
+def _caller() -> str:
+    """``file:line`` of the first frame outside ``archie_shared``."""
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_code.co_filename.startswith(_SHARED_DIR):
+        frame = frame.f_back
+    return "unknown" if frame is None else f"{frame.f_code.co_filename}:{frame.f_lineno}"
+
+
+def guard_host_files(reader: str) -> None:
+    """Raise if this process is in an agent container (``ARCHIE_AGENT_CONTAINER=1``).
+
+    Agent containers get config and credentials from the orchestrator through
+    ``archie_agent.host_config``; the host files may still be mounted, so a missed call
+    site would otherwise keep working silently.
+
+    Args:
+        reader: The guarded function, named in the error.
+
+    Raises:
+        HostFileAccessError: Naming ``reader``, its first caller outside ``archie_shared``
+            and the replacement.
+    """
+    if os.environ.get(AGENT_CONTAINER_ENV) != "1":
+        return
+    raise HostFileAccessError(
+        f"{reader}() reads the host's files, which agent containers must not use "
+        f"(called from {_caller()}); use archie_agent.host_config instead"
+    )
 
 
 def home_dir() -> Path:

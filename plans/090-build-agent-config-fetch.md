@@ -1,6 +1,6 @@
 # 090 — Agent config and credentials from the orchestrator
 
-Status: building
+Status: reviewing
 Branch: build-it/090-agent-config-fetch (base: main @ 8cdad07)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/090-agent-config-fetch
 
@@ -415,7 +415,7 @@ in `shared` makes any leftover file read in a container raise.
   `test_plugin_loader.py`); full suite 5598 passed; `ruff check .` clean; no
   `/tmp/archie-sock-*` left behind.
 
-### [ ] M5 — Fail-loud guard, prompt and docs
+### [x] M5 — Fail-loud guard, prompt and docs
 
 - **Approach:** `guard_host_files()` and its calls; `scripts/dev` unsets the flag; `tests/test_host_file_guard.py` (runtime cases, and a scanner
   function tested on the repo and on fixture strings); remove the file names from
@@ -427,7 +427,17 @@ in `shared` makes any leftover file read in a container raise.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test -q tests/test_host_file_guard.py`
   passes; `rg 'config.yaml|credentials.yaml' persona/prompts` and
   `rg -n 'before (each|every) exec call' docs` print nothing; full suite and ruff pass.
-- **Outcome:**
+- **Outcome:** `guard_host_files()` and `HostFileAccessError` in `shared/config.py`, called
+  by `load_nexus_config()` (default path) and `store_path()`; the message names the reader,
+  the first caller outside `archie_shared` and `archie_agent.host_config`. `scripts/dev`
+  unsets `ARCHIE_AGENT_CONTAINER`. `tests/test_host_file_guard.py` (17 tests): each reader,
+  the transitive `runtime_environment()` default, an explicit path, an AST scanner over
+  agent and plugin code (no hits) tested on five fixture forms and an allowed form, and the
+  script check. `environment.md` no longer names the files. Docs: new "Agent config and
+  credentials" section and API row in `architecture.md`; `auth-credentials.md`, `config.md`,
+  `plugins.md`, the github/aws/scalr/cloudflare/kiro READMEs, the github manifest comment
+  and the google and aws skills. Evidence: both `rg` ACs print nothing; `ruff check .` and
+  `ruff format --check` clean; shellcheck clean; full suite 5615 passed.
 
 ## Deviations
 

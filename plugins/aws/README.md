@@ -73,10 +73,11 @@ once when the agent starts, reads `settings` from `context()` and never reads cr
   So `~/.aws` must not be mounted into the container when `profiles` is set.
 - It writes atomically (temp file + rename), with the directory `0700` and the file `0600`.
 
-`bin/credential-process` (bash, needs `yq`, `jq` and `date`) reads `aws.access_key_id`,
-`aws.secret_access_key` and `aws.session_token` from `$ARCHIE_HOME_DIR/credentials.yaml` on
-every run and prints them as `credential_process` JSON. It exits 1 with a message naming
-`archie auth login aws` when the store or the fields are missing. Because the store does not
+`bin/credential-process` (bash, needs `curl`, `jq` and `date`) asks the agent's local socket
+(`$ARCHIE_AGENT_SOCKET`, `GET /credentials/aws`) for `access_key_id`, `secret_access_key` and
+`session_token` on every run and prints them as `credential_process` JSON. It exits 1 with a
+message naming `archie auth login aws` when the fields are missing, and with its own message
+when the agent can't answer. Because the store does not
 record when the session token expires, it reports an `Expiration` 20 minutes ahead. AWS
 clients refresh credentials 15 minutes before `Expiration`, so a long-running SDK session
 runs the helper again about every 5 minutes. Role credentials, cached by the CLI under
