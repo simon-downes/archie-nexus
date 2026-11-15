@@ -116,8 +116,10 @@ class PluginPolicy:
 class CredentialSource:
     """Reads one plugin's own provider credential (provider id == plugin id, D13).
 
-    ``get()`` reads the credential store on every call (D24), so tokens refreshed
-    mid-exec are seen. ``loader`` (zero-arg callable) replaces the store in tests.
+    ``get()`` asks the agent over its local socket on every call (D24; plan 090), so
+    tokens refreshed mid-exec are seen. ``loader`` (zero-arg callable) replaces that:
+    tests use it, and startup hooks, which run in the agent process, read the agent's
+    ``host_config`` through it.
     """
 
     __slots__ = ("_loader", "_plugin")
@@ -134,7 +136,7 @@ class CredentialSource:
         """Return this plugin's credential struct, or None if none is stored."""
         if self._loader is not None:
             return self._loader()
-        from archie_shared.credentials.store import get_credential
+        from archie_agent.local_api import get_credential
 
         return get_credential(self._plugin)
 

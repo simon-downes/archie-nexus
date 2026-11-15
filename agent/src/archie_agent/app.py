@@ -41,7 +41,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
-from archie_agent import host_config
+from archie_agent import host_config, local_api
 from archie_agent.compaction import is_compact_command
 from archie_agent.exec.plugin_loader import PluginLoadError, run_startup_hooks
 from archie_agent.harness import AgentHarness
@@ -156,11 +156,23 @@ async def _periodic_sync():
 
 @asynccontextmanager
 async def lifespan(app):
-    """Initialize the agent loop on startup."""
+    """Start the agent: host config, then the local API, then the backend (plan 090).
+
+    The local API is up before plugin startup hooks and the harness run, so every
+    subprocess they start finds ``ARCHIE_AGENT_SOCKET``.
+    """
+    backend = _backend()
+    config = _host_config(backend)
+    async with local_api.serve_local(), _backend_lifespan(backend, config):
+        yield
+
+
+@asynccontextmanager
+async def _backend_lifespan(backend: str, config: "NexusConfig"):
+    """Initialize the agent loop for ``backend``."""
     global _agent, _catalog, _config
 
-    backend = _backend()
-    _config = _host_config(backend)
+    _config = config
     _catalog = load_models()
     if backend == "kiro":
         async with _kiro_lifespan(_config):

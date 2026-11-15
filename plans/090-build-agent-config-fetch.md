@@ -383,7 +383,7 @@ in `shared` makes any leftover file read in a container raise.
   survived) and an agent-lifespan test with a 0.02 s interval; focused run 88 passed; full
   suite 5589 passed; `ruff check .` clean.
 
-### [ ] M4 — Subprocesses read through the agent socket
+### [x] M4 — Subprocesses read through the agent socket
 
 - **Approach:** `local_api.py` app and server (subclass `uvicorn.Server`, override
   `capture_signals` with a null context), started after `HostConfig` in both lifespans,
@@ -401,7 +401,19 @@ in `shared` makes any leftover file read in a container raise.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test -q tests/test_local_api.py
   tests/test_gh_wrapper.py tests/test_plugin_sdk.py tests/test_plugin_loader.py
   plugins/aws/tests` passes, then the full suite.
-- **Outcome:**
+- **Outcome:** `archie_agent.local_api`: Starlette app with `GET /credentials/{provider}`
+  and `GET /plugins/{plugin_id}/settings`, served by `serve_local()` (a uvicorn server
+  with `capture_signals` disabled) in a 0700 directory; it sets `ARCHIE_AGENT_SOCKET`.
+  `lifespan` is now: host config, then `serve_local()`, then `_backend_lifespan` (native or
+  Kiro). `CredentialSource.get()` uses `local_api.get_credential`; startup hooks get a
+  `host_config` loader. `container/bin/gh` and `credential-process` read via
+  `curl --unix-socket` (shellcheck clean); a settings error still falls back to the
+  personal token, as an unreadable `config.yaml` did. Root `conftest.py` pins the socket
+  path per test and adds `fake_agent_socket`. Evidence: focused run 234 passed
+  (`tests/test_local_api.py`, rewritten `tests/test_gh_wrapper.py` and
+  `plugins/aws/tests/test_aws_credential_process.py`, `test_plugin_sdk.py`, a hook test in
+  `test_plugin_loader.py`); full suite 5598 passed; `ruff check .` clean; no
+  `/tmp/archie-sock-*` left behind.
 
 ### [ ] M5 — Fail-loud guard, prompt and docs
 

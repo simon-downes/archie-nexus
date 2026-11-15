@@ -1,6 +1,12 @@
 """Repo-root pytest setup: install ``archie_plugins`` and isolate the Nexus home."""
 
+import http.server
+import json
 import os
+import shutil
+import socketserver
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -85,3 +91,56 @@ def _host_config_from_files(monkeypatch):
 def real_source_from_env():
     """The unpatched ``host_config.source_from_env``."""
     return _REAL_SOURCE_FROM_ENV
+
+
+@pytest.fixture(autouse=True)
+def _agent_socket_path(monkeypatch):
+    """Pin ``ARCHIE_AGENT_SOCKET`` to a fresh short path (plan 090 D9).
+
+    A session container exports the live agent's socket; tests must never reach it.
+    Unix socket paths are limited to about 100 bytes, hence ``/tmp``, not ``tmp_path``.
+    """
+    directory = tempfile.mkdtemp(prefix="archie-sock-", dir="/tmp")
+    monkeypatch.setenv("ARCHIE_AGENT_SOCKET", f"{directory}/agent.sock")
+    yield
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.fixture
+def fake_agent_socket():
+    """Serve canned agent socket routes at ``ARCHIE_AGENT_SOCKET``; yields the route map.
+
+    Set ``routes["/credentials/github"] = (200, {"value": {...}})``; unknown paths get
+    404. For the scripts that read the agent's socket (``gh``, ``credential-process``).
+    """
+    path = os.environ["ARCHIE_AGENT_SOCKET"]
+    routes: dict[str, tuple[int, object]] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's handler name
+            status, body = routes.get(self.path, (404, {"error": "not found"}))
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def address_string(self):
+            return "agent-socket"
+
+        def log_message(self, format, *args):  # noqa: A002 — http.server's signature
+            pass
+
+    class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    server = Server(path, Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield routes
+    finally:
+        server.shutdown()
+        server.server_close()
+        Path(path).unlink(missing_ok=True)

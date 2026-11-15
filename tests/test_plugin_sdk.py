@@ -92,32 +92,31 @@ def test_context_is_frozen_and_settings_read_only(tmp_path):
     assert ctx.settings["a"] == 1
 
 
-def _write_credentials(home: Path, data: dict) -> None:
-    path = home / "credentials.yaml"
-    path.write_text(json.dumps(data))
-    path.chmod(0o600)
-
-
-def test_credential_source_reads_store_every_call(tmp_path, monkeypatch):
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+def test_credential_source_asks_the_agent_every_call(fake_agent_socket):
+    """In the exec runner, ``get()`` goes to the agent's socket each time (plan 090)."""
     source = CredentialSource("datadog")
+    fake_agent_socket["/credentials/datadog"] = (200, {"value": None})
     assert source.get() is None
-    _write_credentials(
-        tmp_path,
-        {"datadog": {"api_key": "a1", "app_key": "b1"}, "incident_io": {"api_key": "other"}},
-    )
+    fake_agent_socket["/credentials/datadog"] = (200, {"value": {"api_key": "a1", "app_key": "b1"}})
     assert (source.get().api_key, source.get().app_key) == ("a1", "b1")
-    _write_credentials(tmp_path, {"datadog": {"api_key": "a2", "app_key": "b2"}})
+    fake_agent_socket["/credentials/datadog"] = (200, {"value": {"api_key": "a2", "app_key": "b2"}})
     assert source.get().api_key == "a2"
 
 
-def test_credential_source_only_reads_its_own_plugin(tmp_path, monkeypatch):
-    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
-    _write_credentials(tmp_path, {"incident_io": {"api_key": "secret"}})
+def test_credential_source_only_reads_its_own_plugin(fake_agent_socket):
+    fake_agent_socket["/credentials/incident_io"] = (200, {"value": {"api_key": "secret"}})
+    fake_agent_socket["/credentials/datadog"] = (200, {"value": None})
     assert CredentialSource("datadog").get() is None
     # No way to ask for another provider: get() takes no arguments.
     assert list(inspect.signature(CredentialSource.get).parameters) == ["self"]
     assert "secret" not in repr(CredentialSource("incident_io"))
+
+
+def test_credential_source_without_the_agent_raises():
+    from archie_agent.local_api import LocalApiError
+
+    with pytest.raises(LocalApiError, match="can't reach the agent"):
+        CredentialSource("datadog").get()
 
 
 def test_credential_source_loader_substitutes_store():
