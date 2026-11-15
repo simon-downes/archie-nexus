@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from archie_agent import host_config
 from archie_agent.llm import OpenAIClient, create_llm_client
 from archie_agent.llm._types import Done, TextDelta, ToolUseEvent, ToolUseStart, Usage
 from archie_agent.llm.openai_api import OPENAI_BASE_URL
@@ -141,6 +142,7 @@ def test_missing_key_fails_the_request_not_construction(sdk):
         client.invoke(_user(), "system")
     assert sdk == []
     replace_credential("openai", {"api_key": "sk-later"})
+    host_config.current().sync()  # the agent's periodic sync picks up the login (plan 090)
     events = list(client.stream(_user(), "system"))
     assert events[-1] == Done("end_turn")
     assert sdk[0][0]["api_key"] == "sk-later"

@@ -341,7 +341,7 @@ in `shared` makes any leftover file read in a container raise.
   suite 5572 passed; `ruff check .` clean. The `migrate == 3` and `run_container` test
   doubles were updated, and `test_session_store.py` gained a migration 4 test.
 
-### [ ] M2 — Credentials through the pull-through cache
+### [x] M2 — Credentials through the pull-through cache
 
 - **Approach:** `HostConfig.get_credential()` (miss fetch, cached absence, typed with
   `CREDENTIAL_TYPES` like `store.get_credential`), `sync()` extended to send and apply
@@ -355,7 +355,15 @@ in `shared` makes any leftover file read in a container raise.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test -q tests/test_host_config.py
   tests/test_openai_api.py tests/test_runtime_env_live.py tests/test_credentials_runtime.py
   tests/test_kiro_harness.py` passes, then the full suite.
-- **Outcome:**
+- **Outcome:** `HostConfig.credential_entry()`/`get_credential()` (miss fetch, cached
+  absence, typed like the store), `sync(names)` sending every held version and keeping held
+  values on per-name errors, the 180 s / 30 s early sync, and module `get_credential()` /
+  `refresh()`. Bedrock (both paths, refresh via `host_config.refresh`), Bedrock-OpenAI,
+  OpenAI and `resolve_api_key` read through it; `runtime_environment(config, lookup=)` and
+  `_runtime_env` keyed on `(id(host), generation)`. Deviation: the exec runner now calls
+  `_runtime_env.inherit_environment()` (see Deviations). Evidence: `tests/test_host_config.py`
+  28 passed (counting source, fake clock, Bedrock/OpenAI/Kiro reads); focused run 106
+  passed; full suite 5585 passed; `ruff check .` clean.
 
 ### [ ] M3 — Periodic sync
 
@@ -404,6 +412,13 @@ in `shared` makes any leftover file read in a container raise.
 - **Outcome:**
 
 ## Deviations
+
+- M2: shells started inside exec (the runner's `shell` helper) called `subprocess_env()`,
+  which would now try to build a `HostConfig` in the runner and fail without a token. The
+  runner calls `_runtime_env.inherit_environment()` at startup, so those shells reuse the
+  environment the agent built for the runner (the same values as before, without the
+  warning). Behaviour for the model is unchanged; tested in
+  `tests/test_runtime_env_live.py::test_shells_inside_exec_inherit_the_runners_environment`.
 
 ## Risks
 

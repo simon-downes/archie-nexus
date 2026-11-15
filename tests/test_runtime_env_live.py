@@ -1,8 +1,9 @@
-"""Shell and exec subprocesses get credential/settings variables from the current files."""
+"""Shell and exec subprocesses get credential/settings variables from the held host config."""
 
 import os
 
 import pytest
+from archie_agent import host_config
 from archie_agent.exec.tool import run_exec
 from archie_agent.exec.tools import _runtime_env
 from archie_agent.exec.tools._subprocess import run_shell
@@ -35,11 +36,12 @@ async def test_shell_sees_login_and_settings_changes_without_restart():
 
     _write_config(SCALR % "two.example")
     replace_credential("scalr", {"token": "second"})
+    host_config.current().sync()  # what the periodic sync does (plan 090)
     result = await run_shell('printf "%s %s" "$SCALR_TOKEN" "$SCALR_HOSTNAME"')
     assert result.stdout == "second two.example"
 
 
-async def test_runtime_env_is_cached_until_files_change(monkeypatch):
+async def test_runtime_env_is_cached_until_a_sync_changes_something(monkeypatch):
     _write_config(SCALR % "one.example")
     calls = []
     real = _runtime_env._compute
@@ -53,6 +55,9 @@ async def test_runtime_env_is_cached_until_files_change(monkeypatch):
     _runtime_env.runtime_env()
     assert len(calls) == 1
     _write_config(SCALR % "two.example")
+    _runtime_env.runtime_env()
+    assert len(calls) == 1  # an edit on the host isn't seen until a sync
+    host_config.current().sync()
     assert _runtime_env.runtime_env()[0]["SCALR_HOSTNAME"] == "two.example"
     assert len(calls) == 2
 
@@ -71,6 +76,7 @@ async def test_broken_config_keeps_last_good_values():
     replace_credential("scalr", {"token": "kept"})
     await run_shell("true")
     _write_config("plugins: [unclosed\n")
+    host_config.current().sync()
     result = await run_shell('printf "%s" "$SCALR_TOKEN"')
     assert result.stdout == "kept"
     assert result.stderr == ""
@@ -97,3 +103,16 @@ def _python() -> str:
     import sys
 
     return sys.executable
+
+
+async def test_shells_inside_exec_inherit_the_runners_environment(tmp_path):
+    """The runner has no host config of its own; its shells reuse what the agent passed."""
+    _write_config(SCALR % "one.example")
+    replace_credential("scalr", {"token": "inherited"})
+    source = (
+        "async def main():\n    out = await shell('printf %s \"$SCALR_TOKEN\"')\n    return out\n"
+    )
+    envelope = await run_exec(source, run_root=tmp_path, python=_python())
+    assert envelope.ok, envelope.error
+    assert "inherited" in envelope.return_value
+    assert "archie warning" not in envelope.return_value

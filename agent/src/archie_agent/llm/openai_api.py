@@ -45,9 +45,9 @@ _MISSING_KEY = "No OpenAI API key: run `archie auth login openai` or set OPENAI_
 def _api_key() -> str | None:
     """Return the stored ``openai.api_key``, else ``OPENAI_API_KEY``.
 
-    A malformed stored entry raises the store's ``ValueError`` rather than falling back.
+    A malformed stored entry raises ``ValueError`` rather than falling back.
     """
-    from archie_shared.credentials import get_credential
+    from archie_agent.host_config import get_credential
 
     credential = get_credential("openai")
     stored = getattr(credential, "api_key", None) if credential else None

@@ -52,7 +52,7 @@ class _StoredBedrockCredentialProvider(CredentialProvider):
     METHOD = "archie"
 
     def load(self) -> Credentials | None:
-        from archie_shared.credentials import get_credential
+        from archie_agent.host_config import get_credential
 
         credential = get_credential("bedrock")
         if credential and credential.aws_access_key_id and credential.aws_secret_access_key:

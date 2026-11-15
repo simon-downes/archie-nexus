@@ -406,6 +406,11 @@ def main_cli() -> None:
     signal.signal(signal.SIGTERM, _sigterm_handler)
     _partial_state["run_dir"] = str(run_dir)
 
+    # The agent already put the credential and settings variables in this process's
+    # environment; shells started by exec helpers inherit them (plan 090).
+    from archie_agent.exec.tools import _runtime_env
+
+    _runtime_env.inherit_environment()
     run(run_dir)
 
 

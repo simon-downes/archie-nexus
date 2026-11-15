@@ -2,68 +2,79 @@
 
 The orchestrator used to pass ``runtime_environment()`` to ``docker run`` as
 ``-e`` flags, which froze the values at container start. Shell commands and
-exec runners now get them computed when each subprocess starts, so a new
-``archie auth login`` or a ``config.yaml`` edit reaches running sessions.
+exec runners now get them computed when each subprocess starts, from the config
+and credentials the agent holds (``host_config``, plan 090), so a new
+``archie auth login`` or a config edit reaches running sessions after a sync.
 
-The computed values are cached until the modification time or size of
-``config.yaml`` or ``credentials.yaml`` changes.
+The computed values are cached until the held config or credentials change
+(``HostConfig.generation``).
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
-_Key = tuple[tuple[int, int] | None, ...]
+from archie_agent import host_config
+
+_Key = tuple[int, int] | None
 _cache: tuple[_Key, dict[str, str], str | None] | None = None
 _last_good: dict[str, str] | None = None
+_inherited = False
 
 
-def _stat_key(paths: list[Path]) -> _Key:
-    key: list[tuple[int, int] | None] = []
-    for path in paths:
-        try:
-            st = path.stat()
-        except OSError:
-            key.append(None)
-        else:
-            key.append((st.st_mtime_ns, st.st_size))
-    return tuple(key)
+def inherit_environment() -> None:
+    """Use this process's environment as it is, adding nothing.
+
+    For the exec runner: the agent built its environment with :func:`subprocess_env`,
+    and the runner has no ``host_config`` of its own (no agent token).
+    """
+    global _inherited
+    _inherited = True
+
+
+def _key() -> _Key:
+    """Identifies what the variables were computed from; None when nothing is held."""
+    try:
+        host = host_config.current()
+    except Exception:  # noqa: BLE001 — the compute reports why
+        return None
+    return (id(host), host.generation)
 
 
 def _compute() -> tuple[dict[str, str], str | None]:
     from archie_shared.config import ConfigError
     from archie_shared.credentials.runtime import runtime_environment
-    from archie_shared.schemas import load_nexus_config
 
     try:
-        return runtime_environment(load_nexus_config()), None
+        host = host_config.current()
+        return runtime_environment(host.config(), lookup=host.get_credential), None
     except Exception as exc:  # noqa: BLE001 — a broken config must not block commands
-        # Config errors name config.yaml keys. Other errors may come from the
-        # credential store, whose YAML errors can quote a line of secrets.
-        reason = str(exc) if isinstance(exc, ConfigError) else type(exc).__name__
+        # Config and orchestrator errors name config keys or providers. Other errors
+        # may quote a credential, so only their type is shown.
+        quoted = isinstance(exc, ConfigError | host_config.HostConfigError)
+        reason = str(exc) if quoted else type(exc).__name__
         return {}, f"credentials and plugin settings were not loaded: {reason}"
 
 
 def runtime_env() -> tuple[dict[str, str], str | None]:
-    """Return ``(variables, warning)`` from the current config and credential store.
+    """Return ``(variables, warning)`` from the held config and credentials.
 
-    If the files can't be read, the last good variables stay in force with no
+    If they can't be computed, the last good variables stay in force with no
     warning, as the live tool policy keeps its last valid snapshot. With no
     good variables yet, they are empty and ``warning`` says why.
     """
     global _cache, _last_good
-    from archie_shared.config import home_dir
-
-    home = home_dir()
-    key = _stat_key([home / "config.yaml", home / "credentials.yaml"])
-    if _cache is None or _cache[0] != key:
+    if _inherited:
+        return {}, None
+    key = _key()
+    if _cache is None or key is None or _cache[0] != key:
         env, warning = _compute()
         if warning is None:
             _last_good = env
         elif _last_good is not None:
             env, warning = _last_good, None
-        _cache = (key, env, warning)
+        # Read the key again: credentials fetched by the compute move the generation.
+        _cache = (_key(), env, warning)
     return dict(_cache[1]), _cache[2]
 
 
