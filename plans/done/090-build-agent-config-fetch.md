@@ -1,6 +1,6 @@
 # 090 — Agent config and credentials from the orchestrator
 
-Status: reviewing
+Status: done
 Branch: build-it/090-agent-config-fetch (base: main @ 8cdad07)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/090-agent-config-fetch
 
@@ -520,9 +520,25 @@ in `shared` makes any leftover file read in a container raise.
     already reaches the orchestrator through the same config port, so an edit without a
     restart breaks both alike; recorded under Risks.
   - Rejected: none.
-- Merge risk: pending
+- Merge risk: High: every new session now starts only if its container reaches the orchestrator at `host.docker.internal` with a valid token, which the tests cover in-process but no real container has exercised; a failure is loud (the agent exits 1 naming the cause) and reverting the PR restores the file reads.
 
 ## Outcome
+
+Agent containers no longer read `config.yaml` or `credentials.yaml`. The agent syncs them
+from `POST /api/agent/sync` (per-session token, hash stored in `sessions`), keeps a
+pull-through cache with a 5-minute sync and an on-read OAuth sync, and serves its
+subprocesses (exec runner plugins, `gh`, AWS `credential-process`) over a Unix socket. With
+`ARCHIE_AGENT_CONTAINER=1` the shared file readers raise, and a static test keeps agent and
+plugin code off them.
+
+Verified: full suite `env -u ARCHIE_BACKEND scripts/dev test -q -p no:cacheprovider` 5618
+passed; `scripts/dev ruff check .` clean; `ruff format --check` on the changed files clean;
+shellcheck clean on `container/bin/gh`, `plugins/aws/bin/credential-process`, `scripts/dev`;
+the `rg` ACs for the prompt and docs print nothing.
+
+Not verified: a real session container end to end (Docker isn't available inside this
+session), and reachability on Docker Desktop or native Linux (only colima was probed, and
+only with `curl`).
 
 PR: pending
 CI: pending
