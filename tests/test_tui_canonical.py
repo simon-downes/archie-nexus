@@ -393,6 +393,28 @@ async def test_cold_cache_compaction_renders_pending_then_success():
     ]
 
 
+def _kiro_compaction(status="success", error=None):
+    """A Kiro manual compaction pair (091 D2): no token figures."""
+    start = msgspec.structs.replace(
+        _compaction_start("manual", None), tokens_before=0, model_key="kiro/gpt-5.6-luna"
+    )
+    complete = msgspec.structs.replace(
+        _compaction_complete("manual", status, tokens_after=None, cost_saved=0.0, estimate=None),
+        tokens_before=0,
+        duration_ms=8204,
+        error=error,
+    )
+    return start, complete
+
+
+async def test_kiro_compaction_renders_without_tokens():
+    host = _ConversationHost()
+    headers = await host.run(list(_kiro_compaction()))
+    assert headers == [["○ Compaction manual (Kiro)"], ["● Compaction manual (Kiro, 8204ms)"]]
+    failed = await _ConversationHost().run(list(_kiro_compaction("failure", "Kiro is busy")))
+    assert failed[-1] == ["● Compaction manual (Kiro, 8204ms) Failed: Kiro is busy"]
+
+
 async def test_threshold_compaction_displays_cost_saved():
     host = _ConversationHost()
     headers = await host.run(

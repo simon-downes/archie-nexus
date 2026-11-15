@@ -206,7 +206,7 @@ clearing questions that Kiro abandons.
 
 ## Milestones
 
-### [ ] M1 — Manual /compact on Kiro
+### [x] M1 — Manual /compact on Kiro
 
 - **Approach:** D2–D6 and D12. Fake Kiro handles `_kiro/session/compact` (records the
   request; `ok` sends a `summarization_completed` frame then `{success: true}`; `busy` →
@@ -229,7 +229,7 @@ clearing questions that Kiro abandons.
   tests/test_tui_canonical.py tests/test_tui_app.py tests/test_web_session_detail.py -q`
   passes, and `rg -n "not available|no manual compaction|Archie sessions only"
   docs/kiro.md README.md` finds nothing.
-- **Outcome:**
+- **Outcome:** `KiroHarness.run_manual_compaction`/`_compact` call `_kiro/session/compact` and write `compaction_start`/`compaction_complete` (tokens 0/null, Kiro summary); `summarization()` helper in `translate.py`; `compaction_not_cancellable` notice on interrupt; fake Kiro `FAKE_KIRO_COMPACT`; `CompactionNode.model_key` and Kiro rows in the TUI (`CompactionEntry(kiro=True)`) and web (`compaction_text`); palette lists Compact context for Kiro. Docs: `docs/kiro.md`, `README.md`, `docs/event-spec.md`. M1 Verify: 224 passed; docs `rg` finds nothing; full suite 5538 passed; `ruff check .` passed; `ruff format --check` only the baseline file.
 
 ### [ ] M2 — Automatic compaction mapping
 

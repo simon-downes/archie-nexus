@@ -111,8 +111,17 @@ to re-check that later.
 - **Model switch** accepts `kiro/<id>` keys from `kiro.models` that Kiro also offers, and
   re-applies effort. Other keys get `error_notice unknown_model`. The TUI palette lists the
   allowlist for Kiro sessions, and the status bar shows `<id> (Kiro)`.
-- **`/compact`** is not available. Kiro compacts automatically at 80 % of the context, and
-  the agent answers with `error_notice manual_compaction_failed`.
+- **`/compact`** (typed, or Compact context in the TUI palette) calls Kiro's
+  `_kiro/session/compact`. The log gets a `compaction_start` (reason `manual`) and a
+  `compaction_complete` carrying Kiro's summary from its `summarization_completed` frame.
+  Kiro reports no tokens, so both carry `tokens_before` 0 and `tokens_after` null, and the
+  TUI and web viewer show `Compaction manual (Kiro, <ms>)`. Kiro answers `{success: false}`
+  while a turn or another compaction runs, which ends as a `failure` completion; so do a
+  JSON-RPC error and the 120 s timeout. Before the first turn the agent answers
+  `manual_compaction_failed` "Nothing to compact" without calling Kiro. Kiro can't cancel a
+  compaction, so an interrupt during one sends only an `error_notice`
+  `compaction_not_cancellable`. Kiro sends no context figure after a manual compaction, so
+  the status bar keeps the old percentage until the next turn.
 - **Permission requests** are answered `cancelled`, with a warning. The agent rules allow
   every Archie tool, skill and `archie-worker`, so Kiro shouldn't ask.
 - **Kiro exits mid-session:** the active turn ends with `turn_error` "Kiro backend stopped".
@@ -131,7 +140,7 @@ to re-check that later.
 ## Limits
 
 Kiro sessions run locally only, with no remote Kiro sessions or cloud sandboxes. The backend
-has no resume, no manual compaction and no per-request latency or token counts. Context is a
+has no resume and no per-request latency or token counts. Context is a
 percentage only, for the main agent only (Kiro reports none for subagents), and turn cost
 limits are not enforced. Insights and `archie stats` don't
 show credits yet. The `tests/fake_kiro.py` scripted agent covers the ACP flow without a

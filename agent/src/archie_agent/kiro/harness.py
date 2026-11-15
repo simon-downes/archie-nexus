@@ -21,7 +21,13 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 from archie_shared.config import home_dir
-from archie_shared.events import ErrorNotice, SessionStatus, UserMessage
+from archie_shared.events import (
+    CompactionComplete,
+    CompactionStart,
+    ErrorNotice,
+    SessionStatus,
+    UserMessage,
+)
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.kiro import (
     CreditLedger,
@@ -36,11 +42,12 @@ from archie_shared.session.log import LogAppendError, SessionLog
 from ulid import ULID
 
 from archie_agent.agents import DEFAULT_AGENT
+from archie_agent.event_factory import now_utc
 from archie_agent.exec.tool import create_registry
 from archie_agent.kiro import agent_files
 from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpError
 from archie_agent.kiro.mcp_server import ArchieMcpServer
-from archie_agent.kiro.translate import TurnTranslator, context_pct
+from archie_agent.kiro.translate import TurnTranslator, context_pct, summarization
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import discover_skills
@@ -58,6 +65,10 @@ KIRO_COMMAND = ("kiro-cli", "acp", "--agent-engine=v3")
 ALLOWED_BUILTIN_TAGS = frozenset({"read"})
 STARTUP_TIMEOUT_S = 30.0
 DEAD_MESSAGE = "Kiro backend stopped; start a new session"
+# Kiro caps its own summary call at 60 s (091 D4).
+COMPACT_TIMEOUT_S = 120.0
+COMPACT_BUSY_MESSAGE = "Kiro did not compact: a turn or compaction is in progress"
+COMPACT_NOT_CANCELLABLE = "Kiro can't cancel a compaction; it finishes on its own"
 
 
 class KiroStartupError(RuntimeError):
@@ -167,6 +178,8 @@ class KiroHarness:
         self._exit_code: int | None = None
         self._ledger = CreditLedger(self._kiro.credits)
         self._context_pct: float | None = None  # Kiro's latest root context usage (089)
+        self._compacting = False  # a manual ``_kiro/session/compact`` is in flight (091)
+        self._compaction_summary: str | None = None
         self._tasks: set[asyncio.Task] = set()
 
     # -- surface used by app.py ---------------------------------------------------
@@ -436,6 +449,10 @@ class KiroHarness:
         params = msg.get("params") or {}
         if method == "session/update":
             update = params.get("update") or {}
+            if self._compacting and self._translator is None:
+                info = summarization(update)
+                if info is not None and info.kind == "completed" and info.subtask is None:
+                    self._compaction_summary = info.summary
             if update.get("sessionUpdate") == "config_option_update":
                 self.config_options = update.get("configOptions") or self.config_options
                 self._changed.set()
@@ -567,8 +584,15 @@ class KiroHarness:
         """Cancel the whole Kiro turn and kill running Archie tool processes (D22)."""
         if not self._turn_active or self._acp is None or self._kiro_session_id is None:
             return
+        if self._compacting:
+            # Kiro's compaction has no cancel; say so rather than ignore the key (091 D5).
+            self._spawn(self._notice("compaction_not_cancellable", COMPACT_NOT_CANCELLABLE))
+            return
         self._mcp.cancel_all()
-        task = asyncio.get_running_loop().create_task(self._send_cancel())
+        self._spawn(self._send_cancel())
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -580,14 +604,80 @@ class KiroHarness:
             log.warning("Cannot cancel the Kiro turn: %s", exc)
 
     async def run_manual_compaction(self) -> None:
-        """Kiro compacts automatically; ``/compact`` is not available (D21)."""
+        """Compact Kiro's context with ``_kiro/session/compact`` (091 D4).
+
+        Runs with the turn flag taken by ``try_begin_turn`` and always releases it.
+        """
         try:
-            await self._notice(
-                "manual_compaction_failed",
-                "Kiro compacts automatically; /compact is not available",
-            )
+            if self._dead or self._acp is None:
+                await self._notice("manual_compaction_failed", DEAD_MESSAGE)
+                return
+            if self.session.turn_index == 0:
+                await self._notice("manual_compaction_failed", "Nothing to compact")
+                return
+            await self._emit_status()
+            await self._compact()
+        except LogAppendError as exc:
+            await self._notice("storage_error", str(exc))
         finally:
+            self._compacting = False
             self._turn_active = False
+            await self._emit_status()
+
+    async def _compact(self) -> None:
+        """Ask Kiro to compact and record it as a manual compaction (091 D2)."""
+        assert self._acp is not None
+        request_id = str(ULID())
+        turn = self.session.turn_index
+        await self._event_bus.emit(
+            CompactionStart(
+                id=str(ULID()),
+                turn=turn,
+                iteration=0,
+                scope=None,
+                request_id=request_id,
+                reason="manual",
+                tokens_before=0,  # Kiro reports no tokens
+                estimated_next_request_cost_usd=None,
+                model_key=self.session.model_id,
+                sent_at=now_utc(),
+            )
+        )
+        self._compacting = True
+        self._compaction_summary = None
+        started = time.monotonic()
+        error: str | None = None
+        try:
+            result = await self._acp.request(
+                "_kiro/session/compact",
+                {"sessionId": self._kiro_session_id},
+                timeout=COMPACT_TIMEOUT_S,
+            )
+            if not (isinstance(result, dict) and result.get("success") is True):
+                error = COMPACT_BUSY_MESSAGE
+        except AcpError as exc:
+            error = f"Kiro compaction failed: {exc}"
+        except TimeoutError:
+            error = f"Kiro compaction timed out after {COMPACT_TIMEOUT_S:.0f}s"
+        finally:
+            self._compacting = False
+        await self._event_bus.emit(
+            CompactionComplete(
+                id=str(ULID()),
+                turn=turn,
+                iteration=0,
+                scope=None,
+                request_id=request_id,
+                reason="manual",
+                status="failure" if error else "success",
+                tokens_before=0,
+                tokens_after=None,
+                cost_saved_usd=0.0,
+                duration_ms=round((time.monotonic() - started) * 1000),
+                error=error,
+                summary=None if error else self._compaction_summary,
+            )
+        )
 
     # -- helpers -------------------------------------------------------------------
 

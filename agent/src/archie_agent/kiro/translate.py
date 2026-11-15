@@ -56,6 +56,48 @@ def context_pct(update: dict) -> float | None:
     return float(value)
 
 
+@dataclass(frozen=True)
+class Summarization:
+    """One Kiro compaction frame: ``kind`` is ``started``, ``completed`` or ``failed`` (091)."""
+
+    kind: str
+    summary: str | None = None
+    reason: str | None = None  # ``error`` or ``canceled`` for a failed compaction
+    subtask: str | None = None  # ``agentSubtaskId`` for a subagent's compaction
+
+
+_SUMMARIZATION_KINDS = {
+    "summarization_started": "started",
+    "summarization_completed": "completed",
+    "summarization_failed": "failed",
+}
+
+
+def summarization(update: dict) -> Summarization | None:
+    """The compaction frame in a ``session/update`` ``update``, or None (091 D6).
+
+    Kiro sends ``session_info_update`` with ``_meta.kiro.kind`` ``summarization_started``
+    (automatic compaction only), ``summarization_completed`` (with the summary) or
+    ``summarization_failed``.
+    """
+    if update.get("sessionUpdate") != "session_info_update":
+        return None
+    meta = _kiro_meta(update)
+    kind = _SUMMARIZATION_KINDS.get(meta.get("kind"))
+    if kind is None:
+        return None
+    detail = meta.get("summarization") if isinstance(meta.get("summarization"), dict) else {}
+    summary_obj = detail.get("summary") if isinstance(detail.get("summary"), dict) else {}
+    summary = summary_obj.get("conversationSummary") or meta.get("conversationSummary")
+    reason = meta.get("reason") or detail.get("reason")
+    return Summarization(
+        kind,
+        summary if isinstance(summary, str) and summary else None,
+        reason if isinstance(reason, str) else None,
+        meta.get("agentSubtaskId") or None,
+    )
+
+
 def _iso(at: float) -> str:
     return datetime.fromtimestamp(at, UTC).isoformat()
 

@@ -95,7 +95,7 @@ QUESTION_CLIP = 80
 """Characters of a question shown in a "Needs an answer" notice."""
 
 COMPACT_MESSAGE = "/compact"
-"""Sent as a message to compact a native session's context (084 D24)."""
+"""Sent as a message to compact a session's context (084 D24; Kiro too since 091)."""
 
 _MAIN_SCREEN_ACTIONS = frozenset(
     {
@@ -836,10 +836,10 @@ class ArchieApp(App):
             )
 
     def action_compact(self) -> None:
-        """Palette: compact a native session's context by sending ``/compact`` (D24)."""
+        """Palette: compact the session's context by sending ``/compact`` (D24, 091 D12)."""
         record = self._acting_on()
         controller = self.controller
-        if record is None or record.backend == "kiro" or controller is None:
+        if record is None or controller is None:
             return
         if controller.turn_active:
             self.notice("Not compacted", "Wait for the turn to finish.", "warning")

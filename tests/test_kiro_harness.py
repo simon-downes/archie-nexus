@@ -17,6 +17,8 @@ from archie_agent.kiro.harness import KiroHarness, KiroStartupError
 from archie_agent.tool_policy_live import LiveToolPolicy
 from archie_shared.events import (
     AssistantMessage,
+    CompactionComplete,
+    CompactionStart,
     ErrorNotice,
     LLMRequest,
     SessionStatus,
@@ -292,22 +294,107 @@ async def test_kiro_exit_mid_turn_then_dead_notice(harness, home):
     assert not harness.turn_active
 
 
-async def test_compact_is_not_available(harness, home):
-    seen: list = []
-    original = harness.event_bus.emit
-
-    async def capture(event, target=None):
-        seen.append(event)
-        return await original(event, target)
-
-    harness.event_bus.emit = capture
+async def _compact(harness: KiroHarness) -> list:
+    """Run ``/compact`` as ``app.py`` does and return every emitted event."""
+    seen = _capture(harness)
     assert harness.try_begin_turn()
     await harness.run_manual_compaction()
-    assert [(e.kind, e.message) for e in seen if isinstance(e, ErrorNotice)] == [
-        ("manual_compaction_failed", "Kiro compacts automatically; /compact is not available")
-    ]
     assert not harness.turn_active
-    assert not any(isinstance(e, UserMessage) for e in _safe_log(home))
+    return seen
+
+
+def _compact_requests(tmp_path: Path) -> list[dict]:
+    return [
+        r["in"]["params"]
+        for r in _record(tmp_path)
+        if r.get("in", {}).get("method") == "_kiro/session/compact"
+    ]
+
+
+async def test_compact_calls_kiro_and_records_a_manual_compaction(harness, home, tmp_path):
+    """091 D4: /compact runs _kiro/session/compact and logs a manual compaction."""
+    await harness.handle_message("run it")
+    seen = await _compact(harness)
+    assert _compact_requests(tmp_path) == [{"sessionId": "sess_fake"}]
+    start, complete = [e for e in _log(home) if isinstance(e, CompactionStart | CompactionComplete)]
+    assert (start.reason, start.tokens_before, start.model_key, start.turn) == (
+        "manual",
+        0,
+        "kiro/gpt-5.6-luna",
+        1,
+    )
+    assert (complete.status, complete.request_id, complete.error) == (
+        "success",
+        start.request_id,
+        None,
+    )
+    assert (complete.tokens_after, complete.cost_saved_usd) == (None, 0.0)
+    assert complete.summary == "## Overview\nFake Kiro summary."
+    states = [e.state for e in seen if isinstance(e, SessionStatus)]
+    assert states[0] == "working" and states[-1] == "idle"
+
+
+@pytest.mark.parametrize(
+    ("variant", "error"),
+    [
+        ("busy", "Kiro did not compact: a turn or compaction is in progress"),
+        ("error", "Kiro compaction failed: no summary"),
+    ],
+)
+async def test_compact_failures_end_as_failed_compactions(
+    home, tmp_path, monkeypatch, variant, error
+):
+    monkeypatch.setenv("FAKE_KIRO_COMPACT", variant)
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        await _compact(h)
+    finally:
+        await h.close()
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error, complete.summary) == ("failure", error, None)
+
+
+async def test_compact_before_any_turn_sends_nothing(harness, home, tmp_path):
+    seen = await _compact(harness)
+    assert [(e.kind, e.message) for e in seen if isinstance(e, ErrorNotice)] == [
+        ("manual_compaction_failed", "Nothing to compact")
+    ]
+    assert _compact_requests(tmp_path) == []
+    assert not any(isinstance(e, CompactionStart) for e in _safe_log(home))
+
+
+async def test_compact_on_a_dead_backend_is_refused(harness, tmp_path):
+    await harness.handle_message("exit")
+    seen = await _compact(harness)
+    notice = next(e for e in seen if isinstance(e, ErrorNotice))
+    assert notice.kind == "manual_compaction_failed" and "start a new session" in notice.message
+    assert _compact_requests(tmp_path) == []
+
+
+async def test_interrupt_during_compaction_sends_no_cancel(home, tmp_path, monkeypatch):
+    """091 D5: Kiro can't cancel a compaction, so interrupt only says so."""
+    monkeypatch.setenv("FAKE_KIRO_COMPACT", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        seen = _capture(h)
+        assert h.try_begin_turn()
+        task = asyncio.create_task(h.run_manual_compaction())
+        deadline = time.monotonic() + 5
+        while not _compact_requests(tmp_path) and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        h.interrupt()
+        await task
+    finally:
+        await h.close()
+    methods = [r.get("in", {}).get("method") for r in _record(tmp_path)]
+    assert "session/cancel" not in methods
+    assert [e.kind for e in seen if isinstance(e, ErrorNotice)] == ["compaction_not_cancellable"]
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert complete.status == "success"
 
 
 async def test_switch_model(harness, tmp_path):
