@@ -44,6 +44,7 @@ from typing import Protocol
 
 import msgspec
 import websockets
+from archie_shared.agent_sync import token_hash
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
@@ -635,7 +636,10 @@ class SessionTracker:
             status="starting",
             started_at=now_iso(),
         )
-        await asyncio.to_thread(self.store.insert, record)
+        token = prepared.agent_token
+        await asyncio.to_thread(
+            self.store.insert, record, agent_token_hash=token_hash(token) if token else None
+        )
         self._records[session_id] = record
         self._publish(record)
         self._spawn(session_id, self._start(prepared))

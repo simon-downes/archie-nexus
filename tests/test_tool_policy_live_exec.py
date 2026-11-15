@@ -4,6 +4,7 @@ import json
 import sys
 
 import pytest
+from archie_agent import host_config
 from archie_agent.agents import ChildDispatch
 from archie_agent.exec.tool import create_registry
 from archie_agent.harness import AgentHarness
@@ -16,6 +17,7 @@ from archie_agent.tool_policy_live import (
     load_policy_snapshot,
     startup_runner_state,
 )
+from archie_shared.config import ConfigError
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 from archie_shared.types import ToolUseBlock
 
@@ -47,6 +49,15 @@ class FakeWebSocket:
     def notices(self) -> list[dict]:
         events = [json.loads(m) for m in self.messages]
         return [e for e in events if e["type"] == "error_notice"]
+
+
+def _write(home, text: str) -> None:
+    """Edit the host config and sync it, as the agent's periodic sync would (plan 090)."""
+    (home / "config.yaml").write_text(text)
+    try:
+        host_config.current().sync()
+    except ConfigError:
+        pass  # nothing held yet: the next read starts from the file
 
 
 @pytest.fixture
@@ -83,28 +94,28 @@ async def _exec(executor) -> str:
 
 @pytest.mark.asyncio
 async def test_root_exec_sees_config_change_without_restart(tmp_path, home):
-    (home / "config.yaml").write_text(_config(False))
+    _write(home, _config(False))
     harness = _harness(tmp_path, LiveToolPolicy(load_policy_snapshot()))
 
     assert _notion_write(await _exec(harness._execute_tool)) is False
-    (home / "config.yaml").write_text(_config(True))
+    _write(home, _config(True))
     assert _notion_write(await _exec(harness._execute_tool)) is True
 
 
 @pytest.mark.asyncio
 async def test_invalid_config_keeps_last_policy_with_one_notice(tmp_path, home):
-    (home / "config.yaml").write_text(_config(True))
+    _write(home, _config(True))
     harness = _harness(tmp_path, LiveToolPolicy(load_policy_snapshot()))
     ws = FakeWebSocket()
     await harness.event_bus.register_client(ws, ())
 
-    (home / "config.yaml").write_text("plugins: [unclosed\n")
+    _write(home, "plugins: [unclosed\n")
     for _ in range(3):
         assert _notion_write(await _exec(harness._execute_tool)) is True
     notices = ws.notices()
     assert [n["kind"] for n in notices] == [RELOAD_FAILED_KIND]
 
-    (home / "config.yaml").write_text(_config(False))
+    _write(home, _config(False))
     assert _notion_write(await _exec(harness._execute_tool)) is False
     assert [n["kind"] for n in ws.notices()] == [RELOAD_FAILED_KIND, RECOVERED_KIND]
 
@@ -174,9 +185,7 @@ async def test_exec_context_settings_fixed_at_startup_policy_live(tmp_path, home
     from archie_shared.plugins import load_manifests
     from archie_shared.schemas import load_nexus_config
 
-    (home / "config.yaml").write_text(
-        _config(False) + "  datadog:\n    settings: {site: datadoghq.com}\n"
-    )
+    _write(home, _config(False) + "  datadog:\n    settings: {site: datadoghq.com}\n")
     settings, enabled = startup_runner_state(load_nexus_config(), load_manifests())
     harness = _harness(
         tmp_path, LiveToolPolicy(load_policy_snapshot(), settings=settings, enabled=enabled)
@@ -191,9 +200,7 @@ async def test_exec_context_settings_fixed_at_startup_policy_live(tmp_path, home
     first = await context()
     assert first["policy"]["notion"]["write"]["enabled"] is False
     assert first["settings"]["datadog"] == {"site": "datadoghq.com"}
-    (home / "config.yaml").write_text(
-        _config(True) + "  datadog:\n    settings: {site: datadoghq.eu}\n"
-    )
+    _write(home, _config(True) + "  datadog:\n    settings: {site: datadoghq.eu}\n")
     second = await context()
     assert second["policy"]["notion"]["write"]["enabled"] is True
     assert second["settings"] == first["settings"]

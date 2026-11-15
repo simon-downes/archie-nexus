@@ -89,7 +89,7 @@ def test_start_session_missing_configured_mount_is_skipped(
         patch("archie_orchestrator.lifecycle.check_image", return_value=True),
         patch(
             "archie_orchestrator.lifecycle.run_container",
-            side_effect=lambda c: captured_cmd.extend(c),
+            side_effect=lambda c, env=None: captured_cmd.extend(c),
         ),
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
     ):
@@ -115,7 +115,7 @@ def test_start_session_configured_mounts(config, workspace, tmp_path, monkeypatc
         patch("archie_orchestrator.lifecycle.check_image", return_value=True),
         patch(
             "archie_orchestrator.lifecycle.run_container",
-            side_effect=lambda c: captured_cmd.extend(c),
+            side_effect=lambda c, env=None: captured_cmd.extend(c),
         ),
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
     ):
@@ -130,7 +130,7 @@ def test_start_session_correct_docker_command(config, workspace, tmp_path):
 
     captured_cmd = []
 
-    def fake_run(cmd):
+    def fake_run(cmd, env=None):
         captured_cmd.extend(cmd)
 
     fake_descriptor_port = "32771"
@@ -215,7 +215,7 @@ def test_start_session_forwards_brain_env_without_mount(config, workspace, tmp_p
         patch("archie_orchestrator.lifecycle.check_image", return_value=True),
         patch(
             "archie_orchestrator.lifecycle.run_container",
-            side_effect=lambda c: captured_cmd.extend(c),
+            side_effect=lambda c, env=None: captured_cmd.extend(c),
         ),
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
         patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
@@ -234,7 +234,7 @@ def test_start_session_env_vars_in_command(config, workspace, tmp_path):
         patch("archie_orchestrator.lifecycle.check_image", return_value=True),
         patch(
             "archie_orchestrator.lifecycle.run_container",
-            side_effect=lambda c: captured_cmd.extend(c),
+            side_effect=lambda c, env=None: captured_cmd.extend(c),
         ),
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="32771"),
         patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
@@ -302,7 +302,10 @@ def _start_capturing(config, ws_name, tmp_path, **kwargs):
     captured: list[str] = []
     with (
         patch("archie_orchestrator.lifecycle.check_image", return_value=True),
-        patch("archie_orchestrator.lifecycle.run_container", side_effect=captured.extend),
+        patch(
+            "archie_orchestrator.lifecycle.run_container",
+            side_effect=lambda c, env=None: captured.extend(c),
+        ),
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="9999") as mock_wait,
         patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
     ):
@@ -417,7 +420,9 @@ def test_run_start_runs_the_prepared_command_and_returns_the_port(config, worksp
         patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="40123") as mock_wait,
     ):
         assert run_start(prepared) == 40123
-    mock_run.assert_called_once_with(prepared.command)
+    mock_run.assert_called_once_with(
+        prepared.command, env={"ARCHIE_AGENT_TOKEN": prepared.agent_token}
+    )
     assert mock_wait.call_args.args == (prepared.container_name, prepared.command)
 
 
@@ -432,3 +437,37 @@ def test_start_session_returns_running_container(config, workspace, tmp_path):
     assert isinstance(started, RunningContainer)
     assert started.port == 9999
     assert started.container_name == f"archie-{started.session_id}"
+
+
+# ---------------------------------------------------------------------------
+# Agent token and orchestrator URL (plan 090)
+# ---------------------------------------------------------------------------
+
+
+def _prepare(config, workspace, tmp_path):
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        return prepare_start(workspace[0], config)
+
+
+def test_prepare_start_names_the_agent_token_without_its_value(config, workspace, tmp_path):
+    from archie_shared.schemas import get_profile
+
+    prepared = _prepare(config, workspace, tmp_path)
+    cmd = prepared.command
+    assert cmd[cmd.index("ARCHIE_AGENT_TOKEN") - 1] == "-e"
+    assert not any(arg.startswith("ARCHIE_AGENT_TOKEN=") for arg in cmd)
+    assert len(prepared.agent_token) >= 32
+    assert prepared.agent_token not in " ".join(cmd)
+    assert prepared.agent_token not in repr(prepared)
+    assert cmd[cmd.index("ARCHIE_AGENT_CONTAINER=1") - 1] == "-e"
+    port = get_profile(config.orchestrator).port
+    assert f"ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:{port}" in cmd
+
+
+def test_each_session_gets_its_own_token(config, workspace, tmp_path):
+    first = _prepare(config, workspace, tmp_path)
+    second = _prepare(config, workspace, tmp_path)
+    assert first.agent_token != second.agent_token

@@ -70,8 +70,8 @@ def test_db_path_is_archie_db_in_home(tmp_path):
 def test_migrate_creates_schema_wal_and_lock(tmp_path):
     db = db_path(tmp_path)
     assert schema_version(db) is None
-    assert migrate(db) == 3
-    assert schema_version(db) == 3
+    assert migrate(db) == 4
+    assert schema_version(db) == 4
     assert (tmp_path / "archie.db.lock").exists()
     conn = sqlite3.connect(db)
     try:
@@ -82,8 +82,13 @@ def test_migrate_creates_schema_wal_and_lock(tmp_path):
     finally:
         conn.close()
     assert {"sessions", "meta"} <= tables
-    assert {"idx_sessions_status", "idx_sessions_started_at"} <= indexes
-    assert columns == list(store_module.COLUMNS)  # 2 dropped name_fixed, 3 added location
+    assert {
+        "idx_sessions_status",
+        "idx_sessions_started_at",
+        "idx_sessions_agent_token_hash",
+    } <= indexes
+    # 2 dropped name_fixed, 3 added location, 4 added agent_token_hash (not a record field)
+    assert columns == [*store_module.COLUMNS, "agent_token_hash"]
     assert mode == "wal"
 
 
@@ -91,7 +96,7 @@ def test_migrate_is_idempotent(tmp_path):
     db = db_path(tmp_path)
     migrate(db)
     SessionStore(db).insert(record(SID))
-    assert migrate(db) == 3
+    assert migrate(db) == 4
     assert [r.session_id for r in SessionStore(db).list()] == [SID]
 
 
@@ -121,7 +126,7 @@ def test_migration_2_prefixes_names_and_drops_name_fixed(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.undo()
 
-    assert migrate(db) == 3
+    assert migrate(db) == 4
 
     rows = {r.session_id: r for r in SessionStore(db).list(include_ended=True)}
     assert (rows["proj-01kx77jkz8"].name, rows["proj-01kx77jkz8"].name_source) == (
@@ -156,7 +161,7 @@ def test_migration_3_adds_a_null_location_to_existing_rows(tmp_path, monkeypatch
     conn.close()
     monkeypatch.undo()
 
-    assert migrate(db) == 3
+    assert migrate(db) == 4
 
     [row] = SessionStore(db).list(include_ended=True)
     assert (row.session_id, row.status, row.location) == (SID, "stopped", None)
@@ -166,8 +171,26 @@ def test_migration_3_adds_a_null_location_to_existing_rows(tmp_path, monkeypatch
         stored = conn.execute("SELECT location FROM sessions").fetchall()
     finally:
         conn.close()
-    assert columns[-1] == "location"
+    assert columns[-2:] == ["location", "agent_token_hash"]
     assert stored == [(None,)]
+
+
+def test_migration_4_adds_a_null_agent_token_hash_to_existing_rows(tmp_path, monkeypatch):
+    db = db_path(tmp_path)
+    monkeypatch.setattr(store_module, "MIGRATIONS", store_module.MIGRATIONS[:3])
+    assert migrate(db) == 3
+    SessionStore(db).save(record(SID))
+    monkeypatch.undo()
+
+    assert migrate(db) == 4
+
+    conn = sqlite3.connect(db)
+    try:
+        stored = conn.execute("SELECT agent_token_hash FROM sessions").fetchall()
+    finally:
+        conn.close()
+    assert stored == [(None,)]
+    assert SessionStore(db).get(SID) == record(SID)
 
 
 def test_migration_1_alone_imports_logs_into_the_version_1_table(session_logs, tmp_path):
@@ -266,7 +289,7 @@ def test_migration_imports_each_log_once(session_logs, tmp_path):
     for path in paths:
         _touch(path)
 
-    assert migrate(db_path(tmp_path)) == 3  # migration 1 imports, then 2 and 3 run on the rows
+    assert migrate(db_path(tmp_path)) == 4  # migration 1 imports, then 2-4 run on the rows
     store = SessionStore(db_path(tmp_path))
     mtime = MTIME.isoformat()
 

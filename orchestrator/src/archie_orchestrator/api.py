@@ -23,6 +23,8 @@ are relative to the mount:
   POST   /auth/refresh/{provider}         — refresh OAuth credentials
   PUT    /auth/credential/{provider}      — replace a static credential
   DELETE /auth/credential/{provider}      — remove a credential
+  POST   /agent/sync                      — agent config and credential sync
+                                            (bearer agent token; :mod:`.agent_api`)
 """
 
 import asyncio
@@ -41,9 +43,9 @@ from archie_shared.session import SessionDescriptor
 from archie_shared.workspaces import Workspace
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
-from starlette.routing import Route, WebSocketRoute
+from starlette.routing import Mount, Route, WebSocketRoute
 
-from archie_orchestrator import store, workspaces
+from archie_orchestrator import agent_api, store, workspaces
 from archie_orchestrator.auth import AuthError
 from archie_orchestrator.config_source import config_source
 from archie_orchestrator.docker import DockerError
@@ -617,4 +619,5 @@ routes = [
     Route("/auth/refresh/{provider}", auth_refresh, methods=["POST"]),
     Route("/auth/credential/{provider}", auth_credential_put, methods=["PUT"]),
     Route("/auth/credential/{provider}", auth_credential_delete, methods=["DELETE"]),
+    Mount("/agent", routes=agent_api.routes),
 ]

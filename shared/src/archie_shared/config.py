@@ -20,6 +20,10 @@ import yaml
 # shared/src/archie_shared/config.py -> parents[3] == repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
+AGENT_CONTAINER_ENV = "ARCHIE_AGENT_CONTAINER"
+"""Set to ``1`` by the orchestrator in every agent container (plan 090). Agent containers
+get config and credentials from the orchestrator, never from the host files."""
+
 
 class ConfigError(Exception):
     """Raised on config load failures (missing file, bad YAML, validation)."""

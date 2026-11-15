@@ -293,7 +293,7 @@ in `shared` makes any leftover file read in a container raise.
 
 ## Milestones
 
-### [ ] M1 — Agent starts from orchestrator-served config
+### [x] M1 — Agent starts from orchestrator-served config
 
 - **Approach:** add `agent_sync.py`; migration 4 and store methods (follow `_migration_3`
   in `store.py`); token generation in `prepare_start` (`secrets.token_urlsafe(32)`),
@@ -331,7 +331,15 @@ in `shared` makes any leftover file read in a container raise.
   tests/test_ws_integration.py tests/test_tool_policy_live.py
   tests/test_tool_policy_live_exec.py tests/test_plugin_enabled.py tests/test_kiro_harness.py
   tests/test_plugin_loader.py` passes, then the full suite.
-- **Outcome:**
+- **Outcome:** `POST /api/agent/sync` (`agent_api.py`, `answer_sync`), migration 4 with
+  `insert(..., agent_token_hash=)` / `session_for_token_hash`, per-session token in
+  `prepare_start` (name-only `-e`, value via `run_container(env=)`), and
+  `archie_agent.host_config` (`HttpSource`, `source_from_env`, `HostConfig`, lazy
+  `current()`). Both lifespans, the policy loader and skills read it. Evidence:
+  `tests/test_agent_sync_api.py` and `tests/test_host_config.py` (new, including the
+  agent `/status` model coming from the orchestrator route), focused run 406 passed; full
+  suite 5572 passed; `ruff check .` clean. The `migrate == 3` and `run_container` test
+  doubles were updated, and `test_session_store.py` gained a migration 4 test.
 
 ### [ ] M2 — Credentials through the pull-through cache
 

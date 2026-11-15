@@ -7,6 +7,7 @@ starting, stopping, and health-checking containers.
 
 import json
 import logging
+import os
 import subprocess
 import time
 import urllib.error
@@ -125,11 +126,14 @@ def check_image(tag: str = IMAGE_TAG) -> bool:
     return result.returncode == 0
 
 
-def run_container(cmd: list[str]) -> None:
+def run_container(cmd: list[str], env: dict[str, str] | None = None) -> None:
     """Execute a `docker run` command.
 
     Args:
         cmd: Full docker run command list (starting with "docker").
+        env: Variables added to the docker CLI's environment, for ``-e NAME`` flags that
+            take their value from it (the agent token). The rest of ``os.environ`` is kept:
+            the CLI needs ``PATH``, ``HOME`` and ``DOCKER_HOST``.
 
     Raises:
         DockerError: If docker run returns a non-zero exit code.
@@ -137,7 +141,8 @@ def run_container(cmd: list[str]) -> None:
     # Log only the docker subcommand — never the full argv, which contains
     # -e/-v pairs that may include secrets (credentials, tokens).
     log.debug("docker run (%d args)", len(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    full_env = {**os.environ, **env} if env else None
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=full_env)
     if result.returncode != 0:
         raise DockerError(
             command=cmd[:3],
@@ -199,7 +204,8 @@ def wait_for_ready(
                 command=["docker", "inspect", name],
                 stderr=(
                     f"Container '{name}' exited during startup (removed by --rm).\n"
-                    f"To debug, re-run without --rm:\n"
+                    f"To debug, re-run without --rm (export ARCHIE_AGENT_TOKEN first; the\n"
+                    f"agent exits without it):\n"
                     f"  {' '.join(debug_cmd)}\n"
                     f"Then inspect with: docker logs {name}"
                 ),

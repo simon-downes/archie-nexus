@@ -283,7 +283,7 @@ async def test_post_insert_failure_is_500_and_starts_nothing(monkeypatch):
         monkeypatch.setattr(
             tracker.store,
             "insert",
-            lambda r: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")),
+            lambda r, **_: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")),
         )
         async with _client() as http:
             response = await http.post("/api/sessions", json={"workspace": "proj"})

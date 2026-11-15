@@ -158,7 +158,7 @@ async def test_create_insert_failure_starts_nothing(monkeypatch):
     runtime = FakeRuntime()
     tracker = _tracker(runtime)
 
-    def broken(_record):
+    def broken(_record, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(tracker.store, "insert", broken)

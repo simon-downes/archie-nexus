@@ -21,7 +21,7 @@ from archie_shared.commands import (
     SwitchModelCommand,
     decode_command,
 )
-from archie_shared.config import home_dir
+from archie_shared.config import ConfigError, home_dir
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
@@ -32,7 +32,6 @@ from archie_shared.models import get_model, load_models
 from archie_shared.plugins.config import policy_snapshot
 from archie_shared.plugins.manifest import load_manifests
 from archie_shared.protocol import PROTOCOL_VERSION
-from archie_shared.schemas import load_nexus_config
 from archie_shared.session.log import CursorNotFound
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -41,6 +40,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
+from archie_agent import host_config
 from archie_agent.compaction import is_compact_command
 from archie_agent.exec.plugin_loader import PluginLoadError, run_startup_hooks
 from archie_agent.harness import AgentHarness
@@ -125,13 +125,29 @@ def _backend() -> str:
     return backend
 
 
+def _host_config(backend: str) -> "NexusConfig":
+    """The config synced from the orchestrator (plan 090); exits 1 if there is none.
+
+    A Kiro session also records the reason where the orchestrator reads it (D17).
+    """
+    try:
+        return host_config.get_config()
+    except (host_config.HostConfigError, ConfigError) as exc:
+        reason = f"Cannot get the config from the orchestrator: {exc}"
+        log.error("%s", reason)
+        session_id = os.environ.get("ARCHIE_SESSION_ID")
+        if backend == "kiro" and session_id:
+            write_startup_error(session_id, reason)
+        sys.exit(1)
+
+
 @asynccontextmanager
 async def lifespan(app):
     """Initialize the agent loop on startup."""
     global _agent, _catalog, _config
 
     backend = _backend()
-    _config = load_nexus_config()
+    _config = _host_config(backend)
     _catalog = load_models()
     if backend == "kiro":
         async with _kiro_lifespan(_config):

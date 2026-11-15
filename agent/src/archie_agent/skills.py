@@ -9,8 +9,8 @@ from pathlib import Path, PureWindowsPath
 import yaml
 from archie_shared.config import ConfigError, persona_dir
 from archie_shared.plugins import PluginManifestError, enabled_plugins, load_manifests
-from archie_shared.schemas import load_nexus_config
 
+from archie_agent import host_config
 from archie_agent.tools import ToolSpec
 
 log = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ def discover_skills(enabled: Iterable[str] | None = None) -> dict[str, SkillEntr
     """Scan ~/.agents/skills, persona skills, then each plugin's skills (by plugin id).
 
     Plugin skills are limited to ``enabled`` plugin ids; ``None`` reads the
-    enabled set from ``config.yaml``. If that config is invalid, a warning is
-    logged and every plugin's skills are included (tools stay policy-gated).
+    enabled set from the host config (``host_config``). If there is no valid config, a
+    warning is logged and every plugin's skills are included (tools stay policy-gated).
     """
     catalog: dict[str, SkillEntry] = {}
     _scan_directory(Path.home() / ".agents" / "skills", catalog)
@@ -52,10 +52,10 @@ def discover_skills(enabled: Iterable[str] | None = None) -> dict[str, SkillEntr
 
 
 def _enabled_plugin_ids(plugins: dict) -> set[str] | None:
-    """Enabled plugin ids from ``config.yaml``; None (= all) if the config is invalid."""
+    """Enabled plugin ids from the host config; None (= all) without a valid config."""
     try:
-        config = load_nexus_config()
-    except ConfigError as error:
+        config = host_config.get_config()
+    except (ConfigError, host_config.HostConfigError) as error:
         log.warning("Invalid config; including skills of every plugin: %s", error)
         return None
     return enabled_plugins(config.plugins, plugins)

@@ -10,6 +10,7 @@ from archie_orchestrator.docker import (
     RunningContainer,
     container_running,
     list_sessions,
+    run_container,
     wait_for_ready,
 )
 
@@ -224,3 +225,35 @@ def test_list_sessions_malformed_json_line():
     session_ids = {s.session_id for s in sessions}
     assert "myproject-01abc12345" in session_ids
     assert "otherapp-01def67890" in session_ids
+
+
+def test_run_container_adds_env_to_the_cli_environment(monkeypatch):
+    """The token reaches ``docker`` through its environment; PATH and the rest are kept."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/docker.sock")
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=_make_run_result()) as run:
+        run_container(
+            ["docker", "run", "-e", "ARCHIE_AGENT_TOKEN"], env={"ARCHIE_AGENT_TOKEN": "t"}
+        )
+    env = run.call_args.kwargs["env"]
+    assert env["ARCHIE_AGENT_TOKEN"] == "t"
+    assert env["DOCKER_HOST"] == "unix:///tmp/docker.sock"
+    assert "PATH" in env
+
+
+def test_run_container_without_env_inherits_the_environment():
+    with patch("archie_orchestrator.docker.subprocess.run", return_value=_make_run_result()) as run:
+        run_container(["docker", "run"])
+    assert run.call_args.kwargs["env"] is None
+
+
+def test_run_failure_error_never_includes_the_token():
+    failed = _make_run_result(returncode=125)
+    failed.stderr = "docker: invalid reference format"
+    with (
+        patch("archie_orchestrator.docker.subprocess.run", return_value=failed),
+        pytest.raises(DockerError) as exc,
+    ):
+        run_container(
+            ["docker", "run", "-e", "ARCHIE_AGENT_TOKEN"], env={"ARCHIE_AGENT_TOKEN": "s3cret"}
+        )
+    assert "s3cret" not in str(exc.value)

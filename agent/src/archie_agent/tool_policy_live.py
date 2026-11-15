@@ -1,9 +1,10 @@
 """Live tool-policy reload for exec calls, plus the startup-only runner context.
 
-The agent re-reads ``config.yaml`` before each exec call so a policy edit takes
-effect without a new session. If the file is invalid, the last valid snapshot
-stays in force. Notices are emitted only on state transitions so a broken file
-does not flood the TUI.
+Before each exec call the agent takes the policy from the config it last synced from
+the orchestrator (``host_config``, plan 090), so a policy edit on the host takes effect
+after the next sync without a new session. If the host config was invalid at that
+sync, the last valid snapshot stays in force. Notices are emitted only on state
+transitions so a broken file does not flood the TUI.
 
 Plugin ``settings`` and the ``enabled`` set are captured once at construction
 (agent startup) and never reloaded (D11); ``runner_context()`` combines them
@@ -15,12 +16,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from archie_shared.config import ConfigError
 from archie_shared.events import ErrorNotice
 from archie_shared.plugins.config import enabled_plugins, policy_snapshot, resolved_settings
 from archie_shared.plugins.errors import PluginManifestError
 from archie_shared.plugins.manifest import LoadedPlugin, load_manifests
-from archie_shared.schemas import load_nexus_config
 from ulid import ULID
+
+from archie_agent import host_config
 
 if TYPE_CHECKING:
     from archie_shared.schemas import NexusConfig
@@ -32,8 +35,16 @@ Snapshot = dict[str, Any]
 
 
 def load_policy_snapshot() -> Snapshot:
-    """Read ``config.yaml`` now and return its detached tool-policy snapshot."""
-    return policy_snapshot(load_nexus_config().plugins, load_manifests())
+    """The detached tool-policy snapshot of the last synced host config.
+
+    Raises:
+        ConfigError: If the host config was invalid at the last sync.
+    """
+    host = host_config.current()
+    error = host.config_error
+    if error is not None:
+        raise ConfigError(error)
+    return policy_snapshot(host.config().plugins, load_manifests())
 
 
 def startup_runner_state(
@@ -119,5 +130,5 @@ class LiveToolPolicy:
         return snapshot, ErrorNotice(
             id=str(ULID()),
             kind=RECOVERED_KIND,
-            message="Tool policy reloaded from config.yaml.",
+            message="Tool policy reloaded from the host config.",
         )

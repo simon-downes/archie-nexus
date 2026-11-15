@@ -6,7 +6,10 @@ record too. The schema is versioned with ``PRAGMA user_version`` and changed onl
 ordered migrations in :data:`MIGRATIONS`, which run under an exclusive ``flock`` on
 ``archie.db.lock``. Migration 1 imports every existing session log once as a ``stopped``
 row; migration 2 moves a name's source into the name itself and drops ``name_fixed``;
-migration 3 adds the ``location`` column (JSON, plan 084 D25).
+migration 3 adds the ``location`` column (JSON, plan 084 D25); migration 4 adds
+``agent_token_hash``, the SHA-256 of the session's agent token (plan 090 D1). That
+column isn't part of ``SessionDescriptor``, so it isn't in :data:`COLUMNS` and record
+writes leave it alone.
 
 A stored ``name`` is ``<source>:<name>`` (``id:proj-01kx77jkz8``, ``user:Review PR 26``,
 ``llm:Workspaces API``), so queries show where a name came from. Only this module knows
@@ -260,10 +263,21 @@ def _migration_3(conn: sqlite3.Connection, sessions_dir: Path) -> None:
     conn.execute("ALTER TABLE sessions ADD COLUMN location TEXT")
 
 
+def _migration_4(conn: sqlite3.Connection, sessions_dir: Path) -> None:
+    """Add the nullable ``agent_token_hash`` column with a unique index (plan 090 D1).
+
+    Existing rows keep null: their containers, if still running, predate agent tokens.
+    """
+    del sessions_dir
+    conn.execute("ALTER TABLE sessions ADD COLUMN agent_token_hash TEXT")
+    conn.execute("CREATE UNIQUE INDEX idx_sessions_agent_token_hash ON sessions(agent_token_hash)")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection, Path], None], ...] = (
     _migration_1,
     _migration_2,
     _migration_3,
+    _migration_4,
 )
 """Canonical schema migrations; migration N brings ``user_version`` to N."""
 
@@ -400,14 +414,27 @@ class SessionStore:
         with closing(connect(self.db)) as conn, conn:
             yield conn
 
-    def insert(self, record: SessionDescriptor) -> None:
-        """Insert a new row.
+    def insert(self, record: SessionDescriptor, *, agent_token_hash: str | None = None) -> None:
+        """Insert a new row, with the hash of its agent token when it has one.
 
         Raises:
-            sqlite3.IntegrityError: If a row with that session ID exists.
+            sqlite3.IntegrityError: If a row with that session ID (or token hash) exists.
         """
         with self._conn() as conn:
             conn.execute(_INSERT_SQL, _row_values(record))
+            if agent_token_hash is not None:
+                conn.execute(
+                    "UPDATE sessions SET agent_token_hash = ? WHERE session_id = ?",
+                    (agent_token_hash, record.session_id),
+                )
+
+    def session_for_token_hash(self, agent_token_hash: str) -> str | None:
+        """The ID of the session whose agent token has this hash, or None."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT session_id FROM sessions WHERE agent_token_hash = ?", (agent_token_hash,)
+            ).fetchone()
+        return row["session_id"] if row is not None else None
 
     def save(self, record: SessionDescriptor) -> None:
         """Write a whole record, inserting it if it has no row yet."""
