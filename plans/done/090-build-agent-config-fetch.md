@@ -541,7 +541,7 @@ session), and reachability on Docker Desktop or native Linux (only colima was pr
 only with `curl`).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/37
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
