@@ -1,7 +1,9 @@
 """The agent's host config: environment, HTTP source, cache and startup (plan 090)."""
 
+import asyncio
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -386,6 +388,70 @@ def test_llm_and_kiro_credentials_come_from_the_host_config(monkeypatch):
     host_config.install(_started(source))
     assert openai_api._api_key() == "sk-host"
     assert resolve_api_key() == "k-host"
+
+
+# ---------------------------------------------------------------------------
+# Periodic sync
+# ---------------------------------------------------------------------------
+
+
+async def _run_loop(host, ticks: int = 3) -> None:
+    task = asyncio.create_task(host_config.sync_loop(host, interval=0.01))
+    await asyncio.sleep(0.01 * ticks + 0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_sync_loop_brings_host_edits_in():
+    source = CountingSource({"github": {"personal_token": "old"}})
+    host = _started(source)
+    host.get_credential("github")
+    source.store["github"] = {"personal_token": "new"}
+    await _run_loop(host)
+    assert host.get_credential("github").personal_token == "new"
+    assert len(source.requests) > 2
+
+
+async def test_sync_loop_keeps_values_and_runs_on_after_failures(caplog):
+    source = CountingSource({"github": {"personal_token": "kept"}})
+    host = _started(source)
+    host.get_credential("github")
+    source.fail_after = len(source.requests)
+    with caplog.at_level(logging.WARNING, logger="archie_agent.host_config"):
+        await _run_loop(host, ticks=4)
+    assert host.get_credential("github").personal_token == "kept"
+    assert caplog.text.count("Periodic sync failed") >= 2
+
+
+async def test_sync_loop_survives_an_unexpected_error(caplog):
+    host = _started(
+        ScriptedSource(_config_reply(NexusConfig()), RuntimeError("boom"), *([SyncResponse()] * 50))
+    )
+    with caplog.at_level(logging.ERROR, logger="archie_agent.host_config"):
+        await _run_loop(host, ticks=3)
+    assert "Periodic sync failed unexpectedly" in caplog.text
+    assert host.config() == NexusConfig()
+
+
+def test_the_agent_syncs_while_it_runs(monkeypatch):
+    from archie_agent import app as app_module
+
+    (home_dir() / "config.yaml").write_text(f'global:\n  model: "{MODEL}"\n')
+    monkeypatch.setenv("ARCHIE_SESSION_ID", "test-session")
+    monkeypatch.setattr(host_config, "SYNC_INTERVAL", 0.02)
+    with (
+        patch.object(app_module, "create_llm_client", return_value=MagicMock()),
+        TestClient(app_module.app),
+    ):
+        (home_dir() / "config.yaml").write_text(
+            f'global:\n  model: "{MODEL}"\nplugins:\n  jira: {{enabled: false}}\n'
+        )
+        deadline = time.monotonic() + 3
+        while host_config.current().config().plugins.get("jira") is None:
+            assert time.monotonic() < deadline, "the agent never synced"
+            time.sleep(0.02)
+        assert host_config.current().config().plugins["jira"].enabled is False
 
 
 # ---------------------------------------------------------------------------

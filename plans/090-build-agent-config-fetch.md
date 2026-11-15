@@ -365,7 +365,7 @@ in `shared` makes any leftover file read in a container raise.
   28 passed (counting source, fake clock, Bedrock/OpenAI/Kiro reads); focused run 106
   passed; full suite 5585 passed; `ruff check .` clean.
 
-### [ ] M3 — Periodic sync
+### [x] M3 — Periodic sync
 
 - **Approach:** `sync_loop(hc, interval=300)` started as a task at the end of both
   lifespans and cancelled at shutdown; it runs `HostConfig.sync()` (config version plus all
@@ -375,7 +375,13 @@ in `shared` makes any leftover file read in a container raise.
   from the session.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test -q tests/test_host_config.py
   tests/test_ws_integration.py` passes, then the full suite.
-- **Outcome:**
+- **Outcome:** `host_config.sync_loop()` (default `SYNC_INTERVAL` 300 s, read at call
+  time) runs `HostConfig.sync` in a thread, logging `HostConfigError` as a warning and
+  anything else with a traceback, and never stops on a failure. Both lifespans wrap their
+  `yield` in `_periodic_sync()`, which cancels the task at shutdown. Evidence: loop tests
+  (edits arrive, failures keep values and the loop runs on, an unexpected error is
+  survived) and an agent-lifespan test with a 0.02 s interval; focused run 88 passed; full
+  suite 5589 passed; `ruff check .` clean.
 
 ### [ ] M4 — Subprocesses read through the agent socket
 

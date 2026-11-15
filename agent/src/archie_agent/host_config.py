@@ -16,6 +16,7 @@ subprocesses never call it: they have no token (see :func:`source_from_env`).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -40,6 +41,8 @@ log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 5.0
 """Seconds an orchestrator request may take before the sync fails."""
+SYNC_INTERVAL = 300.0
+"""Seconds between the periodic syncs that bring host edits to a running session."""
 EARLY_SYNC_WINDOW = 180.0
 """Seconds before a held credential's ``expires_at`` at which a read syncs it (D12)."""
 EARLY_SYNC_SPACING = 30.0
@@ -360,3 +363,19 @@ def refresh(service: str) -> None:
         current().sync([service])
     except HostConfigError as exc:
         log.warning("Sync after a rejected %s credential failed: %s", service, exc)
+
+
+async def sync_loop(host: HostConfig, interval: float | None = None) -> None:
+    """Sync ``host`` every ``interval`` seconds (default :data:`SYNC_INTERVAL`) until cancelled.
+
+    A failed sync is logged and the held values stay in use until the next one (D24).
+    """
+    delay = SYNC_INTERVAL if interval is None else interval
+    while True:
+        await asyncio.sleep(delay)
+        try:
+            await asyncio.to_thread(host.sync)
+        except HostConfigError as exc:
+            log.warning("Periodic sync failed; keeping the held config and credentials. %s", exc)
+        except Exception:  # noqa: BLE001 — the loop must outlive one bad reply
+            log.exception("Periodic sync failed unexpectedly")

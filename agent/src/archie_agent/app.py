@@ -6,6 +6,7 @@ Endpoints:
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -142,6 +143,18 @@ def _host_config(backend: str) -> "NexusConfig":
 
 
 @asynccontextmanager
+async def _periodic_sync():
+    """Keep the host config current while the block runs (``host_config.sync_loop``)."""
+    task = asyncio.create_task(host_config.sync_loop(host_config.current()))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@asynccontextmanager
 async def lifespan(app):
     """Initialize the agent loop on startup."""
     global _agent, _catalog, _config
@@ -216,7 +229,8 @@ async def lifespan(app):
             "session": session_id,
         },
     )
-    yield
+    async with _periodic_sync():
+        yield
     log.info("Agent shutting down")
     await _end_active_turn(_agent, SHUTDOWN_GRACE_S)
 
@@ -274,7 +288,8 @@ async def _kiro_lifespan(config: "NexusConfig"):
             "Agent started",
             extra={"backend": "kiro", "model": harness.session.model_id, "session": session_id},
         )
-        yield
+        async with _periodic_sync():
+            yield
     finally:
         log.info("Agent shutting down")
         await _end_active_turn(harness, SHUTDOWN_GRACE_S)
