@@ -47,7 +47,7 @@ from archie_agent.exec.tool import create_registry
 from archie_agent.kiro import agent_files
 from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpError
 from archie_agent.kiro.mcp_server import ArchieMcpServer
-from archie_agent.kiro.translate import TurnTranslator, context_pct, summarization
+from archie_agent.kiro.translate import RootContext, TurnTranslator, summarization
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import discover_skills
@@ -178,6 +178,7 @@ class KiroHarness:
         self._exit_code: int | None = None
         self._ledger = CreditLedger(self._kiro.credits)
         self._context_pct: float | None = None  # Kiro's latest root context usage (089)
+        self._root_context = RootContext()  # live figure without placeholders (091 D8)
         self._compacting = False  # a manual ``_kiro/session/compact`` is in flight (091)
         self._compaction_summary: str | None = None
         self._tasks: set[asyncio.Task] = set()
@@ -464,7 +465,7 @@ class KiroHarness:
             if translator is not None:
                 for event in translator.feed(update, received):
                     await self._event_bus.emit(event)
-            pct = context_pct(update)
+            pct = self._root_context.feed(update)
             if pct is not None and pct != self._context_pct:
                 self._context_pct = pct
                 # A turn that has finished translating but not yet sent its closing status

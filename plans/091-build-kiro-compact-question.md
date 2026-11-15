@@ -231,14 +231,14 @@ clearing questions that Kiro abandons.
   docs/kiro.md README.md` finds nothing.
 - **Outcome:** `KiroHarness.run_manual_compaction`/`_compact` call `_kiro/session/compact` and write `compaction_start`/`compaction_complete` (tokens 0/null, Kiro summary); `summarization()` helper in `translate.py`; `compaction_not_cancellable` notice on interrupt; fake Kiro `FAKE_KIRO_COMPACT`; `CompactionNode.model_key` and Kiro rows in the TUI (`CompactionEntry(kiro=True)`) and web (`compaction_text`); palette lists Compact context for Kiro. Docs: `docs/kiro.md`, `README.md`, `docs/event-spec.md`. M1 Verify: 224 passed; docs `rg` finds nothing; full suite 5538 passed; `ruff check .` passed; `ruff format --check` only the baseline file.
 
-### [ ] M2 — Automatic compaction mapping
+### [x] M2 — Automatic compaction mapping
 
 - **Approach:** D7 and D8 in `translate.py`; the harness uses `RootContext` for live
   status. Fake Kiro prompt `autocompact` sends started, completed (summary), `context(20)`
   twice, `context(4.2)`, text, completion; `autocompact_fail` sends started then
   `summarization_failed`. In `finish()`, an open compaction's `compaction_complete`
-  (`interrupted`) is written after the open tool results and child scopes and before the
-  root flush, `llm_request` and terminal event. Docs: `docs/kiro.md` event-mapping rows for `summarization_*`
+  (`interrupted`) is written first, before the open tool results, child terminals, root
+  flush, `llm_request` and root terminal. Docs: `docs/kiro.md` event-mapping rows for `summarization_*`
   and the placeholder.
 - **Test seam:** `TurnTranslator.feed`/`finish` in `tests/test_kiro_translate.py`;
   harness against the fake in `tests/test_kiro_harness.py`.
@@ -246,7 +246,7 @@ clearing questions that Kiro abandons.
   status bar never shows the placeholder 20 %.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_kiro_translate.py
   tests/test_kiro_harness.py -q` passes.
-- **Outcome:**
+- **Outcome:** `RootContext` and the `TurnTranslator` compaction mapping (`_summarization`, `_start_compaction`, `_end_compaction`; open compactions closed first in `finish()`); the harness feeds its own `RootContext` for live status. Fake prompts `autocompact`/`autocompact_fail`. Docs: `docs/kiro.md` mapping row and placeholder note. Verify: `tests/test_kiro_translate.py tests/test_kiro_harness.py` 65 passed; `ruff check .` passed.
 
 ### [ ] M3 — Question tool on Kiro
 
@@ -273,6 +273,8 @@ clearing questions that Kiro abandons.
 - **Outcome:**
 
 ## Deviations
+
+- M2: an open compaction is closed first in `finish()` rather than after the open tool results, so a subagent-scope compaction also ends before that subagent's terminal event. No scope change.
 
 ## Risks
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-from archie_shared.events import Event, LLMRequest
+from archie_shared.events import CompactionComplete, CompactionStart, Event, LLMRequest
 from archie_shared.types import ImageBlock
 from ulid import ULID
 
@@ -29,6 +29,8 @@ log = logging.getLogger(__name__)
 ARCHIE_TITLE_PREFIX = "@archie/"
 SKILL_TOOL_ID = "disclose_context"
 NO_COMPLETION_ERROR = "no turn_completion from Kiro"
+# Kiro's first context figure after a compaction, before the real one (091 D8).
+PLACEHOLDER_CONTEXT_PCT = 20.0
 
 
 def _kiro_meta(update: dict) -> dict:
@@ -98,6 +100,33 @@ def summarization(update: dict) -> Summarization | None:
     )
 
 
+class RootContext:
+    """Root context figures with Kiro's post-compaction placeholder dropped (091 D8).
+
+    After a root ``summarization_completed``, Kiro reports exactly 20 % (twice) before the
+    real figure. ``feed`` drops those frames until a frame with another value arrives.
+    """
+
+    def __init__(self) -> None:
+        self._armed = False
+
+    def feed(self, update: dict) -> float | None:
+        """The root context percentage in ``update``, or None (also for a placeholder)."""
+        info = summarization(update)
+        if info is not None:
+            if info.kind == "completed" and info.subtask is None:
+                self._armed = True
+            return None
+        pct = context_pct(update)
+        if pct is None:
+            return None
+        if self._armed:
+            if pct == PLACEHOLDER_CONTEXT_PCT:
+                return None
+            self._armed = False
+        return pct
+
+
 def _iso(at: float) -> str:
     return datetime.fromtimestamp(at, UTC).isoformat()
 
@@ -114,6 +143,15 @@ class _Tool:
     iteration: int = 0
     request_id: str = ""
     done: bool = False
+
+
+@dataclass
+class _Compaction:
+    """An automatic Kiro compaction that has started and not yet ended (091 D7)."""
+
+    request_id: str
+    iteration: int
+    started: float
 
 
 @dataclass
@@ -144,6 +182,8 @@ class TurnTranslator:
         self._context_last: float | None = None  # root context figures this turn (089 D5)
         self._context_max: float | None = None
         self._context_seen: set[float] = set()
+        self._context = RootContext()
+        self._compactions: dict[str | None, _Compaction] = {}
 
     # -- scopes and segments ---------------------------------------------------
 
@@ -227,7 +267,10 @@ class TurnTranslator:
             meta = _kiro_meta(update)
             if meta.get("kind") == "turn_completion" and not meta.get("agentSubtaskId"):
                 self.completion = meta
-            pct = context_pct(update)
+            info = summarization(update)
+            if info is not None:
+                self._summarization(info, self._scope_of(update), at, out)
+            pct = self._context.feed(update)
             if pct is not None:
                 self._context_last = pct
                 self._context_max = (
@@ -235,6 +278,79 @@ class TurnTranslator:
                 )
                 self._context_seen.add(pct)
         return out
+
+    # -- automatic compaction (091 D7) -------------------------------------------
+
+    def _summarization(
+        self, info: Summarization, scope: str | None, at: float, out: list[Event]
+    ) -> None:
+        state = self._scope(scope)
+        if info.kind == "started":
+            if scope not in self._compactions:
+                self._start_compaction(state, at, out)
+            return
+        compaction = self._compactions.pop(scope, None) or self._start_compaction(state, at, out)
+        self._compactions.pop(scope, None)
+        if info.kind == "completed":
+            self._end_compaction(state, compaction, "success", None, info.summary, at, out)
+        elif info.reason == "canceled":
+            error = "Kiro compaction was cancelled"
+            self._end_compaction(state, compaction, "interrupted", error, None, at, out)
+        else:
+            error = f"Kiro compaction failed: {info.reason or 'unknown error'}"
+            self._end_compaction(state, compaction, "failure", error, None, at, out)
+
+    def _start_compaction(self, state: _Scope, at: float, out: list[Event]) -> _Compaction:
+        self._flush(state, out)
+        compaction = _Compaction(str(ULID()), max(state.iteration, 0), at)
+        self._compactions[state.factory.scope] = compaction
+        out.append(
+            CompactionStart(
+                id=str(ULID()),
+                turn=self.turn,
+                iteration=compaction.iteration,
+                scope=state.factory.scope,
+                request_id=compaction.request_id,
+                reason="threshold",
+                tokens_before=0,  # Kiro reports no tokens
+                estimated_next_request_cost_usd=None,
+                model_key=self._model_key,
+                sent_at=_iso(at),
+                subagent_index=state.factory.subagent_index,
+            )
+        )
+        return compaction
+
+    def _end_compaction(
+        self,
+        state: _Scope,
+        compaction: _Compaction,
+        status: str,
+        error: str | None,
+        summary: str | None,
+        at: float,
+        out: list[Event],
+    ) -> None:
+        out.append(
+            CompactionComplete(
+                id=str(ULID()),
+                turn=self.turn,
+                iteration=compaction.iteration,
+                scope=state.factory.scope,
+                request_id=compaction.request_id,
+                reason="threshold",
+                status=status,
+                tokens_before=0,
+                tokens_after=None,
+                cost_saved_usd=0.0,
+                duration_ms=max(0, round((at - compaction.started) * 1000)),
+                error=error,
+                summary=summary,
+                subagent_index=state.factory.subagent_index,
+            )
+        )
+        # Kiro continues with a fresh model request after a compaction.
+        state.boundary = True
 
     def _classify(self, update: dict, at: float) -> _Tool:
         meta = _kiro_meta(update)
@@ -378,6 +494,13 @@ class TurnTranslator:
         """
         out: list[Event] = []
         cancelled = stop_reason == "cancelled"
+        # First, so every compaction ends before its scope's terminal event (091 D7).
+        for scope, compaction in list(self._compactions.items()):
+            error = "Turn ended during the compaction"
+            self._end_compaction(
+                self._scope(scope), compaction, "interrupted", error, None, at, out
+            )
+        self._compactions.clear()
         for call_id, tool in self._tools.items():
             if tool.kind != "internal" and not tool.done:
                 reason = (

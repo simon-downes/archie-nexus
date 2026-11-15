@@ -14,7 +14,9 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
   false}``), ``error`` (JSON-RPC error), ``slow`` (``ok`` after 1 s).
 - The prompt text picks the turn: ``error`` → JSON-RPC error; ``exit`` → exit 3
   mid-turn; ``sleep`` → MCP ``shell sleep 30`` until ``session/cancel``;
-  ``permission`` → ask permission; anything else → text, ``tool_load``, MCP
+  ``permission`` → ask permission; ``autocompact`` → text, an automatic compaction
+  (started, completed, placeholder context 20, real context 4.2), text;
+  ``autocompact_fail`` → a compaction that fails; anything else → text, ``tool_load``, MCP
   ``shell echo KIRO-OK``, text.
 """
 
@@ -273,6 +275,21 @@ async def prompt(rid: int, params: dict) -> None:
         )
         await asyncio.wait({task}, timeout=5)
         send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
+        return
+    if text in ("autocompact", "autocompact_fail"):
+        chunk("Answer.")
+        summarization_frame("summarization_started", summarization={"status": "running"})
+        if text == "autocompact":
+            summary_completed("## Overview\nAuto summary.")
+            context(20)
+            context(4.2)
+        else:
+            summarization_frame(
+                "summarization_failed", summarization={"status": "error"}, reason="error"
+            )
+        chunk("Ready.")
+        completion(0.3)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
         return
     if text == "permission":
         response = await ask_permission()

@@ -6,9 +6,16 @@ import json
 from pathlib import Path
 
 import msgspec
-from archie_agent.kiro.translate import NO_COMPLETION_ERROR, TurnTranslator, context_pct
+from archie_agent.kiro.translate import (
+    NO_COMPLETION_ERROR,
+    RootContext,
+    TurnTranslator,
+    context_pct,
+)
 from archie_shared.events import (
     AssistantMessage,
+    CompactionComplete,
+    CompactionStart,
     IterationStart,
     LLMRequest,
     TextDelta,
@@ -296,3 +303,111 @@ def test_tui_streams_both_text_segments_live():
     assert texts == messages
     assert len(stream_ids) == len(messages)
     assert len(messages) == 3
+
+
+# --- automatic compaction (091) -------------------------------------------------------
+
+
+def _info(kind: str, **meta) -> dict:
+    return {"sessionUpdate": "session_info_update", "_meta": {"kiro": {"kind": kind, **meta}}}
+
+
+def _started() -> dict:
+    return _info("summarization_started", summarization={"status": "running"})
+
+
+def _completed(summary: str = "## Overview\nAuto.") -> dict:
+    return _info(
+        "summarization_completed",
+        summarization={"status": "success", "summary": {"conversationSummary": summary}},
+        conversationSummary=summary,
+        truncated=False,
+    )
+
+
+def _failed(reason: str) -> dict:
+    return _info("summarization_failed", summarization={"status": reason}, reason=reason)
+
+
+def _ctx(pct: float) -> dict:
+    return _info("context_usage", usagePercentage=pct)
+
+
+def _say(text: str) -> dict:
+    return {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}
+
+
+def _feed(updates, *, stop="end_turn", finish_at=20.0):
+    tr = TurnTranslator(Path("/tmp/x.jsonl"), MODEL_KEY, 2)
+    events = []
+    for at, update in enumerate(updates, start=10):
+        events.extend(tr.feed(update, float(at)))
+    events.extend(
+        tr.finish(stop_reason=stop, error=None, sent_at=9.0, at=finish_at, price=lambda c: c)
+    )
+    return events
+
+
+def test_automatic_compaction_maps_to_a_threshold_compaction():
+    events = _feed([_say("Answer."), _started(), _completed(), _ctx(20), _ctx(20), _ctx(4.2)])
+    start = next(e for e in events if isinstance(e, CompactionStart))
+    complete = next(e for e in events if isinstance(e, CompactionComplete))
+    assert (start.reason, start.tokens_before, start.model_key, start.scope) == (
+        "threshold",
+        0,
+        MODEL_KEY,
+        None,
+    )
+    assert (complete.status, complete.summary, complete.request_id) == (
+        "success",
+        "## Overview\nAuto.",
+        start.request_id,
+    )
+    assert (complete.tokens_after, complete.duration_ms) == (None, 1000)
+    # The text before the compaction is flushed first.
+    names = [type(e).__name__ for e in events]
+    assert names.index("AssistantMessage") < names.index("CompactionStart")
+    request = next(e for e in events if isinstance(e, LLMRequest))
+    assert (request.context_pct, request.context_pct_max, request.context_samples) == (4.2, 4.2, 1)
+
+
+def test_text_after_a_compaction_opens_a_new_iteration():
+    events = _feed([_say("Answer."), _started(), _completed(), _say("Ready.")])
+    deltas = [e for e in events if isinstance(e, TextDelta)]
+    assert [d.iteration for d in deltas] == [0, 1]
+    assert deltas[0].request_id != deltas[1].request_id
+
+
+def test_completed_without_started_synthesises_the_start():
+    events = _feed([_completed()])
+    start, complete = [e for e in events if isinstance(e, CompactionStart | CompactionComplete)]
+    assert complete.request_id == start.request_id and complete.duration_ms == 0
+
+
+def test_failed_and_cancelled_compactions():
+    failed = _feed([_started(), _failed("error")])
+    (complete,) = [e for e in failed if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error) == ("failure", "Kiro compaction failed: error")
+    cancelled = _feed([_started(), _failed("canceled")])
+    (complete,) = [e for e in cancelled if isinstance(e, CompactionComplete)]
+    assert complete.status == "interrupted"
+
+
+def test_turn_ending_mid_compaction_interrupts_it_before_the_terminal():
+    events = _feed([_started()], stop="cancelled")
+    names = [type(e).__name__ for e in events]
+    assert names.index("CompactionComplete") < names.index("TurnInterrupted")
+    (complete,) = [e for e in events if isinstance(e, CompactionComplete)]
+    assert complete.status == "interrupted" and complete.duration_ms == 10_000
+
+
+def test_root_context_drops_the_placeholder_after_a_summary():
+    ctx = RootContext()
+    assert ctx.feed(_ctx(20)) == 20.0  # not armed: a real 20 passes
+    assert ctx.feed(_completed()) is None
+    assert [ctx.feed(_ctx(20)), ctx.feed(_ctx(20)), ctx.feed(_ctx(4.2))] == [None, None, 4.2]
+    assert ctx.feed(_ctx(20)) == 20.0  # disarmed by the real figure
+    sub = _completed()
+    sub["_meta"]["kiro"]["agentSubtaskId"] = "sub1"
+    assert ctx.feed(sub) is None
+    assert ctx.feed(_ctx(20)) == 20.0  # a subagent's compaction doesn't arm it

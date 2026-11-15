@@ -397,6 +397,30 @@ async def test_interrupt_during_compaction_sends_no_cancel(home, tmp_path, monke
     assert complete.status == "success"
 
 
+async def test_automatic_compaction_is_logged_and_hides_the_placeholder(harness, home):
+    """091 D7/D8: a mid-turn Kiro compaction is a threshold compaction; 20 % never shows."""
+    seen = _capture(harness)
+    await harness.handle_message("autocompact")
+    events = _log(home)
+    (start,) = [e for e in events if isinstance(e, CompactionStart)]
+    (complete,) = [e for e in events if isinstance(e, CompactionComplete)]
+    assert (start.reason, complete.status, complete.summary) == (
+        "threshold",
+        "success",
+        "## Overview\nAuto summary.",
+    )
+    assert [e.content for e in events if isinstance(e, AssistantMessage)] == ["Answer.", "Ready."]
+    pcts = [e.context_pct for e in seen if isinstance(e, SessionStatus)]
+    assert 20.0 not in pcts and 4.2 in pcts
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_failed_automatic_compaction_is_logged(harness, home):
+    await harness.handle_message("autocompact_fail")
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error) == ("failure", "Kiro compaction failed: error")
+
+
 async def test_switch_model(harness, tmp_path):
     assert await harness.switch_model("bedrock-anthropic.claude-sonnet-4-6") is not None
     assert await harness.switch_model("kiro/claude-sonnet-5.5") is None

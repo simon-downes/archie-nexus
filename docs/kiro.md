@@ -80,6 +80,7 @@ the agent kills Kiro and ends the active turn with `turn_error`.
 | any other tool | logged under its `toolId` or title, with a warning |
 | `turn_completion` + prompt result | one root `llm_request`, then `turn_complete` / `turn_interrupted` / `turn_error` |
 | `session_info_update` kind `context_usage` (root) | `session_status.context_pct` when the value changes; the turn's last, max and distinct count on its `llm_request` |
+| `session_info_update` kinds `summarization_started` / `summarization_completed` / `summarization_failed` during a turn | `compaction_start` / `compaction_complete` (reason `threshold`; `success` with Kiro's summary, `failure`, or `interrupted` for `canceled` or a turn that ends first), scoped like the other events |
 
 For current Kiro ACP frames, an Archie tool call uses `title: "@archie/<name>"` and places
 its arguments directly in `rawInput`, for example `{"path": "foo.py"}`. The translator treats
@@ -100,7 +101,10 @@ every `session_status` and sends a new status when it changes, so the TUI status
 `Ctx: N%` live; Kiro gives no token count. The turn's `llm_request` stores the last figure
 (`context_pct`), the highest (`context_pct_max`), the number of distinct figures
 (`context_samples`) and `len(requestIds)` (`kiro_requests`), so replay, insights and
-`archie stats` show it. The turn's fields cover frames up to the `session/prompt` result; Kiro usually repeats the last figure just after it, and a changed figure there reaches the next `session_status` (and the next turn) only. Archie keeps one `llm_request` per turn: in the logs checked, the
+`archie stats` show it. Straight after an automatic compaction Kiro reports a placeholder of
+exactly 20 % before the real figure; the agent drops those frames from both the live status
+and the turn's figures. After the compaction Kiro carries on with one or two more model
+requests in the same turn, so a short extra reply can follow the row. The turn's fields cover frames up to the `session/prompt` result; Kiro usually repeats the last figure just after it, and a changed figure there reaches the next `session_status` (and the next turn) only. Archie keeps one `llm_request` per turn: in the logs checked, the
 figures matched Kiro's request IDs for only 39 % of requests, so the two counts are recorded
 to re-check that later.
 
