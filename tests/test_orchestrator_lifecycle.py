@@ -453,8 +453,6 @@ def _prepare(config, workspace, tmp_path):
 
 
 def test_prepare_start_names_the_agent_token_without_its_value(config, workspace, tmp_path):
-    from archie_shared.schemas import get_profile
-
     prepared = _prepare(config, workspace, tmp_path)
     cmd = prepared.command
     assert cmd[cmd.index("ARCHIE_AGENT_TOKEN") - 1] == "-e"
@@ -463,8 +461,20 @@ def test_prepare_start_names_the_agent_token_without_its_value(config, workspace
     assert prepared.agent_token not in " ".join(cmd)
     assert prepared.agent_token not in repr(prepared)
     assert cmd[cmd.index("ARCHIE_AGENT_CONTAINER=1") - 1] == "-e"
-    port = get_profile(config.orchestrator).port
-    assert f"ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:{port}" in cmd
+    assert "ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:7600" in cmd
+
+
+def test_orchestrator_url_follows_the_default_profile_port(config, workspace, tmp_path):
+    import msgspec
+
+    custom = msgspec.structs.replace(
+        config,
+        orchestrator=msgspec.convert(
+            {"profiles": {"default": {"port": 7611}}}, type(config.orchestrator)
+        ),
+    )
+    cmd = _prepare(custom, workspace, tmp_path).command
+    assert "ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:7611" in cmd
 
 
 def test_each_session_gets_its_own_token(config, workspace, tmp_path):

@@ -51,15 +51,17 @@ async def test_runtime_env_is_cached_until_a_sync_changes_something(monkeypatch)
         return real()
 
     monkeypatch.setattr(_runtime_env, "_compute", counting)
-    _runtime_env.runtime_env()
-    _runtime_env.runtime_env()
-    assert len(calls) == 1
+    for _ in range(3):
+        _runtime_env.runtime_env()
+    # The first compute fetched credentials, which moved the generation; one more compute
+    # from the held values, then the cache holds.
+    assert len(calls) == 2
     _write_config(SCALR % "two.example")
     _runtime_env.runtime_env()
-    assert len(calls) == 1  # an edit on the host isn't seen until a sync
+    assert len(calls) == 2  # an edit on the host isn't seen until a sync
     host_config.current().sync()
     assert _runtime_env.runtime_env()[0]["SCALR_HOSTNAME"] == "two.example"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 async def test_broken_config_runs_command_with_warning():
@@ -116,3 +118,44 @@ async def test_shells_inside_exec_inherit_the_runners_environment(tmp_path):
     assert envelope.ok, envelope.error
     assert "inherited" in envelope.return_value
     assert "archie warning" not in envelope.return_value
+
+
+class _FlakyOrchestrator:
+    """Answers from the temp home files, except while ``down``."""
+
+    def __init__(self):
+        self.down = False
+
+    def sync(self, request):
+        from archie_orchestrator.agent_api import answer_sync
+        from archie_shared.credentials.store import load_store
+        from archie_shared.schemas import load_nexus_config
+
+        if self.down and request.credentials:
+            raise host_config.HostConfigError("orchestrator down")
+        return answer_sync(request, load_config=load_nexus_config, load_store=load_store)
+
+
+def _flaky_host(monkeypatch) -> _FlakyOrchestrator:
+    source = _FlakyOrchestrator()
+    monkeypatch.setattr(host_config, "source_from_env", lambda: source)
+    host_config.current()
+    return source
+
+
+def test_a_failed_first_compute_is_retried(monkeypatch):
+    """An unreachable orchestrator at the first command doesn't stick for the session."""
+    now = [1000.0]
+    monkeypatch.setattr(_runtime_env, "_clock", lambda: now[0])
+    _write_config(SCALR % "one.example")
+    replace_credential("scalr", {"token": "after-recovery"})
+    source = _flaky_host(monkeypatch)
+    source.down = True
+    env, warning = _runtime_env.runtime_env()
+    assert "SCALR_TOKEN" not in env and "orchestrator down" in warning
+    source.down = False
+    now[0] += _runtime_env.RETRY_AFTER - 1
+    assert "orchestrator down" in _runtime_env.runtime_env()[1]  # not retried yet
+    now[0] += 1
+    env, warning = _runtime_env.runtime_env()
+    assert (env.get("SCALR_TOKEN"), warning) == ("after-recovery", None)

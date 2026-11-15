@@ -1,7 +1,6 @@
 """Tests for live tool-policy reload (plan 065)."""
 
 import pytest
-from archie_agent import host_config
 from archie_agent.tool_policy_live import (
     RECOVERED_KIND,
     RELOAD_FAILED_KIND,
@@ -9,7 +8,8 @@ from archie_agent.tool_policy_live import (
     load_policy_snapshot,
     startup_runner_state,
 )
-from archie_shared.config import ConfigError
+
+from tests.host_config_helpers import write_host_config as _write
 
 NOTION_WRITE_ON = """\
 plugins:
@@ -18,15 +18,6 @@ plugins:
       write:
         enabled: true
 """
-
-
-def _write(home, text: str) -> None:
-    """Edit the host config and sync it, as the agent's periodic sync would (plan 090)."""
-    (home / "config.yaml").write_text(text)
-    try:
-        host_config.current().sync()
-    except ConfigError:
-        pass  # nothing held yet: the next read starts from the file
 
 
 @pytest.fixture

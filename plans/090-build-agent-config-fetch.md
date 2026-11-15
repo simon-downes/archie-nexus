@@ -95,7 +95,7 @@ questions were needed).
 | D18 | Policy reload | the policy loader reads the cached config; a `config_error` from the last sync raises, giving the existing reload-failed notice; edits arrive with the next sync | sync before each exec call | the user chose a low request rate | self |
 | D19 | Auth-error sync | Bedrock's `_try_refresh_credentials` forces a sync of `bedrock` before rebuilding the client | every client and plugin | only Bedrock has an expiry-retry path today | self |
 | D20 | `runtime_environment()` | gains `lookup` (default: the file store); `_runtime_env` passes `host_config.get_credential` and keys its cache on `HostConfig.generation` | file-stat key | the files are no longer the source | user (council), self (key) |
-| D21 | Mixed versions | no compatibility path: a new agent started by an old orchestrator exits naming the missing variable; running containers keep their in-memory code | file fallback | contradicts D6/D7; restarting the orchestrator fixes it | self |
+| D21 | Mixed versions | no compatibility path: a new agent started by an old orchestrator exits naming the missing variable; sessions running when the checkout is updated must be restarted (their mounted scripts and runner code change, but they have no socket) | file fallback | contradicts D6/D7; restarting the orchestrator and sessions once fixes it | self |
 | D22 | `scripts/dev` | unsets `ARCHIE_AGENT_CONTAINER` | leave it | manual `scripts/dev uv run archie …` inside a session would otherwise trip the guard | self |
 | D23 | Empty token | `PreparedStart.agent_token` defaults to `""`; no token stores `NULL`, and the route rejects an empty bearer | hash whatever is given | `tests/session_fakes.py` builds `PreparedStart` without a token; hashing `""` would collide on the unique index | self |
 | D24 | Failed sync after startup | a periodic or early sync that fails (unreachable, 401, 5xx, or `credential_errors` for a held name) logs a warning and keeps the held value; a miss that fails raises `HostConfigError` | replace held values with errors | keeps last-good behaviour (`_runtime_env._last_good`, `LiveToolPolicy`); a mid-edit invalid `credentials.yaml` mustn't break running sessions | self |
@@ -210,7 +210,9 @@ in `shared` makes any leftover file read in a container raise.
 - `shared/src/archie_shared/agent_sync.py` (new): `SyncRequest`, `SyncItem`,
   `SyncResponse` structs and `version_of(value) -> str`.
 - `shared/src/archie_shared/config.py`: `AGENT_CONTAINER_ENV`, `HostFileAccessError`,
-  `guard_host_files(what, replacement)`.
+  `guard_host_files(reader)` (the replacement, `archie_agent.host_config`, is in its message).
+- `shared/src/archie_shared/credentials/models.py`: `credential_type_for()` and
+  `to_credential()`, the typed conversion shared by the store, `host_config` and `local_api`.
 - `shared/src/archie_shared/schemas.py`, `credentials/store.py`: call the guard.
   `credentials/runtime.py`: `runtime_environment(config, lookup=get_credential)`.
 - `orchestrator/src/archie_orchestrator/agent_api.py` (new): `answer_sync(request, *,
@@ -459,7 +461,16 @@ in `shared` makes any leftover file read in a container raise.
   is a follow-up.
 - Policy edits now take up to 5 minutes to reach a running session (D18).
 - A sync miss blocks the calling thread for up to the 5 s timeout when the orchestrator is
-  down; on the event-loop thread that stalls the agent briefly.
+  down; on the event-loop thread that stalls the agent briefly. A failed projected-env
+  compute is retried every 30 s, so while the orchestrator is down a shell command can wait
+  that long once per 30 s.
+- Sessions running when the checkout is updated get the new scripts and runner code (they
+  are mounted) but have no agent socket: `gh` runs without a token, AWS `credential-process`
+  fails and exec plugin credential reads fail until the session is restarted. Documented as
+  an upgrade step in `docs/architecture.md` and the PR.
+- `ARCHIE_ORCHESTRATOR_URL` follows the default profile port in the config at session
+  start, not the port `archie serve` bound; editing the port without restarting the
+  orchestrator breaks new sessions, as it already breaks the CLI.
 
 ## Review
 
@@ -482,6 +493,34 @@ in `shared` makes any leftover file read in a container raise.
   in Non-functional, M5 dedupe, `migrate == 4` updates, the second `test_plugin_sdk` test,
   `run_container` env merge, `field(repr=False)`, module-attribute call and
   `real_source_from_env`). Stopped after two passes, as the process allows.
+
+- Code review: `general` and `risk`, one round (no ❌). Fixed:
+  - risk ⚠️: a failed first projected-env compute stayed cached for the whole session;
+    `_runtime_env` now retries a failed compute after 30 s (`RETRY_AFTER`, patchable
+    `_clock`) and keys the cache from before the compute (general ℹ️, the race).
+    Test: `test_a_failed_first_compute_is_retried`.
+  - risk ⚠️: sessions running at upgrade time break until restarted (mounted scripts and
+    runner code). D21 corrected; upgrade step added to `docs/architecture.md` and Risks.
+  - risk ℹ️: the nested uvicorn server reconfigured the process's uvicorn loggers; it now
+    passes `log_config=None`, no `log_level`, `access_log=False`.
+  - general ⚠️: the `wait_for_ready` re-run hint couldn't work (a failed session's token
+    is rejected); replaced with a message saying so.
+  - general ⚠️: the orchestrator-URL test was tautological; it now asserts a literal 7600
+    and a configured 7611.
+  - general ℹ️: typed-credential conversion was in three places and `local_api` had
+    drifted; `credential_type_for()` / `to_credential()` in `credentials/models.py` are used
+    by all three.
+  - general ℹ️: the startup-hook test patched the module function; it installs a stand-in at
+    `host_config.install()`. The write-and-sync helper is one function in
+    `tests/host_config_helpers.py`. One test renamed to match what it checks. The plan's
+    `guard_host_files` signature corrected.
+  - general ❓ (local API failure on Kiro): now handled like the other startup failures
+    (`_startup_failed`, startup-error file); test `test_kiro_lifespan_records_a_local_api_failure`.
+  - risk ❓ (URL port from the edited config vs the bound port): answered, kept. The CLI
+    already reaches the orchestrator through the same config port, so an edit without a
+    restart breaks both alike; recorded under Risks.
+  - Rejected: none.
+- Merge risk: pending
 
 ## Outcome
 

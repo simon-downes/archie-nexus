@@ -302,7 +302,7 @@ def _oauth(expires_at: datetime) -> dict:
     return {"access_token": "a", "refresh_token": "r", "expires_at": expires_at.isoformat()}
 
 
-def test_a_read_near_expiry_syncs_once_per_spacing():
+def test_a_read_near_expiry_syncs_first():
     clock = Clock()
     source = CountingSource({"notion": _oauth(clock.now + timedelta(seconds=100))})
     host = _started(source, now=clock)
@@ -489,6 +489,27 @@ async def test_kiro_lifespan_records_why_it_has_no_config(monkeypatch):
     reason = (home_dir() / "logs" / "kiro" / "kirotest-02.startup-error").read_text()
     assert "Cannot get the config from the orchestrator" in reason
     assert "Invalid YAML" in reason
+
+
+async def test_kiro_lifespan_records_a_local_api_failure(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from archie_agent import app as app_module
+
+    @asynccontextmanager
+    async def broken():
+        raise OSError("AF_UNIX path too long")
+        yield
+
+    monkeypatch.setenv("ARCHIE_BACKEND", "kiro")
+    monkeypatch.setenv("ARCHIE_SESSION_ID", "kirotest-03")
+    monkeypatch.setattr(app_module.local_api, "serve_local", broken)
+    with pytest.raises(SystemExit) as exc:
+        async with app_module.lifespan(app_module.app):
+            pass
+    assert exc.value.code == 1
+    reason = (home_dir() / "logs" / "kiro" / "kirotest-03.startup-error").read_text()
+    assert "Cannot start the agent's local API: AF_UNIX path too long" in reason
 
 
 def test_agent_runs_with_the_config_the_orchestrator_serves(monkeypatch):

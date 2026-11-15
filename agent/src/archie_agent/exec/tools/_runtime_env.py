@@ -7,17 +7,24 @@ and credentials the agent holds (``host_config``, plan 090), so a new
 ``archie auth login`` or a config edit reaches running sessions after a sync.
 
 The computed values are cached until the held config or credentials change
-(``HostConfig.generation``).
+(``HostConfig.generation``). A compute that fails is tried again after
+:data:`RETRY_AFTER` seconds, since a failed credential fetch changes nothing held.
 """
 
 from __future__ import annotations
 
 import os
+import time
 
 from archie_agent import host_config
 
+RETRY_AFTER = 30.0
+"""Seconds before a failed compute (orchestrator unreachable, bad entry) is retried."""
+_clock = time.monotonic
+
 _Key = tuple[int, int] | None
-_cache: tuple[_Key, dict[str, str], str | None] | None = None
+# (key, variables, warning, monotonic time to retry, or None after a success)
+_cache: tuple[_Key, dict[str, str], str | None, float | None] | None = None
 _last_good: dict[str, str] | None = None
 _inherited = False
 
@@ -67,14 +74,18 @@ def runtime_env() -> tuple[dict[str, str], str | None]:
     if _inherited:
         return {}, None
     key = _key()
-    if _cache is None or key is None or _cache[0] != key:
+    now = _clock()
+    retry_due = _cache is not None and _cache[3] is not None and now >= _cache[3]
+    if _cache is None or key is None or _cache[0] != key or retry_due:
         env, warning = _compute()
-        if warning is None:
+        failed = warning is not None
+        if not failed:
             _last_good = env
         elif _last_good is not None:
             env, warning = _last_good, None
-        # Read the key again: credentials fetched by the compute move the generation.
-        _cache = (_key(), env, warning)
+        # The key from before the compute: credentials it fetched move the generation, so
+        # the next call recomputes once from held values instead of missing a change.
+        _cache = (key, env, warning, now + RETRY_AFTER if failed else None)
     return dict(_cache[1]), _cache[2]
 
 

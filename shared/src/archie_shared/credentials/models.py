@@ -50,3 +50,43 @@ CREDENTIAL_TYPES: dict[str, type] = {
     "bedrock": BedrockCredential,
     **_generated_types(),
 }
+
+
+def credential_type_for(service: str) -> type:
+    """The registered credential type of ``service``.
+
+    Raises:
+        KeyError: If ``service`` isn't a known provider.
+    """
+    if service not in CREDENTIAL_TYPES:
+        known = ", ".join(sorted(CREDENTIAL_TYPES))
+        raise KeyError(f"Unknown service '{service}'. Known: {known}")
+    return CREDENTIAL_TYPES[service]
+
+
+def to_credential[T](
+    service: str, entry: object, credential_type: type[T] | None = None, *, origin: str
+) -> T:
+    """Convert one raw stored entry into its typed credential struct.
+
+    Shared by the store and the agent's readers (plan 090), so all report the same errors.
+
+    Args:
+        service: Provider name.
+        entry: The raw stored entry (a mapping).
+        credential_type: Overrides the type from :data:`CREDENTIAL_TYPES`.
+        origin: Where the entry came from, for the error (``"in <path>"``,
+            ``"from the orchestrator"``).
+
+    Raises:
+        KeyError: If ``service`` isn't a known provider and no type is given.
+        ValueError: If the entry isn't a mapping or doesn't fit the type.
+    """
+    if credential_type is None:
+        credential_type = credential_type_for(service)
+    if not isinstance(entry, dict):
+        raise ValueError(f"Credential entry for '{service}' must be a mapping")
+    try:
+        return msgspec.convert(entry, credential_type, strict=False)
+    except msgspec.ValidationError as e:
+        raise ValueError(f"Validation error for '{service}' {origin}: {e}") from None

@@ -186,8 +186,8 @@ def wait_for_ready(
 
     Args:
         name: Container name to wait on.
-        docker_run_cmd: The original docker run command (used in error messages to
-            suggest a debug re-run without --rm).
+        docker_run_cmd: The original docker run command. Not echoed in errors: a re-run
+            without a live session's agent token can't start (plan 090).
         timeout: Maximum seconds to wait before raising.
 
     Raises:
@@ -199,15 +199,13 @@ def wait_for_ready(
 
     while time.monotonic() < deadline:
         if not container_running(name):
-            debug_cmd = [a for a in docker_run_cmd if a != "--rm"]
             raise DockerError(
                 command=["docker", "inspect", name],
                 stderr=(
                     f"Container '{name}' exited during startup (removed by --rm).\n"
-                    f"To debug, re-run without --rm (export ARCHIE_AGENT_TOKEN first; the\n"
-                    f"agent exits without it):\n"
-                    f"  {' '.join(debug_cmd)}\n"
-                    f"Then inspect with: docker logs {name}"
+                    "Re-running its docker command by hand can't reproduce the start: the "
+                    "agent needs the token of a live session (plan 090). Start a new session "
+                    "and check the orchestrator log."
                 ),
                 returncode=1,
             )

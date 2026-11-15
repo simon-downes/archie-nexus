@@ -27,7 +27,7 @@ import httpx
 import msgspec
 import uvicorn
 from archie_shared.config import ConfigError
-from archie_shared.credentials.models import CREDENTIAL_TYPES
+from archie_shared.credentials.models import CREDENTIAL_TYPES, credential_type_for, to_credential
 from archie_shared.plugins.config import resolved_settings
 from archie_shared.plugins.manifest import load_manifests
 from starlette.applications import Starlette
@@ -122,7 +122,9 @@ async def serve_local(path: Path | None = None) -> AsyncIterator[Path]:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     path.unlink(missing_ok=True)  # a socket left by an earlier server in this container
-    config = uvicorn.Config(app, uds=str(path), log_level="warning", lifespan="off")
+    # log_config=None and no log_level: uvicorn.Config would otherwise reconfigure the
+    # process-wide uvicorn loggers that the agent's main server uses.
+    config = uvicorn.Config(app, uds=str(path), lifespan="off", log_config=None, access_log=False)
     server = _NestedServer(config)
     task = asyncio.create_task(server.serve())
     while not server.started and not task.done():
@@ -172,15 +174,12 @@ def get_credential[T](name: str, credential_type: type[T] | None = None) -> T | 
     """A provider's credential from the agent, as its typed struct, or None.
 
     Raises:
+        KeyError: If ``name`` isn't a known provider and no type is given.
         LocalApiError: If the agent can't be asked or can't send it.
         ValueError: If the entry doesn't fit the type.
     """
-    if credential_type is None:
-        credential_type = CREDENTIAL_TYPES[name]
+    kind = credential_type or credential_type_for(name)
     entry = fetch(f"/credentials/{name}")["value"]
     if entry is None:
         return None
-    try:
-        return msgspec.convert(entry, credential_type, strict=False)
-    except msgspec.ValidationError as exc:
-        raise ValueError(f"Validation error for '{name}' from the agent: {exc}") from None
+    return to_credential(name, entry, kind, origin="from the agent")

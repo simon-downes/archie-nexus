@@ -12,7 +12,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import msgspec
 from archie_shared.commands import (
@@ -126,20 +126,24 @@ def _backend() -> str:
     return backend
 
 
-def _host_config(backend: str) -> "NexusConfig":
-    """The config synced from the orchestrator (plan 090); exits 1 if there is none.
+def _startup_failed(backend: str, reason: str) -> NoReturn:
+    """Log why the agent can't start and exit 1.
 
     A Kiro session also records the reason where the orchestrator reads it (D17).
     """
+    log.error("%s", reason)
+    session_id = os.environ.get("ARCHIE_SESSION_ID")
+    if backend == "kiro" and session_id:
+        write_startup_error(session_id, reason)
+    sys.exit(1)
+
+
+def _host_config(backend: str) -> "NexusConfig":
+    """The config synced from the orchestrator (plan 090); exits 1 if there is none."""
     try:
         return host_config.get_config()
     except (host_config.HostConfigError, ConfigError) as exc:
-        reason = f"Cannot get the config from the orchestrator: {exc}"
-        log.error("%s", reason)
-        session_id = os.environ.get("ARCHIE_SESSION_ID")
-        if backend == "kiro" and session_id:
-            write_startup_error(session_id, reason)
-        sys.exit(1)
+        _startup_failed(backend, f"Cannot get the config from the orchestrator: {exc}")
 
 
 @asynccontextmanager
@@ -163,7 +167,12 @@ async def lifespan(app):
     """
     backend = _backend()
     config = _host_config(backend)
-    async with local_api.serve_local(), _backend_lifespan(backend, config):
+    async with contextlib.AsyncExitStack() as stack:
+        try:
+            await stack.enter_async_context(local_api.serve_local())
+        except (OSError, RuntimeError) as exc:
+            _startup_failed(backend, f"Cannot start the agent's local API: {exc}")
+        await stack.enter_async_context(_backend_lifespan(backend, config))
         yield
 
 

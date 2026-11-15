@@ -128,6 +128,8 @@ Agent containers don't read `config.yaml` or `credentials.yaml` (plan 090). The 
 
 The agent token identifies its session only. Any process in the container runs as the same user and could read it from `/proc`, or ask the local socket; the design prevents incidental exposure of config and credentials to the model, not deliberate access. Containers reach the orchestrator through `host.docker.internal`: on colima and Docker Desktop that reaches a loopback-bound orchestrator; on native Linux Docker it does not.
 
+Upgrading: restart the orchestrator, then restart sessions that were running. The scripts, plugins and exec runner code are mounted from the checkout, so a session started before this change picks up the new `gh` wrapper, `credential-process` and plugin credential reads without the agent socket they need, and those calls fail until the session is restarted.
+
 The system prompt's Environment section is the plain-markdown `persona/prompts/environment.md`, with installed tools and paths written out and a few probed values filled in by `agent/src/archie_agent/environment.py`. See [System prompt](system-prompt.md) for the prompt's structure and how to add a tool.
 
 ## Host HTTP API

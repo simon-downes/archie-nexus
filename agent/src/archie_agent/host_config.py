@@ -34,7 +34,7 @@ from archie_shared.agent_sync import (
     SyncResponse,
 )
 from archie_shared.config import AGENT_CONTAINER_ENV, ConfigError
-from archie_shared.credentials.models import CREDENTIAL_TYPES
+from archie_shared.credentials.models import credential_type_for, to_credential
 from archie_shared.schemas import NexusConfig
 
 log = logging.getLogger(__name__)
@@ -214,20 +214,11 @@ class HostConfig:
             ValueError: If the entry doesn't fit the type, or (:class:`HostConfigError`) it
                 isn't held and the orchestrator can't send it.
         """
-        if credential_type is None:
-            if name not in CREDENTIAL_TYPES:
-                known = ", ".join(sorted(CREDENTIAL_TYPES))
-                raise KeyError(f"Unknown service '{name}'. Known: {known}")
-            credential_type = CREDENTIAL_TYPES[name]
+        kind = credential_type or credential_type_for(name)
         entry = self.credential_entry(name)
         if entry is None:
             return None
-        try:
-            return msgspec.convert(entry, credential_type, strict=False)
-        except msgspec.ValidationError as exc:
-            raise ValueError(
-                f"Validation error for '{name}' from the orchestrator: {exc}"
-            ) from None
+        return to_credential(name, entry, kind, origin="from the orchestrator")
 
     def _near_expiry(self, name: str, entry: dict[str, Any] | None) -> bool:
         """Whether a read of this held entry should sync first, recording the attempt."""

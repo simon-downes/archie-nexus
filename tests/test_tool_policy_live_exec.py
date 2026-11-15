@@ -4,7 +4,6 @@ import json
 import sys
 
 import pytest
-from archie_agent import host_config
 from archie_agent.agents import ChildDispatch
 from archie_agent.exec.tool import create_registry
 from archie_agent.harness import AgentHarness
@@ -17,9 +16,10 @@ from archie_agent.tool_policy_live import (
     load_policy_snapshot,
     startup_runner_state,
 )
-from archie_shared.config import ConfigError
 from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
 from archie_shared.types import ToolUseBlock
+
+from tests.host_config_helpers import write_host_config as _write
 
 SOURCE = "async def main():\n    return _tool_policy\n"
 
@@ -49,15 +49,6 @@ class FakeWebSocket:
     def notices(self) -> list[dict]:
         events = [json.loads(m) for m in self.messages]
         return [e for e in events if e["type"] == "error_notice"]
-
-
-def _write(home, text: str) -> None:
-    """Edit the host config and sync it, as the agent's periodic sync would (plan 090)."""
-    (home / "config.yaml").write_text(text)
-    try:
-        host_config.current().sync()
-    except ConfigError:
-        pass  # nothing held yet: the next read starts from the file
 
 
 @pytest.fixture

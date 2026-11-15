@@ -6,7 +6,6 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from archie_agent import host_config
 from archie_agent.exec.envelope import Envelope
 from archie_agent.exec.runner import _build_namespace, run
 from archie_agent.exec.tool import run_exec
@@ -16,7 +15,7 @@ from archie_cli.auth import login
 from archie_orchestrator.app import app
 from archie_orchestrator.auth import AuthService, UnknownProviderError
 from archie_orchestrator.credential_refresh import refresh_expiring_credentials
-from archie_shared.config import ConfigError, home_dir
+from archie_shared.config import home_dir
 from archie_shared.credentials.models import OAuthCredential
 from archie_shared.credentials.runtime import runtime_environment
 from archie_shared.credentials.store import replace_credential
@@ -25,16 +24,14 @@ from archie_shared.schemas import load_nexus_config
 from click.testing import CliRunner
 from httpx import ASGITransport, AsyncClient
 
+from tests.host_config_helpers import write_host_config
+
 DATADOG_OFF = "plugins:\n  datadog: {enabled: false}\n"
 
 
 def _config(text: str):
     """Write the host config, sync the agent's copy (plan 090), and return it parsed."""
-    (home_dir() / "config.yaml").write_text(text)
-    try:
-        host_config.current().sync()
-    except ConfigError:
-        pass  # nothing held yet: the next read starts from the file
+    write_host_config(home_dir(), text)
     return load_nexus_config()
 
 
