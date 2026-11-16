@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import time
@@ -21,7 +22,14 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 from archie_shared.config import home_dir
-from archie_shared.events import ErrorNotice, SessionStatus, UserMessage
+from archie_shared.events import (
+    CompactionComplete,
+    CompactionStart,
+    ErrorNotice,
+    SessionStatus,
+    ToolResult,
+    UserMessage,
+)
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.kiro import (
     CreditLedger,
@@ -36,16 +44,19 @@ from archie_shared.session.log import LogAppendError, SessionLog
 from ulid import ULID
 
 from archie_agent.agents import DEFAULT_AGENT
+from archie_agent.event_factory import now_utc
 from archie_agent.exec.tool import create_registry
 from archie_agent.kiro import agent_files
 from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpError
 from archie_agent.kiro.mcp_server import ArchieMcpServer
-from archie_agent.kiro.translate import TurnTranslator, context_pct
+from archie_agent.kiro.translate import RootContext, TurnTranslator, summarization
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
+from archie_agent.question import Answer, QuestionBroker, QuestionError, create_question_tool
 from archie_agent.session_bus import SessionEventBus
 from archie_agent.skills import discover_skills
 
 if TYPE_CHECKING:
+    from archie_shared.events import PendingQuestion
     from archie_shared.schemas import NexusConfig
 
     from archie_agent.tool_policy_live import LiveToolPolicy
@@ -58,6 +69,12 @@ KIRO_COMMAND = ("kiro-cli", "acp", "--agent-engine=v3")
 ALLOWED_BUILTIN_TAGS = frozenset({"read"})
 STARTUP_TIMEOUT_S = 30.0
 DEAD_MESSAGE = "Kiro backend stopped; start a new session"
+# Kiro caps its own summary call at 60 s (091 D4).
+COMPACT_TIMEOUT_S = 120.0
+COMPACT_BUSY_MESSAGE = "Kiro did not compact: a turn or compaction is in progress"
+COMPACT_NOT_CANCELLABLE = "Kiro can't cancel a compaction; it finishes on its own"
+QUESTION_TOOL = "question"
+QUESTION_ABANDONED = "Kiro ended the question tool call before an answer"
 
 
 class KiroStartupError(RuntimeError):
@@ -100,6 +117,20 @@ def resolve_api_key() -> str | None:
         credential = None
     key = getattr(credential, "api_key", None) if credential is not None else None
     return key or os.environ.get("KIRO_API_KEY") or None
+
+
+def kiro_question_tool(broker: QuestionBroker):
+    """The ``question`` tool for Kiro's MCP server, with a fresh id per call (091 D9).
+
+    The MCP handler never sees ACP's ``toolCallId``; the TUI treats the id as opaque.
+    """
+    base = create_question_tool(broker)
+
+    async def handler(**kwargs):
+        kwargs.pop("_tool_use_id", None)
+        return await base.handler(**kwargs, _tool_use_id=str(ULID()))
+
+    return dataclasses.replace(base, handler=handler)
 
 
 def config_value(options: Any, config_id: str) -> Any:
@@ -149,9 +180,11 @@ class KiroHarness:
             exec_kwargs["python"] = exec_python
         if exec_run_root:
             exec_kwargs["run_root"] = exec_run_root
-        self._mcp = ArchieMcpServer(
-            create_registry(), self._current_runner_context, exec_kwargs=exec_kwargs
-        )
+        # Root-only, like native sessions: the worker's agent file leaves it out (091 D11).
+        self._questions = QuestionBroker(self._emit_status)
+        registry = create_registry()
+        registry.register(kiro_question_tool(self._questions))
+        self._mcp = ArchieMcpServer(registry, self._current_runner_context, exec_kwargs=exec_kwargs)
         self._acp: AcpClient | None = None
         self._kiro_session_id: str | None = None
         self.config_options: list = []
@@ -167,6 +200,9 @@ class KiroHarness:
         self._exit_code: int | None = None
         self._ledger = CreditLedger(self._kiro.credits)
         self._context_pct: float | None = None  # Kiro's latest root context usage (089)
+        self._root_context = RootContext()  # live figure without placeholders (091 D8)
+        self._compacting = False  # a manual ``_kiro/session/compact`` is in flight (091)
+        self._compaction_summary: str | None = None
         self._tasks: set[asyncio.Task] = set()
 
     # -- surface used by app.py ---------------------------------------------------
@@ -232,6 +268,11 @@ class KiroHarness:
             root_prompt=build_kiro_prompt(self._workspace),
             worker_prompt=build_kiro_worker_prompt(DEFAULT_AGENT.body, self._workspace),
             skill_paths=[entry.path for entry in skills.values()],
+            worker_tools=[
+                f"@{agent_files.MCP_SERVER}/{name}"
+                for name in self._mcp.tool_names()
+                if name != QUESTION_TOOL
+            ],
         )
 
         env = dict(os.environ)
@@ -436,6 +477,10 @@ class KiroHarness:
         params = msg.get("params") or {}
         if method == "session/update":
             update = params.get("update") or {}
+            if self._compacting and self._translator is None:
+                info = summarization(update)
+                if info is not None and info.kind == "completed" and info.subtask is None:
+                    self._compaction_summary = info.summary
             if update.get("sessionUpdate") == "config_option_update":
                 self.config_options = update.get("configOptions") or self.config_options
                 self._changed.set()
@@ -447,7 +492,15 @@ class KiroHarness:
             if translator is not None:
                 for event in translator.feed(update, received):
                     await self._event_bus.emit(event)
-            pct = context_pct(update)
+                    if (
+                        isinstance(event, ToolResult)
+                        and event.is_error
+                        and translator.tool_name(event.tool_use_id) == QUESTION_TOOL
+                    ):
+                        # Kiro failed the call (or timed it out) while it still waits. A
+                        # second question's own error result comes back ``completed``.
+                        self._questions.cancel(QUESTION_ABANDONED)
+            pct = self._root_context.feed(update)
             if pct is not None and pct != self._context_pct:
                 self._context_pct = pct
                 # A turn that has finished translating but not yet sent its closing status
@@ -508,6 +561,8 @@ class KiroHarness:
             await self._notice("storage_error", str(exc))
         finally:
             self._translator = None
+            # Kiro doesn't cancel an MCP call when the turn ends (091 D10).
+            self._questions.cancel()
             self._turn_active = False
             await self._emit_status()
 
@@ -567,8 +622,17 @@ class KiroHarness:
         """Cancel the whole Kiro turn and kill running Archie tool processes (D22)."""
         if not self._turn_active or self._acp is None or self._kiro_session_id is None:
             return
+        if self._compacting:
+            # Kiro's compaction has no cancel; say so rather than ignore the key (091 D5).
+            self._spawn(self._notice("compaction_not_cancellable", COMPACT_NOT_CANCELLABLE))
+            return
+        # Kiro doesn't cancel the MCP call, so end the wait here (091 D10).
+        self._questions.cancel()
         self._mcp.cancel_all()
-        task = asyncio.get_running_loop().create_task(self._send_cancel())
+        self._spawn(self._send_cancel())
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -580,14 +644,87 @@ class KiroHarness:
             log.warning("Cannot cancel the Kiro turn: %s", exc)
 
     async def run_manual_compaction(self) -> None:
-        """Kiro compacts automatically; ``/compact`` is not available (D21)."""
+        """Compact Kiro's context with ``_kiro/session/compact`` (091 D4).
+
+        Runs with the turn flag taken by ``try_begin_turn`` and always releases it.
+        """
         try:
-            await self._notice(
-                "manual_compaction_failed",
-                "Kiro compacts automatically; /compact is not available",
-            )
+            if self._dead or self._acp is None:
+                await self._notice("manual_compaction_failed", DEAD_MESSAGE)
+                return
+            if self.session.turn_index == 0:
+                await self._notice("manual_compaction_failed", "Nothing to compact")
+                return
+            # Set before the first await, so an interrupt never sends session/cancel (D5).
+            self._compacting = True
+            self._compaction_summary = None
+            await self._emit_status()
+            await self._compact()
+        except LogAppendError as exc:
+            await self._notice("storage_error", str(exc))
         finally:
+            self._compacting = False
             self._turn_active = False
+            await self._emit_status()
+
+    async def _compact(self) -> None:
+        """Ask Kiro to compact and record it as a manual compaction (091 D2)."""
+        assert self._acp is not None
+        request_id = str(ULID())
+        turn = self.session.turn_index
+        await self._event_bus.emit(
+            CompactionStart(
+                id=str(ULID()),
+                turn=turn,
+                iteration=0,
+                scope=None,
+                request_id=request_id,
+                reason="manual",
+                tokens_before=0,  # Kiro reports no tokens
+                estimated_next_request_cost_usd=None,
+                model_key=self.session.model_id,
+                sent_at=now_utc(),
+            )
+        )
+        started = time.monotonic()
+
+        def complete(status: str, error: str | None) -> CompactionComplete:
+            return CompactionComplete(
+                id=str(ULID()),
+                turn=turn,
+                iteration=0,
+                scope=None,
+                request_id=request_id,
+                reason="manual",
+                status=status,
+                tokens_before=0,
+                tokens_after=None,
+                cost_saved_usd=0.0,
+                duration_ms=round((time.monotonic() - started) * 1000),
+                error=error,
+                summary=self._compaction_summary if status == "success" else None,
+            )
+
+        error: str | None = None
+        try:
+            result = await self._acp.request(
+                "_kiro/session/compact",
+                {"sessionId": self._kiro_session_id},
+                timeout=COMPACT_TIMEOUT_S,
+            )
+            if not (isinstance(result, dict) and result.get("success") is True):
+                error = COMPACT_BUSY_MESSAGE
+        except AcpError as exc:
+            error = f"Kiro compaction failed: {exc}"
+        except TimeoutError:
+            error = f"Kiro compaction timed out after {COMPACT_TIMEOUT_S:.0f}s"
+        except asyncio.CancelledError:
+            # Shutdown cancelled the wait: every compaction_start still gets its completion.
+            event = complete("interrupted", "The session stopped during the compaction")
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._event_bus.emit(event))
+            raise
+        await self._event_bus.emit(complete("failure" if error else "success", error))
 
     # -- helpers -------------------------------------------------------------------
 
@@ -600,29 +737,40 @@ class KiroHarness:
             log.warning("Failed to send %s notice", kind, exc_info=True)
 
     @property
-    def pending_question(self) -> None:
-        """Kiro sessions have no ``question`` tool, so nothing is ever pending."""
-        return None
+    def pending_question(self) -> PendingQuestion | None:
+        """The question the root turn is waiting on, or ``None``."""
+        return self._questions.pending
 
     def status_event(self) -> SessionStatus:
-        """Build the live ``session_status`` frame (``working`` or ``idle``, context %)."""
+        """Build the live ``session_status`` frame (state, pending question, context %)."""
         from archie_agent.app import _read_git_branch
 
+        question = self._questions.pending
+        if question is not None:
+            state = "blocked"
+        elif self._turn_active:
+            state = "working"
+        else:
+            state = "idle"
         return SessionStatus(
             id=str(ULID()),
             model_key=self.session.model_id,
             git_branch=_read_git_branch(),
-            state="working" if self._turn_active else "idle",
+            state=state,
+            question=question,
             context_pct=msgspec.UNSET if self._context_pct is None else self._context_pct,
         )
 
-    def answer_question(self, command) -> ErrorNotice:
-        """Reject answers: Kiro sessions never have a pending question."""
-        return ErrorNotice(
-            id=str(ULID()),
-            kind="question_not_pending",
-            message=f"No pending question {command.question_id!r}",
-        )
+    def answer_question(self, command) -> ErrorNotice | None:
+        """Route an ``answer`` command; return a targeted notice when it doesn't fit."""
+        try:
+            self._questions.answer(
+                command.question_id,
+                Answer(option=command.option, text=command.text, dismiss=command.dismiss),
+            )
+        except QuestionError as exc:
+            return ErrorNotice(id=str(ULID()), kind=exc.kind, message=str(exc))
+        return None
 
     async def _emit_status(self) -> None:
         try:

@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from archie_shared.kiro import kiro_model_id
 from archie_shared.session.accounting import UsageTotals
 from archie_shared.tool_rows import row_lines, tool_row
 from archie_shared.transcript import (
@@ -384,7 +385,11 @@ def widget_for(node) -> Widget:
             return CompactionMarker(
                 node.reason, node.tokens_before, node.tokens_after or 0, node.summary
             )
-        entry = CompactionEntry(_compaction_label(node.reason), node.tokens_before)
+        if kiro_model_id(node.model_key) is not None:
+            # Kiro rows carry no token figures, so the plain reason is the label (091 D3).
+            entry = CompactionEntry(node.reason, node.tokens_before, kiro=True)
+        else:
+            entry = CompactionEntry(_compaction_label(node.reason), node.tokens_before)
         if node.status != "pending":
             _complete_compaction(entry, node)
         return entry

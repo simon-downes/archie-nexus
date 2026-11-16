@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -56,14 +56,18 @@ def root_agent_config(mcp_url: str, skill_paths: Iterable[Path] = ()) -> dict:
     }
 
 
-def worker_agent_config(mcp_url: str) -> dict:
-    """Agent JSON for the ``archie-worker`` subagent."""
+def worker_agent_config(mcp_url: str, tools: Sequence[str] | None = None) -> dict:
+    """Agent JSON for the ``archie-worker`` subagent.
+
+    ``tools`` lists the worker's tools (``@archie/<name>``); ``None`` gives it every Archie
+    tool. The harness lists them to keep root-only tools such as ``question`` out (091 D11).
+    """
     return {
         "name": WORKER_AGENT,
         "description": "General-purpose Archie worker subagent with Archie tools",
         "prompt": f"file://../archie/{WORKER_AGENT}.md",
         "mcpServers": _mcp_servers(mcp_url),
-        "tools": [f"@{MCP_SERVER}"],
+        "tools": list(tools) if tools is not None else [f"@{MCP_SERVER}"],
         "includeMcpJson": False,
         "includePowers": False,
         "permissions": {
@@ -92,6 +96,7 @@ def write_agent_files(
     root_prompt: str,
     worker_prompt: str,
     skill_paths: Iterable[Path] = (),
+    worker_tools: Sequence[str] | None = None,
 ) -> dict[str, Path]:
     """Write both prompts and both agent JSONs; return their paths by name."""
     prompts = kiro_home / "archie"
@@ -107,7 +112,10 @@ def write_agent_files(
     _atomic_write(
         paths["root_agent"], json.dumps(root_agent_config(mcp_url, skill_paths), indent=2) + "\n"
     )
-    _atomic_write(paths["worker_agent"], json.dumps(worker_agent_config(mcp_url), indent=2) + "\n")
+    _atomic_write(
+        paths["worker_agent"],
+        json.dumps(worker_agent_config(mcp_url, worker_tools), indent=2) + "\n",
+    )
     return paths
 
 

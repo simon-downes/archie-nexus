@@ -15,8 +15,11 @@ import pytest
 import yaml
 from archie_agent.kiro.harness import KiroHarness, KiroStartupError
 from archie_agent.tool_policy_live import LiveToolPolicy
+from archie_shared.commands import AnswerCommand
 from archie_shared.events import (
     AssistantMessage,
+    CompactionComplete,
+    CompactionStart,
     ErrorNotice,
     LLMRequest,
     SessionStatus,
@@ -292,22 +295,249 @@ async def test_kiro_exit_mid_turn_then_dead_notice(harness, home):
     assert not harness.turn_active
 
 
-async def test_compact_is_not_available(harness, home):
-    seen: list = []
-    original = harness.event_bus.emit
-
-    async def capture(event, target=None):
-        seen.append(event)
-        return await original(event, target)
-
-    harness.event_bus.emit = capture
+async def _compact(harness: KiroHarness) -> list:
+    """Run ``/compact`` as ``app.py`` does and return every emitted event."""
+    seen = _capture(harness)
     assert harness.try_begin_turn()
     await harness.run_manual_compaction()
-    assert [(e.kind, e.message) for e in seen if isinstance(e, ErrorNotice)] == [
-        ("manual_compaction_failed", "Kiro compacts automatically; /compact is not available")
-    ]
     assert not harness.turn_active
-    assert not any(isinstance(e, UserMessage) for e in _safe_log(home))
+    return seen
+
+
+def _compact_requests(tmp_path: Path) -> list[dict]:
+    return [
+        r["in"]["params"]
+        for r in _record(tmp_path)
+        if r.get("in", {}).get("method") == "_kiro/session/compact"
+    ]
+
+
+async def test_compact_calls_kiro_and_records_a_manual_compaction(harness, home, tmp_path):
+    """091 D4: /compact runs _kiro/session/compact and logs a manual compaction."""
+    await harness.handle_message("run it")
+    seen = await _compact(harness)
+    assert _compact_requests(tmp_path) == [{"sessionId": "sess_fake"}]
+    start, complete = [e for e in _log(home) if isinstance(e, CompactionStart | CompactionComplete)]
+    assert (start.reason, start.tokens_before, start.model_key, start.turn) == (
+        "manual",
+        0,
+        "kiro/gpt-5.6-luna",
+        1,
+    )
+    assert (complete.status, complete.request_id, complete.error) == (
+        "success",
+        start.request_id,
+        None,
+    )
+    assert (complete.tokens_after, complete.cost_saved_usd) == (None, 0.0)
+    assert complete.summary == "## Overview\nFake Kiro summary."
+    states = [e.state for e in seen if isinstance(e, SessionStatus)]
+    assert states[0] == "working" and states[-1] == "idle"
+
+
+@pytest.mark.parametrize(
+    ("variant", "error"),
+    [
+        ("busy", "Kiro did not compact: a turn or compaction is in progress"),
+        ("error", "Kiro compaction failed: no summary"),
+    ],
+)
+async def test_compact_failures_end_as_failed_compactions(
+    home, tmp_path, monkeypatch, variant, error
+):
+    monkeypatch.setenv("FAKE_KIRO_COMPACT", variant)
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        await _compact(h)
+    finally:
+        await h.close()
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error, complete.summary) == ("failure", error, None)
+
+
+async def test_compact_before_any_turn_sends_nothing(harness, home, tmp_path):
+    seen = await _compact(harness)
+    assert [(e.kind, e.message) for e in seen if isinstance(e, ErrorNotice)] == [
+        ("manual_compaction_failed", "Nothing to compact")
+    ]
+    assert _compact_requests(tmp_path) == []
+    assert not any(isinstance(e, CompactionStart) for e in _safe_log(home))
+
+
+async def test_compact_on_a_dead_backend_is_refused(harness, tmp_path):
+    await harness.handle_message("exit")
+    seen = await _compact(harness)
+    notice = next(e for e in seen if isinstance(e, ErrorNotice))
+    assert notice.kind == "manual_compaction_failed" and "start a new session" in notice.message
+    assert _compact_requests(tmp_path) == []
+
+
+async def test_interrupt_during_compaction_sends_no_cancel(home, tmp_path, monkeypatch):
+    """091 D5: Kiro can't cancel a compaction, so interrupt only says so."""
+    monkeypatch.setenv("FAKE_KIRO_COMPACT", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        seen = _capture(h)
+        assert h.try_begin_turn()
+        task = asyncio.create_task(h.run_manual_compaction())
+        deadline = time.monotonic() + 5
+        while not _compact_requests(tmp_path) and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        h.interrupt()
+        await task
+    finally:
+        await h.close()
+    methods = [r.get("in", {}).get("method") for r in _record(tmp_path)]
+    assert "session/cancel" not in methods
+    assert [e.kind for e in seen if isinstance(e, ErrorNotice)] == ["compaction_not_cancellable"]
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert complete.status == "success"
+
+
+async def test_automatic_compaction_is_logged_and_hides_the_placeholder(harness, home):
+    """091 D7/D8: a mid-turn Kiro compaction is a threshold compaction; 20 % never shows."""
+    seen = _capture(harness)
+    await harness.handle_message("autocompact")
+    events = _log(home)
+    (start,) = [e for e in events if isinstance(e, CompactionStart)]
+    (complete,) = [e for e in events if isinstance(e, CompactionComplete)]
+    assert (start.reason, complete.status, complete.summary) == (
+        "threshold",
+        "success",
+        "## Overview\nAuto summary.",
+    )
+    assert [e.content for e in events if isinstance(e, AssistantMessage)] == ["Answer.", "Ready."]
+    pcts = [e.context_pct for e in seen if isinstance(e, SessionStatus)]
+    assert 20.0 not in pcts and 4.2 in pcts
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_failed_automatic_compaction_is_logged(harness, home):
+    await harness.handle_message("autocompact_fail")
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error) == ("failure", "Kiro compaction failed: error")
+
+
+async def _until(predicate, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not met in time")
+
+
+def _recorded(tmp_path: Path, key: str):
+    return next((r[key] for r in _record(tmp_path) if key in r), None)
+
+
+async def _served_tools(url: str) -> set[str]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async with streamable_http_client(url) as (read, write, _), ClientSession(read, write) as s:
+        await s.initialize()
+        return {t.name for t in (await s.list_tools()).tools}
+
+
+async def test_question_tool_is_root_only(harness, tmp_path):
+    """091 D11: the root agent gets every Archie tool; the worker lists all but question."""
+    served = await _served_tools(harness.mcp_url)
+    assert {"question", "shell", "exec"} <= served and not served & {"skill", "task"}
+    root = json.loads((tmp_path / "kiro" / "agents" / "archie.json").read_text())
+    worker = json.loads((tmp_path / "kiro" / "agents" / "archie-worker.json").read_text())
+    assert "@archie" in root["tools"]
+    assert "@archie/question" not in worker["tools"]
+    assert set(worker["tools"]) == {f"@archie/{n}" for n in served - {"question"}}
+
+
+async def test_question_blocks_until_answered(harness, home):
+    """091 D9: a Kiro question waits for the answer and shows as live state."""
+    seen = _capture(harness)
+    task = asyncio.create_task(harness.handle_message("question"))
+    pending = await _until(lambda: harness.pending_question)
+    assert [o.label for o in pending.options] == ["Blue", "Red"]  # recommended first
+    status = harness.status_event()
+    assert (status.state, status.question) == ("blocked", pending)
+    wrong = harness.answer_question(AnswerCommand(question_id="nope", option=0))
+    assert wrong.kind == "question_not_pending"
+    assert harness.answer_question(AnswerCommand(question_id=pending.id, option=0)) is None
+    await task
+    events = _log(home)
+    call = next(e for e in events if isinstance(e, ToolCall))
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert call.name == "question" and result.content == "User selected option 1: Blue"
+    assert isinstance(events[-1], TurnComplete)
+    statuses = [e for e in seen if isinstance(e, SessionStatus)]
+    assert any(s.state == "blocked" and s.question == pending for s in statuses)
+    assert (statuses[-1].state, statuses[-1].question) == ("idle", None)
+
+
+async def test_interrupt_clears_a_pending_question(harness, home, tmp_path):
+    """091 D10: Kiro doesn't cancel the MCP call, so the harness ends the wait."""
+    seen = _capture(harness)
+    task = asyncio.create_task(harness.handle_message("question"))
+    await _until(lambda: harness.pending_question)
+    harness.interrupt()
+    await task
+    assert isinstance(_log(home)[-1], TurnInterrupted)
+    assert harness.pending_question is None
+    last = [e for e in seen if isinstance(e, SessionStatus)][-1]
+    assert (last.state, last.question) == ("idle", None)
+    late = await _until(lambda: _recorded(tmp_path, "question_after_cancel"))
+    assert late == "Error: the turn ended before an answer"
+    await harness.handle_message("run it")
+    assert isinstance(_log(home)[-1], TurnComplete)
+
+
+async def test_a_second_question_does_not_cancel_the_first(harness, home):
+    """Only a failed question call clears the wait; a rejected second call doesn't."""
+    task = asyncio.create_task(harness.handle_message("question_twice"))
+    first = await _until(lambda: harness.pending_question)
+    await _until(lambda: sum(isinstance(e, ToolResult) for e in _safe_log(home)) == 1)
+    assert harness.pending_question == first
+    assert harness.answer_question(AnswerCommand(question_id=first.id, option=0)) is None
+    await task
+    results = sorted(e.content for e in _log(home) if isinstance(e, ToolResult))
+    assert results == ["Error: another question is already waiting", "User selected option 1: Blue"]
+
+
+async def test_question_call_failed_by_kiro_clears_it(harness, home, tmp_path):
+    """091 D10: a question tool call Kiro ends (a timeout) doesn't leave a stale question."""
+    await harness.handle_message("question_fail")
+    assert harness.pending_question is None
+    late = _recorded(tmp_path, "question_after_fail")
+    assert late == "Error: Kiro ended the question tool call before an answer"
+    result = next(e for e in _log(home) if isinstance(e, ToolResult))
+    assert result.is_error
+
+
+async def test_compaction_cancelled_by_shutdown_still_completes(home, tmp_path, monkeypatch):
+    """Every compaction_start gets a compaction_complete, even when the task is cancelled."""
+    monkeypatch.setenv("FAKE_KIRO_COMPACT", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        assert h.try_begin_turn()
+        task = asyncio.create_task(h.run_manual_compaction())
+        await _until(lambda: _compact_requests(tmp_path))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await h.close()
+    (complete,) = [e for e in _log(home) if isinstance(e, CompactionComplete)]
+    assert (complete.status, complete.error) == (
+        "interrupted",
+        "The session stopped during the compaction",
+    )
+    assert not h.turn_active
 
 
 async def test_switch_model(harness, tmp_path):

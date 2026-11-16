@@ -1738,7 +1738,13 @@ async def test_palette_lists_for_native_kiro_ended_and_no_session():
         ]
         await app.switch_to("ws-b")
         await attached(app, pilot, "ws-b")
-        assert _command_names(app) == ["New session…", *session, "Stop session…", *ALWAYS]
+        assert _command_names(app) == [
+            "New session…",
+            *session,
+            "Compact context",
+            "Stop session…",
+            *ALWAYS,
+        ]
         await app.switch_to("ws-c")
         await attached(app, pilot, "ws-c")
         client.publish(make_record("ws-c", started_at=_at(3), status="exited"))
@@ -1819,7 +1825,8 @@ async def test_model_picker_palette_marks_the_current_model_and_switches(monkeyp
         assert kind == "command" and command == SwitchModelCommand(model_key="model-haiku")
 
 
-async def test_compact_palette_action_sends_compact_for_native_sessions_only():
+async def test_compact_palette_action_sends_compact_for_native_and_kiro_sessions():
+    """091 D12: Kiro sessions compact through Kiro, so the palette sends /compact too."""
     client = _client(
         make_record("ws-a", started_at=_at(1)),
         make_record("ws-b", started_at=_at(2), backend="kiro"),
@@ -1833,8 +1840,8 @@ async def test_compact_palette_action_sends_compact_for_native_sessions_only():
         await app.switch_to("ws-b")
         await attached(app, pilot, "ws-b")
         app.action_compact()
-        await pilot.pause()
-        assert client.stream_for("ws-b").sent == []
+        await settle(pilot, lambda: bool(client.stream_for("ws-b").sent))
+        assert client.stream_for("ws-b").sent == [("message", "/compact")]
 
 
 async def test_filter_matches_by_branch_workspace_name_and_id():

@@ -55,15 +55,16 @@ the agent kills Kiro and ends the active turn with `turn_error`.
 - **Prompt:** Archie's identity, soul, environment, tools and brain sections, plus
   `persona/prompts/kiro.md`. Kiro injects `AGENTS.md` and lists skills itself, so the Archie
   prompt leaves out `<agents.md>`, the skills catalog and the `task` guidance.
-- **Tools:** Archie's `exec` and native tools (not `skill`, `task` or `question`) come from the in-process
+- **Tools:** Archie's `exec`, native tools and `question` (not `skill` or `task`) come from the in-process
   MCP server (`kiro/mcp_server.py`) with their usual schemas, live tool policy and plugin
   runner context. Kiro defers MCP tools: the model loads them with `tool_load` and calls them
   as `archie::<name>`. Results are capped at 29,000 characters, because Kiro replaces
   anything over 30,000 with a preview.
 - **Skills:** the root agent lists skills from persona, `~/.agents/skills` and enabled
   plugins as `skill://` resources. Kiro loads them with its own skill tool.
-- **Subagents:** one subagent, `archie-worker`, which has Archie's tools and the default-agent
-  prompt.
+- **Subagents:** one subagent, `archie-worker`, which has the default-agent prompt and every
+  Archie tool except `question`: its agent file lists them as `@archie/<name>`, because
+  both agents share one MCP server and questions are root-only, as on native sessions.
 
 ## Event mapping
 
@@ -80,6 +81,7 @@ the agent kills Kiro and ends the active turn with `turn_error`.
 | any other tool | logged under its `toolId` or title, with a warning |
 | `turn_completion` + prompt result | one root `llm_request`, then `turn_complete` / `turn_interrupted` / `turn_error` |
 | `session_info_update` kind `context_usage` (root) | `session_status.context_pct` when the value changes; the turn's last, max and distinct count on its `llm_request` |
+| `session_info_update` kinds `summarization_started` / `summarization_completed` / `summarization_failed` during a turn | `compaction_start` / `compaction_complete` (reason `threshold`; `success` with Kiro's summary, `failure`, or `interrupted` for `canceled` or a turn that ends first), scoped like the other events |
 
 For current Kiro ACP frames, an Archie tool call uses `title: "@archie/<name>"` and places
 its arguments directly in `rawInput`, for example `{"path": "foo.py"}`. The translator treats
@@ -100,7 +102,10 @@ every `session_status` and sends a new status when it changes, so the TUI status
 `Ctx: N%` live; Kiro gives no token count. The turn's `llm_request` stores the last figure
 (`context_pct`), the highest (`context_pct_max`), the number of distinct figures
 (`context_samples`) and `len(requestIds)` (`kiro_requests`), so replay, insights and
-`archie stats` show it. The turn's fields cover frames up to the `session/prompt` result; Kiro usually repeats the last figure just after it, and a changed figure there reaches the next `session_status` (and the next turn) only. Archie keeps one `llm_request` per turn: in the logs checked, the
+`archie stats` show it. Straight after an automatic compaction Kiro reports a placeholder of
+exactly 20 % before the real figure; the agent drops those frames from both the live status
+and the turn's figures. After the compaction Kiro carries on with one or two more model
+requests in the same turn, so a short extra reply can follow the row. The turn's fields cover frames up to the `session/prompt` result; Kiro usually repeats the last figure just after it, and a changed figure there reaches the next `session_status` (and the next turn) only. Archie keeps one `llm_request` per turn: in the logs checked, the
 figures matched Kiro's request IDs for only 39 % of requests, so the two counts are recorded
 to re-check that later.
 
@@ -111,8 +116,25 @@ to re-check that later.
 - **Model switch** accepts `kiro/<id>` keys from `kiro.models` that Kiro also offers, and
   re-applies effort. Other keys get `error_notice unknown_model`. The TUI palette lists the
   allowlist for Kiro sessions, and the status bar shows `<id> (Kiro)`.
-- **`/compact`** is not available. Kiro compacts automatically at 80 % of the context, and
-  the agent answers with `error_notice manual_compaction_failed`.
+- **`/compact`** (typed, or Compact context in the TUI palette) calls Kiro's
+  `_kiro/session/compact`. The log gets a `compaction_start` (reason `manual`) and a
+  `compaction_complete` carrying Kiro's summary from its `summarization_completed` frame.
+  Kiro reports no tokens, so both carry `tokens_before` 0 and `tokens_after` null, and the
+  TUI and web viewer show `Compaction manual (Kiro, <ms>)`. Kiro answers `{success: false}`
+  while a turn or another compaction runs, which ends as a `failure` completion; so do a
+  JSON-RPC error and the 120 s timeout. Before the first turn the agent answers
+  `manual_compaction_failed` "Nothing to compact" without calling Kiro. Kiro can't cancel a
+  compaction, so an interrupt during one sends only an `error_notice`
+  `compaction_not_cancellable`. Kiro sends no context figure after a manual compaction, so
+  the status bar keeps the old percentage until the next turn.
+- **`question`** blocks its MCP call until the user answers, like the native tool: the
+  agent publishes the pending question in `session_status` (`state: blocked`) and `/status`,
+  and routes `answer` commands to it. Its id is generated by the agent, because the MCP call
+  never sees ACP's `toolCallId`. Kiro doesn't cancel the MCP call when a turn is cancelled
+  or when it fails the tool call itself (for example after the MCP `requestTimeout`, 600 s),
+  so the agent clears the question on interrupt, when Kiro ends the `question` tool call,
+  and at the end of every turn; the abandoned call returns an `Error:` text that Kiro
+  discards.
 - **Permission requests** are answered `cancelled`, with a warning. The agent rules allow
   every Archie tool, skill and `archie-worker`, so Kiro shouldn't ask.
 - **Kiro exits mid-session:** the active turn ends with `turn_error` "Kiro backend stopped".
@@ -131,7 +153,7 @@ to re-check that later.
 ## Limits
 
 Kiro sessions run locally only, with no remote Kiro sessions or cloud sandboxes. The backend
-has no resume, no manual compaction and no per-request latency or token counts. Context is a
+has no resume and no per-request latency or token counts. Context is a
 percentage only, for the main agent only (Kiro reports none for subagents), and turn cost
 limits are not enforced. Insights and `archie stats` don't
 show credits yet. The `tests/fake_kiro.py` scripted agent covers the ACP flow without a

@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 from archie_orchestrator.app import app
-from archie_orchestrator.transcript import markup_to_html, pygments_css, render_markdown
+from archie_orchestrator.transcript import (
+    compaction_text,
+    markup_to_html,
+    pygments_css,
+    render_markdown,
+)
 from archie_orchestrator.web import VIEWER_CSP
 from archie_shared.events import (
     CompactionComplete,
@@ -17,6 +22,7 @@ from archie_shared.events import (
     TurnInterrupted,
 )
 from archie_shared.schemas import NexusConfig
+from archie_shared.transcript import CompactionNode
 from httpx import ASGITransport, AsyncClient
 
 from tests.session_fakes import serve
@@ -315,6 +321,33 @@ async def test_detail_notices(session_logs):
     assert "boom" in html
     assert 'class="notice-block turn-error"' in html and "provider exploded" in html
     assert 'class="notice-block turn-interrupted"' in html
+
+
+def test_kiro_compaction_text_has_no_token_figures():
+    """091 D3: Kiro reports no tokens, so its rows show only the backend and duration."""
+    node = CompactionNode(
+        id="c",
+        request_id="r",
+        reason="manual",
+        status="pending",
+        tokens_before=0,
+        model_key="kiro/gpt-5.6-luna",
+    )
+    assert compaction_text(node) == ("Compacting (manual)", "Kiro")
+    node.status, node.duration_ms = "success", 8204
+    assert compaction_text(node) == ("Compaction success (manual)", "Kiro, 8204ms")
+    node.status, node.error = "failure", "Kiro is busy"
+    assert compaction_text(node) == ("Compaction failure (manual)", "Kiro is busy")
+    native = CompactionNode(
+        id="n",
+        request_id="r",
+        reason="manual",
+        status="success",
+        tokens_before=9000,
+        tokens_after=900,
+        model_key="m1",
+    )
+    assert compaction_text(native) == ("Compaction success (manual)", "9,000 → 900 tokens")
 
 
 @pytest.mark.asyncio

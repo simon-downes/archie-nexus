@@ -368,6 +368,31 @@ async def test_broker_cancellation_clears_pending_and_notifies():
     assert exc.value.kind == "question_not_pending"
 
 
+async def test_broker_cancel_fails_the_waiter_and_clears_at_once():
+    """091 D10: cancel() ends a wait the backend never cancels."""
+    changes = []
+
+    async def on_change():
+        changes.append(broker.pending)
+
+    broker = QuestionBroker(on_change=on_change)
+    broker.cancel()  # nothing pending: no-op
+    waiter = asyncio.create_task(broker.ask(_question("q1")))
+    await asyncio.sleep(0)
+    assert broker.pending is not None
+    broker.cancel("gone")
+    assert broker.pending is None
+    # A new question asked before the old waiter wakes is not cleared by it.
+    second = asyncio.create_task(broker.ask(_question("q2")))
+    with pytest.raises(QuestionError) as exc:
+        await waiter
+    assert (exc.value.kind, str(exc.value)) == ("question_cancelled", "gone")
+    assert broker.pending is not None and broker.pending.id == "q2"
+    broker.answer("q2", Answer(dismiss=True))
+    assert (await second).dismiss
+    assert broker.pending is None and changes[-1] is None
+
+
 async def test_broker_status_failure_does_not_block_answer():
     async def on_change():
         raise RuntimeError("bus down")
@@ -421,10 +446,11 @@ def test_session_status_defaults_and_round_trip():
     assert not decoded.persist
 
 
-async def test_kiro_status_and_answer_have_no_question():
+async def test_kiro_status_and_answer_without_a_pending_question():
     from archie_agent.kiro.harness import KiroHarness
 
     harness = KiroHarness.__new__(KiroHarness)
+    harness._questions = QuestionBroker()
     harness._turn_active = False
     harness._context_pct = None
     harness.session = MagicMock(model_id="kiro/claude")

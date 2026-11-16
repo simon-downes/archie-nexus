@@ -474,14 +474,16 @@ class CompactionEntry(Widget):
     }
     """
 
-    def __init__(self, reason: str, before: int) -> None:
+    def __init__(self, reason: str, before: int, *, kiro: bool = False) -> None:
         super().__init__()
         self._reason = reason
         self._before = before
+        self._kiro = kiro  # Kiro reports no tokens or cost (091 D3)
         # Text, not markup: the reason and error are arbitrary and must never be parsed.
-        self._header = Text.assemble(
-            ("○", f"bold {theme.PRIMARY}"), f" Compaction {reason} ({before} tokens)"
+        pending = (
+            f" Compaction {reason} (Kiro)" if kiro else f" Compaction {reason} ({before} tokens)"
         )
+        self._header = Text.assemble(("○", f"bold {theme.PRIMARY}"), pending)
 
     def compose(self) -> ComposeResult:
         yield Static(self._header, classes="tool-header")
@@ -496,7 +498,11 @@ class CompactionEntry(Widget):
         """
         colour = theme.ERROR if error else theme.SUCCESS
         reason = self._reason
-        if error:
+        if self._kiro:
+            text = f"Compaction {reason} (Kiro, {duration_ms}ms)"
+            if error:
+                text += f" Failed: {error}"
+        elif error:
             text = f"Compaction {reason} ({self._before} tokens, {duration_ms}ms) Failed: {error}"
         else:
             text = f"Compaction {reason} ({self._before} → {after}, ${display_cost:.2f}, {duration_ms}ms)"

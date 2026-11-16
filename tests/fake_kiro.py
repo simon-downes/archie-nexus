@@ -9,9 +9,18 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
   ``wrong_mode``, ``builtin_tag``, ``sticky_collection``, ``autopilot_off``, ``no_model``,
   ``mcp_failed``, ``exit_on_start``, ``hang``, ``late_builtin`` (bad tag after startup),
   ``late_collection`` (content collection re-enabled during a turn).
+- ``FAKE_KIRO_COMPACT``: ``_kiro/session/compact`` variant: ``ok`` (default; sends a
+  ``summarization_completed`` frame, then ``{success: true}``), ``busy`` (``{success:
+  false}``), ``error`` (JSON-RPC error), ``slow`` (``ok`` after 1 s).
 - The prompt text picks the turn: ``error`` → JSON-RPC error; ``exit`` → exit 3
   mid-turn; ``sleep`` → MCP ``shell sleep 30`` until ``session/cancel``;
-  ``permission`` → ask permission; anything else → text, ``tool_load``, MCP
+  ``permission`` → ask permission; ``autocompact`` → text, an automatic compaction
+  (started, completed, placeholder context 20, real context 4.2), text;
+  ``autocompact_fail`` → a compaction that fails; ``question`` → MCP ``question`` until it
+  returns or ``session/cancel`` (then the result is recorded as ``question_after_cancel``);
+  ``question_fail`` → fails the ``question`` call after 0.5 s, like a Kiro timeout, and
+  records the late MCP result as ``question_after_fail``; ``question_twice`` → two parallel
+  ``question`` calls (the second fails at once); anything else → text, ``tool_load``, MCP
   ``shell echo KIRO-OK``, text.
 """
 
@@ -26,6 +35,8 @@ from pathlib import Path
 RECORD = os.environ.get("FAKE_KIRO_RECORD")
 HOME = Path(os.environ.get("FAKE_KIRO_HOME", str(Path.home() / ".kiro")))
 SCENARIO = os.environ.get("FAKE_KIRO_SCENARIO", "ok")
+COMPACT = os.environ.get("FAKE_KIRO_COMPACT", "ok")
+SUMMARY = "## Overview\nFake Kiro summary."
 SESSION = "sess_fake"
 MODELS = ["auto", "claude-opus-5.5", "claude-sonnet-5.5", "gpt-5.6-luna", "gpt-5.6-sol"]
 if SCENARIO == "no_model":
@@ -239,6 +250,52 @@ async def ask_permission() -> dict:
     return await fut
 
 
+QUESTION = {
+    "question": "Which colour?",
+    "options": [{"label": "Red"}, {"label": "Blue", "description": "cool"}],
+    "recommended": 1,
+}
+
+
+def tool_failed(call_id: str) -> None:
+    update(
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": call_id,
+            "status": "failed",
+            "rawOutput": "This tool was interrupted before it reported a result.",
+        }
+    )
+
+
+async def ask_question(rid: int, *, fail: bool) -> None:
+    """Like Kiro 3.1.0: a cancel or a failed call doesn't cancel the MCP request."""
+    chunk("Asking.")
+    task = asyncio.create_task(archie_tool("tc_q", "question", QUESTION))
+    if fail:
+        await asyncio.sleep(0.5)
+        tool_failed("tc_q")
+        late = await asyncio.wait_for(task, 5)
+        record({"question_after_fail": late["text"]})
+        chunk("Moving on.")
+        completion(0.2)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        return
+    waiter = asyncio.create_task(cancelled.wait())
+    done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    waiter.cancel()
+    if task in done:
+        chunk(f"Got: {task.result()['text']}")
+        completion(0.2)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        return
+    completion(0.1, "aborted")
+    tool_failed("tc_q")
+    send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
+    late = await asyncio.wait_for(task, 5)
+    record({"question_after_cancel": late["text"]})
+
+
 async def prompt(rid: int, params: dict) -> None:
     text = params["prompt"][0]["text"]
     cancelled.clear()
@@ -269,6 +326,32 @@ async def prompt(rid: int, params: dict) -> None:
         await asyncio.wait({task}, timeout=5)
         send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
         return
+    if text in ("autocompact", "autocompact_fail"):
+        chunk("Answer.")
+        summarization_frame("summarization_started", summarization={"status": "running"})
+        if text == "autocompact":
+            summary_completed("## Overview\nAuto summary.")
+            context(20)
+            context(4.2)
+        else:
+            summarization_frame(
+                "summarization_failed", summarization={"status": "error"}, reason="error"
+            )
+        chunk("Ready.")
+        completion(0.3)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        return
+    if text == "question_twice":
+        first = asyncio.create_task(archie_tool("tc_q1", "question", QUESTION))
+        await asyncio.sleep(0.2)
+        await archie_tool("tc_q2", "question", QUESTION)
+        chunk(f"Got: {(await first)['text']}")
+        completion(0.2)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        return
+    if text in ("question", "question_fail"):
+        await ask_question(rid, fail=text == "question_fail")
+        return
     if text == "permission":
         response = await ask_permission()
         record({"permission_response": response})
@@ -294,6 +377,36 @@ async def prompt(rid: int, params: dict) -> None:
     chunk("Done: KIRO-OK.")
     completion(0.5, request_ids=3)
     send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+
+
+def summarization_frame(kind: str, **meta) -> None:
+    """A compaction ``session_info_update`` shaped like Kiro 3.1.0's."""
+    update({"sessionUpdate": "session_info_update", "_meta": {"kiro": {"kind": kind, **meta}}})
+
+
+def summary_completed(summary: str = SUMMARY) -> None:
+    summarization_frame(
+        "summarization_completed",
+        summarization={
+            "status": "success",
+            "summary": {"conversationSummary": summary, "truncated": False},
+        },
+        conversationSummary=summary,
+        truncated=False,
+    )
+
+
+async def compact(rid: int) -> None:
+    if COMPACT == "slow":
+        await asyncio.sleep(1)
+    if COMPACT == "busy":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"success": False}})
+        return
+    if COMPACT == "error":
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": "no summary"}})
+        return
+    summary_completed()
+    send({"jsonrpc": "2.0", "id": rid, "result": {"success": True}})
 
 
 def notify(method: str, params: dict) -> None:
@@ -366,6 +479,8 @@ async def handle(msg: dict) -> None:
         asyncio.create_task(prompt(rid, params))
     elif method == "session/cancel":
         cancelled.set()
+    elif method == "_kiro/session/compact":
+        asyncio.create_task(compact(rid))
     elif rid is not None and method is None:
         fut = pending.pop(rid, None)
         if fut is not None and not fut.done():

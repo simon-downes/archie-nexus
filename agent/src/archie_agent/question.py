@@ -71,8 +71,23 @@ class QuestionBroker:
             await self._notify()
             return await future
         finally:
-            self._pending, self._future = None, None
+            # ``cancel`` may already have cleared it, and a new question may be pending.
+            if self._future is future:
+                self._pending, self._future = None, None
             await asyncio.shield(self._notify())
+
+    def cancel(self, message: str = "the turn ended before an answer") -> None:
+        """Drop the pending question and fail its waiter with ``message``; no-op if none.
+
+        For backends that don't cancel the tool call when the turn ends (Kiro, 091 D10).
+        The pending state clears at once; the waiter's ``finally`` publishes the change.
+        """
+        future = self._future
+        if self._pending is None or future is None:
+            return
+        self._pending, self._future = None, None
+        if not future.done():
+            future.set_exception(QuestionError("question_cancelled", message))
 
     def answer(self, question_id: str, answer: Answer) -> None:
         """Resolve the pending question.

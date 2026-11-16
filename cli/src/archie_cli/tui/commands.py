@@ -4,9 +4,8 @@
 D22, D23). The sidebar navigates and the palette acts, so there are no "switch to
 session" entries, and the app lists only these providers (Textual's system commands
 are left out). Rename, Change model, Compact and Stop are hidden while no session is on
-screen or it has ended; Compact also for Kiro sessions, which compact by themselves
-(D24), and Change model and Compact while the session is still starting (nothing
-receives them yet).
+screen or it has ended, and Change model and Compact while the session is still starting
+(nothing receives them yet). Kiro sessions compact through Kiro (091 D12).
 
 ``ModelCommands`` is the model picker: the palette with only the session's models, one
 line per model with aligned ``$in / $out`` prices per million tokens and a tick on the
@@ -151,14 +150,13 @@ def session_commands(actions: AppActions) -> list[Command]:
             commands.append(
                 Command("Change model…", f"{model}  alt+m", actions.action_change_model)
             )
-            if record.backend != "kiro":
-                commands.append(
-                    Command(
-                        "Compact context",
-                        "Summarise the conversation to free context",
-                        actions.action_compact,
-                    )
+            commands.append(
+                Command(
+                    "Compact context",
+                    "Summarise the conversation to free context",
+                    actions.action_compact,
                 )
+            )
         commands.append(
             Command(
                 "Stop session…",

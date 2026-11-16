@@ -11,6 +11,7 @@ import html
 import re
 import sys
 
+from archie_shared.kiro import kiro_model_id
 from archie_shared.markup import parse
 from archie_shared.transcript import (
     CompactionNode,
@@ -168,9 +169,12 @@ def compaction_text(node: CompactionNode) -> tuple[str, str]:
             f"Context compacted ({reason})",
             f"{node.tokens_before:,} → {(node.tokens_after or 0):,} tokens",
         )
+    kiro = kiro_model_id(node.model_key) is not None  # Kiro reports no tokens (091 D3)
     if node.status == "pending":
-        return f"Compacting ({reason})", f"{node.tokens_before:,} tokens"
+        return f"Compacting ({reason})", "Kiro" if kiro else f"{node.tokens_before:,} tokens"
     if node.status == "success":
+        if kiro:
+            return f"Compaction success ({reason})", f"Kiro, {node.duration_ms}ms"
         after = f"{node.tokens_after:,}" if node.tokens_after is not None else "?"
         return f"Compaction success ({reason})", f"{node.tokens_before:,} → {after} tokens"
     return f"Compaction {node.status} ({reason})", node.error or f"Compaction {node.status}"

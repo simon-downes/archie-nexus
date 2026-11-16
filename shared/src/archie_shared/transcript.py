@@ -140,6 +140,7 @@ class CompactionNode:
     cost_saved_usd: float = 0.0
     summary: str = ""
     marker: bool = False  # legacy ``context_compacted`` record
+    model_key: str = ""  # from ``compaction_start``; a ``kiro/`` key has no token figures (091)
     kind: str = "compaction"
 
 
@@ -795,6 +796,7 @@ class TranscriptBuilder:
                 status="pending",
                 tokens_before=event.tokens_before,
                 estimated_next_request_cost_usd=event.estimated_next_request_cost_usd,
+                model_key=event.model_key,
             )
             self._compactions[(scope, index, event.request_id)] = node
             self._add(event, node, changes)
