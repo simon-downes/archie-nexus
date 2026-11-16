@@ -15,8 +15,8 @@ Static, fields `personal_token` and `work_token`. `archie auth login github` rea
 object from stdin (`{"personal_token": "...", "work_token": "..."}`) or, without piped input,
 prompts for both with hidden input.
 
-Not projected into the container environment (no `env`, no `set_env`). The wrapper reads the
-one token it needs from `credentials.yaml` in the mounted Nexus home on each call.
+Not projected into the container environment (no `env`, no `set_env`). The wrapper asks the
+agent's local socket for the one token it needs on each call.
 
 ## Configuration
 
@@ -34,7 +34,7 @@ plugins:
 
 No tool policy (no tools). `work_orgs` is accepted only under `plugins.github.settings`.
 `enabled: false` hides login and status for the provider. The wrapper does not check
-`enabled`; it reads `config.yaml` and `credentials.yaml` directly.
+`enabled`; the agent's socket serves the settings and token either way.
 
 ## How it works
 
@@ -50,15 +50,16 @@ fallback), so wrapper changes ship without an image rebuild. On each call the wr
    `GH_REPO`; then the GitHub remote gh treats as the base repository (the one marked by
    `gh repo set-default`, then `upstream`, `github`, `origin`, then the first). Remotes on
    other hosts are ignored.
-3. Reads `plugins.github.settings.work_orgs` from `config.yaml` with `yq`. An exact,
-   case-insensitive match selects `github.work_token`; anything else, including no owner,
-   selects `github.personal_token`.
-4. Reads that token from `credentials.yaml` and `exec`s `gh-base` with all arguments, stdin
-   and exit code unchanged and `GH_TOKEN` set only in that process.
+3. Asks the agent's socket (`$ARCHIE_AGENT_SOCKET`) for `GET /plugins/github/settings` and
+   reads `work_orgs` with `jq`. An exact, case-insensitive match selects
+   `github.work_token`; anything else, including no owner, selects `github.personal_token`.
+4. Asks the socket for `GET /credentials/github`, takes that token and `exec`s `gh-base` with
+   all arguments, stdin and exit code unchanged and `GH_TOKEN` set only in that process.
 
-The Nexus home is `$ARCHIE_HOME_DIR`, default `~/.nexus`. A missing or non-string token, or an
-unreadable file, prints a warning to stderr and runs `gh-base` without a token, so gh falls
-back to its own stored login. Owner detection works on argument patterns: a `gh repo`
+The socket is `$ARCHIE_AGENT_SOCKET`, default `/tmp/archie-agent/agent.sock`. A missing or
+non-string token, or an agent that can't answer, prints a warning to stderr and runs `gh-base`
+without a token, so gh falls back to its own stored login; settings that can't be fetched mean
+the personal token. Owner detection works on argument patterns: a `gh repo`
 argument right after a bare flag is skipped, and URL-only targets such as
 `gh pr view https://github.com/o/r/pull/1` use the current remote. Pass `-R owner/repo` in
 those cases.

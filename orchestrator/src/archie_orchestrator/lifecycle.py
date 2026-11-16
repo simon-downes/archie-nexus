@@ -7,13 +7,15 @@ when invoking from an async context.
 
 import logging
 import os
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from archie_shared.config import home_dir
+from archie_shared.agent_sync import ORCHESTRATOR_URL_ENV, TOKEN_ENV
+from archie_shared.config import AGENT_CONTAINER_ENV, home_dir
 from archie_shared.events import UserMessage
 from archie_shared.kiro import startup_error_path
-from archie_shared.schemas import NexusConfig, expand_workspace_root
+from archie_shared.schemas import NexusConfig, expand_workspace_root, get_profile
 from archie_shared.session import container_name, generate_session_id
 from archie_shared.session.log import SessionLog
 
@@ -83,8 +85,10 @@ class PreparedStart:
         container_name: Docker container name for the session.
         workspace: Workspace directory name.
         backend: ``native`` or ``kiro``.
-        command: The full ``docker run`` command.
+        command: The full ``docker run`` command. It names ``ARCHIE_AGENT_TOKEN`` without
+            a value; :func:`run_start` passes the value in the docker CLI's environment.
         nexus_home: Host-side home directory mounted into the container.
+        agent_token: The session's agent token (plan 090), or "" when there is none.
     """
 
     session_id: str
@@ -93,6 +97,7 @@ class PreparedStart:
     backend: str
     command: list[str]
     nexus_home: Path
+    agent_token: str = field(default="", repr=False)
 
 
 def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native") -> PreparedStart:
@@ -145,6 +150,9 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     container_persona = "/opt/archie/persona"
     plugins_dir_host = REPO_ROOT / "plugins"
     configured_brain = os.environ.get("ARCHIE_BRAIN_DIR")
+    # The agent fetches config and credentials from this orchestrator (plan 090).
+    agent_token = secrets.token_urlsafe(32)
+    orchestrator_url = f"http://host.docker.internal:{get_profile(config.orchestrator).port}"
 
     docker_cmd = [
         "docker",
@@ -164,6 +172,14 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
         f"ARCHIE_PLUGINS_DIR={CONTAINER_PLUGINS_DIR}",
         "-e",
         f"ARCHIE_SESSION_ID={session_id}",
+        "-e",
+        f"{AGENT_CONTAINER_ENV}=1",
+        "-e",
+        f"{ORCHESTRATOR_URL_ENV}={orchestrator_url}",
+        # Name only: docker takes the value from its own environment (run_start), so the
+        # token never appears in argv or in a DockerError (D2).
+        "-e",
+        TOKEN_ENV,
         *(["-e", "ARCHIE_BACKEND=kiro"] if backend == "kiro" else []),
         *(["-e", f"ARCHIE_BRAIN_DIR={configured_brain}"] if configured_brain else []),
         "-v",
@@ -196,6 +212,7 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
         backend=backend,
         command=docker_cmd,
         nexus_home=nexus_home,
+        agent_token=agent_token,
     )
 
 
@@ -217,8 +234,10 @@ def run_start(prepared: PreparedStart) -> int:
     docker_cmd = prepared.command
     backend = prepared.backend
 
-    # Start container
-    run_container(docker_cmd)
+    # Start container; the agent token reaches it through the docker CLI's environment.
+    run_container(
+        docker_cmd, env={TOKEN_ENV: prepared.agent_token} if prepared.agent_token else None
+    )
 
     # Wait for ready; raises RuntimeError on crash or timeout.
     # On failure, tear down the container we started so a stuck/timed-out

@@ -6,12 +6,13 @@ Endpoints:
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import msgspec
 from archie_shared.commands import (
@@ -21,7 +22,7 @@ from archie_shared.commands import (
     SwitchModelCommand,
     decode_command,
 )
-from archie_shared.config import home_dir
+from archie_shared.config import ConfigError, home_dir
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
@@ -32,7 +33,6 @@ from archie_shared.models import get_model, load_models
 from archie_shared.plugins.config import policy_snapshot
 from archie_shared.plugins.manifest import load_manifests
 from archie_shared.protocol import PROTOCOL_VERSION
-from archie_shared.schemas import load_nexus_config
 from archie_shared.session.log import CursorNotFound
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -41,6 +41,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from ulid import ULID
 
+from archie_agent import host_config, local_api
 from archie_agent.compaction import is_compact_command
 from archie_agent.exec.plugin_loader import PluginLoadError, run_startup_hooks
 from archie_agent.harness import AgentHarness
@@ -125,13 +126,62 @@ def _backend() -> str:
     return backend
 
 
+def _startup_failed(backend: str, reason: str) -> NoReturn:
+    """Log why the agent can't start and exit 1.
+
+    A Kiro session also records the reason where the orchestrator reads it (D17).
+    """
+    log.error("%s", reason)
+    session_id = os.environ.get("ARCHIE_SESSION_ID")
+    if backend == "kiro" and session_id:
+        write_startup_error(session_id, reason)
+    sys.exit(1)
+
+
+def _host_config(backend: str) -> "NexusConfig":
+    """The config synced from the orchestrator (plan 090); exits 1 if there is none."""
+    try:
+        return host_config.get_config()
+    except (host_config.HostConfigError, ConfigError) as exc:
+        _startup_failed(backend, f"Cannot get the config from the orchestrator: {exc}")
+
+
+@asynccontextmanager
+async def _periodic_sync():
+    """Keep the host config current while the block runs (``host_config.sync_loop``)."""
+    task = asyncio.create_task(host_config.sync_loop(host_config.current()))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 @asynccontextmanager
 async def lifespan(app):
-    """Initialize the agent loop on startup."""
+    """Start the agent: host config, then the local API, then the backend (plan 090).
+
+    The local API is up before plugin startup hooks and the harness run, so every
+    subprocess they start finds ``ARCHIE_AGENT_SOCKET``.
+    """
+    backend = _backend()
+    config = _host_config(backend)
+    async with contextlib.AsyncExitStack() as stack:
+        try:
+            await stack.enter_async_context(local_api.serve_local())
+        except (OSError, RuntimeError) as exc:
+            _startup_failed(backend, f"Cannot start the agent's local API: {exc}")
+        await stack.enter_async_context(_backend_lifespan(backend, config))
+        yield
+
+
+@asynccontextmanager
+async def _backend_lifespan(backend: str, config: "NexusConfig"):
+    """Initialize the agent loop for ``backend``."""
     global _agent, _catalog, _config
 
-    backend = _backend()
-    _config = load_nexus_config()
+    _config = config
     _catalog = load_models()
     if backend == "kiro":
         async with _kiro_lifespan(_config):
@@ -200,7 +250,8 @@ async def lifespan(app):
             "session": session_id,
         },
     )
-    yield
+    async with _periodic_sync():
+        yield
     log.info("Agent shutting down")
     await _end_active_turn(_agent, SHUTDOWN_GRACE_S)
 
@@ -258,7 +309,8 @@ async def _kiro_lifespan(config: "NexusConfig"):
             "Agent started",
             extra={"backend": "kiro", "model": harness.session.model_id, "session": session_id},
         )
-        yield
+        async with _periodic_sync():
+            yield
     finally:
         log.info("Agent shutting down")
         await _end_active_turn(harness, SHUTDOWN_GRACE_S)

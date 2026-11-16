@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from archie_shared.schemas import NexusConfig
@@ -27,8 +28,13 @@ def _claim(owners: dict[str, str], env_name: str, owner: str) -> None:
     owners[env_name] = owner
 
 
-def runtime_environment(config: NexusConfig) -> dict[str, str]:
+def runtime_environment(
+    config: NexusConfig, lookup: Callable[[str, type], Any] | None = None
+) -> dict[str, str]:
     """Return env vars for an agent shell command or exec run (see ``_runtime_env``).
+
+    ``lookup(name, type)`` returns a provider's typed credential or None. The default
+    reads the host credential store; the agent passes its ``host_config`` cache.
 
     Static credentials are projected for providers with ``set_env`` enabled;
     missing or partial credentials are skipped (field validation is the API's
@@ -36,6 +42,7 @@ def runtime_environment(config: NexusConfig) -> dict[str, str]:
     enforced at manifest load) are projected when their resolved value is not
     None. Disabled plugins project nothing.
     """
+    get = get_credential if lookup is None else lookup
     result: dict[str, str] = {}
     owners: dict[str, str] = {}
     for name in PROVIDERS:
@@ -50,7 +57,7 @@ def runtime_environment(config: NexusConfig) -> dict[str, str]:
             if not _ENV_NAME.fullmatch(env_name):
                 raise ValueError(f"Provider '{name}' has invalid environment name '{env_name}'")
             _claim(owners, env_name, name)
-        credential = get_credential(name, CREDENTIAL_TYPES[name])
+        credential = get(name, CREDENTIAL_TYPES[name])
         if credential is None:
             continue
         values = {field: getattr(credential, field) for field in credential.__struct_fields__}

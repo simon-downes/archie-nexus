@@ -17,6 +17,7 @@ from pathlib import Path
 from archie_shared.config import plugins_dir
 from archie_shared.plugins import PLUGIN_PACKAGE, LoadedPlugin, resolved_settings
 
+from archie_agent import host_config
 from archie_agent.exec import plugin as _sdk
 
 # Names the runner injects into every exec namespace besides core tools.
@@ -158,6 +159,11 @@ def run_startup_hooks(
                 settings=values,
                 home=home,
                 workspace=None,
+                # In the agent process: read the cache directly, not the socket the
+                # event loop running this hook would have to answer (plan 090 D17).
+                credentials=_sdk.CredentialSource(
+                    pid, loader=lambda pid=pid: host_config.get_credential(pid)
+                ),
             )
             with _sdk.use_context(ctx):
                 result = func()

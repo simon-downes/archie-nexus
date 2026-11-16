@@ -1,10 +1,19 @@
 """Repo-root pytest setup: install ``archie_plugins`` and isolate the Nexus home."""
 
+import http.server
+import json
 import os
+import shutil
+import socketserver
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
+from archie_agent import host_config
 from archie_agent.exec.plugin_loader import install_package
+from archie_shared.agent_sync import TOKEN_ENV
+from archie_shared.config import AGENT_CONTAINER_ENV
 
 REPO_ROOT = Path(__file__).resolve().parent
 REPO_PLUGINS_DIR = REPO_ROOT / "plugins"
@@ -36,3 +45,102 @@ def pytest_collect_directory(path, parent):
 def _isolated_nexus_home(tmp_path_factory, monkeypatch):
     """Point ARCHIE_HOME_DIR at a fresh temp dir so tests never read ~/.nexus (D20)."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path_factory.mktemp("nexus-home")))
+
+
+class FileSource:
+    """A ``host_config`` source answered from the test's ``ARCHIE_HOME_DIR`` files.
+
+    It runs the orchestrator's own :func:`~archie_orchestrator.agent_api.answer_sync`, so
+    agent tests that write ``config.yaml`` or ``credentials.yaml`` into the temp home keep
+    working while versions and replies follow the real rules (plan 090 D10). Requests are
+    recorded in :attr:`requests`.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list = []
+
+    def sync(self, request):
+        from archie_orchestrator.agent_api import answer_sync
+        from archie_shared.credentials.store import load_store
+        from archie_shared.schemas import load_nexus_config
+
+        self.requests.append(request)
+        return answer_sync(request, load_config=load_nexus_config, load_store=load_store)
+
+
+_REAL_SOURCE_FROM_ENV = host_config.source_from_env
+
+
+@pytest.fixture(autouse=True)
+def _host_config_from_files(monkeypatch):
+    """Give agent code a file-backed host config and a clean container environment.
+
+    Clears the container flag and the agent token (a session container exports the flag;
+    tests that need it set it themselves), patches ``source_from_env`` with
+    :class:`FileSource`, and forgets the installed ``HostConfig`` before and after.
+    """
+    monkeypatch.delenv(AGENT_CONTAINER_ENV, raising=False)
+    monkeypatch.delenv(TOKEN_ENV, raising=False)
+    monkeypatch.setattr(host_config, "source_from_env", FileSource)
+    host_config.reset()
+    yield
+    host_config.reset()
+
+
+@pytest.fixture
+def real_source_from_env():
+    """The unpatched ``host_config.source_from_env``."""
+    return _REAL_SOURCE_FROM_ENV
+
+
+@pytest.fixture(autouse=True)
+def _agent_socket_path(monkeypatch):
+    """Pin ``ARCHIE_AGENT_SOCKET`` to a fresh short path (plan 090 D9).
+
+    A session container exports the live agent's socket; tests must never reach it.
+    Unix socket paths are limited to about 100 bytes, hence ``/tmp``, not ``tmp_path``.
+    """
+    directory = tempfile.mkdtemp(prefix="archie-sock-", dir="/tmp")
+    monkeypatch.setenv("ARCHIE_AGENT_SOCKET", f"{directory}/agent.sock")
+    yield
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.fixture
+def fake_agent_socket():
+    """Serve canned agent socket routes at ``ARCHIE_AGENT_SOCKET``; yields the route map.
+
+    Set ``routes["/credentials/github"] = (200, {"value": {...}})``; unknown paths get
+    404. For the scripts that read the agent's socket (``gh``, ``credential-process``).
+    """
+    path = os.environ["ARCHIE_AGENT_SOCKET"]
+    routes: dict[str, tuple[int, object]] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's handler name
+            status, body = routes.get(self.path, (404, {"error": "not found"}))
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def address_string(self):
+            return "agent-socket"
+
+        def log_message(self, format, *args):  # noqa: A002 — http.server's signature
+            pass
+
+    class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    server = Server(path, Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield routes
+    finally:
+        server.shutdown()
+        server.server_close()
+        Path(path).unlink(missing_ok=True)

@@ -90,9 +90,9 @@ def write_startup_error(session_id: str, reason: str) -> Path | None:
 
 
 def resolve_api_key() -> str | None:
-    """``credentials.yaml`` ``kiro.api_key``, falling back to ``KIRO_API_KEY``."""
+    """The stored ``kiro.api_key`` (from the orchestrator), falling back to ``KIRO_API_KEY``."""
     try:
-        from archie_shared.credentials import get_credential
+        from archie_agent.host_config import get_credential
 
         credential = get_credential("kiro")
     except (KeyError, ValueError) as exc:

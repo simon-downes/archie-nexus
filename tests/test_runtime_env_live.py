@@ -1,8 +1,9 @@
-"""Shell and exec subprocesses get credential/settings variables from the current files."""
+"""Shell and exec subprocesses get credential/settings variables from the held host config."""
 
 import os
 
 import pytest
+from archie_agent import host_config
 from archie_agent.exec.tool import run_exec
 from archie_agent.exec.tools import _runtime_env
 from archie_agent.exec.tools._subprocess import run_shell
@@ -35,11 +36,12 @@ async def test_shell_sees_login_and_settings_changes_without_restart():
 
     _write_config(SCALR % "two.example")
     replace_credential("scalr", {"token": "second"})
+    host_config.current().sync()  # what the periodic sync does (plan 090)
     result = await run_shell('printf "%s %s" "$SCALR_TOKEN" "$SCALR_HOSTNAME"')
     assert result.stdout == "second two.example"
 
 
-async def test_runtime_env_is_cached_until_files_change(monkeypatch):
+async def test_runtime_env_is_cached_until_a_sync_changes_something(monkeypatch):
     _write_config(SCALR % "one.example")
     calls = []
     real = _runtime_env._compute
@@ -49,12 +51,17 @@ async def test_runtime_env_is_cached_until_files_change(monkeypatch):
         return real()
 
     monkeypatch.setattr(_runtime_env, "_compute", counting)
-    _runtime_env.runtime_env()
-    _runtime_env.runtime_env()
-    assert len(calls) == 1
-    _write_config(SCALR % "two.example")
-    assert _runtime_env.runtime_env()[0]["SCALR_HOSTNAME"] == "two.example"
+    for _ in range(3):
+        _runtime_env.runtime_env()
+    # The first compute fetched credentials, which moved the generation; one more compute
+    # from the held values, then the cache holds.
     assert len(calls) == 2
+    _write_config(SCALR % "two.example")
+    _runtime_env.runtime_env()
+    assert len(calls) == 2  # an edit on the host isn't seen until a sync
+    host_config.current().sync()
+    assert _runtime_env.runtime_env()[0]["SCALR_HOSTNAME"] == "two.example"
+    assert len(calls) == 3
 
 
 async def test_broken_config_runs_command_with_warning():
@@ -71,6 +78,7 @@ async def test_broken_config_keeps_last_good_values():
     replace_credential("scalr", {"token": "kept"})
     await run_shell("true")
     _write_config("plugins: [unclosed\n")
+    host_config.current().sync()
     result = await run_shell('printf "%s" "$SCALR_TOKEN"')
     assert result.stdout == "kept"
     assert result.stderr == ""
@@ -97,3 +105,57 @@ def _python() -> str:
     import sys
 
     return sys.executable
+
+
+async def test_shells_inside_exec_inherit_the_runners_environment(tmp_path):
+    """The runner has no host config of its own; its shells reuse what the agent passed."""
+    _write_config(SCALR % "one.example")
+    replace_credential("scalr", {"token": "inherited"})
+    source = (
+        "async def main():\n    out = await shell('printf %s \"$SCALR_TOKEN\"')\n    return out\n"
+    )
+    envelope = await run_exec(source, run_root=tmp_path, python=_python())
+    assert envelope.ok, envelope.error
+    assert "inherited" in envelope.return_value
+    assert "archie warning" not in envelope.return_value
+
+
+class _FlakyOrchestrator:
+    """Answers from the temp home files, except while ``down``."""
+
+    def __init__(self):
+        self.down = False
+
+    def sync(self, request):
+        from archie_orchestrator.agent_api import answer_sync
+        from archie_shared.credentials.store import load_store
+        from archie_shared.schemas import load_nexus_config
+
+        if self.down and request.credentials:
+            raise host_config.HostConfigError("orchestrator down")
+        return answer_sync(request, load_config=load_nexus_config, load_store=load_store)
+
+
+def _flaky_host(monkeypatch) -> _FlakyOrchestrator:
+    source = _FlakyOrchestrator()
+    monkeypatch.setattr(host_config, "source_from_env", lambda: source)
+    host_config.current()
+    return source
+
+
+def test_a_failed_first_compute_is_retried(monkeypatch):
+    """An unreachable orchestrator at the first command doesn't stick for the session."""
+    now = [1000.0]
+    monkeypatch.setattr(_runtime_env, "_clock", lambda: now[0])
+    _write_config(SCALR % "one.example")
+    replace_credential("scalr", {"token": "after-recovery"})
+    source = _flaky_host(monkeypatch)
+    source.down = True
+    env, warning = _runtime_env.runtime_env()
+    assert "SCALR_TOKEN" not in env and "orchestrator down" in warning
+    source.down = False
+    now[0] += _runtime_env.RETRY_AFTER - 1
+    assert "orchestrator down" in _runtime_env.runtime_env()[1]  # not retried yet
+    now[0] += 1
+    env, warning = _runtime_env.runtime_env()
+    assert (env.get("SCALR_TOKEN"), warning) == ("after-recovery", None)

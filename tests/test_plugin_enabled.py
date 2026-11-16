@@ -24,11 +24,14 @@ from archie_shared.schemas import load_nexus_config
 from click.testing import CliRunner
 from httpx import ASGITransport, AsyncClient
 
+from tests.host_config_helpers import write_host_config
+
 DATADOG_OFF = "plugins:\n  datadog: {enabled: false}\n"
 
 
 def _config(text: str):
-    (home_dir() / "config.yaml").write_text(text)
+    """Write the host config, sync the agent's copy (plan 090), and return it parsed."""
+    write_host_config(home_dir(), text)
     return load_nexus_config()
 
 

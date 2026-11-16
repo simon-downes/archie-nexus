@@ -11,15 +11,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-import msgspec
 import yaml
 
-from archie_shared.config import home_dir
-from archie_shared.credentials.models import CREDENTIAL_TYPES
+from archie_shared.config import guard_host_files, home_dir
+from archie_shared.credentials.models import to_credential
 
 
 def store_path() -> Path:
-    """Resolve the credential store file path."""
+    """Resolve the credential store file path.
+
+    Raises:
+        HostFileAccessError: In an agent container (plan 090), so every store read and
+            write fails loudly there.
+    """
+    guard_host_files("store_path")
     return home_dir() / "credentials.yaml"
 
 
@@ -110,21 +115,7 @@ def get_credential[T](service: str, credential_type: type[T] | None = None) -> T
     entry = store.get(service)
     if entry is None:
         return None
-    if not isinstance(entry, dict):
-        raise ValueError(f"Credential entry for '{service}' must be a mapping")
-
-    if credential_type is None:
-        if service not in CREDENTIAL_TYPES:
-            raise KeyError(
-                f"Unknown service '{service}'. Known: {', '.join(sorted(CREDENTIAL_TYPES.keys()))}"
-            )
-        credential_type = CREDENTIAL_TYPES[service]
-
-    try:
-        return msgspec.convert(entry, credential_type, strict=False)
-    except msgspec.ValidationError as e:
-        path = store_path()
-        raise ValueError(f"Validation error for '{service}' in {path}: {e}") from None
+    return to_credential(service, entry, credential_type, origin=f"in {store_path()}")
 
 
 def _update_store(update) -> None:

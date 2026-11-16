@@ -93,7 +93,7 @@ class BedrockClient:
 
     def _create_client(self, region: str):
         """Create a boto3 client using Archie credentials or the default chain."""
-        from archie_shared.credentials import get_credential
+        from archie_agent.host_config import get_credential
 
         cred = get_credential("bedrock")
         kwargs: dict[str, Any] = {
@@ -291,10 +291,11 @@ class BedrockClient:
         raise RuntimeError("Unreachable")
 
     def _try_refresh_credentials(self) -> bool:
-        """Re-read credentials and recreate the boto3 client."""
-        from archie_shared.credentials import get_credential
+        """Sync credentials from the orchestrator and recreate the boto3 client (D19)."""
+        from archie_agent import host_config
 
-        cred = get_credential("bedrock")
+        host_config.refresh("bedrock")
+        cred = host_config.get_credential("bedrock")
         if not cred or not cred.aws_access_key_id:
             return False
         self.client = self._create_client(self._region)

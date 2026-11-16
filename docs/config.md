@@ -30,7 +30,7 @@ orchestrator:
 plugins: {}
 ```
 
-The agent reads each section when a session starts, except `plugins.<id>.policy`, which it re-reads before each exec call (see below). `cli` and `web` are currently reserved for future settings.
+The agent gets the config from the orchestrator (it never reads the file itself) and uses each section as it was when the session started, except `plugins.<id>.policy`, which it takes from its latest copy at each exec call (see below). It syncs that copy every 5 minutes. `cli` and `web` are currently reserved for future settings.
 
 The orchestrator re-reads `config.yaml` when it uses it, so most edits apply without
 restarting it:
@@ -71,13 +71,14 @@ optional, and an unknown plugin id or field is a load error:
 
 The manifest keys behind each of these are described in [Plugins](plugins.md).
 
-The agent re-reads `policy` before each exec call, so policy edits apply to running
-sessions; if the file is invalid, the last valid policy stays in force and the TUI shows a
-warning. `enabled`, `auth` and `settings` are read when a session starts, by both the
+At each exec call the agent takes `policy` from the config it last synced from the
+orchestrator (every 5 minutes), so policy edits apply to running sessions within that time;
+if the file was invalid at the last sync, the last valid policy stays in force and the TUI
+shows a warning. `enabled`, `auth` and `settings` are read when a session starts, by both the
 orchestrator (container environment) and the agent (tools and skills), so a new session
 picks up edits without an orchestrator restart. Setting
-`enabled: false` in a running session also turns both policy blocks off from the next exec
-call; the rest takes effect in the next session.
+`enabled: false` in a running session also turns both policy blocks off from the first exec
+call after the next sync; the rest takes effect in the next session.
 
 ```yaml
 plugins:

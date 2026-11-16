@@ -25,6 +25,9 @@ cd "$repo_root"
 # Development commands must use the worktree's persona and plugins.
 export ARCHIE_PERSONA_DIR="$repo_root/persona"
 export ARCHIE_PLUGINS_DIR="$repo_root/plugins"
+# A session's agent sets this so shared code refuses to read the host's config and
+# credential files (plan 090). The worktree's orchestrator and CLI must read them.
+unset ARCHIE_AGENT_CONTAINER
 
 vb_package="tree-sitter-vb-dotnet"
 wheel_dir="${ARCHIE_WHEEL_DIR:-/opt/archie/wheels}"

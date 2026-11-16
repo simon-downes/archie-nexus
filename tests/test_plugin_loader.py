@@ -240,6 +240,10 @@ def fail():
     raise RuntimeError("bad profiles")
 
 
+def read_credential():
+    CALLS.append(context().credentials.get())
+
+
 async def start_async():
     return None
 """
@@ -274,6 +278,24 @@ def test_startup_hook_runs_with_its_context(plugins_root, tmp_path):
     assert calls == [("hooky", {"region": "us-east-1"}, None)]
     with pytest.raises(plugin_sdk.PluginContextError):
         plugin_sdk.context()
+
+
+def test_startup_hook_reads_credentials_from_the_host_config(plugins_root):
+    """Hooks run in the agent process, so they read the cache, not the socket (plan 090)."""
+    from archie_agent import host_config
+
+    class HeldCredentials:
+        """Stands in for the agent's HostConfig at its public seam."""
+
+        def get_credential(self, name, credential_type=None):
+            return f"cached-{name}"
+
+    _write_hook_plugin(plugins_root, func="read_credential")
+    host_config.install(HeldCredentials())
+    run_startup_hooks(
+        load_manifests(plugins_root), enabled=["hooky"], settings={}, root=plugins_root
+    )
+    assert sys.modules["archie_plugins.hooky.hook"].CALLS == ["cached-hooky"]
 
 
 def test_startup_hook_defaults_settings_from_manifest(plugins_root, tmp_path):

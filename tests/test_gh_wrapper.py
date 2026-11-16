@@ -2,7 +2,8 @@
 
 The wrapper is run as a subprocess with a fake ``gh-base`` first on PATH. The fake
 prints the token environment, its argv, and its stdin as JSON, then exits with the
-code given in ``FAKE_EXIT``.
+code given in ``FAKE_EXIT``. The tokens and ``work_orgs`` come from the root conftest's
+``fake_agent_socket``, standing in for the agent's local API (plan 090).
 """
 
 import json
@@ -17,8 +18,8 @@ import pytest
 WRAPPER = Path(__file__).resolve().parents[1] / "container" / "bin" / "gh"
 
 pytestmark = pytest.mark.skipif(
-    not all(shutil.which(tool) for tool in ("bash", "git", "yq")),
-    reason="gh wrapper tests need bash, git and yq",
+    not all(shutil.which(tool) for tool in ("bash", "git", "curl", "jq")),
+    reason="gh wrapper tests need bash, git, curl and jq",
 )
 
 FAKE_GH_BASE = f"""#!{sys.executable}
@@ -32,26 +33,31 @@ print(json.dumps({{
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
 
-CREDENTIALS = "github:\n  personal_token: personal-secret\n  work_token: work-secret\n"
-CONFIG = "plugins:\n  github:\n    settings:\n      work_orgs: [tillo]\n"
+CREDENTIALS = "/credentials/github"
+SETTINGS = "/plugins/github/settings"
+TOKENS = {"personal_token": "personal-secret", "work_token": "work-secret"}
 
 
 @pytest.fixture
-def env(tmp_path):
-    """A clean environment with a fake gh-base and a Nexus home holding both tokens."""
+def agent(fake_agent_socket):
+    """The agent's socket routes: both tokens, and ``tillo`` as a work org."""
+    fake_agent_socket[CREDENTIALS] = (200, {"value": dict(TOKENS)})
+    fake_agent_socket[SETTINGS] = (200, {"work_orgs": ["tillo"]})
+    return fake_agent_socket
+
+
+@pytest.fixture
+def env(tmp_path, agent):
+    """A clean environment with a fake gh-base and the agent socket serving both tokens."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "gh-base"
     fake.write_text(FAKE_GH_BASE)
     fake.chmod(0o755)
-    home = tmp_path / "nexus"
-    home.mkdir()
-    (home / "credentials.yaml").write_text(CREDENTIALS)
-    (home / "config.yaml").write_text(CONFIG)
     base = {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path / "userhome"),
-        "ARCHIE_HOME_DIR": str(home),
+        "ARCHIE_AGENT_SOCKET": os.environ["ARCHIE_AGENT_SOCKET"],
         "GIT_CONFIG_NOSYSTEM": "1",
     }
     return base
@@ -117,48 +123,63 @@ def test_arguments_stdin_and_exit_code_pass_through(env, tmp_path):
     assert proc.returncode == 3
 
 
-def test_credentials_are_read_on_every_call(env, tmp_path):
+def test_credentials_are_asked_on_every_call(env, agent, tmp_path):
     repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
     _, first = run_gh(env, "pr", "list", cwd=repo)
-    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
-    creds.write_text(CREDENTIALS.replace("personal-secret", "rotated"))
+    agent[CREDENTIALS] = (200, {"value": {**TOKENS, "personal_token": "rotated"}})
     _, second = run_gh(env, "pr", "list", cwd=repo)
     assert (first["GH_TOKEN"], second["GH_TOKEN"]) == ("personal-secret", "rotated")
 
 
-def test_default_home_is_dot_nexus(env, tmp_path):
-    userhome = Path(env["HOME"]) / ".nexus"
-    userhome.mkdir(parents=True)
-    (userhome / "credentials.yaml").write_text(CREDENTIALS.replace("personal-secret", "from-home"))
-    env = {k: v for k, v in env.items() if k != "ARCHIE_HOME_DIR"}
-    repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
-    _, data = run_gh(env, "pr", "list", cwd=repo)
-    assert data["GH_TOKEN"] == "from-home"
+def test_default_socket_is_the_agents():
+    assert 'sock="${ARCHIE_AGENT_SOCKET:-/tmp/archie-agent/agent.sock}"' in WRAPPER.read_text()
 
 
-def test_missing_config_means_no_work_orgs(env, tmp_path):
-    (Path(env["ARCHIE_HOME_DIR"]) / "config.yaml").unlink()
+def test_wrapper_never_reads_the_host_files():
+    text = WRAPPER.read_text()
+    assert "credentials.yaml" not in text and "config.yaml" not in text
+
+
+def test_no_work_orgs_means_personal(env, agent, tmp_path):
+    agent[SETTINGS] = (200, {})
     repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
     _, data = run_gh(env, "pr", "list", cwd=repo)
     assert data["GH_TOKEN"] == "personal-secret"
 
 
-def test_missing_token_warns_and_runs_without_token(env, tmp_path):
-    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
-    creds.write_text("github:\n  personal_token: personal-secret\n")
+def test_missing_token_warns_and_runs_without_token(env, agent, tmp_path):
+    agent[CREDENTIALS] = (200, {"value": {"personal_token": "personal-secret"}})
     repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
     proc, data = run_gh(env, "pr", "list", cwd=repo, extra={"GH_TOKEN": ""})
     assert data["GH_TOKEN"] is None
-    assert f"gh: github.work_token is not set in {creds}" in proc.stderr
+    assert "gh: github.work_token is not set" in proc.stderr
 
 
-def test_malformed_credentials_warn_and_run_without_token(env, tmp_path):
-    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
-    creds.write_text("github: [unclosed\n")
+def test_no_stored_github_credential_warns_and_runs_without_token(env, agent, tmp_path):
+    agent[CREDENTIALS] = (200, {"value": None})
     repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
     proc, data = run_gh(env, "pr", "list", cwd=repo)
     assert data["GH_TOKEN"] is None
-    assert f"gh: could not read {creds}" in proc.stderr
+    assert "gh: github.personal_token is not set" in proc.stderr
+
+
+def test_agent_error_warns_and_runs_without_token(env, agent, tmp_path):
+    agent[CREDENTIALS] = (503, {"error": "the orchestrator can't send the 'github' credential"})
+    repo = make_repo(tmp_path / "r", origin="git@github.com:simon-downes/x.git")
+    proc, data = run_gh(env, "pr", "list", cwd=repo)
+    assert data["GH_TOKEN"] is None
+    assert "gh: could not get /credentials/github from the agent" in proc.stderr
+
+
+def test_unreachable_agent_warns_and_runs_without_token(env, tmp_path):
+    repo = make_repo(tmp_path / "r", origin="git@github.com:tillo/service.git")
+    proc, data = run_gh(
+        env, "pr", "list", cwd=repo, extra={"ARCHIE_AGENT_SOCKET": str(tmp_path / "none.sock")}
+    )
+    assert proc.returncode == 0
+    assert data["GH_TOKEN"] is None
+    assert "could not get /plugins/github/settings from the agent" in proc.stderr
+    assert "could not get /credentials/github from the agent" in proc.stderr
 
 
 def test_caller_gh_token_is_left_alone(env, tmp_path):
@@ -390,24 +411,22 @@ def test_gh_resolved_with_other_value_is_used(env, tmp_path):
     assert data["GH_TOKEN"] == "work-secret"
 
 
-def test_malformed_config_warns_and_uses_personal(env, work_repo):
-    config = Path(env["ARCHIE_HOME_DIR"]) / "config.yaml"
-    config.write_text("plugins: [unclosed\n")
+def test_settings_error_warns_and_uses_personal(env, agent, work_repo):
+    agent[SETTINGS] = (503, {"error": "Invalid YAML in config.yaml"})
     proc, data = run_gh(env, "pr", "list", cwd=work_repo)
     assert data["GH_TOKEN"] == "personal-secret"
-    assert f"gh: could not read {config}" in proc.stderr
+    assert "gh: could not get /plugins/github/settings from the agent" in proc.stderr
 
 
-def test_non_string_token_is_treated_as_missing(env, personal_repo):
-    creds = Path(env["ARCHIE_HOME_DIR"]) / "credentials.yaml"
-    creds.write_text("github:\n  personal_token: [a, b]\n  work_token: w\n")
+def test_non_string_token_is_treated_as_missing(env, agent, personal_repo):
+    agent[CREDENTIALS] = (200, {"value": {"personal_token": ["a", "b"], "work_token": "w"}})
     proc, data = run_gh(env, "pr", "list", cwd=personal_repo)
     assert data["GH_TOKEN"] is None
     assert "github.personal_token is not set" in proc.stderr
 
 
-def test_runs_when_home_and_archie_home_are_unset(env, tmp_path):
-    bare = {k: v for k, v in env.items() if k not in {"HOME", "ARCHIE_HOME_DIR"}}
+def test_runs_when_home_is_unset(env, tmp_path):
+    bare = {k: v for k, v in env.items() if k != "HOME"}
     outside = tmp_path / "plain"
     outside.mkdir()
     proc, data = run_gh(bare, "--version", cwd=outside)

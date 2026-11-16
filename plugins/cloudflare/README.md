@@ -91,8 +91,8 @@ and hides login and status for the provider.
 `shared/src/archie_shared/credentials/runtime.py` (`runtime_environment()`) builds the
 environment that the agent adds to each shell command and exec run: the stored `api_token` as `CLOUDFLARE_API_TOKEN` (skipped
 when no credential is stored), and `account_id` as `CLOUDFLARE_ACCOUNT_ID` when set. The agent
-re-reads `config.yaml` and `credentials.yaml` when either changes, so a new login or setting
-applies to the next command without restarting the session.
+recomputes it when a sync from the orchestrator changes its config or credentials (every 5
+minutes), so a new login or setting applies without restarting the session.
 
 ## Tests
 
