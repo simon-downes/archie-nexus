@@ -308,8 +308,8 @@ Not verified: a real `archie start chat` against Docker (no Docker in the build 
 behaviour on a case-insensitive macOS volume (`samefile` is expected to treat `Chat` and
 `chat` as one directory; tested only with a symlinked alias on Linux).
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/40
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
