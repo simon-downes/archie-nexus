@@ -1,6 +1,6 @@
 # 092 — Brain browser in the web client
 
-Status: reviewing
+Status: done
 Branch: build-it/092-brain-browser (base: main @ fc1f141)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/092-brain-browser
 
@@ -334,11 +334,33 @@ is stored.
     hand-typed `/brain/soul.md` on macOS would show the "not indexed" notice. Tree links
     use on-disk names, and the brain's own `_ROOT_EXCLUDED_NAMES` compares on-disk
     names the same way, so the notice is right for every link the browser produces.
+- Merge risk: Medium: the reachable failure is a path-guard gap exposing a host file to
+  the unauthenticated localhost pages, limited by the resolve-equals-lexical check, the
+  dot-name and `samefile` checks and their 404 tests; the shared `search` change keeps the
+  `rg` branch byte-for-byte and defaults to the tool's existing behaviour.
+- Browser evidence: ran the brain routes under uvicorn against a sample brain in /tmp
+  (not the real brain). It found nimble.css drawing `<article>` as a card around entry
+  bodies; fixed in `brain.css` (a few lines, no re-review needed) and re-captured.
 
 ## Outcome
+
+Delivered `/brain` and `/brain/{path}`: sidebar tree, rendered Markdown with Pygments
+highlighting and an entry header, highlighted non-Markdown files, directory listings,
+and search through `archie_shared.brain.search(q, 50, refresh_index=False)` with an
+`rg`-free fallback. Evidence: `tests/test_web_brain.py` and `tests/test_brain.py`
+(103 passed with `test_exec_tools.py`); full suite 17 failed, 9 errors, 5655 passed, the
+Baseline's failures only; ruff clean; three browser screenshots (entry, search, script).
+Not verified: macOS host behaviour (case-insensitive filesystem covered by a hard-link
+stand-in; `rg` absence covered by patching `shutil.which`), and the page against the
+real brain inside a running orchestrator (Docker isn't available here).
 
 PR: pending
 CI: pending
 
 ## Follow-ups
+
+- One unreadable file anywhere in the brain makes `rg` exit 2, so `brain_search` (agent
+  and browser) fails for every query. Pre-existing; noticed while testing the notice.
+- A symlinked entry pointing outside the root invalidates `index.yaml` on every load
+  (`_valid_index` rejects it), so the index is rebuilt each search. Pre-existing.
 
