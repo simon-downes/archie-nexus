@@ -1,6 +1,6 @@
 {% extends "viewer/base.html" %}
 {% import "brain/_tree.html" as t %}
-{% block title %}{% if main.view == "file" %}{{ main.meta.name if main.meta else main.name }}{% else %}Brain{% endif %}{% endblock %}
+{% block title %}{% if main.meta %}{{ main.meta.name }}{% elif main.name %}{{ main.name }}{% else %}Brain{% endif %}{% endblock %}
 {% block brand_href %}/brain{% endblock %}
 {% block brand %}brain{% endblock %}
 {% block styles %}<link rel="stylesheet" href="/static/viewer/pygments.css">

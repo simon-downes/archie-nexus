@@ -126,6 +126,16 @@
     padding: 0 0.5rem;
 }
 
+.viewer .dir-list {
+    list-style: none;
+    padding: 0;
+    font-family: var(--v-mono);
+}
+
+.viewer .dir-list a.dir {
+    font-weight: 600;
+}
+
 .viewer .brain-main .code pre.highlight {
     font-size: 0.82rem;
     line-height: 1.45;

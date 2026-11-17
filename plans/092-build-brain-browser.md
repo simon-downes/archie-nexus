@@ -238,7 +238,7 @@ is stored.
   erroring. `scripts/dev test tests/test_web_brain.py`: 20 passed; `tests/test_web_*.py`:
   220 passed; ruff check and format --check clean.
 
-### [ ] M2 — Other files and directories
+### [x] M2 — Other files and directories
 
 - **Approach:** Extend `path_page`: directories render a child list (`view="dir"`);
   non-Markdown files go through `transcript.highlight_file`; binary and >1 MiB files show
@@ -248,7 +248,11 @@ is stored.
   empty file → "Empty file".
 - **Deliverable:** every item in the tree opens to something readable.
 - **Verify:** `scripts/dev test tests/test_web_brain.py` passes; ruff as M1.
-- **Outcome:**
+- **Outcome:** `_dir_view` (non-recursive, same `_shown` filter as the tree), `_crumbs`,
+  `_text` (NUL byte or invalid UTF-8 → binary), `MAX_FILE_BYTES` = 1 MiB (a file of exactly
+  1 MiB still shows), "Empty file." notice; directory and file views share the breadcrumb
+  line. `scripts/dev test tests/test_web_brain.py`: 24 passed; ruff check and format
+  --check clean.
 
 ### [ ] M3 — Search
 

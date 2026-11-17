@@ -241,6 +241,86 @@ async def test_paths_that_cannot_be_shown_are_404(brain, tmp_path, path):
 
 
 # ---------------------------------------------------------------------------
+# Other files and directories
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_markdown_file_is_highlighted_by_filename(brain):
+    _write(brain, "tools/run.py", "import os\n\ndef main():\n    return os.getcwd()\n")
+    _write(brain, "tools/notes.unknownext", "plain <b>text</b>")
+
+    py = _main((await _get("/brain/tools/run.py")).text)
+    plain = _main((await _get("/brain/tools/notes.unknownext")).text)
+
+    assert '<div class="code"><pre class="highlight"><code><span class="kn">import</span>' in py
+    assert '<h1 class="file-name">run.py</h1>' in py
+    assert "Not indexed" not in py
+    assert "plain &lt;b&gt;text&lt;/b&gt;" in plain
+    assert "<b>" not in plain
+
+
+@pytest.mark.asyncio
+async def test_binary_large_and_empty_files_show_a_notice(brain):
+    _write(brain, "bin.dat", b"abc\x00SECRETBYTES")
+    _write(brain, "latin.txt", b"caf\xe9 SECRETBYTES")
+    _write(brain, "big.txt", b"SECRETBYTES" + b"x" * (1024 * 1024 + 1 - 11))
+    _write(brain, "limit.txt", b"y" * (1024 * 1024))
+    _write(brain, "empty.md", "")
+
+    binary = _main((await _get("/brain/bin.dat")).text)
+    latin = _main((await _get("/brain/latin.txt")).text)
+    big = _main((await _get("/brain/big.txt")).text)
+    limit = await _get("/brain/limit.txt")
+    empty = _main((await _get("/brain/empty.md")).text)
+
+    assert "Binary file (15 bytes)." in binary
+    assert "Binary file (16 bytes)." in latin
+    assert "This file is too large to show (1.0 MiB)." in big
+    for main in (binary, latin, big):
+        assert "SECRETBYTES" not in main
+    assert limit.status_code == 200 and "too large" not in limit.text  # exactly 1 MiB shows
+    assert "Empty file." in empty
+
+
+@pytest.mark.asyncio
+async def test_directory_lists_children_with_tree_exclusions(brain, tmp_path):
+    _write(brain, "a/z.md", "z")
+    _write(brain, "a/B.md", "b")
+    _write(brain, "a/sub/deep.md", "d")
+    _write(brain, "a/.hidden", "h")
+    (brain / "a" / "link.md").symlink_to(brain / "a" / "z.md")
+    (brain / "empty").mkdir()
+
+    resp = await _get("/brain/a")
+    trailing = await _get("/brain/a/")
+    empty = await _get("/brain/empty")
+
+    assert resp.status_code == trailing.status_code == 200
+    main = _main(resp.text)
+    assert re.findall(r'<li><a class="(?:dir|file)" href="([^"]+)"', main) == [
+        "/brain/a/sub",
+        "/brain/a/B.md",
+        "/brain/a/z.md",
+    ]
+    assert "deep.md" not in main  # not recursive
+    assert re.search(r'href="/brain/a" aria-current="page"', _tree(resp.text))
+    assert "<title>a — Archie</title>" in resp.text
+    assert "Empty directory." in _main(empty.text)
+
+
+@pytest.mark.asyncio
+async def test_breadcrumbs_link_each_ancestor(brain):
+    _write(brain, "a/b/entry.md", _entry("entry"))
+
+    main = _main((await _get("/brain/a/b/entry.md")).text)
+    crumbs = re.search(r'<p class="crumbs chrome">.*?</p>', main, re.S).group(0)
+
+    assert re.findall(r'href="([^"]+)"', crumbs) == ["/brain", "/brain/a", "/brain/a/b"]
+    assert '<span aria-current="location">entry.md</span>' in crumbs
+
+
+# ---------------------------------------------------------------------------
 # Chrome
 # ---------------------------------------------------------------------------
 

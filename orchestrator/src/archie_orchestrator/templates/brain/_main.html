@@ -3,6 +3,22 @@
 {%- if main.view == "landing" %}
     <h1 class="brain-title">Brain</h1>
     <p class="chrome dim">Pick a file from the tree. The brain is read from <code>{{ root }}</code>.</p>
+{%- elif main.view in ("file", "dir") %}
+    <p class="crumbs chrome">
+        {%- for name, href in main.crumbs %}<a href="{{ href }}">{{ name }}</a> / {% endfor -%}
+        <span aria-current="location">{{ main.name }}</span></p>
+{%- endif %}
+{%- if main.view == "dir" %}
+    <h1 class="brain-title file-name">{{ main.name }}/</h1>
+    {%- if main.children %}
+    <ul class="dir-list chrome">
+        {%- for child in main.children %}
+        <li><a class="{{ 'dir' if child.is_dir else 'file' }}" href="{{ brain_href(child.rel) }}">{{ child.name }}{{ '/' if child.is_dir }}</a></li>
+        {%- endfor %}
+    </ul>
+    {%- else %}
+    <p class="empty chrome">Empty directory.</p>
+    {%- endif %}
 {%- elif main.view == "file" %}
     {%- if main.meta %}
     <header class="entry-head">
@@ -25,7 +41,9 @@
     {%- if main.unindexed %}
     <p class="notice chrome">Not indexed: <code>brain_search</code> can't find this file, because its frontmatter is missing or invalid (it needs <code>name</code>, <code>summary</code>, <code>tags</code> and a timezone-aware <code>updated</code>).</p>
     {%- endif %}
-    {%- if main.markdown %}
+    {%- if main.notice %}
+    <p class="notice chrome">{{ main.notice }}</p>
+    {%- elif main.markdown %}
     <article class="md">{{ main.html }}</article>
     {%- else %}
     <div class="code">{{ main.html }}</div>

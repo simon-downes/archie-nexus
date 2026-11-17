@@ -28,6 +28,7 @@ from archie_orchestrator.web import VIEWER_CSP, _render_viewer, templates
 
 log = logging.getLogger(__name__)
 
+MAX_FILE_BYTES = 1024 * 1024  # larger files show a notice instead of their content
 _GUIDANCE_NAMES = {"BRAIN.md", "SOUL.md"}  # root guidance files: not entries
 _MARKDOWN_SUFFIXES = {".md", ".markdown"}
 
@@ -121,10 +122,43 @@ def _format_updated(value: str) -> str:
     return value[:16].replace("T", " ") + " UTC"
 
 
+def _format_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} byte{'' if size == 1 else 's'}"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
+
+
+def _crumbs(rel: str) -> list[tuple[str, str]]:
+    """(name, href) for the brain root and each ancestor directory of ``rel``."""
+    parts = rel.split("/")[:-1]
+    return [("brain", "/brain")] + [
+        (part, brain_href("/".join(parts[: i + 1]))) for i, part in enumerate(parts)
+    ]
+
+
+def _text(data: bytes) -> str | None:
+    """Decode a file as UTF-8 text; None for binary (a NUL byte or invalid UTF-8)."""
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _file_view(root: Path, path: Path, rel: str) -> dict:
     """Main-pane context for one file."""
-    text = path.read_text(encoding="utf-8")
-    view: dict = {"view": "file", "rel": rel, "name": path.name}
+    view: dict = {"view": "file", "rel": rel, "name": path.name, "crumbs": _crumbs(rel)}
+    size = path.stat().st_size
+    if size > MAX_FILE_BYTES:
+        return {**view, "notice": f"This file is too large to show ({_format_size(size)})."}
+    text = _text(path.read_bytes())
+    if text is None:
+        return {**view, "notice": f"Binary file ({_format_size(size)})."}
+    if not text:
+        return {**view, "notice": "Empty file."}
     if path.suffix.lower() not in _MARKDOWN_SUFFIXES:
         return {**view, "html": Markup(transcript.highlight_file(text, path.name))}
     entry = parse_entry(text)
@@ -147,6 +181,17 @@ def _file_view(root: Path, path: Path, rel: str) -> dict:
             "updated": _format_updated(entry["updated"]),
         },
         "html": transcript.render_markdown(entry["body"]),
+    }
+
+
+def _dir_view(root: Path, path: Path, rel: str) -> dict:
+    """Main-pane context for one directory: its shown children, not recursive."""
+    return {
+        "view": "dir",
+        "rel": rel,
+        "name": path.name,
+        "crumbs": _crumbs(rel),
+        "children": _children(root, path, "", deep=False),
     }
 
 
@@ -178,18 +223,25 @@ def _path_body(rel: str) -> tuple[str, int]:
     """Render ``/brain/<rel>``; a path that can't be shown gets the 404 pane."""
     root = brain_root()
     path = resolve_brain_path(rel)
-    if path is not None and path.is_file():
+    if path is not None:
+        shown = path.relative_to(root).as_posix()
         try:
-            main = _file_view(root, path, path.relative_to(root).as_posix())
-        except (OSError, UnicodeError) as exc:
+            if path.is_dir():
+                main = _dir_view(root, path, shown)
+            elif path.is_file():
+                main = _file_view(root, path, shown)
+            else:  # a socket, FIFO or device
+                main = None
+        except OSError as exc:  # unreadable, or removed since it was resolved
             log.info("Brain browser: cannot read %s: %s", rel, exc)
-        else:
-            return _page(main, current=main["rel"]), 200
+            main = None
+        if main is not None:
+            return _page(main, current=shown), 200
     return _page({"view": "missing", "rel": rel}), 404
 
 
 async def path_page(request: Request) -> HTMLResponse:
-    """GET /brain/{path} — one file; ``/brain/`` is the landing page."""
+    """GET /brain/{path} — one file or directory; ``/brain/`` is the landing page."""
     rel = request.path_params["path"]
     if not rel.strip("/"):
         return await index_page(request)
