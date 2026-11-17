@@ -354,7 +354,7 @@ Not verified: macOS host behaviour (case-insensitive filesystem covered by a har
 stand-in; `rg` absence covered by patching `shutil.which`), and the page against the
 real brain inside a running orchestrator (Docker isn't available here).
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/39
 CI: pending
 
 ## Follow-ups
