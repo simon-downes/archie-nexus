@@ -355,7 +355,7 @@ stand-in; `rg` absence covered by patching `shutil.which`), and the page against
 real brain inside a running orchestrator (Docker isn't available here).
 
 PR: https://github.com/simon-downes/archie-nexus/pull/39
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
