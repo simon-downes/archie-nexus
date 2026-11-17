@@ -1,6 +1,6 @@
 # 093 — Scratch workspace for chat sessions
 
-Status: reviewing
+Status: done
 Branch: build-it/093-scratch-workspace (base: main @ fc1f141)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/093-scratch-workspace
 
@@ -280,6 +280,9 @@ tracker's location mapping.
   their last valid config through the designed version-skew path, and `omit_defaults` would
   change the wire format of every `GlobalConfig` field; recorded under Risks instead. No ❌,
   so no second round.
+- Merge risk: Medium: after the upgrade, sessions already running keep their last config
+  and log a sync warning until restarted; the new host file operations only touch
+  `<scratch>/<session_id>/`, never recursively, and are off unless the key is set.
 - Plan review: 1 pass. Fixed: D8 failed-start cleanup now checks `container_running` (native
   readiness timeout leaves the container running); D10/Overview reconciled with where the
   helper is used; symlink-safe `AGENTS.md` copy and comparison (`lstat`); `ConfigError`
@@ -289,6 +292,21 @@ tracker's location mapping.
   `_cleanup_failed_start` corrected. No findings rejected. No ❌, so no second pass.
 
 ## Outcome
+
+With `global.scratch_workspace: chat`, each session in `chat` (or an alias of it) mounts a
+new `chat/<session_id>/` at `/workspace`, created before `docker run` with a copy of a
+regular-file `chat/AGENTS.md`. Stopping the session, or a failed start whose container
+isn't running, removes the directory when the session left nothing in it. Locations of
+scratch sessions are read under their own directory, both on tool results and in the 30 s
+sweep. With the key unset nothing changes.
+
+Verification: full `scripts/dev test` gives 5657 passed with the same 17 failed and 9
+errors as the baseline (no new failures; all in the agent-app tests listed in Baseline);
+`scripts/dev ruff check .` and `ruff format --check` on the changed files pass.
+
+Not verified: a real `archie start chat` against Docker (no Docker in the build container);
+behaviour on a case-insensitive macOS volume (`samefile` is expected to treat `Chat` and
+`chat` as one directory; tested only with a symlinked alias on Linux).
 
 PR: pending
 CI: pending
