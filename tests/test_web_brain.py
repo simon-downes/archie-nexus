@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -240,6 +241,34 @@ async def test_paths_that_cannot_be_shown_are_404(brain, tmp_path, path):
     assert resp.headers["content-security-policy"] == VIEWER_CSP
 
 
+@pytest.mark.asyncio
+async def test_another_name_for_the_root_index_is_404(brain):
+    # A hard link stands in for a case-insensitive alias such as INDEX.yaml on macOS.
+    _write(brain, "index.yaml", "entries: []")
+    os.link(brain / "index.yaml", brain / "INDEX.yaml")
+    resp = await _get("/brain/INDEX.yaml")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_unreadable_file_is_404_and_unreadable_directory_is_skipped(brain):
+    locked = _write(brain, "locked.md", "secret")
+    _write(brain, "closed/inner.md", "inner")
+    _write(brain, "open.md", "open")
+    locked.chmod(0)
+    (brain / "closed").chmod(0)
+    try:
+        file_resp = await _get("/brain/locked.md")
+        tree_resp = await _get("/brain")
+    finally:
+        locked.chmod(0o644)
+        (brain / "closed").chmod(0o755)
+
+    assert file_resp.status_code == 404
+    assert tree_resp.status_code == 200
+    assert _tree_links(tree_resp.text) == ["/brain/closed", "/brain/locked.md", "/brain/open.md"]
+
+
 # ---------------------------------------------------------------------------
 # Other files and directories
 # ---------------------------------------------------------------------------
@@ -417,24 +446,46 @@ async def test_search_query_is_escaped(brain):
 
 
 @pytest.mark.asyncio
-async def test_search_failure_shows_a_notice(brain, monkeypatch):
-    from archie_shared.brain import BrainError
+async def test_search_failure_shows_a_notice(brain):
+    _write(brain, "ok.md", _entry("ok", body="x"))
+    locked = _write(brain, "locked.md", _entry("locked", body="x"))
+    locked.chmod(0)  # rg reports the unreadable file and exits 2
+    try:
+        resp = await _get("/brain?q=x")
+    finally:
+        locked.chmod(0o644)
+    assert resp.status_code == 200
+    assert "Search failed: ripgrep error:" in _main(resp.text)
 
-    def fail(query, limit):
-        raise BrainError("ripgrep error: boom")
 
-    monkeypatch.setattr("archie_orchestrator.brain_web.search", fail)
+@pytest.mark.asyncio
+async def test_search_that_cannot_start_rg_shows_a_notice(brain, monkeypatch):
+    _write(brain, "ok.md", _entry("ok", body="x"))
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "rg")
+
+    monkeypatch.setattr("archie_shared.brain.subprocess.run", missing)
     resp = await _get("/brain?q=x")
     assert resp.status_code == 200
-    assert "Search failed: ripgrep error: boom" in _main(resp.text)
+    assert "Search failed:" in _main(resp.text) and "No such file or directory" in resp.text
 
-    def deny(query, limit):
-        raise PermissionError(13, "Permission denied", str(brain / "index.yaml"))
 
-    monkeypatch.setattr("archie_orchestrator.brain_web.search", deny)
-    resp = await _get("/brain?q=x")
-    assert resp.status_code == 200
-    assert "Search failed:" in _main(resp.text) and "Permission denied" in resp.text
+@pytest.mark.asyncio
+async def test_search_never_writes_the_index(brain, tmp_path, monkeypatch):
+    _write(brain, "a.md", _entry("alpha", body="x"))
+
+    resp = await _get("/brain?q=alpha")
+
+    assert _hit_paths(resp.text) == ["a.md"]
+    assert not (brain / "index.yaml").exists()
+    assert not (brain.parent / f".{brain.name}.brain.lock").exists()
+
+    missing = tmp_path / "no-brain"
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(missing))
+    resp = await _get("/brain?q=alpha")
+    assert "No entries match" in _main(resp.text)
+    assert not missing.exists()
 
 
 @pytest.mark.asyncio

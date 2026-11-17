@@ -3,15 +3,16 @@
 A read-only view of the brain root (``archie_shared.brain.brain_root``) as the host
 sees it: a sidebar tree of directories and files, and a main pane that renders one
 file. Markdown goes through :func:`transcript.render_markdown` (raw HTML escaped,
-Pygments fences); a valid entry's frontmatter is shown as a header. The tree and file
-views only read: they never create the root or touch ``index.yaml``.
+Pygments fences); a valid entry's frontmatter is shown as a header. Nothing here
+writes: no page creates the root, takes the brain lock or touches ``index.yaml``.
 
 The tree, and every path the browser opens, leaves out dot-names (``.git``, temporary
 write files), the root ``index.yaml`` (derived) and symlinks (they could leave the root).
 
 ``/brain?q=`` runs :func:`archie_shared.brain.search`, the function behind the agent's
-``brain_search`` tool, so results and their order match it. Like the tool, a search may
-refresh ``index.yaml``.
+``brain_search`` tool, so results and their order match it. It passes
+``refresh_index=False``: a stale index is rebuilt in memory, never written from the host,
+whose file locks and symlink resolution may differ from the container's.
 """
 
 from __future__ import annotations
@@ -113,11 +114,14 @@ def resolve_brain_path(rel: str) -> Path | None:
     parts = rel.split("/")
     if not rel or any(not part or part.startswith(".") for part in parts):
         return None
-    if parts == ["index.yaml"]:
-        return None
     path = root.joinpath(*parts)
     try:
         if path.resolve(strict=True) != path:
+            return None
+        # samefile, not a name compare: on a case-insensitive filesystem (macOS)
+        # "INDEX.yaml" opens the derived index too.
+        index = root / "index.yaml"
+        if len(parts) == 1 and index.exists() and path.samefile(index):
             return None
     except (OSError, RuntimeError, ValueError):  # missing, a loop, an embedded NUL
         return None
@@ -251,8 +255,8 @@ def _results_view(q: str) -> dict:
     """Main-pane context for a search, ranked by the ``brain_search`` function itself."""
     view: dict = {"view": "results", "q": q, "hits": []}
     try:
-        hits = search(q, SEARCH_LIMIT)
-    except (BrainError, OSError) as exc:  # rg failed, or the index can't be written
+        hits = search(q, SEARCH_LIMIT, refresh_index=False)
+    except (BrainError, OSError) as exc:  # rg failed or couldn't start
         log.warning("Brain search failed: %s", exc)
         return {**view, "error": str(exc)}
     terms = list(dict.fromkeys(q.lower().split()))  # as search() splits them

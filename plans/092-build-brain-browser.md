@@ -73,7 +73,7 @@ Discovery:
 | D9 | Navigation | Plain links with full page loads; `brain.js` only scrolls the current tree item into view. The tree uses `<details>` with the current file's ancestors open | htmx swaps of the main pane | A full load keeps the tree's current marker correct with no client state; the brain is small (78 files today) | self |
 | D10 | Search UI | A search box at the top of the sidebar; results replace the main pane, via htmx on input (fragment on `HX-Request`) and a plain GET otherwise, following `session_list_page` | Results in the sidebar | The main pane has room for summary and excerpt; the pattern exists | self |
 | D11 | Directory URLs | `/brain/<dir>` lists the directory's children in the main pane with D5's exclusions; breadcrumbs link to each ancestor. `/brain/` (empty path) is the landing page | 404 for directories | Breadcrumbs need a target | self |
-| D12 | Side effects of browsing | Tree and file views only read, and never create the root. Search may rewrite `index.yaml` and create the root, as the tool does | Read-only search via a new non-writing search function | D2: one search function; the rewrite is the same freshness behaviour the agent relies on | self |
+| D12 | Side effects of browsing | Nothing writes: tree and file views only read, and search calls `search(q, 50, refresh_index=False)`, which rebuilds a stale index in memory (`current_records`) without the lock, `index.yaml` or `mkdir` | Letting search refresh `index.yaml` as the tool does | The host's `flock` may not exclude the container's across a Docker Desktop bind mount, and the host resolves container-absolute symlinks differently, so a host rewrite could drop entries from the agent's index; one ranking function is kept (D2) | self (changed in code review) |
 | D13 | Search hits the browser won't show (an indexed entry under a dot-directory, a dot-file or a symlink, which `_candidate` accepts but D5 excludes) | Listed in rank order like any hit, with the name unlinked and a "not browsable" label | Filtering them out; linking to a 404 | Keeps the result list identical to `search` (D2) without dead links |
 
 ## Requirements
@@ -286,6 +286,12 @@ is stored.
 
 ## Deviations
 
+- Code review: browser search no longer refreshes `index.yaml` (D12 changed). `search`
+  gained a keyword `refresh_index` (default True, so the agent's tool is unchanged) and
+  `shared/brain.py` a public `current_records()`; `search` returns `[]` early when there
+  are no records. Prompted by the risk reviewer's questions on cross-VM locking and
+  host-side symlink resolution.
+
 - M3: the Python fallback also skips symlinked entries. `rg` doesn't follow symlinks
   in a directory walk, so a symlinked entry never gets a body match there; without the
   skip the fallback would rank it higher. D4 updated; the fallback test covers it.
@@ -296,8 +302,6 @@ is stored.
   through `.gitignore`/`.ignore`, or whose match depends on Unicode case folding beyond
   `str.lower`, can gain a body match. The common host case (no `rg`, no ignore files) is
   identical.
-- A search from the page can rewrite `index.yaml` while an agent writes the brain; both go
-  through the existing brain lock.
 
 ## Review
 
@@ -311,6 +315,25 @@ is stored.
   `<mark>` spans found on raw text before escaping; clearing the box pushing `/brain`
   stated as intended; `brain/base.html` extends `viewer/base.html` with a new `brand`
   block. No findings rejected.
+- Code review: `general` and `risk` (risk: URL paths become filesystem paths; the shared
+  search function changed), one round, no ❌.
+  - Fixed: ⚠️ untested `OSError` paths, now covered by tests with a mode-000 file and
+    directory; ℹ️ the fallback test now asserts `rg` is on PATH; ℹ️ the search-failure
+    test no longer patches the module's own `search` (a real unreadable file makes `rg`
+    exit 2; `subprocess.run` is patched only at the process boundary); ℹ️ (both
+    reviewers) the root `index.yaml` check now uses `samefile`, so `INDEX.yaml` on a
+    case-insensitive filesystem is a 404 (a hard-link test stands in for that); ℹ️ a
+    comment in `web.py` points to the `brain_href` global.
+  - ❓ risk (host/container `flock` and symlink divergence): answered by changing D12, so
+    the host never writes the index; tested by `test_search_never_writes_the_index` and
+    `test_search_without_refreshing_ranks_the_same_and_writes_nothing`.
+  - ❓ general (a valid root `SOUL.md` shows an entry header; a non-Markdown file with
+    frontmatter shows as source): intended. The header only describes the file's own
+    frontmatter, and non-Markdown files are shown as source by D8. No change.
+  - Rejected: the risk reviewer's side note that `_GUIDANCE_NAMES` is case-sensitive, so a
+    hand-typed `/brain/soul.md` on macOS would show the "not indexed" notice. Tree links
+    use on-disk names, and the brain's own `_ROOT_EXCLUDED_NAMES` compares on-disk
+    names the same way, so the notice is right for every link the browser produces.
 
 ## Outcome
 

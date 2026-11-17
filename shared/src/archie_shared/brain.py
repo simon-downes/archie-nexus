@@ -224,29 +224,40 @@ def _needs_refresh(root: Path, records: list[dict[str, Any]], index_mtime: float
     return False
 
 
+def _stale(root: Path, records: list[dict[str, Any]] | None) -> bool:
+    try:
+        return records is None or _needs_refresh(
+            root, records, (root / "index.yaml").stat().st_mtime
+        )
+    except OSError:
+        return True
+
+
 def ensure_fresh_index() -> list[dict[str, Any]]:
     root = brain_root()
     root.mkdir(parents=True, exist_ok=True)
     records = _load_index(root)
-    try:
-        stale = records is None or _needs_refresh(
-            root, records, (root / "index.yaml").stat().st_mtime
-        )
-    except OSError:
-        stale = True
-    if not stale:
+    if not _stale(root, records):
         return records or []
     with _lock(root):
         records = _load_index(root)
-        try:
-            stale = records is None or _needs_refresh(
-                root, records, (root / "index.yaml").stat().st_mtime
-            )
-        except OSError:
-            stale = True
-        if stale:
+        if _stale(root, records):
             records = _records(root)
             _write_index(root, records)
+    return records or []
+
+
+def current_records() -> list[dict[str, Any]]:
+    """The entries :func:`ensure_fresh_index` would return, without writing anything.
+
+    A stale or missing index is rebuilt in memory only: no lock, no ``index.yaml``
+    write, and a missing root is not created. For readers outside the container (the
+    orchestrator), whose file locks and symlink resolution may differ from the agent's.
+    """
+    root = brain_root()
+    records = _load_index(root)
+    if _stale(root, records):
+        return _records(root)
     return records or []
 
 
@@ -416,7 +427,12 @@ def _body_matches(root: Path, valid: set[str], terms: list[str]) -> dict[str, se
     return body_terms
 
 
-def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
+def search(query: str, limit: int = 10, *, refresh_index: bool = True) -> list[dict[str, Any]]:
+    """Rank indexed entries for ``query``; the logic behind the ``brain_search`` tool.
+
+    With ``refresh_index=False`` a stale index is rebuilt in memory only
+    (:func:`current_records`); the ranking is the same.
+    """
     terms = list(dict.fromkeys(query.lower().split()))
     if not terms:
         raise BrainError("query must not be empty")
@@ -424,7 +440,9 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
         raise BrainError("limit must not be negative")
     if limit == 0:
         return []
-    records = ensure_fresh_index()
+    records = ensure_fresh_index() if refresh_index else current_records()
+    if not records:  # also covers a missing root, which rg would report as an error
+        return []
     root = brain_root()
     body_terms = _body_matches(root, {r["path"] for r in records}, terms)
     hits = []

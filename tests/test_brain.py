@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -191,7 +192,35 @@ def _comparable(hits):
     return [(h["path"], round(h["score"], 6), h["excerpt"]) for h in hits]
 
 
+def test_search_without_refreshing_ranks_the_same_and_writes_nothing(monkeypatch, tmp_path):
+    root = tmp_path / "brain"
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(root))
+    assert search("alpha", refresh_index=False) == []
+    assert not root.exists()  # a missing root is not created
+
+    root.mkdir()
+    (root / "name.md").write_text(_entry("alpha", body="x"))
+    (root / "body.md").write_text(_entry("other", body="alpha here"))
+    read_only = search("alpha", refresh_index=False)
+    assert not (root / "index.yaml").exists()
+    assert not (tmp_path / ".brain.brain.lock").exists()
+
+    refreshed = search("alpha")
+    assert (root / "index.yaml").exists()
+    assert _comparable(read_only) == _comparable(refreshed)
+    assert [h["path"] for h in refreshed] == ["name.md", "body.md"]
+
+    # A stale index on disk is rebuilt in memory, not rewritten.
+    (root / "new.md").write_text(_entry("alpha new", body="x"))
+    old = time.time() - 2 * 86400
+    os.utime(root / "index.yaml", (old, old))
+    before = (root / "index.yaml").read_text()
+    assert "new.md" in [h["path"] for h in search("alpha", refresh_index=False)]
+    assert (root / "index.yaml").read_text() == before
+
+
 def test_search_without_rg_matches_rg(monkeypatch, tmp_path):
+    assert shutil.which("rg"), "the baseline needs rg on PATH"
     monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
     files = {
         "name.md": _entry("deploy guide", body="steps"),
