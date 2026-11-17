@@ -1,0 +1,18 @@
+{% extends "viewer/base.html" %}
+{% import "brain/_tree.html" as t %}
+{% block title %}{% if main.view == "file" %}{{ main.meta.name if main.meta else main.name }}{% else %}Brain{% endif %}{% endblock %}
+{% block brand_href %}/brain{% endblock %}
+{% block brand %}brain{% endblock %}
+{% block styles %}<link rel="stylesheet" href="/static/viewer/pygments.css">
+    <link rel="stylesheet" href="/static/brain/brain.css">{% endblock %}
+{% block scripts %}<script src="/static/brain/brain.js" defer></script>{% endblock %}
+{% block content %}
+<div class="brain">
+    <aside class="brain-side chrome">
+        <nav class="brain-tree" aria-label="Brain files">
+            {% if tree %}{{ t.tree(tree) }}{% else %}<p class="empty">The brain is empty.</p>{% endif %}
+        </nav>
+    </aside>
+    {% include "brain/_main.html" %}
+</div>
+{% endblock %}

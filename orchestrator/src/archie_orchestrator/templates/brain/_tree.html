@@ -1,0 +1,17 @@
+{# Sidebar tree: directories are <details>, open on the current path. #}
+{% macro tree(nodes) -%}
+<ul>
+    {%- for node in nodes %}
+    <li>
+        {%- if node.is_dir %}
+        <details{% if node.open %} open{% endif %}>
+            <summary><a class="dir" href="{{ brain_href(node.rel) }}"{% if node.current %} aria-current="page"{% endif %}>{{ node.name }}</a></summary>
+            {%- if node.children %}{{ tree(node.children) }}{% endif %}
+        </details>
+        {%- else %}
+        <a class="file" href="{{ brain_href(node.rel) }}"{% if node.current %} aria-current="page"{% endif %}>{{ node.name }}</a>
+        {%- endif %}
+    </li>
+    {%- endfor %}
+</ul>
+{%- endmacro %}

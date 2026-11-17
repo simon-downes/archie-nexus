@@ -209,7 +209,7 @@ is stored.
 
 ## Milestones
 
-### [ ] M1 — Browse the tree and read a Markdown entry
+### [x] M1 — Browse the tree and read a Markdown entry
 
 - **Approach:** Add `brain_web.py` with `index_page` (landing only), `path_page` (files
   only, Markdown only in this milestone), `resolve_brain_path` and `build_tree`. Templates
@@ -230,7 +230,13 @@ is stored.
 - **Verify:** `scripts/dev test tests/test_web_brain.py` passes; `scripts/dev ruff check
   orchestrator shared tests` and `scripts/dev ruff format --check orchestrator shared tests`
   pass.
-- **Outcome:**
+- **Outcome:** `brain_web.py` (tree, path guard, Markdown view), `brain/page.html`,
+  `_tree.html`, `_main.html` (the 404 is a `missing` view of `_main.html` inside the brain
+  layout instead of a separate `not_found.html`), `brain.css`, `brain.js`, routes, nav
+  links and a `brand`/`brand_href` block in `viewer/base.html`. `highlight_file` was added
+  to `transcript.py` now so non-Markdown files open as plain highlighted text rather than
+  erroring. `scripts/dev test tests/test_web_brain.py`: 20 passed; `tests/test_web_*.py`:
+  220 passed; ruff check and format --check clean.
 
 ### [ ] M2 — Other files and directories
 

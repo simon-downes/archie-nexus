@@ -1,0 +1,37 @@
+{# Main pane of the brain browser; the view is main.view. #}
+<section id="brain-main" class="brain-main">
+{%- if main.view == "landing" %}
+    <h1 class="brain-title">Brain</h1>
+    <p class="chrome dim">Pick a file from the tree. The brain is read from <code>{{ root }}</code>.</p>
+{%- elif main.view == "file" %}
+    {%- if main.meta %}
+    <header class="entry-head">
+        <h1>{{ main.meta.name }}</h1>
+        <p class="summary">{{ main.meta.summary }}</p>
+        <p class="facts chrome">
+            <span class="path">{{ main.rel }}</span>
+            <span><span class="dim">updated</span> {{ main.meta.updated }}</span>
+            {%- if main.meta.tags %}
+            <span class="tags">{% for tag in main.meta.tags %}<span class="tag">{{ tag }}</span>{% endfor %}</span>
+            {%- endif %}
+        </p>
+    </header>
+    {%- else %}
+    <header class="entry-head">
+        <h1 class="file-name">{{ main.name }}</h1>
+        <p class="facts chrome"><span class="path">{{ main.rel }}</span></p>
+    </header>
+    {%- endif %}
+    {%- if main.unindexed %}
+    <p class="notice chrome">Not indexed: <code>brain_search</code> can't find this file, because its frontmatter is missing or invalid (it needs <code>name</code>, <code>summary</code>, <code>tags</code> and a timezone-aware <code>updated</code>).</p>
+    {%- endif %}
+    {%- if main.markdown %}
+    <article class="md">{{ main.html }}</article>
+    {%- else %}
+    <div class="code">{{ main.html }}</div>
+    {%- endif %}
+{%- elif main.view == "missing" %}
+    <h1 class="brain-title">Not found</h1>
+    <p class="chrome">Nothing to show at <code>{{ main.rel }}</code>. <a href="/brain">Back to the brain</a>.</p>
+{%- endif %}
+</section>

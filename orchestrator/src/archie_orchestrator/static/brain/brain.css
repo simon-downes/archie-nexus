@@ -1,0 +1,151 @@
+/* Brain browser: a sticky sidebar tree beside the main pane. Builds on viewer.css
+   (the .viewer variables, .md reading type, .notice, .chrome). */
+
+.viewer .brain {
+    display: grid;
+    grid-template-columns: 17rem minmax(0, 1fr);
+    gap: 2rem;
+    align-items: start;
+}
+
+/* --- sidebar ------------------------------------------------------------- */
+
+.viewer .brain-side {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    padding-right: 0.75rem;
+    border-right: 1px solid var(--v-chrome-border);
+}
+
+.viewer .brain-tree ul {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 0 0.85rem;
+}
+
+.viewer .brain-tree > ul {
+    padding-left: 0;
+}
+
+.viewer .brain-tree li {
+    margin: 0;
+    padding: 0;
+}
+
+.viewer .brain-tree details {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+}
+
+.viewer .brain-tree summary {
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    color: var(--v-dim);
+    font-weight: 400;
+}
+
+.viewer .brain-tree a {
+    display: inline-block;
+    max-width: 100%;
+    padding: 0.05rem 0.3rem;
+    border-radius: var(--nc-radius);
+    color: var(--nc-text);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+}
+
+.viewer .brain-tree a.dir {
+    font-weight: 600;
+}
+
+.viewer .brain-tree a:hover {
+    background: var(--v-chrome-bg);
+}
+
+.viewer .brain-tree a[aria-current="page"] {
+    background: var(--v-chrome-bg);
+    color: var(--v-user);
+    font-weight: 700;
+}
+
+/* --- main pane ----------------------------------------------------------- */
+
+.viewer .brain-main {
+    min-width: 0;
+}
+
+.viewer .brain-main .crumbs {
+    margin-bottom: 0.25rem;
+    font-family: var(--v-mono);
+}
+
+.viewer .brain-title,
+.viewer .entry-head h1 {
+    font-size: 1.6rem;
+    margin-block: 0 0.35rem;
+}
+
+.viewer .entry-head {
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--v-chrome-border);
+}
+
+.viewer .entry-head .file-name {
+    font-family: var(--v-mono);
+}
+
+.viewer .entry-head .summary {
+    margin-block: 0 0.5rem;
+    color: var(--v-dim);
+    max-width: 52rem;
+}
+
+.viewer .entry-head .path {
+    font-family: var(--v-mono);
+}
+
+.viewer .tags {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+
+.viewer .tag {
+    font-family: var(--v-mono);
+    font-size: 0.72rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: 999px;
+    padding: 0 0.5rem;
+}
+
+.viewer .brain-main .code pre.highlight {
+    font-size: 0.82rem;
+    line-height: 1.45;
+    overflow-x: auto;
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border-radius: var(--nc-radius);
+}
+
+@media (max-width: 50rem) {
+    .viewer .brain {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1rem;
+    }
+
+    .viewer .brain-side {
+        position: static;
+        max-height: 40vh;
+        padding: 0 0 0.75rem;
+        border-right: 0;
+        border-bottom: 1px solid var(--v-chrome-border);
+    }
+}
