@@ -185,3 +185,44 @@ def test_zero_limit_skips_search(monkeypatch, tmp_path):
     assert search("anything", limit=0) == []
     with pytest.raises(Exception, match="negative"):
         search("anything", limit=-1)
+
+
+def _comparable(hits):
+    return [(h["path"], round(h["score"], 6), h["excerpt"]) for h in hits]
+
+
+def test_search_without_rg_matches_rg(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCHIE_BRAIN_DIR", str(tmp_path))
+    files = {
+        "name.md": _entry("deploy guide", body="steps"),
+        "tags.md": "---\nname: runbook\nsummary: s\ntags: [deploy]\nupdated: '2025-01-01T00:00:00+00:00'\n---\nx",
+        "body/one.md": _entry("notes", body="intro\nWe DEPLOY on Fridays\nand ship\n"),
+        "body/two.md": _entry("other ship", body="ship it"),
+        "none.md": _entry("unrelated", body="nothing"),
+        ".hidden/secret.md": _entry("hidden deploy", body="deploy ship"),
+        "dir/.draft.md": _entry("draft", body="deploy"),
+    }
+    for relative, content in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    (tmp_path / "alias.md").symlink_to(tmp_path / "body" / "two.md")
+    rebuild_index()
+
+    with_rg = search("deploy ship", limit=50)
+    monkeypatch.setattr("archie_shared.brain.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "archie_shared.brain.subprocess.run",
+        lambda *a, **k: pytest.fail("rg must not run when it is not on PATH"),
+    )
+    without_rg = search("deploy ship", limit=50)
+
+    assert _comparable(without_rg) == _comparable(with_rg)
+    paths = [h["path"] for h in with_rg]
+    assert {"name.md", "tags.md", "body/one.md", "body/two.md"} <= set(paths)
+    # Indexed, but rg skips hidden paths and symlinks, so they have no body match.
+    assert next(h for h in with_rg if h["path"] == ".hidden/secret.md")["excerpt"] is None
+    assert next(h for h in with_rg if h["path"] == "alias.md")["excerpt"] is None
+    assert next(h for h in with_rg if h["path"] == "body/one.md")["excerpt"] == (
+        "We DEPLOY on Fridays"
+    )

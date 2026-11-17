@@ -8,18 +8,23 @@ views only read: they never create the root or touch ``index.yaml``.
 
 The tree, and every path the browser opens, leaves out dot-names (``.git``, temporary
 write files), the root ``index.yaml`` (derived) and symlinks (they could leave the root).
+
+``/brain?q=`` runs :func:`archie_shared.brain.search`, the function behind the agent's
+``brain_search`` tool, so results and their order match it. Like the tool, a search may
+refresh ``index.yaml``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from archie_shared.brain import brain_root, parse_entry
-from markupsafe import Markup
+from archie_shared.brain import BrainError, brain_root, parse_entry, search
+from markupsafe import Markup, escape
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
@@ -29,6 +34,7 @@ from archie_orchestrator.web import VIEWER_CSP, _render_viewer, templates
 log = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 1024 * 1024  # larger files show a notice instead of their content
+SEARCH_LIMIT = 50  # search()'s own cap; the order is the brain_search tool's
 _GUIDANCE_NAMES = {"BRAIN.md", "SOUL.md"}  # root guidance files: not entries
 _MARKDOWN_SUFFIXES = {".md", ".markdown"}
 
@@ -210,13 +216,71 @@ def _response(body: str, status_code: int = 200) -> HTMLResponse:
     )
 
 
-def _landing() -> str:
-    return _page({"view": "landing"})
+def _mark(text: str, terms: list[str]) -> Markup:
+    """Escape ``text`` and wrap each case-insensitive match of a term in ``<mark>``.
+
+    Spans are found on the raw text, so a term like ``amp`` never matches an entity.
+    """
+    pattern = re.compile(
+        "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True)), re.IGNORECASE
+    )
+    out, last = [], 0
+    for match in pattern.finditer(text):
+        out.append(escape(text[last : match.start()]))
+        out.append(Markup("<mark>%s</mark>") % match.group(0))
+        last = match.end()
+    out.append(escape(text[last:]))
+    return Markup("").join(out)
+
+
+def _hit(hit: dict, terms: list[str]) -> dict:
+    """One search result for the template; ``href`` is None when the browser can't show it."""
+    return {
+        "path": hit["path"],
+        "name": hit["name"],
+        "summary": hit["summary"],
+        "tags": hit["tags"],
+        "updated": _format_updated(hit["updated"]),
+        "score": f"{hit['score']:.1f}",
+        "excerpt": _mark(hit["excerpt"], terms) if hit.get("excerpt") else None,
+        "href": brain_href(hit["path"]) if resolve_brain_path(hit["path"]) else None,
+    }
+
+
+def _results_view(q: str) -> dict:
+    """Main-pane context for a search, ranked by the ``brain_search`` function itself."""
+    view: dict = {"view": "results", "q": q, "hits": []}
+    try:
+        hits = search(q, SEARCH_LIMIT)
+    except (BrainError, OSError) as exc:  # rg failed, or the index can't be written
+        log.warning("Brain search failed: %s", exc)
+        return {**view, "error": str(exc)}
+    terms = list(dict.fromkeys(q.lower().split()))  # as search() splits them
+    return {**view, "hits": [_hit(hit, terms) for hit in hits]}
+
+
+def _index_body(q: str, partial: bool) -> str:
+    """Render ``/brain``: search results for a non-blank ``q``, else the landing pane."""
+    main = _results_view(q) if q.strip() else {"view": "landing"}
+    if partial:
+        return _render_viewer("brain/_main.html", {"main": main, "root": str(brain_root())})
+    return _page(main, q=q)
 
 
 async def index_page(request: Request) -> HTMLResponse:
-    """GET /brain — the tree and a landing pane."""
-    return _response(await asyncio.to_thread(_landing))
+    """GET /brain — the tree with a landing pane, or search results for ``q``.
+
+    An htmx request (``HX-Request``) gets only the ``#brain-main`` fragment; htmx
+    history restores (``HX-History-Restore-Request``) get the full page.
+    """
+    q = request.query_params.get("q", "")
+    partial = (
+        request.headers.get("hx-request") == "true"
+        and request.headers.get("hx-history-restore-request") != "true"
+    )
+    response = _response(await asyncio.to_thread(_index_body, q, partial))
+    response.headers["Vary"] = "HX-Request, HX-History-Restore-Request"
+    return response
 
 
 def _path_body(rel: str) -> tuple[str, int]:

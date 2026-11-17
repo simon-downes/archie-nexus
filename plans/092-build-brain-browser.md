@@ -51,7 +51,8 @@ Discovery:
 - Failing before this work: `tests/test_ws_integration.py` (most tests, failures and
   errors), `tests/test_host_config.py::test_the_agent_syncs_while_it_runs`,
   `tests/test_question_tool.py::test_manual_compaction_emits_working` and a few others in
-  those files: all `concurrent.futures` timeouts from the container environment. Full run:
+  those files: all `concurrent.futures` timeouts from the container environment; and
+  `tests/test_local_api.py::test_the_agents_tcp_app_has_no_local_routes` (no Kiro key). Full run:
   17 failed, 9 errors, 5616 passed. Ruff check passes.
 - Not included: `cli/src/archie_cli/tui/pane.py`, `tests/test_tui_app.py` (modified),
   `.DS_Store`, `plans/060-spec-container-aws-profiles.md`, `plans/070-build-nexus-plugins.md`
@@ -64,7 +65,7 @@ Discovery:
 | D1 | Where the browser lives | Orchestrator pages at `/brain` and `/brain/{path}`, read on the host from `brain_root()` | An agent-side route proxied per session; a separate app | The web client is the orchestrator's page set; the host resolves the same brain directory, so no running session is needed | self |
 | D2 | How search mirrors `brain_search` | Call `archie_shared.brain.search(q, 50)` directly | A reimplementation or a client-side index | Same function as the tool, so ranking, excerpts and index freshness can't drift | self |
 | D3 | Result limit | 50 (the function's cap) | The tool's default 10; a user-set limit | A page can show more than an agent wants in context; the order is the same, so the first 10 match the tool's default answer | self |
-| D4 | `rg` missing on the host | `search` falls back to a pure-Python body scan of indexed entries when `shutil.which("rg")` is None, skipping entries with a dot-name path component (as `rg` skips hidden files); the agent path is unchanged when `rg` exists. Accepted differences: the fallback ignores `.gitignore`/`.ignore` rules and uses `str.lower` instead of `rg`'s case folding | Require `rg` and show an error; always use Python | The orchestrator runs on the user's machine, where `rg` is not a declared dependency; `rg` is only a prefilter, since matches are re-checked against the body in Python | self |
+| D4 | `rg` missing on the host | `search` falls back to a pure-Python body scan of indexed entries when `shutil.which("rg")` is None, skipping entries with a dot-name path component or a symlink in their path (as an `rg` directory walk skips hidden files and doesn't follow symlinks); the agent path is unchanged when `rg` exists. Accepted differences: the fallback ignores `.gitignore`/`.ignore` rules and uses `str.lower` instead of `rg`'s case folding | Require `rg` and show an error; always use Python | The orchestrator runs on the user's machine, where `rg` is not a declared dependency; `rg` is only a prefilter, since matches are re-checked against the body in Python | self |
 | D5 | Which files the tree shows | Every regular file and directory under the root except dot-names (`.git`, `_atomic_write` temp files), the root `index.yaml` and symlinks | Only indexed entries | The brain holds non-entry files (`.py`, `.tf`, `.sh`) and root guidance (`BRAIN.md`, `SOUL.md`) that the user asked to browse as "directories and files"; `index.yaml` is derived; symlinks could point outside the root | self |
 | D6 | Rendering Markdown | Reuse `transcript.render_markdown` (raw HTML escaped, Pygments fences) and `static/viewer/pygments.css` | A new renderer or client-side highlighting | Brain files are written by agents and treated as untrusted; the renderer is already safe under `VIEWER_CSP` | self |
 | D7 | Frontmatter display | A valid entry (`parse_entry`) shows name as title, summary, tags and updated in a header; the body is rendered without the YAML. A `.md` file outside the root guidance names that fails `parse_entry` shows a "not indexed" notice and renders the whole text | Render raw YAML; hide the problem | `_records` silently skips a `.md` that fails `parse_entry`, so an agent's malformed write is invisible to search; the notice makes it visible while reading | self |
@@ -254,7 +255,7 @@ is stored.
   line. `scripts/dev test tests/test_web_brain.py`: 24 passed; ruff check and format
   --check clean.
 
-### [ ] M3 — Search
+### [x] M3 — Search
 
 - **Approach:** In `shared/brain.py`, extract `_body_matches` with the Python branch when
   `shutil.which("rg")` is None (match each indexed entry's parsed body against the terms,
@@ -275,9 +276,19 @@ is stored.
 - **Verify:** `scripts/dev test tests/test_web_brain.py tests/test_brain.py tests/test_exec_tools.py`
   passes, then the full `scripts/dev test` shows no failures beyond the Baseline's (shared
   change, CONTRIBUTING.md); ruff commands as M1.
-- **Outcome:**
+- **Outcome:** `shared/brain.py`: `_body_matches` (the old `rg` block, unchanged) and
+  `_python_body_matches` behind `shutil.which("rg")`. `brain_web.py`: `_results_view`,
+  `_hit`, `_mark`, `_index_body`; the sidebar search box and `results` view. Docs:
+  architecture Pages table and viewer paragraph, README. Focused run
+  (`test_web_brain.py`, `test_brain.py`, `test_exec_tools.py`): 98 passed. Full
+  `scripts/dev test`: 17 failed, 9 errors, 5650 passed, the same failures as the Baseline.
+  Ruff check and format clean.
 
 ## Deviations
+
+- M3: the Python fallback also skips symlinked entries. `rg` doesn't follow symlinks
+  in a directory walk, so a symlinked entry never gets a body match there; without the
+  skip the fallback would rank it higher. D4 updated; the fallback test covers it.
 
 ## Risks
 

@@ -48,6 +48,34 @@
     {%- else %}
     <div class="code">{{ main.html }}</div>
     {%- endif %}
+{%- elif main.view == "results" %}
+    <h1 class="brain-title">Search</h1>
+    {%- if main.error %}
+    <p class="notice chrome">Search failed: {{ main.error }}</p>
+    {%- elif not main.hits %}
+    <p class="empty chrome">No entries match <code>{{ main.q }}</code>.</p>
+    {%- else %}
+    <p class="count chrome">{{ main.hits|length }} result{{ "" if main.hits|length == 1 else "s" }} for <code>{{ main.q }}</code></p>
+    <ol class="hits">
+        {%- for hit in main.hits %}
+        <li class="hit" data-path="{{ hit.path }}">
+            <p class="hit-head">
+                {%- if hit.href %}<a class="hit-name" href="{{ hit.href }}">{{ hit.name }}</a>
+                {%- else %}<span class="hit-name">{{ hit.name }}</span> <span class="dim chrome">(not browsable)</span>{% endif %}
+                <span class="score" title="brain_search score">{{ hit.score }}</span></p>
+            <p class="facts chrome"><span class="path">{{ hit.path }}</span>
+                <span><span class="dim">updated</span> {{ hit.updated }}</span>
+                {%- if hit.tags %}
+                <span class="tags">{% for tag in hit.tags %}<span class="tag">{{ tag }}</span>{% endfor %}</span>
+                {%- endif %}</p>
+            <p class="hit-summary">{{ hit.summary }}</p>
+            {%- if hit.excerpt %}
+            <p class="hit-excerpt">{{ hit.excerpt }}</p>
+            {%- endif %}
+        </li>
+        {%- endfor %}
+    </ol>
+    {%- endif %}
 {%- elif main.view == "missing" %}
     <h1 class="brain-title">Not found</h1>
     <p class="chrome">Nothing to show at <code>{{ main.rel }}</code>. <a href="/brain">Back to the brain</a>.</p>

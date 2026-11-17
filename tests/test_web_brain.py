@@ -321,6 +321,156 @@ async def test_breadcrumbs_link_each_ancestor(brain):
 
 
 # ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+
+def _search_fixture(brain: Path, tmp_path: Path) -> None:
+    _write(brain, "a/name-match.md", _entry("Deploy guide", tags=("ops",), body="steps"))
+    _write(brain, "b/tag-match.md", _entry("Runbook", tags=("deploy",), body="other"))
+    _write(brain, "c/body-match.md", _entry("Notes", body="intro\nhow we Deploy & ship\n"))
+    _write(brain, "d/none.md", _entry("Unrelated", body="nothing here"))
+    _write(brain, "loose.md", "deploy without frontmatter")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "linked.md").write_text(_entry("Linked deploy", body="x"))
+    (brain / "linked.md").symlink_to(outside / "linked.md")
+    _write(brain, "real.md", _entry("Real deploy target", body="x"))
+    (brain / "alias.md").symlink_to(brain / "real.md")
+
+
+def _hit_paths(html: str) -> list[str]:
+    return re.findall(r'<li class="hit" data-path="([^"]+)"', html)
+
+
+@pytest.mark.asyncio
+async def test_search_matches_brain_search_order(brain, tmp_path):
+    from archie_shared.brain import search
+
+    _search_fixture(brain, tmp_path)
+
+    resp = await _get("/brain?q=deploy")
+
+    assert resp.status_code == 200
+    expected = [hit["path"] for hit in search("deploy", 50)]
+    assert len(expected) >= 4
+    assert _hit_paths(resp.text) == expected
+    assert "loose.md" not in _hit_paths(resp.text)
+    assert 'value="deploy"' in resp.text  # the box keeps the query
+    assert re.search(
+        r'<a class="hit-name" href="/brain/a/name-match.md">Deploy guide</a>', resp.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_hit_shows_summary_tags_and_marked_excerpt(brain, tmp_path):
+    _search_fixture(brain, tmp_path)
+
+    main = _main((await _get("/brain?q=deploy")).text)
+    hit = re.search(r'<li class="hit" data-path="c/body-match.md">.*?</li>', main, re.S).group(0)
+
+    assert "summary of Notes" in hit
+    assert '<span class="tag">tag</span>' in hit
+    assert '<p class="hit-excerpt">how we <mark>Deploy</mark> &amp; ship</p>' in hit
+    assert re.search(r'<span class="score" [^>]*>\d+\.\d</span>', hit)
+
+
+@pytest.mark.asyncio
+async def test_search_excerpt_marks_never_split_entities(brain):
+    _write(brain, "e.md", _entry("Entity", body="fish & chips <amp>\n"))
+
+    main = _main((await _get("/brain?q=amp")).text)
+
+    assert "fish &amp; chips &lt;<mark>amp</mark>&gt;" in main
+
+
+@pytest.mark.asyncio
+async def test_search_hits_the_browser_cannot_show_are_unlinked(brain, tmp_path):
+    _search_fixture(brain, tmp_path)
+
+    main = _main((await _get("/brain?q=real")).text)
+
+    alias = re.search(r'<li class="hit" data-path="alias.md">.*?</li>', main, re.S).group(0)
+    real = re.search(r'<li class="hit" data-path="real.md">.*?</li>', main, re.S).group(0)
+    assert "href=" not in alias
+    assert "(not browsable)" in alias
+    assert 'href="/brain/real.md"' in real
+
+
+@pytest.mark.asyncio
+async def test_search_without_matches_and_blank_query(brain, tmp_path):
+    _search_fixture(brain, tmp_path)
+
+    none = await _get("/brain?q=zebra")
+    blank = await _get("/brain?q=%20%20")
+
+    assert "No entries match <code>zebra</code>." in _main(none.text)
+    assert "Pick a file from the tree" in _main(blank.text)
+
+
+@pytest.mark.asyncio
+async def test_search_query_is_escaped(brain):
+    _write(brain, "x.md", _entry("x"))
+    resp = await _get("/brain?q=%3Cscript%3E")
+    assert "<script>" not in resp.text
+    assert "&lt;script&gt;" in _main(resp.text)
+
+
+@pytest.mark.asyncio
+async def test_search_failure_shows_a_notice(brain, monkeypatch):
+    from archie_shared.brain import BrainError
+
+    def fail(query, limit):
+        raise BrainError("ripgrep error: boom")
+
+    monkeypatch.setattr("archie_orchestrator.brain_web.search", fail)
+    resp = await _get("/brain?q=x")
+    assert resp.status_code == 200
+    assert "Search failed: ripgrep error: boom" in _main(resp.text)
+
+    def deny(query, limit):
+        raise PermissionError(13, "Permission denied", str(brain / "index.yaml"))
+
+    monkeypatch.setattr("archie_orchestrator.brain_web.search", deny)
+    resp = await _get("/brain?q=x")
+    assert resp.status_code == 200
+    assert "Search failed:" in _main(resp.text) and "Permission denied" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_htmx_search_returns_main_fragment(brain, tmp_path):
+    _search_fixture(brain, tmp_path)
+
+    resp = await _get("/brain?q=deploy", headers={"HX-Request": "true"})
+    restore = await _get(
+        "/brain?q=deploy", headers={"HX-Request": "true", "HX-History-Restore-Request": "true"}
+    )
+    landing = await _get("/brain", headers={"HX-Request": "true"})
+
+    body = resp.text.strip()
+    assert body.startswith('<section id="brain-main"')
+    assert "<html" not in body
+    assert _hit_paths(body)
+    assert resp.headers["vary"] == "HX-Request, HX-History-Restore-Request"
+    assert resp.headers["content-security-policy"] == VIEWER_CSP
+    assert "<html" in restore.text
+    assert landing.text.strip().startswith('<section id="brain-main"')
+    assert "Pick a file from the tree" in landing.text
+
+
+@pytest.mark.asyncio
+async def test_search_box_attributes(brain):
+    resp = await _get("/brain")
+    box = re.search(r'<input type="search"[^>]*>', resp.text, re.S).group(0)
+    assert 'name="q"' in box
+    assert 'hx-get="/brain"' in box
+    assert 'hx-target="#brain-main"' in box
+    assert 'hx-swap="outerHTML"' in box
+    assert 'hx-push-url="true"' in box
+    assert "delay:250ms" in box
+
+
+# ---------------------------------------------------------------------------
 # Chrome
 # ---------------------------------------------------------------------------
 
