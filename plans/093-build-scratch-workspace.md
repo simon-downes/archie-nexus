@@ -1,6 +1,6 @@
 # 093 — Scratch workspace for chat sessions
 
-Status: building
+Status: reviewing
 Branch: build-it/093-scratch-workspace (base: main @ fc1f141)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/093-scratch-workspace
 
@@ -208,7 +208,7 @@ tracker's location mapping.
   `test_orchestrator_lifecycle.py test_session_tracker.py test_workspaces.py
   test_sessions_api.py`; ruff clean.
 
-### [ ] M3 — Scratch session locations map through the per-session directory
+### [x] M3 — Scratch session locations map through the per-session directory
 
 - **Approach:** `workspaces.session_directory`; `locate_session` / `refresh_sessions`
   parameters; tracker `scratch_workspace` callable read in `_location_once` and
@@ -219,7 +219,13 @@ tracker's location mapping.
 - **Deliverable:** a chat session that clones a repo shows that repo as its location.
 - **Verify:** `scripts/dev test tests/test_session_location.py tests/test_workspaces.py`
   passes.
-- **Outcome:**
+- **Outcome:** `locate_session(..., session_id=, scratch_workspace=)` and
+  `refresh_sessions(..., scratch_workspace)` resolve through `session_directory`; the
+  tracker's new `scratch_workspace` callable is read in `_location_once` and `_sweep_once`;
+  `app.py` wires it from `config_source.latest()`. Architecture location paragraph updated.
+  Verify: 219 passed across `test_session_location.py test_workspaces.py
+  test_session_tracker.py` (new tests prove a repo in the session's dir wins over a same-named
+  one in the shared workspace); ruff clean.
 
 ## Deviations
 

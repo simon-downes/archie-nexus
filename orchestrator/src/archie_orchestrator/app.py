@@ -86,6 +86,7 @@ async def lifespan(app: Starlette):
         runtime,
         titler=Titler(config_source.latest),
         workspace_root=lambda: expand_workspace_root(config_source.latest()),
+        scratch_workspace=lambda: config_source.latest().global_.scratch_workspace,
     )
     await tracker.start()
     app.state.tracker = tracker

@@ -720,7 +720,7 @@ async def test_a_failing_location_job_is_logged_and_the_stream_still_followed(
 ):
     make_repo(workspace / "app")
 
-    def boom(*args):
+    def boom(*args, **kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(tracker_module, "locate_session", boom)
@@ -853,5 +853,56 @@ async def test_the_tracker_places_a_session_after_huge_calls(root, workspace):
     assert (tracker.live(SID).location.repo, tracker.live(SID).location.branch) == (
         "lib",
         "feat/big",
+    )
+    await tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# Scratch sessions (093)
+# ---------------------------------------------------------------------------
+
+
+def test_a_scratch_session_is_located_under_its_own_directory(root, workspace):
+    make_repo(workspace / "app", branch="shared")  # in the workspace, not the session's dir
+    sha = make_repo(workspace / SID / "app", branch="mine")
+    state = _fed(call("edit", path="app/a.py"))
+    found, from_root = tracker_module.locate_session(
+        root, "proj", state, session_id=SID, scratch_workspace="proj"
+    )
+    assert (found, from_root) == (SessionLocation(repo="app", branch="mine", commit=sha), True)
+    # Another workspace is the scratch one: proj maps to itself as before.
+    found, _ = tracker_module.locate_session(
+        root, "proj", state, session_id=SID, scratch_workspace="chat"
+    )
+    assert found.branch == "shared"
+
+
+def test_a_scratch_session_without_its_directory_has_no_location(root, workspace):
+    make_repo(workspace / "app")
+    state = _fed(call("edit", path="app/a.py"))
+    assert tracker_module.locate_session(
+        root, "proj", state, session_id=SID, scratch_workspace="proj"
+    ) == (None, False)
+
+
+def test_the_sweep_reads_a_scratch_session_under_its_own_directory(root, workspace):
+    make_repo(workspace / "app", branch="shared")
+    make_repo(workspace / SID / "app", branch="mine")
+    before = SessionLocation(repo="app", branch="old")
+    found = tracker_module.refresh_sessions(root, [(SID, "proj", before)], "proj")
+    assert found[SID].branch == "mine"
+
+
+async def test_the_tracker_locates_a_scratch_session_in_its_own_directory(root, workspace):
+    make_repo(workspace / "app", branch="shared")
+    make_repo(workspace / SID / "app", branch="cloned")
+    tracker = _located_tracker(root)
+    tracker.scratch_workspace = lambda: "proj"
+    await tracker._on_frame(SID, _frame(_tool_call("t1", "shell", {"command": "cd app && ls"})))
+    await tracker._on_frame(SID, _frame(_tool_result("t1")))
+    await until(lambda: tracker.live(SID).location is not None)
+    assert (tracker.live(SID).location.repo, tracker.live(SID).location.branch) == (
+        "app",
+        "cloned",
     )
     await tracker.close()
