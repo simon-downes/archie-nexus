@@ -110,7 +110,7 @@ paths; configured mounts are appended separately.
 | `persona/` | `/opt/archie/persona` | prompts, agents, procedure skills |
 | `plugins/` | `/opt/archie/plugins` | integration manifests, code, skills (read-only; `ARCHIE_PLUGINS_DIR`) |
 | `container/bin/gh` | `/usr/local/bin/gh` | `gh` wrapper (read-only) |
-| selected workspace | `/workspace` | project under development |
+| selected workspace, or `<workspace>/<session_id>/` for `global.scratch_workspace` | `/workspace` | project under development; a scratch session's own directory, created before `docker run` with a copy of the workspace's `AGENTS.md` and removed on stop when unused (see [Configuration](config.md#scratch-workspace)) |
 | `ARCHIE_HOME_DIR` (normally `~/.nexus`) | `/home/archie/.nexus` | sessions, cache, brain; `config.yaml` and `credentials.yaml` are still in the mount but agent code never reads them |
 | `~/.agents` | `/home/archie/.agents` | agent-related user content |
 

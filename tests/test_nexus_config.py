@@ -112,6 +112,21 @@ def test_load_nexus_config_mounts(tmp_path):
     assert config.mounts == ("~/.gitconfig*", ("~/.ssh/id_ed25519*", "~/.ssh:ro"))
 
 
+def test_scratch_workspace_defaults_to_off_and_loads_a_name(tmp_path):
+    assert NexusConfig().global_.scratch_workspace is None
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("global:\n  scratch_workspace: chat\n")
+    assert load_nexus_config(path=cfg).global_.scratch_workspace == "chat"
+
+
+@pytest.mark.parametrize("name", ["a/b", "a\\\\b", ".", "..", ""])
+def test_scratch_workspace_must_be_a_single_directory_name(tmp_path, name):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f'global:\n  scratch_workspace: "{name}"\n')
+    with pytest.raises(ConfigError, match="scratch_workspace"):
+        load_nexus_config(path=cfg)
+
+
 # --- Tests: load_nexus_config error cases ---
 
 

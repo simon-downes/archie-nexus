@@ -165,7 +165,7 @@ tracker's location mapping.
 
 ## Milestones
 
-### [ ] M1 — Scratch sessions mount a fresh per-session directory
+### [x] M1 — Scratch sessions mount a fresh per-session directory
 
 - **Approach:** config key + validation in `schemas.py`; `scratch_dir`/`agents_md` on
   `PreparedStart`; mount source in `prepare_start`; `_create_scratch_dir` in `run_start`
@@ -179,7 +179,13 @@ tracker's location mapping.
   `/workspace` holding only the copied `AGENTS.md`.
 - **Verify:** `scripts/dev test tests/test_nexus_config.py tests/test_orchestrator_lifecycle.py`
   passes.
-- **Outcome:**
+- **Outcome:** `GlobalConfig.scratch_workspace` with validation; `prepare_start` mounts
+  `<ws>/<session_id>` and carries `scratch_dir`/`agents_md`; `run_start` creates the dir
+  (`mkdir` without `exist_ok`) and copies a regular-file `AGENTS.md` (symlink skipped with a
+  warning) before `_run`. `docs/config.md` gained a "Scratch workspace" section (it also
+  describes M2's cleanup) and the architecture mounts table a row. Verify: 89 passed in
+  `tests/test_nexus_config.py tests/test_orchestrator_lifecycle.py`; ruff check and format
+  clean on touched files.
 
 ### [ ] M2 — Unused per-session directories are removed
 

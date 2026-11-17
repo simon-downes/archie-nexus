@@ -1,5 +1,6 @@
 """Tests for archie_orchestrator.lifecycle — session start/stop logic."""
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -481,3 +482,100 @@ def test_each_session_gets_its_own_token(config, workspace, tmp_path):
     first = _prepare(config, workspace, tmp_path)
     second = _prepare(config, workspace, tmp_path)
     assert first.agent_token != second.agent_token
+
+
+# ---------------------------------------------------------------------------
+# Scratch workspace (093)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scratch(tmp_path) -> tuple[NexusConfig, Path]:
+    """A config whose scratch workspace is ``chat``, and that workspace's directory."""
+    ws_dir = tmp_path / "chat"
+    ws_dir.mkdir()
+    config = NexusConfig(
+        global_=GlobalConfig(workspace_root=str(tmp_path), scratch_workspace="chat")
+    )
+    return config, ws_dir
+
+
+def _prepare_in(config, name, tmp_path):
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        return prepare_start(name, config)
+
+
+def _run_seeing(prepared, directory):
+    """Run ``prepared``; return the entries of ``directory`` when docker run was called."""
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, env=None):
+        seen["entries"] = sorted(os.listdir(directory))
+        agents = directory / "AGENTS.md"
+        seen["agents"] = agents.read_text() if agents.exists() else None
+
+    with (
+        patch("archie_orchestrator.lifecycle.run_container", side_effect=fake_run),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="40123"),
+    ):
+        assert run_start(prepared) == 40123
+    return seen
+
+
+def test_a_scratch_start_mounts_a_fresh_session_directory(scratch, tmp_path):
+    config, ws_dir = scratch
+    (ws_dir / "AGENTS.md").write_text("chat rules\n")
+    (ws_dir / "old.txt").write_text("left by an earlier chat")
+    prepared = _prepare_in(config, "chat", tmp_path)
+    session_dir = ws_dir.resolve() / prepared.session_id
+
+    assert prepared.session_id.startswith("chat-")
+    assert f"{session_dir}:/workspace:rw" in prepared.command
+    assert f"{ws_dir.resolve()}:/workspace:rw" not in prepared.command
+    assert not session_dir.exists()  # prepare_start creates nothing
+
+    seen = _run_seeing(prepared, session_dir)
+    assert seen == {"entries": ["AGENTS.md"], "agents": "chat rules\n"}
+
+
+def test_a_scratch_workspace_without_agents_md_gets_an_empty_directory(scratch, tmp_path):
+    config, ws_dir = scratch
+    prepared = _prepare_in(config, "chat", tmp_path)
+    seen = _run_seeing(prepared, ws_dir.resolve() / prepared.session_id)
+    assert seen == {"entries": [], "agents": None}
+
+
+def test_a_symlinked_agents_md_is_not_copied(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    secret = tmp_path / "secret.txt"
+    secret.write_text("a host file")
+    (ws_dir / "AGENTS.md").symlink_to(secret)
+    prepared = _prepare_in(config, "chat", tmp_path)
+    seen = _run_seeing(prepared, ws_dir.resolve() / prepared.session_id)
+    assert seen == {"entries": [], "agents": None}
+    assert "it is a symlink" in caplog.text
+
+
+def test_other_workspaces_mount_as_before_with_scratch_on(scratch, workspace, tmp_path):
+    config, _ = scratch
+    ws_name, ws_path = workspace
+    prepared = _prepare_in(config, ws_name, tmp_path)
+    assert f"{ws_path.resolve()}:/workspace:rw" in prepared.command
+    assert (prepared.scratch_dir, prepared.agents_md) == (None, None)
+    seen = _run_seeing(prepared, ws_path)
+    assert seen == {"entries": [], "agents": None}  # nothing created in the workspace
+
+
+def test_a_scratch_directory_that_already_exists_fails_the_start(scratch, tmp_path):
+    config, ws_dir = scratch
+    prepared = _prepare_in(config, "chat", tmp_path)
+    prepared.scratch_dir.mkdir()
+    (prepared.scratch_dir / "keep.txt").write_text("x")
+    with patch("archie_orchestrator.lifecycle.run_container") as mock_run:
+        with pytest.raises(FileExistsError):
+            run_start(prepared)
+    mock_run.assert_not_called()
+    assert (prepared.scratch_dir / "keep.txt").exists()
