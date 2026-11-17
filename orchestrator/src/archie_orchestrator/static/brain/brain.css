@@ -126,6 +126,15 @@
     padding: 0 0.5rem;
 }
 
+/* nimble.css draws <article> as a card; an entry body reads as plain page text. */
+.viewer .brain-main article.md {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: none;
+    box-shadow: none;
+}
+
 .viewer .dir-list {
     list-style: none;
     padding: 0;
