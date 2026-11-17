@@ -1,6 +1,6 @@
 # 092 — Brain browser in the web client
 
-Status: building
+Status: reviewing
 Branch: build-it/092-brain-browser (base: main @ fc1f141)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/092-brain-browser
 
