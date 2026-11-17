@@ -617,14 +617,6 @@ def test_stop_keeps_a_scratch_directory_the_session_wrote_to(scratch, tmp_path):
     assert sorted(os.listdir(directory)) == ["AGENTS.md", "notes.md"]
 
 
-def test_stop_keeps_a_scratch_directory_whose_agents_md_changed(scratch, tmp_path):
-    config, ws_dir = scratch
-    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
-    (directory / "AGENTS.md").write_text("edited by the session")
-    _stop(session_id, config)
-    assert (directory / "AGENTS.md").read_text() == "edited by the session"
-
-
 def test_stop_keeps_a_scratch_directory_whose_agents_md_became_a_symlink(scratch, tmp_path):
     config, ws_dir = scratch
     session_id, directory = _scratch_session(config, ws_dir, tmp_path)
@@ -658,7 +650,7 @@ def test_stop_of_a_scratch_session_whose_directory_is_gone_is_quiet(scratch, tmp
 def test_a_scratch_cleanup_error_is_logged_and_the_stop_still_succeeds(scratch, tmp_path, caplog):
     config, ws_dir = scratch
     session_id, directory = _scratch_session(config, ws_dir, tmp_path)
-    with patch("archie_orchestrator.lifecycle.os.listdir", side_effect=PermissionError("denied")):
+    with patch("archie_orchestrator.lifecycle.os.scandir", side_effect=PermissionError("denied")):
         assert _stop(session_id, config) is False
     assert "Cannot inspect scratch directory" in caplog.text
     assert directory.is_dir()
@@ -699,3 +691,65 @@ def test_a_failed_start_keeps_its_scratch_directory_if_the_container_may_run(
     assert "not ready" in str(error)
     assert prepared.scratch_dir.is_dir()
     assert "Keeping" in caplog.text
+
+
+def test_a_symlinked_alias_of_the_scratch_workspace_is_scratch_too(scratch, tmp_path):
+    config, ws_dir = scratch
+    (tmp_path / "alias").symlink_to(ws_dir)
+    prepared = _prepare_in(config, "alias", tmp_path)
+    assert prepared.scratch_dir == ws_dir.resolve() / prepared.session_id
+    assert f"{prepared.scratch_dir}:/workspace:rw" in prepared.command
+
+
+def test_a_fifo_agents_md_is_skipped_without_blocking(scratch, tmp_path):
+    config, ws_dir = scratch
+    os.mkfifo(ws_dir / "AGENTS.md")
+    prepared = _prepare_in(config, "chat", tmp_path)
+    seen = _run_seeing(prepared, prepared.scratch_dir)
+    assert seen == {"entries": [], "agents": None}
+
+
+def test_a_failed_agents_md_copy_removes_the_new_directory(scratch, tmp_path):
+    config, ws_dir = scratch
+    agents = ws_dir / "AGENTS.md"
+    agents.write_text("rules")
+    agents.chmod(0)
+    prepared = _prepare_in(config, "chat", tmp_path)
+    try:
+        with patch("archie_orchestrator.lifecycle.run_container") as mock_run:
+            with pytest.raises(PermissionError):
+                run_start(prepared)
+    finally:
+        agents.chmod(0o644)
+    mock_run.assert_not_called()
+    assert not prepared.scratch_dir.exists()
+
+
+@pytest.mark.parametrize("content", ["rules!", "RULES"])  # another size; same size
+def test_stop_keeps_a_scratch_directory_whose_agents_md_differs(scratch, tmp_path, content):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents="rules")
+    (directory / "AGENTS.md").write_text(content)
+    _stop(session_id, config)
+    assert (directory / "AGENTS.md").read_text() == content
+
+
+def test_stop_does_not_read_a_huge_agents_md_into_memory(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    with open(directory / "AGENTS.md", "r+b") as f:
+        f.truncate(1 << 40)  # sparse: 1 TiB that would not fit in memory
+    _stop(session_id, config)
+    assert (directory / "AGENTS.md").stat().st_size == 1 << 40
+
+
+def test_a_scratch_directory_that_cannot_be_removed_is_logged(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents=None)
+    ws_dir.chmod(0o555)
+    try:
+        assert _stop(session_id, config) is False
+    finally:
+        ws_dir.chmod(0o755)
+    assert "Cannot remove scratch directory" in caplog.text
+    assert directory.is_dir()

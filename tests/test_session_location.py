@@ -906,3 +906,19 @@ async def test_the_tracker_locates_a_scratch_session_in_its_own_directory(root, 
         "cloned",
     )
     await tracker.close()
+
+
+async def test_the_tracker_sweep_reads_a_scratch_session_under_its_own_directory(
+    root, workspace, monkeypatch
+):
+    make_repo(workspace / "app", branch="shared")
+    sha = make_repo(workspace / SID / "app", branch="mine")
+    monkeypatch.setattr(tracker_module, "LOCATION_SWEEP_INTERVAL", 0.02)
+    located = record(SID, location=SessionLocation(repo="app", branch="mine", commit=sha))
+    tracker = make_tracker(records=[located], runtime=FakeRuntime([running(SID, port=None)]))
+    tracker.workspace_root = lambda: root
+    tracker.scratch_workspace = lambda: "proj"
+    await tracker.start()
+    git(workspace / SID / "app", "checkout", "-q", "-b", "moved")
+    await until(lambda: tracker.live(SID).location.branch == "moved")
+    await tracker.close()

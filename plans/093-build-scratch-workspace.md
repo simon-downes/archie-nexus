@@ -68,7 +68,7 @@ Codebase facts:
 | D2 | Config | `global.scratch_workspace: str \| None`, one name | a list of scratch workspaces; a marker file in the directory | User asked for a single key | user (discussion) |
 | D3 | Default | `None` (off) | `"chat"` | Turning it on changes what an existing `chat` workspace mounts; off by default keeps current behaviour for every existing config | self |
 | D4 | Where per-session dirs live | `<workspace_root>/<scratch>/<session_id>/` | `~/.nexus/scratch/<id>`; a hidden `.sessions/` subdir | Next to the workspace's `AGENTS.md`, browsable on the host under the workspace the user picked; session IDs are unique and already start with the workspace name | self |
-| D5 | Workspace instructions | Copy `<scratch>/AGENTS.md` into the new dir before `docker run`, only when `lstat` shows a regular file (a symlink is skipped with a warning) | a nested read-only file bind mount; no instructions | A nested file mount leaves an empty placeholder file on the host and is a second mount to reason about; a copy works for native and Kiro alike | self |
+| D5 | Workspace instructions | Copy `<scratch>/AGENTS.md` into the new dir before `docker run`, only when it opens with `O_NOFOLLOW` as a regular file (a symlink is skipped with a warning) | a nested read-only file bind mount; no instructions | A nested file mount leaves an empty placeholder file on the host and is a second mount to reason about; a copy works for native and Kiro alike | self |
 | D6 | When to create the dir | In `run_start`, before `run_container` | in `prepare_start` | `prepare_start` stays free of workspace side effects (082 D15: it only validates and builds argv); the path is computed in `prepare_start` and carried on `PreparedStart` | self |
 | D7 | Cleanup rule | Remove the dir when it is empty, or holds only an `AGENTS.md` that is a regular file (by `lstat`) byte-identical to the workspace's current regular-file `AGENTS.md`; otherwise keep it. Removal is `unlink` + `rmdir`, never recursive | always delete; never delete; age-based prune | Removes the common no-artefact case without ever deleting something the session wrote or changed | self |
 | D8 | When to clean up | After a successful `stop_session`; and when `run_start` fails, only if `docker.container_running` then reports the container not running (a failed or raising check keeps the dir) | also on crash/exit detection and at orchestrator start; always on a failed start | A native readiness timeout leaves the container running and adoptable, so a failed start doesn't prove the dir is unused; detecting other ends safely needs the live set, and deleting a dir under a running container loses its writes | self |
@@ -229,6 +229,21 @@ tracker's location mapping.
 
 ## Deviations
 
+- M2: `workspaces.session_directory` landed in M2, not M3, because stop-time cleanup needs
+  it. No scope change.
+- Review: a workspace is the scratch workspace when its resolved directory is the same file
+  (`os.path.samefile`) as `global.scratch_workspace`'s, not when the name matches, so a
+  symlinked alias (or a differently cased name on a case-insensitive volume) also gets a
+  per-session directory. `workspaces.is_scratch_directory` and
+  `scratch_session_directory` carry this; `session_directory` builds on them. Behaviour
+  widens slightly (aliases are scratch too); the requirements otherwise stand.
+- Review: the `AGENTS.md` copy and comparison open files with `O_NOFOLLOW | O_NONBLOCK` and
+  check `fstat` (the plan said `lstat`), the copy is created with `O_EXCL | O_NOFOLLOW`,
+  the comparison checks sizes and then reads in 64 KiB chunks, and cleanup lists at most two
+  entries. Same rules, without the check/use races or unbounded reads.
+- Review: the single-directory-name rule moved to `archie_shared.workspaces.is_single_name`,
+  used by the config validator, `resolve_workspace` and `scratch_session_directory`.
+
 ## Risks
 
 - Changing `scratch_workspace` or `workspace_root` while a scratch session runs changes how
@@ -240,13 +255,31 @@ tracker's location mapping.
 - With the key on, `/api/workspaces` lists a per-session dir that holds a `.git` (a chat that
   ran `git init` in `/workspace`) as a repo of `chat`, and kept dirs count toward
   `MAX_REPOS` scanning. Accepted: it describes what is on disk.
-- An agent still running pre-change code rejects the new key on config sync
-  (`forbid_unknown_fields`) and keeps its last valid config with a warning, until restarted.
+- An agent still running pre-change code rejects every config sync after the orchestrator
+  is upgraded, whether or not the key is set (`to_builtins` always includes
+  `scratch_workspace`, and `GlobalConfig` forbids unknown fields). It keeps its last valid
+  config and logs "the orchestrator sent a config this agent can't read" until the session
+  is restarted. This is the existing version-skew path in `host_config.py`; accepted.
+- Cleanup trusts that `<workspace>/<session_id>` isn't swapped for a symlink between
+  `scratch_session_directory`'s check and the `unlink`/`rmdir` (only a container with the
+  scratch workspace itself mounted could do that). The worst case is removing a regular
+  `AGENTS.md` identical to the workspace's own, then an `rmdir` that fails on the symlink.
 - The deliverable (a real `archie start chat`) needs Docker, which isn't available in the
   build container; it is covered by unit tests on the argv and filesystem effects only.
 
 ## Review
 
+- Code review: `general` and `risk` (risk: a new config key in a shared schema, and host
+  file operations on session-writable directories), one round. Fixed: tracker-level sweep
+  test for scratch sessions; tests for the copy-failure cleanup, the `rmdir` failure
+  warning and direct `GlobalConfig` validation; docs reload list; shared
+  `is_single_name`; unbounded `read_bytes` (size check, chunked compare, two-entry scan);
+  check/use races in the `AGENTS.md` copy (`O_NOFOLLOW`, `fstat`, `O_EXCL`); scratch
+  identity by `samefile` (answers the ❓ on aliases and case). Rejected: omitting
+  `scratch_workspace` from the sync payload when unset. Old agents already fall back to
+  their last valid config through the designed version-skew path, and `omit_defaults` would
+  change the wire format of every `GlobalConfig` field; recorded under Risks instead. No ❌,
+  so no second round.
 - Plan review: 1 pass. Fixed: D8 failed-start cleanup now checks `container_running` (native
   readiness timeout leaves the container running); D10/Overview reconciled with where the
   helper is used; symlink-safe `AGENTS.md` copy and comparison (`lstat`); `ConfigError`

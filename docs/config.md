@@ -36,8 +36,9 @@ The agent gets the config from the orchestrator (it never reads the file itself)
 The orchestrator re-reads `config.yaml` when it uses it, so most edits apply without
 restarting it:
 
-- Starting a session reads the file as it is at that moment: `mounts` and
-  `workspace_root`. An invalid file makes `POST /api/sessions` fail with the validation
+- Starting a session reads the file as it is at that moment: `mounts`,
+  `workspace_root` and `scratch_workspace`. Stopping one, and session locations, read
+  `workspace_root` and `scratch_workspace` from the last valid config. An invalid file makes `POST /api/sessions` fail with the validation
   error; no session starts with a stale config.
 - Plugin `settings` that declare `env` (Scalr's `SCALR_HOSTNAME`) and credential
   environment variables are not part of session start. The agent reads them from the
@@ -68,7 +69,7 @@ global:
   scratch_workspace: chat
 ```
 
-A session in that workspace mounts `<workspace_root>/chat/<session_id>/` at `/workspace`
+A session in that workspace (or in a symlinked alias of it) mounts `<workspace_root>/chat/<session_id>/` at `/workspace`
 instead of `<workspace_root>/chat/`. The orchestrator creates the directory before the
 container starts and copies `chat/AGENTS.md` into it when that is a regular file (a symlink
 is not followed), so the workspace's instructions still reach the agent. The session keeps

@@ -15,6 +15,7 @@ from archie_shared.config import ConfigError, guard_host_files, home_dir, load_c
 from archie_shared.plugins.config import PluginConfig, validate_plugins
 from archie_shared.plugins.errors import PluginManifestError
 from archie_shared.plugins.manifest import load_manifests
+from archie_shared.workspaces import is_single_name
 
 # Sections replaced by ``plugins:`` (070 M4); ``archie config migrate`` converts them.
 _REMOVED_SECTIONS = ("tools", "auth")
@@ -38,7 +39,7 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     def __post_init__(self) -> None:
         name = self.scratch_workspace
-        if name is not None and ("/" in name or "\\" in name or name in ("", ".", "..")):
+        if name is not None and not is_single_name(name):
             raise ValueError(f"global.scratch_workspace '{name}' must be a single directory name")
 
 

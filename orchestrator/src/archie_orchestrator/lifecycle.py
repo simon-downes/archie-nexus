@@ -5,6 +5,7 @@ All functions are synchronous — callers should use asyncio.to_thread()
 when invoking from an async context.
 """
 
+import errno
 import logging
 import os
 import secrets
@@ -41,7 +42,11 @@ from archie_orchestrator.docker import (
     wait_for_ready,
 )
 from archie_orchestrator.mounts import resolve_mounts
-from archie_orchestrator.workspaces import resolve_workspace, session_directory
+from archie_orchestrator.workspaces import (
+    is_scratch_directory,
+    resolve_workspace,
+    scratch_session_directory,
+)
 
 # orchestrator/src/archie_orchestrator/lifecycle.py → repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -52,6 +57,7 @@ BACKENDS = ("native", "kiro")
 # Kiro startup has its own 30 s deadline inside the agent (077 D18); leave room for it.
 READY_TIMEOUT_S = {"native": 30.0, "kiro": 45.0}
 AGENTS_MD = "AGENTS.md"
+_COMPARE_CHUNK = 64 * 1024
 
 
 def _remove_empty_session_log(session_id: str) -> bool:
@@ -132,7 +138,8 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     if backend not in BACKENDS:
         raise ValueError(f"Invalid backend {backend!r}: expected 'native' or 'kiro'")
     # 1. Resolve and validate workspace path (no escaping workspace_root)
-    resolved = resolve_workspace(expand_workspace_root(config), workspace)
+    root = expand_workspace_root(config)
+    resolved = resolve_workspace(root, workspace)
 
     # 2. Check image exists
     if not check_image(IMAGE_TAG):
@@ -145,7 +152,7 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     # A scratch workspace's sessions each get a fresh directory (093); run_start creates it.
     mounted = resolved
     scratch_dir = agents_md = None
-    if workspace == config.global_.scratch_workspace:
+    if is_scratch_directory(root, resolved, config.global_.scratch_workspace):
         mounted = scratch_dir = resolved / session_id
         agents_md = resolved / AGENTS_MD
 
@@ -299,35 +306,86 @@ def _run(prepared: PreparedStart) -> int:
     return int(port_str)
 
 
-def _regular_file(path: Path) -> bool:
-    """Whether ``path`` is a regular file, not following a final symlink."""
+def _open_regular(path: Path) -> int | None:
+    """A read-only descriptor on ``path`` if it is a regular file; None if it isn't one.
+
+    Sessions can write workspace files, so nothing is followed or waited on: a symlink
+    (``O_NOFOLLOW``), a FIFO or a device (``O_NONBLOCK``, then ``fstat``) gives None.
+
+    Raises:
+        OSError: If ``path`` is there but can't be opened for another reason.
+    """
     try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
-    except OSError:
-        return False
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return fd
 
 
 def _create_scratch_dir(directory: Path, agents_md: Path | None) -> None:
     """Create a scratch session's directory and copy the workspace's ``AGENTS.md`` in.
 
-    Workspace files may have been written by a session, so a symlinked ``AGENTS.md``
-    is not followed (it could name any host file); it is skipped with a warning.
+    Workspace files may have been written by a session, so ``AGENTS.md`` is copied only
+    when it is a regular file (:func:`_open_regular`; a symlink is skipped with a
+    warning), and the copy is created with ``O_EXCL | O_NOFOLLOW`` so nothing planted in
+    the new directory is written through.
 
     Raises:
         OSError: If the directory exists or can't be created, or the copy fails (the
             directory is removed again).
     """
     directory.mkdir()
-    if agents_md is None or not _regular_file(agents_md):
-        if agents_md is not None and agents_md.is_symlink():
-            log.warning("Not copying %s into %s: it is a symlink", agents_md, directory)
+    if agents_md is None:
         return
+    target = directory / AGENTS_MD
     try:
-        shutil.copyfile(agents_md, directory / AGENTS_MD)
+        source = _open_regular(agents_md)
+        if source is None:
+            if agents_md.is_symlink():
+                log.warning("Not copying %s into %s: it is a symlink", agents_md, directory)
+            return
+        with os.fdopen(source, "rb") as src:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            with os.fdopen(os.open(target, flags, 0o666), "wb") as dst:
+                shutil.copyfileobj(src, dst)
     except OSError:
-        (directory / AGENTS_MD).unlink(missing_ok=True)
-        directory.rmdir()
+        try:
+            target.unlink(missing_ok=True)
+            directory.rmdir()
+        except OSError as exc:
+            log.warning("Cannot remove %s after a failed copy: %s", directory, exc)
         raise
+
+
+def _same_bytes(copy: Path, source: Path) -> bool:
+    """Whether ``copy`` and ``source`` are regular files with the same bytes.
+
+    Sizes are compared first and the contents in chunks, so a large session-written
+    ``copy`` is never read into memory.
+    """
+    copy_fd = _open_regular(copy)
+    if copy_fd is None:
+        return False
+    with os.fdopen(copy_fd, "rb") as a:
+        source_fd = _open_regular(source)
+        if source_fd is None:
+            return False
+        with os.fdopen(source_fd, "rb") as b:
+            if os.fstat(a.fileno()).st_size != os.fstat(b.fileno()).st_size:
+                return False
+            while True:
+                chunk = a.read(_COMPARE_CHUNK)
+                if chunk != b.read(_COMPARE_CHUNK):
+                    return False
+                if not chunk:
+                    return True
 
 
 def _release_scratch_dir_after_failed_start(prepared: PreparedStart) -> None:
@@ -352,13 +410,15 @@ def _remove_unused_scratch_dir(directory: Path, agents_md: Path | None) -> bool:
 
     Unused means empty, or holding only an ``AGENTS.md`` that is a regular file with the
     same bytes as the workspace's current regular-file ``agents_md``. Anything else is
-    kept. Nothing is removed recursively, and failures are logged, not raised.
+    kept. Only the first two entries are listed, nothing is removed recursively, and
+    failures are logged, not raised.
 
     Returns:
         Whether the directory was removed.
     """
     try:
-        entries = os.listdir(directory)
+        with os.scandir(directory) as it:
+            entries = [entry.name for _, entry in zip(range(2), it, strict=False)]
     except FileNotFoundError:
         return False
     except OSError as exc:
@@ -367,12 +427,7 @@ def _remove_unused_scratch_dir(directory: Path, agents_md: Path | None) -> bool:
     copy = directory / AGENTS_MD
     try:
         if entries == [AGENTS_MD]:
-            if not (
-                agents_md is not None
-                and _regular_file(copy)
-                and _regular_file(agents_md)
-                and copy.read_bytes() == agents_md.read_bytes()
-            ):
+            if agents_md is None or not _same_bytes(copy, agents_md):
                 return False
             copy.unlink()
         elif entries:
@@ -455,12 +510,13 @@ def stop_session(session_id: str, *, config: NexusConfig | None = None) -> bool:
 def _remove_stopped_scratch_dir(session_id: str, config: NexusConfig) -> None:
     """Remove a stopped scratch session's directory if it is unused; quiet if it is gone."""
     scratch = config.global_.scratch_workspace
-    workspace = split_id(session_id)[0]
-    if scratch is None or workspace != scratch:
+    if scratch is None:
         return
+    root = expand_workspace_root(config)
     try:
-        directory = session_directory(expand_workspace_root(config), workspace, session_id, scratch)
+        directory = scratch_session_directory(root, split_id(session_id)[0], session_id, scratch)
     except (ValueError, OSError) as exc:
         log.debug("No scratch directory to remove for %s: %s", session_id, exc)
         return
-    _remove_unused_scratch_dir(directory, directory.parent / AGENTS_MD)
+    if directory is not None:
+        _remove_unused_scratch_dir(directory, directory.parent / AGENTS_MD)
