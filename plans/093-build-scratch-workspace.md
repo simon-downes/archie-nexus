@@ -187,7 +187,7 @@ tracker's location mapping.
   `tests/test_nexus_config.py tests/test_orchestrator_lifecycle.py`; ruff check and format
   clean on touched files.
 
-### [ ] M2 — Unused per-session directories are removed
+### [x] M2 — Unused per-session directories are removed
 
 - **Approach:** `_remove_unused_scratch_dir` in `lifecycle.py`; called from `run_start`'s
   failure path and `stop_session(config=...)`. `DockerRuntime(config=...)` in `tracker.py`;
@@ -199,7 +199,14 @@ tracker's location mapping.
 - **Deliverable:** stopping a chat session that wrote nothing leaves no directory behind.
 - **Verify:** `scripts/dev test tests/test_orchestrator_lifecycle.py tests/test_session_tracker.py`
   passes.
-- **Outcome:**
+- **Outcome:** `_remove_unused_scratch_dir` (listdir, `lstat` regular-file checks, `unlink` +
+  `rmdir`, `OSError` logged); `run_start` releases the dir after a failure only when
+  `container_running` returns False; `stop_session(config=...)` finds the dir with the new
+  `workspaces.session_directory` (added here rather than M3, since stop needs it);
+  `DockerRuntime(config)` reads config before stopping and falls back to no cleanup on
+  `ConfigError`; `app.py` passes `config_source.latest`. Verify: 244 passed across
+  `test_orchestrator_lifecycle.py test_session_tracker.py test_workspaces.py
+  test_sessions_api.py`; ruff clean.
 
 ### [ ] M3 — Scratch session locations map through the per-session directory
 

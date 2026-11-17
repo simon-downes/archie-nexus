@@ -94,6 +94,35 @@ def resolve_workspace(root: Path, name: str) -> Path:
     return resolved
 
 
+def session_directory(
+    root: Path, workspace: str, session_id: str, scratch_workspace: str | None
+) -> Path:
+    """The host directory a session has mounted at ``/workspace``.
+
+    The workspace directory, or for the scratch workspace the session's own
+    ``<workspace>/<session_id>`` (093).
+
+    Args:
+        root: The expanded ``workspace_root``.
+        workspace: The session's workspace name.
+        session_id: The session's ID.
+        scratch_workspace: ``global.scratch_workspace``, or None when it is off.
+
+    Raises:
+        ValueError: As :func:`resolve_workspace`, or if a scratch session's directory is
+            missing, a symlink or not a directory.
+    """
+    directory = resolve_workspace(root, workspace)
+    if workspace != scratch_workspace:
+        return directory
+    if "/" in session_id or "\\" in session_id or session_id in ("", ".", ".."):
+        raise ValueError(f"Invalid session ID '{session_id}': must be a single directory name.")
+    scratch = directory / session_id
+    if scratch.is_symlink() or not scratch.is_dir():
+        raise ValueError(f"Scratch directory of session '{session_id}' not found: {scratch}")
+    return scratch
+
+
 def list_workspaces(root: Path) -> list[Workspace]:
     """Every workspace under ``root`` with its repos, sorted by name.
 

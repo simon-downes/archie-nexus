@@ -45,6 +45,7 @@ from typing import Protocol
 import msgspec
 import websockets
 from archie_shared.agent_sync import token_hash
+from archie_shared.config import ConfigError
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
@@ -267,7 +268,15 @@ class Runtime(Protocol):
 
 
 class DockerRuntime:
-    """The :class:`Runtime` backed by the Docker CLI."""
+    """The :class:`Runtime` backed by the Docker CLI.
+
+    Args:
+        config: Returns the current config, read at each stop so a scratch session's
+            unused directory is removed (093); None skips that.
+    """
+
+    def __init__(self, config: Callable[[], NexusConfig] | None = None) -> None:
+        self._config = config
 
     def list_running(self) -> list[RunningContainer]:
         return docker.list_sessions()
@@ -282,8 +291,19 @@ class DockerRuntime:
         return docker.container_running(container_name(session_id))
 
     def stop(self, session_id: str) -> bool:
-        """``docker stop`` by name (no ``docker ps``), then drop a log with no prompt (D19)."""
-        return lifecycle.stop_session(session_id)
+        """``docker stop`` by name (no ``docker ps``), then drop a log with no prompt (D19).
+
+        The config is read first; if it can't be, the session still stops, keeping any
+        scratch directory.
+        """
+        if self._config is None:
+            return lifecycle.stop_session(session_id)
+        try:
+            config = self._config()
+        except ConfigError as exc:
+            log.warning("Stopping %s without scratch cleanup: %s", session_id, exc)
+            config = None
+        return lifecycle.stop_session(session_id, config=config)
 
 
 # ---------------------------------------------------------------------------

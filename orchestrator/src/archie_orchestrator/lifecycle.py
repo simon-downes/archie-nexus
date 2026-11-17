@@ -18,7 +18,7 @@ from archie_shared.config import AGENT_CONTAINER_ENV, home_dir
 from archie_shared.events import UserMessage
 from archie_shared.kiro import startup_error_path
 from archie_shared.schemas import NexusConfig, expand_workspace_root, get_profile
-from archie_shared.session import container_name, generate_session_id
+from archie_shared.session import container_name, generate_session_id, split_id
 from archie_shared.session.log import SessionLog
 
 from archie_orchestrator.docker import (
@@ -41,7 +41,7 @@ from archie_orchestrator.docker import (
     wait_for_ready,
 )
 from archie_orchestrator.mounts import resolve_mounts
-from archie_orchestrator.workspaces import resolve_workspace
+from archie_orchestrator.workspaces import resolve_workspace, session_directory
 
 # orchestrator/src/archie_orchestrator/lifecycle.py → repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -426,14 +426,17 @@ def _kiro_startup_error(nexus_home: Path, session_id: str) -> str | None:
     return text or None
 
 
-def stop_session(session_id: str) -> bool:
+def stop_session(session_id: str, *, config: NexusConfig | None = None) -> bool:
     """Stop a session's container by name, then remove its log if it holds no prompt.
 
     Runs ``docker stop archie-<session_id>`` directly, without a ``docker ps`` lookup
-    (082 D19); a log with no submitted prompt is removed (D19a).
+    (082 D19); a log with no submitted prompt is removed (D19a). With ``config``, a
+    scratch session's directory is then removed if it is unused (093).
 
     Args:
         session_id: Exact session ID to stop (no prefix matching).
+        config: The current config, for ``global.scratch_workspace`` and
+            ``workspace_root``; None skips the scratch directory.
 
     Returns:
         Whether the session's log was removed.
@@ -443,5 +446,21 @@ def stop_session(session_id: str) -> bool:
     """
     stop_container(container_name(session_id))
     removed = _remove_empty_session_log(session_id)
+    if config is not None:
+        _remove_stopped_scratch_dir(session_id, config)
     log.info("Session stopped: %s", session_id)
     return removed
+
+
+def _remove_stopped_scratch_dir(session_id: str, config: NexusConfig) -> None:
+    """Remove a stopped scratch session's directory if it is unused; quiet if it is gone."""
+    scratch = config.global_.scratch_workspace
+    workspace = split_id(session_id)[0]
+    if scratch is None or workspace != scratch:
+        return
+    try:
+        directory = session_directory(expand_workspace_root(config), workspace, session_id, scratch)
+    except (ValueError, OSError) as exc:
+        log.debug("No scratch directory to remove for %s: %s", session_id, exc)
+        return
+    _remove_unused_scratch_dir(directory, directory.parent / AGENTS_MD)

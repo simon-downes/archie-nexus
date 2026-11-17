@@ -1,6 +1,7 @@
 """Tests for archie_orchestrator.lifecycle — session start/stop logic."""
 
 import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -579,3 +580,122 @@ def test_a_scratch_directory_that_already_exists_fails_the_start(scratch, tmp_pa
             run_start(prepared)
     mock_run.assert_not_called()
     assert (prepared.scratch_dir / "keep.txt").exists()
+
+
+def _scratch_session(config, ws_dir, tmp_path, *, agents: str | None = "rules\n"):
+    """A started scratch session (docker patched out): its ID and directory."""
+    if agents is not None:
+        (ws_dir / "AGENTS.md").write_text(agents)
+    prepared = _prepare_in(config, "chat", tmp_path)
+    _run_seeing(prepared, ws_dir.resolve() / prepared.session_id)
+    return prepared.session_id, prepared.scratch_dir
+
+
+def _stop(session_id, config):
+    with (
+        patch("archie_orchestrator.lifecycle.stop_container"),
+        patch("archie_orchestrator.lifecycle._remove_empty_session_log", return_value=False),
+    ):
+        return stop_session(session_id, config=config)
+
+
+@pytest.mark.parametrize("agents", [None, "rules\n"])
+def test_stop_removes_an_unused_scratch_directory(scratch, tmp_path, agents):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents=agents)
+    assert directory.is_dir()
+    assert _stop(session_id, config) is False  # the log result is unchanged
+    assert not directory.exists()
+    assert (agents is None) or (ws_dir / "AGENTS.md").read_text() == agents  # source kept
+
+
+def test_stop_keeps_a_scratch_directory_the_session_wrote_to(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "notes.md").write_text("an artefact")
+    _stop(session_id, config)
+    assert sorted(os.listdir(directory)) == ["AGENTS.md", "notes.md"]
+
+
+def test_stop_keeps_a_scratch_directory_whose_agents_md_changed(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "AGENTS.md").write_text("edited by the session")
+    _stop(session_id, config)
+    assert (directory / "AGENTS.md").read_text() == "edited by the session"
+
+
+def test_stop_keeps_a_scratch_directory_whose_agents_md_became_a_symlink(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "AGENTS.md").unlink()
+    (directory / "AGENTS.md").symlink_to(ws_dir / "AGENTS.md")  # same bytes when followed
+    _stop(session_id, config)
+    assert (directory / "AGENTS.md").is_symlink()
+
+
+def test_stop_without_config_or_for_other_workspaces_leaves_directories_alone(
+    scratch, workspace, tmp_path
+):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    _stop(session_id, None)
+    assert directory.is_dir()
+    ws_name, ws_path = workspace
+    (ws_path / f"{ws_name}-01abc12345").mkdir()  # looks like a scratch dir, but isn't one
+    _stop(f"{ws_name}-01abc12345", config)
+    assert (ws_path / f"{ws_name}-01abc12345").is_dir()
+
+
+def test_stop_of_a_scratch_session_whose_directory_is_gone_is_quiet(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    shutil.rmtree(directory)
+    assert _stop(session_id, config) is False
+    assert "WARNING" not in caplog.text
+
+
+def test_a_scratch_cleanup_error_is_logged_and_the_stop_still_succeeds(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    with patch("archie_orchestrator.lifecycle.os.listdir", side_effect=PermissionError("denied")):
+        assert _stop(session_id, config) is False
+    assert "Cannot inspect scratch directory" in caplog.text
+    assert directory.is_dir()
+
+
+def _fail_start(prepared, *, running):
+    """Run ``prepared`` with a readiness failure and ``container_running`` as given."""
+    error = DockerError(command=["docker", "inspect"], stderr="not ready", returncode=1)
+    alive = (
+        {"side_effect": running} if isinstance(running, Exception) else {"return_value": running}
+    )
+    with (
+        patch("archie_orchestrator.lifecycle.run_container"),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", side_effect=error),
+        patch("archie_orchestrator.lifecycle.container_running", **alive),
+        pytest.raises(DockerError) as raised,
+    ):
+        run_start(prepared)
+    return raised.value
+
+
+def test_a_failed_start_removes_its_scratch_directory_when_the_container_is_gone(scratch, tmp_path):
+    config, ws_dir = scratch
+    (ws_dir / "AGENTS.md").write_text("rules\n")
+    prepared = _prepare_in(config, "chat", tmp_path)
+    error = _fail_start(prepared, running=False)
+    assert "not ready" in str(error)  # the original error is re-raised
+    assert not prepared.scratch_dir.exists()
+
+
+@pytest.mark.parametrize("running", [True, DockerError(["docker"], "daemon down", 1)])
+def test_a_failed_start_keeps_its_scratch_directory_if_the_container_may_run(
+    scratch, tmp_path, running, caplog
+):
+    config, ws_dir = scratch
+    prepared = _prepare_in(config, "chat", tmp_path)
+    error = _fail_start(prepared, running=running)
+    assert "not ready" in str(error)
+    assert prepared.scratch_dir.is_dir()
+    assert "Keeping" in caplog.text
