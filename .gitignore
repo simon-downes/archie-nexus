@@ -24,3 +24,6 @@ archie-*.jsonl
 
 # Secrets
 *.key
+
+# macOS
+.DS_Store
