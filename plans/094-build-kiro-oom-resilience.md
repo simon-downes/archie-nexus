@@ -394,6 +394,21 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   note for a cut-off compaction; the note uses the reason's detail; one name,
   `tool_warning()`; D13 moved into order; a Risk for the inline model-switch wait. No ❌.
 
+- Code review: `general` and `risk` both run (`risk` because the change builds shell commands
+  and changes tool/event behaviour). `risk`: no findings (shell construction has no injection
+  surface, exit codes and output are preserved, each restart failure sends one
+  `backend_stopped`, no orphaned processes, and `error` is an existing `SessionState`).
+  `general`: one ⚠️ — the "during a restart" ACs weren't exercised in-flight (every test
+  finished the restart first); fixed by adding a `slow` `session/load` variant and three tests
+  that send a message, switch the model, and interrupt while the restart runs. One ℹ️ — the
+  `backend_stopped` text joined reason and cause with "; "; changed to ". ". One ❓ answered:
+  the missing coverage was an omission, now closed.
+- Merge risk: medium. The failure path is a Kiro backend that exits unexpectedly: the worst
+  case is a restart that doesn't reload correctly, which fails closed to a dead backend that
+  reports `error` and tells the user to start a new session; no data loss, scoped to one
+  session. The OOM-score change only raises tool processes' own `oom_score_adj`, which is
+  reversible and needs no privilege.
+
 ## Outcome
 
 PR: pending

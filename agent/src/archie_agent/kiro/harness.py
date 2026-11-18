@@ -627,7 +627,7 @@ class KiroHarness:
         if not self._can_restart():
             minutes = int(RESTART_WINDOW_S // 60)
             self._mark_dead(
-                f"{reason}; stopped restarting after {RESTART_LIMIT} tries in {minutes} minutes"
+                f"{reason}. Stopped restarting after {RESTART_LIMIT} tries in {minutes} minutes"
             )
             return
         self._restarts.append(time.monotonic())
@@ -671,7 +671,7 @@ class KiroHarness:
             if self._closing:
                 return
             self._dead = True
-            self._dead_reason = f"{reason}; restart failed: {exc}"
+            self._dead_reason = f"{reason}. The restart failed: {exc}"
             await self._notice("backend_stopped", f"{self._dead_reason}. Start a new session.")
             await self._emit_status()
             return

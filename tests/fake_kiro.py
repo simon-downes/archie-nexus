@@ -16,7 +16,8 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
   ``exit`` and ``exit_tool`` turns bump before they exit, like the kernel's OOM killer.
 - ``FAKE_KIRO_LOAD``: ``session/load`` variant (094): ``ok`` (default; replays a frame,
   returns ``configOptions`` with ``contentCollection: enabled`` like real Kiro),
-  ``error`` (JSON-RPC error), ``exit`` (the process exits during load).
+  ``error`` (JSON-RPC error), ``exit`` (the process exits during load), ``slow`` (``ok``
+  after 0.5 s, so a test can act while the restart is in flight).
 - The prompt text (its last paragraph, so a resume-note prefix doesn't change it) picks the
   turn: ``error`` → JSON-RPC error; ``exit`` → exit 3 mid-turn; ``exit_tool`` → start
   ``shell sleep 30`` then exit 3 (an orphaned tool); ``sleep`` → MCP ``shell sleep 30`` until
@@ -481,6 +482,8 @@ async def session_new(rid: int, params: dict) -> None:
 
 
 async def session_load(rid: int, params: dict) -> None:
+    if LOAD == "slow":
+        await asyncio.sleep(0.5)
     if LOAD == "exit":
         os._exit(5)
     if LOAD == "error":

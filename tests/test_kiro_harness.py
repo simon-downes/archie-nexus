@@ -429,6 +429,63 @@ async def test_dead_backend_reports_error_state(home, tmp_path, monkeypatch):
         await h.close()
 
 
+async def test_message_during_restart_waits_then_runs(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_LOAD", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit")
+        assert h._restart_task is not None and not h._restart_task.done()
+        await h.handle_message("run it")  # parks in _await_restart, then runs
+    finally:
+        await h.close()
+    events = _log(home)
+    assert isinstance(events[-1], TurnComplete)
+    assert any(isinstance(e, ToolResult) and "KIRO-OK" in e.content for e in events)
+
+
+async def test_switch_model_during_restart_waits_then_switches(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_LOAD", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit")
+        assert not h._restart_task.done()
+        result = await h.switch_model("kiro/claude-sonnet-5.5")
+    finally:
+        await h.close()
+    assert result is None
+    assert h.session.model_id == "kiro/claude-sonnet-5.5"
+    assert _config_sets_after_load(tmp_path).get("model") == "claude-sonnet-5.5"
+
+
+async def test_interrupt_during_restart_wait_drops_the_message(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_LOAD", "slow")
+    h = _harness(home, tmp_path)
+    await h.start()
+    seen = _capture(h)
+    try:
+        await h.handle_message("exit")
+        task = asyncio.create_task(h.handle_message("run it"))
+        await _until(
+            lambda: h.turn_active and h._restart_task is not None and not h._restart_task.done()
+        )
+        h.interrupt()
+        await asyncio.wait_for(task, 5)
+    finally:
+        await h.close()
+    dropped = next(e for e in seen if isinstance(e, ErrorNotice) and e.kind == "turn_error")
+    assert "wasn't sent" in dropped.message
+    records = _record(tmp_path)
+    prompts = [
+        r["in"]["params"]["prompt"][0]["text"]
+        for r in records
+        if r.get("in", {}).get("method") == "session/prompt"
+    ]
+    assert prompts == ["exit"]
+    assert not any(r.get("in", {}).get("method") == "session/cancel" for r in records)
+
+
 async def test_fail_closed_does_not_restart(home, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_KIRO_SCENARIO", "late_builtin")
     h = _harness(home, tmp_path)
