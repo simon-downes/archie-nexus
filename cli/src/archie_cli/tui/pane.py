@@ -90,15 +90,15 @@ class ActivityLine(Animated):
 
     The word follows ``SessionController.activity``: Thinking while a provider request
     waits, Responding while a reply streams, Working while tools run. Between turns the
-    line is blank but keeps its height (one line and a blank one under it), so the
-    transcript never changes height. The spinner runs on the app's clock (084 D16).
+    line is blank but keeps its height (a blank line above and below it), so the transcript
+    never changes height. The spinner runs on the app's clock (084 D16).
     """
 
     DEFAULT_CSS = """
     ActivityLine {
         width: 1fr;
-        height: 2;
-        padding: 0 2 1 4;
+        height: 3;
+        padding: 1 2 1 4;
     }
     """
 

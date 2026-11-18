@@ -952,7 +952,8 @@ async def test_activity_line_keeps_its_height_and_follows_the_turn():
         line = pane.activity
         await pilot.pause()
         heights = (line.outer_size.height, pane.conversation.outer_size.height)
-        assert heights[0] == 2
+        assert heights[0] == 3
+        assert line.styles.padding.top == 1 and line.styles.padding.bottom == 1
         assert line.activity is None and line.render().plain == ""
 
         await pilot.press(*"go", "enter")
