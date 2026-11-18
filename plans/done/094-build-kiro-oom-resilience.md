@@ -1,6 +1,6 @@
 # 094 — Kiro OOM resilience
 
-Status: reviewing
+Status: done
 Branch: build-it/094-kiro-oom-resilience (base: (detached) @ ec4b472)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/094-kiro-oom-resilience
 
@@ -410,6 +410,20 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   reversible and needs no privilege.
 
 ## Outcome
+
+Delivered the four accepted suggestions as one change. Tool processes (`shell`, `exec`, the
+exec runner) and their descendants raise their own `oom_score_adj` to 1000, so the kernel
+kills a tool before the agent or Kiro. A tool result or Kiro exit that overlapped an OOM kill
+says so, using the container's cgroup `oom_kill` counter, and Kiro's stderr and exit are
+kept in the frame log as `err`/`exit` entries. After an unexpected `kiro-cli` exit the harness
+restarts it and reloads the conversation with ACP `session/load` (at most 3 times in 30
+minutes), kills orphaned tool processes, notes the cut-off turn in the next prompt, and
+otherwise marks the backend dead with `state: error`. Verified: full suite
+`env -u ARCHIE_BACKEND scripts/dev test` 5704 passed; `scripts/dev ruff check .` clean.
+
+Not verified: real Kiro behaviour under an actual kernel OOM kill (tests use a scripted fake
+and a stand-in `memory.events`); a one-off spike against Kiro 0.66.91 confirmed `session/load`
+restores the conversation after a SIGKILL, but that spike isn't part of the suite.
 
 PR: pending
 CI: pending
