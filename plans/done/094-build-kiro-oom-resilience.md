@@ -425,7 +425,7 @@ Not verified: real Kiro behaviour under an actual kernel OOM kill (tests use a s
 and a stand-in `memory.events`); a one-off spike against Kiro 0.66.91 confirmed `session/load`
 restores the conversation after a SIGKILL, but that spike isn't part of the suite.
 
-PR: pending
-CI: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/43
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
