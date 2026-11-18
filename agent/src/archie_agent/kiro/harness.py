@@ -50,6 +50,7 @@ from archie_agent.kiro import agent_files
 from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpError
 from archie_agent.kiro.mcp_server import ArchieMcpServer
 from archie_agent.kiro.translate import RootContext, TurnTranslator, summarization
+from archie_agent.oom import kills_since, oom_kill_count
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
 from archie_agent.question import Answer, QuestionBroker, QuestionError, create_question_tool
 from archie_agent.session_bus import SessionEventBus
@@ -198,6 +199,11 @@ class KiroHarness:
         self._started = False
         self._changed = asyncio.Event()
         self._exit_code: int | None = None
+        # Why the last Kiro process stopped, e.g. "Kiro backend stopped (exit code 1; ...)".
+        self._exit_reason: str | None = None
+        # The container's OOM-kill count and when it was read: when Kiro started, and at
+        # each turn's start and end, so an exit is only blamed on recent kills (094 D16).
+        self._oom_baseline: tuple[int | None, datetime] = (None, datetime.now(UTC))
         self._ledger = CreditLedger(self._kiro.credits)
         self._context_pct: float | None = None  # Kiro's latest root context usage (089)
         self._root_context = RootContext()  # live figure without placeholders (091 D8)
@@ -290,6 +296,7 @@ class KiroHarness:
             await self._acp.start()
         except OSError as exc:
             raise KiroStartupError(f"Cannot start {self._command[0]}: {exc}") from exc
+        self._mark_oom_baseline()
 
         try:
             await self._acp.request(
@@ -536,14 +543,28 @@ class KiroHarness:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
+    def _mark_oom_baseline(self) -> None:
+        self._oom_baseline = (oom_kill_count(), datetime.now(UTC))
+
     def _on_exit(self, code: int | None) -> None:
         self._exit_code = code
+        before, since = self._oom_baseline
+        kills = kills_since(before)
+        detail = f"exit code {code}"
+        if kills:
+            detail += (
+                f"; the out-of-memory killer killed {kills} process(es) in this container "
+                f"since {since:%H:%M:%S} UTC"
+            )
+        self._exit_reason = f"Kiro backend stopped ({detail})"
+        if self._acp is not None:
+            self._acp.record("exit", {"code": code, "oom_kills": kills})
         if not self._dead:
             self._dead = True
             if self._closing:
-                log.info("Kiro backend stopped (exit code %s)", code)
+                log.info("%s", self._exit_reason)
             else:
-                log.error("Kiro backend stopped (exit code %s)", code)
+                log.error("%s", self._exit_reason)
 
     # -- turns -------------------------------------------------------------------
 
@@ -567,7 +588,9 @@ class KiroHarness:
             await self._emit_status()
 
     async def _run_turn(self, content: str) -> None:
-        assert self._acp is not None
+        acp = self._acp
+        assert acp is not None
+        self._mark_oom_baseline()
         turn = self.session.next_turn_index()
         await self._event_bus.emit(
             UserMessage(id=str(ULID()), turn=turn, scope=None, content=content)
@@ -580,7 +603,7 @@ class KiroHarness:
         error: str | None = None
         terminal_done = False
         try:
-            result = await self._acp.request(
+            result = await acp.request(
                 "session/prompt",
                 {
                     "sessionId": self._kiro_session_id,
@@ -589,10 +612,13 @@ class KiroHarness:
             )
             stop_reason = (result or {}).get("stopReason") or "end_turn"
         except AcpError as exc:
-            error = str(exc)
+            # Kiro died: say why, with the OOM kills seen during the turn (094).
+            error = self._exit_reason if not acp.alive and self._exit_reason else str(exc)
         except Exception as exc:  # noqa: BLE001 — every turn ends with a terminal event
             log.exception("Kiro turn failed")
             error = f"{type(exc).__name__}: {exc}"
+        if acp.alive:
+            self._mark_oom_baseline()
         try:
             self._translator = None
             now = datetime.now(UTC)

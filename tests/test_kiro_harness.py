@@ -13,6 +13,7 @@ from pathlib import Path
 import msgspec
 import pytest
 import yaml
+from archie_agent import oom
 from archie_agent.kiro.harness import KiroHarness, KiroStartupError
 from archie_agent.tool_policy_live import LiveToolPolicy
 from archie_shared.commands import AnswerCommand
@@ -32,6 +33,7 @@ from archie_shared.events import (
     decode_event,
     encode_event,
 )
+from archie_shared.kiro import frame_log_path
 from archie_shared.schemas import NexusConfig
 
 FAKE = Path(__file__).parent / "fake_kiro.py"
@@ -293,6 +295,57 @@ async def test_kiro_exit_mid_turn_then_dead_notice(harness, home):
     notice = next(e for e in seen if isinstance(e, ErrorNotice))
     assert notice.kind == "turn_error" and "start a new session" in notice.message
     assert not harness.turn_active
+
+
+def _frames(home: Path) -> list[dict]:
+    path = frame_log_path(home, "kirotest-01")
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.fixture
+def oom_events(tmp_path, monkeypatch) -> Path:
+    """A ``memory.events`` stand-in that the fake's ``exit`` turn bumps (094)."""
+    path = tmp_path / "memory.events"
+    path.write_text("oom 0\noom_kill 0\n")
+    monkeypatch.setattr(oom, "MEMORY_EVENTS", path)
+    monkeypatch.setenv("FAKE_KIRO_OOM_FILE", str(path))
+    return path
+
+
+async def test_kiro_exit_during_oom_names_the_oom_killer(home, tmp_path, oom_events):
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit")
+    finally:
+        await h.close()
+    error = _log(home)[-1]
+    assert isinstance(error, TurnError)
+    assert "Kiro backend stopped (exit code 3; the out-of-memory killer killed 1 process(es)" in (
+        error.message
+    )
+    exits = [f["msg"] for f in _frames(home) if f["dir"] == "exit"]
+    assert exits == [{"code": 3, "oom_kills": 1}]
+
+
+async def test_kiro_exit_without_oom_kill_keeps_the_plain_reason(harness, home):
+    await harness.handle_message("exit")
+    error = _log(home)[-1]
+    assert "exit code 3" in error.message and "out-of-memory" not in error.message
+    exits = [f["msg"] for f in _frames(home) if f["dir"] == "exit"]
+    assert exits == [{"code": 3, "oom_kills": 0}]
+
+
+async def test_kiro_stderr_goes_to_the_frame_log(home, tmp_path):
+    h = _harness(home, tmp_path)
+    await h.start()
+    deadline = time.monotonic() + 5
+    while not any(f["dir"] == "err" for f in _frames(home)) and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    await h.close()
+    errs = [f["msg"] for f in _frames(home) if f["dir"] == "err"]
+    assert "fake kiro: started" in errs and "[INFO] routine progress" in errs
+    assert not any("ExperimentalWarning" in line for line in errs)
 
 
 async def _compact(harness: KiroHarness) -> list:

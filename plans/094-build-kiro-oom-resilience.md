@@ -297,7 +297,7 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   pgid test failed with the old `exec/tool.py` (stashed) and passes with the fix. Verify
   plus `tests/test_code_tool.py`: 162 passed; ruff check and format clean.
 
-### [ ] M2 — OOM kills are named in tool results, Kiro exits and the frame log
+### [x] M2 — OOM kills are named in tool results, Kiro exits and the frame log
 
 - **Approach:** add `MEMORY_EVENTS`, `oom_kill_count()`, `kills_since()` and `tool_warning()` to
   `oom.py`.
@@ -313,7 +313,12 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   keeps Kiro's stderr and exit.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_oom_tools.py tests/test_kiro_harness.py`
   passes.
-- **Outcome:**
+- **Outcome:** `oom.py` gained the counter helpers and `tool_warning()`; `run_shell` and the
+  exec runner's `RunnerCrash` add the warning; the harness keeps a `(count, time)` baseline,
+  builds `_exit_reason`, writes an `exit` frame through the new `AcpClient.record`, and
+  `_acp._read_stderr` writes `err` frames. `fake_kiro.py` bumps `FAKE_KIRO_OOM_FILE` in its
+  `exit` turn. Verify plus `tests/test_exec_tool.py` and `tests/test_kiro_mcp.py`: 98
+  passed; ruff clean.
 
 ### [ ] M3 — Kiro is restarted and its session reloaded after an unexpected exit
 

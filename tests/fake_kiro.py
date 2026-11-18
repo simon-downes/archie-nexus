@@ -12,6 +12,8 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
 - ``FAKE_KIRO_COMPACT``: ``_kiro/session/compact`` variant: ``ok`` (default; sends a
   ``summarization_completed`` frame, then ``{success: true}``), ``busy`` (``{success:
   false}``), ``error`` (JSON-RPC error), ``slow`` (``ok`` after 1 s).
+- ``FAKE_KIRO_OOM_FILE``: a ``memory.events``-style file whose ``oom_kill`` count the
+  ``exit`` turn bumps before it exits, like the kernel's OOM killer.
 - The prompt text picks the turn: ``error`` → JSON-RPC error; ``exit`` → exit 3
   mid-turn; ``sleep`` → MCP ``shell sleep 30`` until ``session/cancel``;
   ``permission`` → ask permission; ``autocompact`` → text, an automatic compaction
@@ -36,6 +38,7 @@ RECORD = os.environ.get("FAKE_KIRO_RECORD")
 HOME = Path(os.environ.get("FAKE_KIRO_HOME", str(Path.home() / ".kiro")))
 SCENARIO = os.environ.get("FAKE_KIRO_SCENARIO", "ok")
 COMPACT = os.environ.get("FAKE_KIRO_COMPACT", "ok")
+OOM_FILE = os.environ.get("FAKE_KIRO_OOM_FILE")
 SUMMARY = "## Overview\nFake Kiro summary."
 SESSION = "sess_fake"
 MODELS = ["auto", "claude-opus-5.5", "claude-sonnet-5.5", "gpt-5.6-luna", "gpt-5.6-sol"]
@@ -54,6 +57,14 @@ def record(entry: dict) -> None:
     if RECORD:
         with open(RECORD, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
+
+
+def oom_kill() -> None:
+    """Bump the ``oom_kill`` count in ``FAKE_KIRO_OOM_FILE``, like a kernel OOM kill."""
+    if OOM_FILE:
+        path = Path(OOM_FILE)
+        count = int(path.read_text().split()[-1]) if path.exists() else 0
+        path.write_text(f"oom 0\noom_kill {count + 1}\n")
 
 
 def send(msg: dict) -> None:
@@ -307,6 +318,7 @@ async def prompt(rid: int, params: dict) -> None:
     if text == "exit":
         chunk("Starting")
         await asyncio.sleep(0.1)
+        oom_kill()
         os._exit(3)
     if text == "sleep":
         chunk("Sleeping.")
