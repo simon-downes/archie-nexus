@@ -44,6 +44,16 @@ def highlight_code(code: str, lang: str = "") -> str:
     return f'<pre class="highlight"><code>{body}</code></pre>'
 
 
+def highlight_file(text: str, filename: str) -> str:
+    """Highlight a whole file by its name's lexer (plain text when none matches)."""
+    try:
+        lexer = get_lexer_for_filename(filename, text)
+    except ClassNotFound:
+        lexer = TextLexer()
+    body = highlight(text, lexer, _FORMATTER)
+    return f'<pre class="highlight"><code>{body}</code></pre>'
+
+
 def _highlight(code: str, lang: str, _attrs: str) -> str:
     return highlight_code(code, lang.split()[0] if lang else "") + "\n"
 

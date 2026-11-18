@@ -151,6 +151,8 @@ Pages:
 | `GET` | `/insights/tools` | insights: calls, errors, duration and result size per tool |
 | `GET` | `/insights/subagents` | insights: subagent types and skill loads |
 | `GET` | `/insights/errors` | insights: request, turn and subagent errors |
+| `GET` | `/brain?q=<terms>` | brain browser: the brain's file tree beside a landing pane, or `brain_search` results for `q` (`HX-Request` gets the `#brain-main` fragment) |
+| `GET` | `/brain/{path}` | brain browser: one file (Markdown rendered, other text highlighted) or directory listing; 404 for dot-names, symlinks, the root `index.yaml` or a missing path |
 | `GET` | `/auth` | credential status web page |
 | `GET` | `/auth/callback/{provider}` | complete browser OAuth callback (registered as the provider redirect URI) |
 
@@ -188,7 +190,7 @@ Other root routes:
 
 The agent service itself listens on port 8080 and provides `/status`, `/events`, and `/stream`; its local API for subprocesses is on a Unix socket instead. The orchestrator’s session routes are the normal client-facing interface; it does not proxy the agent's `/status`, since the session record carries the status, model and pending question. Ended-session history from `/api/sessions/{id}/events` has the agent's format: the same NDJSON lines and the same 409 `{"error": "cursor_not_found", "cursor": ...}` for an unknown cursor.
 
-The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only `archie.db` (the metrics tables joined to the session records); each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The viewer and insights pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
+The session log viewer reads `<ARCHIE_HOME_DIR>/sessions/*.jsonl` directly, so stopped sessions remain browsable. Usage totals come from `llm_request` events. For an active session, `/sessions/{id}/live` opens the agent `/stream` WebSocket and never sends on it. The insights pages read only `archie.db` (the metrics tables joined to the session records); each request first syncs it without waiting (if another sync holds the lock, the page renders from the current index with an "Index is updating" notice). The brain browser (`brain_web.py`) reads the brain root as the host resolves it (`archie_shared.brain.brain_root`). Its tree and file views only read, never create the root, and leave out dot-names, symlinks and the root `index.yaml`. Its search calls `archie_shared.brain.search(q, 50, refresh_index=False)`, the function behind the agent's `brain_search` tool, so results and order are the tool's. With `refresh_index=False` a stale index is rebuilt in memory only: the host never takes the brain lock or writes `index.yaml`, because its file locks and symlink resolution may differ from the container's. Without `rg` on the host's `PATH`, `search` scans the indexed entries' bodies in Python instead, skipping hidden paths and symlinks as `rg` does; it doesn't apply `.gitignore` rules. The viewer, insights and brain pages send a restrictive `Content-Security-Policy`; like the other web pages, they have no authentication and assume the trusted local deployment model.
 
 ### Workspaces
 

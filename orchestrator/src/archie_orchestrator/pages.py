@@ -10,6 +10,8 @@ of its own is a sub-path of its page (``/sessions/{id}/live``).
   GET /sessions/{session_id}            — session transcript
   GET /sessions/{session_id}/live       — live transcript fragments (SSE)
   GET /insights[/sessions[/{id}]|/models|/tools|/subagents|/errors] — usage insights
+  GET /brain[?q=<terms>]                — brain browser: tree, landing or search results
+  GET /brain/{path}                     — brain browser: one file or directory
   GET /auth                             — credential status
   GET /auth/callback/{provider}         — OAuth callback (the browser lands here)
 """
@@ -22,7 +24,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from archie_orchestrator import insights_web
+from archie_orchestrator import brain_web, insights_web
 from archie_orchestrator.auth import AuthError
 from archie_orchestrator.web import (
     auth_status_page,
@@ -105,6 +107,8 @@ routes = [
     Route("/insights/tools", insights_web.tools_page, methods=["GET"]),
     Route("/insights/subagents", insights_web.subagents_page, methods=["GET"]),
     Route("/insights/errors", insights_web.errors_page, methods=["GET"]),
+    Route("/brain", brain_web.index_page, methods=["GET"]),
+    Route("/brain/{path:path}", brain_web.path_page, methods=["GET"]),
     Route("/auth", auth_status_page, methods=["GET"]),
     Route("/auth/callback/{provider}", auth_callback, methods=["GET"]),
 ]

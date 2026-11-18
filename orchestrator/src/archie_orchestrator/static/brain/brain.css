@@ -1,0 +1,250 @@
+/* Brain browser: a sticky sidebar tree beside the main pane. Builds on viewer.css
+   (the .viewer variables, .md reading type, .notice, .chrome). */
+
+.viewer .brain {
+    display: grid;
+    grid-template-columns: 17rem minmax(0, 1fr);
+    gap: 2rem;
+    align-items: start;
+}
+
+/* --- sidebar ------------------------------------------------------------- */
+
+.viewer .brain-side {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    padding-right: 0.75rem;
+    border-right: 1px solid var(--v-chrome-border);
+}
+
+.viewer .brain-tree ul {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 0 0.85rem;
+}
+
+.viewer .brain-tree > ul {
+    padding-left: 0;
+}
+
+.viewer .brain-tree li {
+    margin: 0;
+    padding: 0;
+}
+
+.viewer .brain-tree details {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+}
+
+.viewer .brain-tree summary {
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    color: var(--v-dim);
+    font-weight: 400;
+}
+
+.viewer .brain-tree a {
+    display: inline-block;
+    max-width: 100%;
+    padding: 0.05rem 0.3rem;
+    border-radius: var(--nc-radius);
+    color: var(--nc-text);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+}
+
+.viewer .brain-tree a.dir {
+    font-weight: 600;
+}
+
+.viewer .brain-tree a:hover {
+    background: var(--v-chrome-bg);
+}
+
+.viewer .brain-tree a[aria-current="page"] {
+    background: var(--v-chrome-bg);
+    color: var(--v-user);
+    font-weight: 700;
+}
+
+/* --- main pane ----------------------------------------------------------- */
+
+.viewer .brain-main {
+    min-width: 0;
+}
+
+.viewer .brain-main .crumbs {
+    margin-bottom: 0.25rem;
+    font-family: var(--v-mono);
+}
+
+.viewer .brain-title,
+.viewer .entry-head h1 {
+    font-size: 1.6rem;
+    margin-block: 0 0.35rem;
+}
+
+.viewer .entry-head {
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--v-chrome-border);
+}
+
+.viewer .entry-head .file-name {
+    font-family: var(--v-mono);
+}
+
+.viewer .entry-head .summary {
+    margin-block: 0 0.5rem;
+    color: var(--v-dim);
+    max-width: 52rem;
+}
+
+.viewer .entry-head .path {
+    font-family: var(--v-mono);
+}
+
+.viewer .tags {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+
+.viewer .tag {
+    font-family: var(--v-mono);
+    font-size: 0.72rem;
+    background: var(--v-chrome-bg);
+    border: 1px solid var(--v-chrome-border);
+    border-radius: 999px;
+    padding: 0 0.5rem;
+}
+
+/* nimble.css draws <article> as a card; an entry body reads as plain page text. */
+.viewer .brain-main article.md {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: none;
+    box-shadow: none;
+}
+
+.viewer .dir-list {
+    list-style: none;
+    padding: 0;
+    font-family: var(--v-mono);
+}
+
+.viewer .dir-list a.dir {
+    font-weight: 600;
+}
+
+.viewer .brain-main .code pre.highlight {
+    font-size: 0.82rem;
+    line-height: 1.45;
+    overflow-x: auto;
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border-radius: var(--nc-radius);
+}
+
+/* --- search -------------------------------------------------------------- */
+
+.viewer .brain-search {
+    margin: 0;
+}
+
+.viewer .brain-search input[type="search"] {
+    width: 100%;
+    font-family: var(--v-mono);
+    font-size: 0.85rem;
+}
+
+.viewer .brain-side .hint {
+    color: var(--v-dim);
+    font-size: 0.75rem;
+    margin-block: 0.35rem 0.75rem;
+}
+
+.viewer .hits {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.viewer .hit {
+    margin: 0;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--v-chrome-border);
+}
+
+.viewer .hit p {
+    margin-block: 0 0.25rem;
+}
+
+.viewer .hit-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+}
+
+.viewer .hit-name {
+    font-weight: 700;
+    font-size: 1.05rem;
+}
+
+.viewer .hit .score {
+    margin-left: auto;
+    color: var(--v-dim);
+    font-family: var(--v-mono);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer .hit .facts .path {
+    font-family: var(--v-mono);
+}
+
+.viewer .hit-excerpt {
+    font-family: var(--v-mono);
+    font-size: 0.8rem;
+    color: var(--v-dim);
+    border-left: 3px solid var(--v-chrome-border);
+    padding-left: 0.6rem;
+    overflow-wrap: anywhere;
+}
+
+.viewer .hit-excerpt mark {
+    color: var(--nc-text);
+    background: color-mix(in oklab, var(--v-warn) 30%, transparent);
+    border-radius: 2px;
+}
+
+.viewer .htmx-request.brain-main,
+.viewer .brain-main.htmx-swapping {
+    opacity: 0.6;
+}
+
+@media (max-width: 50rem) {
+    .viewer .brain {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1rem;
+    }
+
+    .viewer .brain-side {
+        position: static;
+        max-height: 40vh;
+        padding: 0 0 0.75rem;
+        border-right: 0;
+        border-bottom: 1px solid var(--v-chrome-border);
+    }
+}

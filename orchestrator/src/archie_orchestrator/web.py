@@ -65,6 +65,7 @@ templates.env.globals.update(
     compaction_text=transcript_html.compaction_text,
     subagent_status=subagent_status_text,
 )
+# brain_web registers brain_href here too (it builds brain URLs from this module's env).
 
 log = logging.getLogger(__name__)
 

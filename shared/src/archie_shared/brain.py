@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager, nullcontext
@@ -222,29 +224,40 @@ def _needs_refresh(root: Path, records: list[dict[str, Any]], index_mtime: float
     return False
 
 
+def _stale(root: Path, records: list[dict[str, Any]] | None) -> bool:
+    try:
+        return records is None or _needs_refresh(
+            root, records, (root / "index.yaml").stat().st_mtime
+        )
+    except OSError:
+        return True
+
+
 def ensure_fresh_index() -> list[dict[str, Any]]:
     root = brain_root()
     root.mkdir(parents=True, exist_ok=True)
     records = _load_index(root)
-    try:
-        stale = records is None or _needs_refresh(
-            root, records, (root / "index.yaml").stat().st_mtime
-        )
-    except OSError:
-        stale = True
-    if not stale:
+    if not _stale(root, records):
         return records or []
     with _lock(root):
         records = _load_index(root)
-        try:
-            stale = records is None or _needs_refresh(
-                root, records, (root / "index.yaml").stat().st_mtime
-            )
-        except OSError:
-            stale = True
-        if stale:
+        if _stale(root, records):
             records = _records(root)
             _write_index(root, records)
+    return records or []
+
+
+def current_records() -> list[dict[str, Any]]:
+    """The entries :func:`ensure_fresh_index` would return, without writing anything.
+
+    A stale or missing index is rebuilt in memory only: no lock, no ``index.yaml``
+    write, and a missing root is not created. For readers outside the container (the
+    orchestrator), whose file locks and symlink resolution may differ from the agent's.
+    """
+    root = brain_root()
+    records = _load_index(root)
+    if _stale(root, records):
+        return _records(root)
     return records or []
 
 
@@ -349,17 +362,38 @@ def mutate(path: Path, content: str, *, _already_locked: bool = False) -> str:
     return content
 
 
-def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
-    terms = list(dict.fromkeys(query.lower().split()))
-    if not terms:
-        raise BrainError("query must not be empty")
-    if limit < 0:
-        raise BrainError("limit must not be negative")
-    if limit == 0:
-        return []
-    records = ensure_fresh_index()
-    root = brain_root()
-    valid = {r["path"] for r in records}
+def _python_body_matches(root: Path, valid: set[str], terms: list[str]) -> dict[str, set[str]]:
+    """Body matches without ``rg``: scan each indexed entry.
+
+    Skips what an ``rg`` directory walk skips by default: hidden path components and
+    symlinks (``rg`` doesn't follow them).
+    """
+    body_terms: dict[str, set[str]] = {}
+    for rel in sorted(valid):
+        if any(part.startswith(".") for part in rel.split("/")):
+            continue
+        path = root / rel
+        try:
+            if path.resolve() != path:
+                continue
+            parsed = parse_entry(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            continue
+        if parsed:
+            matched = {t for t in terms if t in parsed["body"].lower()}
+            if matched:
+                body_terms[rel] = matched
+    return body_terms
+
+
+def _body_matches(root: Path, valid: set[str], terms: list[str]) -> dict[str, set[str]]:
+    """Map each indexed entry whose body contains a term to the terms it contains.
+
+    ``rg`` finds candidate files; each is re-checked against its parsed body. Without
+    ``rg`` on PATH (a host without it), every indexed entry's body is scanned instead.
+    """
+    if shutil.which("rg") is None:
+        return _python_body_matches(root, valid, terms)
     body_terms: dict[str, set[str]] = {}
     cmd = ["rg", "--json", "-i", "-F"]
     for term in terms:
@@ -368,8 +402,6 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode not in (0, 1):
         raise BrainError(f"ripgrep error: {proc.stderr.strip()}")
-    import json
-
     for line in proc.stdout.splitlines():
         try:
             obj = json.loads(line)
@@ -392,6 +424,27 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
                 matched = {t for t in terms if t in body.lower()}
                 if matched:
                     body_terms.setdefault(rel, set()).update(matched)
+    return body_terms
+
+
+def search(query: str, limit: int = 10, *, refresh_index: bool = True) -> list[dict[str, Any]]:
+    """Rank indexed entries for ``query``; the logic behind the ``brain_search`` tool.
+
+    With ``refresh_index=False`` a stale index is rebuilt in memory only
+    (:func:`current_records`); the ranking is the same.
+    """
+    terms = list(dict.fromkeys(query.lower().split()))
+    if not terms:
+        raise BrainError("query must not be empty")
+    if limit < 0:
+        raise BrainError("limit must not be negative")
+    if limit == 0:
+        return []
+    records = ensure_fresh_index() if refresh_index else current_records()
+    if not records:  # also covers a missing root, which rg would report as an error
+        return []
+    root = brain_root()
+    body_terms = _body_matches(root, {r["path"] for r in records}, terms)
     hits = []
     for r in records:
         fields = {
