@@ -14,6 +14,7 @@ import msgspec
 import pytest
 import yaml
 from archie_agent import oom
+from archie_agent.kiro import harness as kiro_harness
 from archie_agent.kiro.harness import KiroHarness, KiroStartupError
 from archie_agent.tool_policy_live import LiveToolPolicy
 from archie_shared.commands import AnswerCommand
@@ -275,26 +276,155 @@ async def test_permission_request_is_cancelled(harness, tmp_path, caplog):
     assert "Run builtin shell" in caplog.text
 
 
-async def test_kiro_exit_mid_turn_then_dead_notice(harness, home):
-    await harness.handle_message("exit")
+async def _finish_restart(h: KiroHarness) -> None:
+    task = h._restart_task
+    if task is not None:
+        await asyncio.wait_for(asyncio.shield(task), 10)
+
+
+def _config_sets_after_load(tmp_path: Path) -> dict[str, str]:
+    sets: dict[str, str] = {}
+    seen_load = False
+    for r in _record(tmp_path):
+        msg = r.get("in", {})
+        if msg.get("method") == "session/load":
+            seen_load = True
+        if seen_load and msg.get("method") == "session/set_config_option":
+            params = msg["params"]
+            sets[params["configId"]] = params["value"]
+    return sets
+
+
+def _methods(tmp_path: Path) -> list[str]:
+    return [r["in"]["method"] for r in _record(tmp_path) if "in" in r and r["in"].get("method")]
+
+
+async def test_restart_reloads_the_session_after_an_unexpected_exit(home, tmp_path, oom_events):
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit")
+        error = _log(home)[-1]
+        assert isinstance(error, TurnError)
+        assert "out-of-memory killer" in error.message and "restarting Kiro" in error.message
+        await _finish_restart(h)
+        assert not h.dead
+        assert h._context_pct is None
+        assert not any(
+            isinstance(e, AssistantMessage) and "replayed" in e.content for e in _log(home)
+        )
+        await h.handle_message("run it")
+    finally:
+        await h.close()
     events = _log(home)
-    assert isinstance(events[-1], TurnError)
-    assert "Kiro backend stopped" in events[-1].message
-    count = len(events)
-    seen: list = []
-    original = harness.event_bus.emit
+    assert any(isinstance(e, ToolResult) and "KIRO-OK" in e.content for e in events)
+    assert isinstance(events[-1], TurnComplete)
+    assert _methods(tmp_path).count("initialize") == 2
+    assert any(
+        r.get("in", {}).get("method") == "session/load"
+        and r["in"]["params"]["sessionId"] == "sess_fake"
+        for r in _record(tmp_path)
+    )
+    sets = _config_sets_after_load(tmp_path)
+    assert sets.get("contentCollection") == "disabled"
+    assert sets.get("model") == "gpt-5.6-luna"
 
-    async def capture(event, target=None):
-        seen.append(event)
-        return await original(event, target)
 
-    harness.event_bus.emit = capture
-    assert harness.try_begin_turn()
-    await harness.handle_message("again")
-    assert len(_log(home)) == count
-    notice = next(e for e in seen if isinstance(e, ErrorNotice))
-    assert notice.kind == "turn_error" and "start a new session" in notice.message
-    assert not harness.turn_active
+async def test_prompt_after_restart_carries_a_resume_note(home, tmp_path):
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit")
+        await _finish_restart(h)
+        await h.handle_message("run it")
+        await h.handle_message("more")
+    finally:
+        await h.close()
+    prompts = [
+        r["in"]["params"]["prompt"][0]["text"]
+        for r in _record(tmp_path)
+        if r.get("in", {}).get("method") == "session/prompt"
+    ]
+    assert prompts[0] == "exit"
+    assert prompts[1].startswith("[Archie note:") and prompts[1].endswith("run it")
+    assert prompts[2] == "more"
+    assert [e.content for e in _log(home) if isinstance(e, UserMessage)] == [
+        "exit",
+        "run it",
+        "more",
+    ]
+
+
+async def test_restart_kills_orphaned_tool_processes(home, tmp_path):
+    import subprocess
+
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit_tool")
+        await _finish_restart(h)
+        await _until(
+            lambda: (
+                "sleep 30"
+                not in subprocess.run(
+                    ["pgrep", "-af", "sleep 30"], capture_output=True, text=True
+                ).stdout
+            )
+        )
+    finally:
+        await h.close()
+
+
+async def test_restart_limit_leaves_the_backend_dead(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(kiro_harness, "RESTART_LIMIT", 1)
+    h = _harness(home, tmp_path)
+    await h.start()
+    seen = _capture(h)
+    try:
+        await h.handle_message("exit")
+        await _finish_restart(h)
+        assert not h.dead
+        await h.handle_message("exit")
+        await _until(
+            lambda: any(isinstance(e, ErrorNotice) and e.kind == "backend_stopped" for e in seen)
+        )
+    finally:
+        await h.close()
+    assert h.dead and h._restart_task is not None
+
+
+async def test_failed_restart_is_dead_and_later_messages_say_so(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_LOAD", "error")
+    h = _harness(home, tmp_path)
+    await h.start()
+    seen = _capture(h)
+    try:
+        await h.handle_message("exit")
+        await _finish_restart(h)
+        assert h.dead
+        stopped = next(
+            e for e in seen if isinstance(e, ErrorNotice) and e.kind == "backend_stopped"
+        )
+        assert "restart failed" in stopped.message
+        seen.clear()
+        assert h.try_begin_turn()
+        await h.handle_message("again")
+    finally:
+        await h.close()
+    dead = next(e for e in seen if isinstance(e, ErrorNotice) and e.kind == "turn_error")
+    assert "start a new session" in dead.message
+
+
+async def test_fail_closed_does_not_restart(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_SCENARIO", "late_builtin")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("run it")
+        await _until(lambda: h.dead)
+    finally:
+        await h.close()
+    assert _methods(tmp_path).count("initialize") == 1
 
 
 def _frames(home: Path) -> list[dict]:
@@ -419,9 +549,17 @@ async def test_compact_before_any_turn_sends_nothing(harness, home, tmp_path):
     assert not any(isinstance(e, CompactionStart) for e in _safe_log(home))
 
 
-async def test_compact_on_a_dead_backend_is_refused(harness, tmp_path):
-    await harness.handle_message("exit")
-    seen = await _compact(harness)
+async def test_compact_on_a_dead_backend_is_refused(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_LOAD", "error")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        await h.handle_message("exit")  # the restart fails to reload → dead
+        await _finish_restart(h)
+        assert h.dead
+        seen = await _compact(h)
+    finally:
+        await h.close()
     notice = next(e for e in seen if isinstance(e, ErrorNotice))
     assert notice.kind == "manual_compaction_failed" and "start a new session" in notice.message
     assert _compact_requests(tmp_path) == []
@@ -704,7 +842,7 @@ async def test_app_lifespan_startup_failure_writes_error_file(home, tmp_path, mo
         ("builtin_tag", "built-in tools shell"),
         ("sticky_collection", "contentCollection is 'enabled'"),
         ("autopilot_off", "autopilot is 'off'"),
-        ("no_model", "does not offer kiro.default_model 'gpt-5.6-luna'"),
+        ("no_model", "does not offer model 'gpt-5.6-luna'"),
         ("mcp_failed", "archie MCP server is connecting"),
         ("exit_on_start", "Kiro backend stopped (exit code 7)"),
         ("hang", "timed out"),
@@ -895,7 +1033,8 @@ async def test_close_during_exit_still_fails_pending_request(home, tmp_path):
     await h._acp.close()
     with pytest.raises(Exception, match="Kiro backend stopped"):
         await asyncio.wait_for(pending, 2)
-    assert h.dead
+    assert h._exit_reason is not None  # the reader's EOF ran _on_exit
+    await _finish_restart(h)
     await h.close()
 
 

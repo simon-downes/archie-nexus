@@ -320,7 +320,7 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   `exit` turn. Verify plus `tests/test_exec_tool.py` and `tests/test_kiro_mcp.py`: 98
   passed; ruff clean.
 
-### [ ] M3 — Kiro is restarted and its session reloaded after an unexpected exit
+### [x] M3 — Kiro is restarted and its session reloaded after an unexpected exit
 
 - **Approach:** split `KiroHarness.start` into one-time setup and `_launch`, following the
   existing step order and `remaining(step)` deadline pattern in `start`. Add the restart flow
@@ -341,7 +341,7 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
 - **Deliverable:** a Kiro session survives `kiro-cli` dying and carries on with its
   conversation.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_kiro_harness.py` passes.
-- **Outcome:**
+- **Outcome:** `start()` keeps the one-time setup and calls `_launch(load_session_id, model_id, timeout)`, which does `session/new` or `session/load`. `_on_exit` restarts (up to 3 in 30 min) via `_restart`, which closes the old client, clears the config, and relaunches with `session/load`; `handle_message`, `switch_model` and `run_manual_compaction` await the restart first, and `interrupt` drops a waiting message (D17). `_on_notification` ignores replayed frames while `_restoring`. `fake_kiro.py` gained `session/load`, `FAKE_KIRO_LOAD`, `exit_tool`, and last-paragraph scenario matching. Six new tests plus three updated for the new behaviour; `test_kiro_harness.py` and `test_oom_tools.py`: 69 passed; ruff clean.
 
 ### [ ] M4 — A dead backend reports `error`, and the docs describe the new behaviour
 

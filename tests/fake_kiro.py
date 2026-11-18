@@ -13,9 +13,14 @@ Run with ``sys.executable tests/fake_kiro.py``. Behaviour:
   ``summarization_completed`` frame, then ``{success: true}``), ``busy`` (``{success:
   false}``), ``error`` (JSON-RPC error), ``slow`` (``ok`` after 1 s).
 - ``FAKE_KIRO_OOM_FILE``: a ``memory.events``-style file whose ``oom_kill`` count the
-  ``exit`` turn bumps before it exits, like the kernel's OOM killer.
-- The prompt text picks the turn: ``error`` → JSON-RPC error; ``exit`` → exit 3
-  mid-turn; ``sleep`` → MCP ``shell sleep 30`` until ``session/cancel``;
+  ``exit`` and ``exit_tool`` turns bump before they exit, like the kernel's OOM killer.
+- ``FAKE_KIRO_LOAD``: ``session/load`` variant (094): ``ok`` (default; replays a frame,
+  returns ``configOptions`` with ``contentCollection: enabled`` like real Kiro),
+  ``error`` (JSON-RPC error), ``exit`` (the process exits during load).
+- The prompt text (its last paragraph, so a resume-note prefix doesn't change it) picks the
+  turn: ``error`` → JSON-RPC error; ``exit`` → exit 3 mid-turn; ``exit_tool`` → start
+  ``shell sleep 30`` then exit 3 (an orphaned tool); ``sleep`` → MCP ``shell sleep 30`` until
+  ``session/cancel``;
   ``permission`` → ask permission; ``autocompact`` → text, an automatic compaction
   (started, completed, placeholder context 20, real context 4.2), text;
   ``autocompact_fail`` → a compaction that fails; ``question`` → MCP ``question`` until it
@@ -38,6 +43,7 @@ RECORD = os.environ.get("FAKE_KIRO_RECORD")
 HOME = Path(os.environ.get("FAKE_KIRO_HOME", str(Path.home() / ".kiro")))
 SCENARIO = os.environ.get("FAKE_KIRO_SCENARIO", "ok")
 COMPACT = os.environ.get("FAKE_KIRO_COMPACT", "ok")
+LOAD = os.environ.get("FAKE_KIRO_LOAD", "ok")
 OOM_FILE = os.environ.get("FAKE_KIRO_OOM_FILE")
 SUMMARY = "## Overview\nFake Kiro summary."
 SESSION = "sess_fake"
@@ -309,6 +315,9 @@ async def ask_question(rid: int, *, fail: bool) -> None:
 
 async def prompt(rid: int, params: dict) -> None:
     text = params["prompt"][0]["text"]
+    if text.startswith("[Archie note:"):
+        text = text.split("\n\n", 1)[1]
+    text = text.strip()
     cancelled.clear()
     if text == "hang":
         await asyncio.Event().wait()
@@ -318,6 +327,14 @@ async def prompt(rid: int, params: dict) -> None:
     if text == "exit":
         chunk("Starting")
         await asyncio.sleep(0.1)
+        oom_kill()
+        os._exit(3)
+    if text == "exit_tool":
+        chunk("Starting")
+        asyncio.create_task(
+            archie_tool("tc_sleep", "shell", {"command": "sleep 30", "description": "Sleep"})
+        )
+        await asyncio.sleep(0.3)
         oom_kill()
         os._exit(3)
     if text == "sleep":
@@ -463,6 +480,27 @@ async def session_new(rid: int, params: dict) -> None:
     asyncio.create_task(advertise_models())
 
 
+async def session_load(rid: int, params: dict) -> None:
+    if LOAD == "exit":
+        os._exit(5)
+    if LOAD == "error":
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": "no such session"}})
+        return
+    state["mode"] = (params.get("_meta") or {}).get("kiro", {}).get("modeId", "vibe")
+    state["contentCollection"] = "enabled"  # real Kiro reloads with collection back on
+    # Replay a little history; the harness ignores it while restoring (094).
+    chunk("replayed history")
+    context(99.0)
+    mcp_status("connecting")
+    await asyncio.sleep(0.01)
+    mcp_status("connected")
+    tags("read")
+    send(
+        {"jsonrpc": "2.0", "id": rid, "result": {"sessionId": SESSION, "configOptions": options()}}
+    )
+    asyncio.create_task(advertise_models())
+
+
 async def advertise_models() -> None:
     await asyncio.sleep(0.05)
     models_ready["value"] = True
@@ -475,6 +513,8 @@ async def handle(msg: dict) -> None:
         send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1}})
     elif method == "session/new":
         await session_new(rid, params)
+    elif method == "session/load":
+        await session_load(rid, params)
     elif method == "session/set_config_option":
         sticky = {"sticky_collection": "contentCollection", "autopilot_off": "autopilot"}
         if SCENARIO == "autopilot_off":
