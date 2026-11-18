@@ -72,7 +72,7 @@ The orchestrator keeps one record per session in the `sessions` table of `archie
 
 `SessionTracker` (`orchestrator/src/archie_orchestrator/tracker.py`) owns every write to `sessions`. It keeps every record that hasn't ended in memory and is authoritative for them; reads of ended records go to the store. Container operations go through a small `Runtime` interface (`DockerRuntime` in production, a fake in tests). For each running session the tracker holds one read-only WebSocket to the agent's `/stream`, as the live viewer does, and folds the events into the record:
 
-- A root `user_message` sets `working`; `session_status` sets `idle`, `working` or `blocked`, the model and the question, and a `kiro/` model sets `backend` to `kiro`.
+- A root `user_message` sets `working`; `session_status` sets `idle`, `working`, `blocked` or `error` (a Kiro backend that died and can't be restarted reports `error`), the model and the question, and a `kiro/` model sets `backend` to `kiro`.
 - A root `turn_complete` or `turn_error` sets `unseen`. After a root `turn_error` the next `idle` is stored as `error`; a root `turn_interrupted` drops that pending error.
 - Other events only move `last_activity_at`. A change to `last_activity_at` alone is written and published at most every 10 s per session, with a trailing write at the end of the window; every other change is written and published at once.
 - When the stream closes, the tracker asks Docker whether the container still runs: gone makes the record `exited`; running reconnects after 1, 2, then 5 s. A `stopping` record is left to the stop.

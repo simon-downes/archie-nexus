@@ -137,15 +137,30 @@ to re-check that later.
   discards.
 - **Permission requests** are answered `cancelled`, with a warning. The agent rules allow
   every Archie tool, skill and `archie-worker`, so Kiro shouldn't ask.
-- **Kiro exits mid-session:** the active turn ends with `turn_error` "Kiro backend stopped".
-  Later messages get a live `error_notice` saying to start a new session. Kiro sessions are
-  not resumed.
+- **Kiro exits mid-session:** the harness restarts it (094). The active turn ends with a
+  `turn_error` that names the exit code, and the out-of-memory killer with a count when the
+  container's `oom_kill` counter rose during the turn. The harness kills the turn's Archie
+  tool processes, relaunches `kiro-cli`, and reloads the conversation with ACP `session/load`,
+  re-applying `contentCollection: disabled`, the model and effort. It then sends a live
+  `error_notice` kind `backend_restarted`, and prefixes the next prompt with a note that the
+  previous turn was cut off (the logged `user_message` stays as typed). It restarts at most 3
+  times in 30 minutes. If a restart can't reload the session, or the limit is reached, the
+  backend is dead: it reports `session_status` state `error`, sends `error_notice` kind
+  `backend_stopped`, and later messages get a `turn_error` telling you to start a new session.
+  A fail-closed stop (a config error or a disallowed built-in tool) is never restarted.
+- **Out-of-memory resilience:** every process a tool starts (`shell`, `exec`, and the exec
+  runner) raises its own `oom_score_adj` to 1000 before it runs, so when the VM or container
+  runs low on memory the kernel kills a tool process before the agent or Kiro. A `shell`
+  result or an exec `RunnerCrash` whose run overlapped an OOM kill carries an
+  `[archie warning: ...]` line. See `agent/src/archie_agent/oom.py`.
 - **Shutdown** kills Kiro's process group and stops the MCP server.
 
 ## Debugging
 
 - `~/.nexus/logs/kiro/<session-id>.acp.jsonl` holds every ACP frame, both directions, with
-  the API key redacted.
+  the API key redacted. `kiro-cli` stderr lines are stored as `err` entries, and each exit as
+  an `exit` entry (`{"code": N, "oom_kills": K}`), so the reason Kiro stopped outlives the
+  container.
 - `~/.nexus/logs/kiro/<session-id>.startup-error` holds the reason a session failed to start.
 - Kiro's stderr goes to the agent log. Routine `[INFO]`/`[DEBUG]` lines go to DEBUG, the
   Node SQLite `ExperimentalWarning` is dropped, and everything else goes to WARNING.
@@ -153,7 +168,9 @@ to re-check that later.
 ## Limits
 
 Kiro sessions run locally only, with no remote Kiro sessions or cloud sandboxes. The backend
-has no resume and no per-request latency or token counts. Context is a
+restarts and reloads its conversation after an unexpected `kiro-cli` exit (094), but a session
+still ends when its container goes away, because Kiro's session store lives inside the
+container. There are no per-request latency or token counts. Context is a
 percentage only, for the main agent only (Kiro reports none for subagents), and turn cost
 limits are not enforced. Insights and `archie stats` don't
 show credits yet. The `tests/fake_kiro.py` scripted agent covers the ACP flow without a

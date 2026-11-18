@@ -934,7 +934,10 @@ class KiroHarness:
         from archie_agent.app import _read_git_branch
 
         question = self._questions.pending
-        if question is not None:
+        if self._dead:
+            # A dead backend can't run; the TUI shows this as a failed session (094).
+            state = "error"
+        elif question is not None:
             state = "blocked"
         elif self._turn_active:
             state = "working"

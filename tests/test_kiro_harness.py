@@ -415,6 +415,20 @@ async def test_failed_restart_is_dead_and_later_messages_say_so(home, tmp_path, 
     assert "start a new session" in dead.message
 
 
+async def test_dead_backend_reports_error_state(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KIRO_LOAD", "error")
+    h = _harness(home, tmp_path)
+    await h.start()
+    try:
+        assert h.status_event().state == "idle"
+        await h.handle_message("exit")
+        await _finish_restart(h)
+        assert h.dead
+        assert h.status_event().state == "error"
+    finally:
+        await h.close()
+
+
 async def test_fail_closed_does_not_restart(home, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_KIRO_SCENARIO", "late_builtin")
     h = _harness(home, tmp_path)
