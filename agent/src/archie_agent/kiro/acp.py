@@ -111,6 +111,10 @@ class AcpClient:
         except (OSError, ValueError):
             log.warning("Cannot write Kiro frame log", exc_info=True)
 
+    def record(self, direction: str, msg: Any) -> None:
+        """Write one entry to the frame log, secrets redacted (the harness's ``exit``)."""
+        self._log(direction, msg)
+
     async def _send(self, msg: dict) -> None:
         if not self.alive or self._proc.stdin is None:
             raise AcpError("Kiro backend is not running")
@@ -216,6 +220,9 @@ class AcpClient:
                 continue
             for secret in self._redact:
                 text = text.replace(secret, "[redacted]")
+            # The frame log keeps every line, so the reason Kiro stopped outlives the
+            # container (the agent log goes to docker logs only).
+            self._log("err", text)
             # Kiro writes its routine progress as "[INFO] …" lines; keep those out of
             # the warning stream and log everything else at WARNING.
             if text.startswith(("[INFO]", "[DEBUG]")):

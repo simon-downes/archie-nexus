@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from archie_agent.oom import argv_wrapper, kills_since, oom_kill_count, shell_prefix, tool_warning
+
+# Every process started here, and its descendants, raises its own OOM score so the kernel
+# kills tools before the agent or Kiro (see archie_agent.oom).
+
 # The container's project mount. Tool subprocesses run here so file discovery,
 # git, and shell operations all act on the same tree.
 WORKSPACE = Path("/workspace")
@@ -93,7 +98,7 @@ async def run_exec(
         asyncio.TimeoutError: If the process exceeds the timeout.
     """
     proc = await asyncio.create_subprocess_exec(
-        *args,
+        *argv_wrapper(args),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=_resolve_cwd(cwd),
@@ -149,8 +154,9 @@ async def run_shell(
     from archie_agent.exec.tools._runtime_env import subprocess_env
 
     env, warning = subprocess_env()
+    oom_before = oom_kill_count()
     proc = await asyncio.create_subprocess_shell(  # noqa: S604
-        command,  # start_new_session below puts sh + descendants in one group
+        shell_prefix(command),  # start_new_session below puts sh + descendants in one group
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=_resolve_cwd(cwd),
@@ -171,6 +177,8 @@ async def run_shell(
     stderr = stderr_b.decode("utf-8", errors="replace")
     if warning:
         stderr = f"[archie warning: {warning}]\n{stderr}"
+    if kills := kills_since(oom_before):
+        stderr = "\n".join(part for part in (stderr.rstrip("\n"), tool_warning(kills)) if part)
     return CompletedProcess(
         returncode=proc.returncode,
         stdout=stdout_b.decode("utf-8", errors="replace"),
