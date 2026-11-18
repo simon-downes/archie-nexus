@@ -15,6 +15,7 @@ from archie_shared.config import ConfigError, guard_host_files, home_dir, load_c
 from archie_shared.plugins.config import PluginConfig, validate_plugins
 from archie_shared.plugins.errors import PluginManifestError
 from archie_shared.plugins.manifest import load_manifests
+from archie_shared.workspaces import is_single_name
 
 # Sections replaced by ``plugins:`` (070 M4); ``archie config migrate`` converts them.
 _REMOVED_SECTIONS = ("tools", "auth")
@@ -27,11 +28,20 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
         model: Active model key from the catalog.
         workspace_root: Base directory containing workspace projects.
         region: Session default AWS region (fallback for geo-inference models).
+        scratch_workspace: Workspace whose sessions each get a fresh directory,
+            ``<workspace>/<session_id>``, as ``/workspace``; None turns this off.
+            Has no effect until that workspace directory exists.
     """
 
     model: str = "bedrock-openai-gpt-5-6-luna"
     workspace_root: str = "~/dev"
     region: str = "eu-west-1"
+    scratch_workspace: str | None = "chat"
+
+    def __post_init__(self) -> None:
+        name = self.scratch_workspace
+        if name is not None and not is_single_name(name):
+            raise ValueError(f"global.scratch_workspace '{name}' must be a single directory name")
 
 
 class SubagentsConfig(msgspec.Struct, forbid_unknown_fields=True):

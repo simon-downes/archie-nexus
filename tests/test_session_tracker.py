@@ -21,7 +21,7 @@ from archie_orchestrator.tracker import (
     SessionTracker,
     resubscribe_delay,
 )
-from archie_shared.config import home_dir
+from archie_shared.config import ConfigError, home_dir
 from archie_shared.events import PendingQuestion, QuestionOption
 from archie_shared.schemas import NexusConfig
 
@@ -1121,6 +1121,23 @@ def test_docker_runtime_delegates_to_docker_and_lifecycle():
     prep.assert_called_once_with("proj", config, backend="kiro")
     run.assert_called_once_with(prepared)
     stop.assert_called_once_with(SID)
+
+
+def test_docker_runtime_passes_the_current_config_to_stop():
+    config = NexusConfig()
+    with patch("archie_orchestrator.lifecycle.stop_session", return_value=True) as stop:
+        assert DockerRuntime(lambda: config).stop(SID) is True
+    stop.assert_called_once_with(SID, config=config)
+
+
+def test_docker_runtime_stops_without_config_when_it_cannot_be_read(caplog):
+    def broken():
+        raise ConfigError("bad yaml")
+
+    with patch("archie_orchestrator.lifecycle.stop_session", return_value=False) as stop:
+        assert DockerRuntime(broken).stop(SID) is False
+    stop.assert_called_once_with(SID, config=None)
+    assert "without scratch cleanup: bad yaml" in caplog.text
 
 
 def test_docker_runtime_stop_stops_by_name_and_reports_log_removal():

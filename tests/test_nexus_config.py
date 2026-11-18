@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 from archie_shared.config import ConfigError
-from archie_shared.schemas import NexusConfig, expand_workspace_root, load_nexus_config
+from archie_shared.schemas import (
+    GlobalConfig,
+    NexusConfig,
+    expand_workspace_root,
+    load_nexus_config,
+)
 
 # --- Tests: load_nexus_config with defaults ---
 
@@ -110,6 +115,25 @@ def test_load_nexus_config_mounts(tmp_path):
     cfg.write_text("mounts:\n  - ~/.gitconfig*\n  - [~/.ssh/id_ed25519*, ~/.ssh:ro]\n")
     config = load_nexus_config(path=cfg)
     assert config.mounts == ("~/.gitconfig*", ("~/.ssh/id_ed25519*", "~/.ssh:ro"))
+
+
+def test_scratch_workspace_defaults_to_chat_and_loads_a_name_or_null(tmp_path):
+    assert NexusConfig().global_.scratch_workspace == "chat"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("global:\n  scratch_workspace: scratch\n")
+    assert load_nexus_config(path=cfg).global_.scratch_workspace == "scratch"
+    cfg.write_text("global:\n  scratch_workspace: null\n")
+    assert load_nexus_config(path=cfg).global_.scratch_workspace is None
+
+
+@pytest.mark.parametrize("name", ["a/b", "a\\b", ".", "..", ""])
+def test_scratch_workspace_must_be_a_single_directory_name(tmp_path, name):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"global:\n  scratch_workspace: '{name}'\n")  # single quotes: no escapes
+    with pytest.raises(ConfigError, match="scratch_workspace"):
+        load_nexus_config(path=cfg)
+    with pytest.raises(ValueError, match="single directory name"):
+        GlobalConfig(scratch_workspace=name)
 
 
 # --- Tests: load_nexus_config error cases ---

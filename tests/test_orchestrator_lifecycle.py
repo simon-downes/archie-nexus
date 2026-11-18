@@ -1,5 +1,7 @@
 """Tests for archie_orchestrator.lifecycle — session start/stop logic."""
 
+import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,6 +9,7 @@ import pytest
 from archie_orchestrator.docker import DockerError, RunningContainer
 from archie_orchestrator.lifecycle import (
     REPO_ROOT,
+    _remove_unused_scratch_dir,
     prepare_start,
     run_start,
     start_session,
@@ -481,3 +484,292 @@ def test_each_session_gets_its_own_token(config, workspace, tmp_path):
     first = _prepare(config, workspace, tmp_path)
     second = _prepare(config, workspace, tmp_path)
     assert first.agent_token != second.agent_token
+
+
+# ---------------------------------------------------------------------------
+# Scratch workspace (093)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scratch(tmp_path) -> tuple[NexusConfig, Path]:
+    """A config whose scratch workspace is ``chat``, and that workspace's directory."""
+    ws_dir = tmp_path / "chat"
+    ws_dir.mkdir()
+    config = NexusConfig(
+        global_=GlobalConfig(workspace_root=str(tmp_path), scratch_workspace="chat")
+    )
+    return config, ws_dir
+
+
+def _prepare_in(config, name, tmp_path):
+    with (
+        patch("archie_orchestrator.lifecycle.check_image", return_value=True),
+        patch("archie_orchestrator.lifecycle.home_dir", return_value=tmp_path / ".nexus"),
+    ):
+        return prepare_start(name, config)
+
+
+def _run_seeing(prepared, directory):
+    """Run ``prepared``; return the entries of ``directory`` when docker run was called."""
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, env=None):
+        seen["entries"] = sorted(os.listdir(directory))
+        agents = directory / "AGENTS.md"
+        seen["agents"] = agents.read_text() if agents.exists() else None
+
+    with (
+        patch("archie_orchestrator.lifecycle.run_container", side_effect=fake_run),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", return_value="40123"),
+    ):
+        assert run_start(prepared) == 40123
+    return seen
+
+
+def test_a_scratch_start_mounts_a_fresh_session_directory(scratch, tmp_path):
+    config, ws_dir = scratch
+    (ws_dir / "AGENTS.md").write_text("chat rules\n")
+    (ws_dir / "old.txt").write_text("left by an earlier chat")
+    prepared = _prepare_in(config, "chat", tmp_path)
+    session_dir = ws_dir.resolve() / prepared.session_id
+
+    assert prepared.session_id.startswith("chat-")
+    assert f"{session_dir}:/workspace:rw" in prepared.command
+    assert f"{ws_dir.resolve()}:/workspace:rw" not in prepared.command
+    assert not session_dir.exists()  # prepare_start creates nothing
+
+    seen = _run_seeing(prepared, session_dir)
+    assert seen == {"entries": ["AGENTS.md"], "agents": "chat rules\n"}
+
+
+def test_a_scratch_workspace_without_agents_md_gets_an_empty_directory(scratch, tmp_path):
+    config, ws_dir = scratch
+    prepared = _prepare_in(config, "chat", tmp_path)
+    seen = _run_seeing(prepared, ws_dir.resolve() / prepared.session_id)
+    assert seen == {"entries": [], "agents": None}
+
+
+def test_a_symlinked_agents_md_is_not_copied(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    secret = tmp_path / "secret.txt"
+    secret.write_text("a host file")
+    (ws_dir / "AGENTS.md").symlink_to(secret)
+    prepared = _prepare_in(config, "chat", tmp_path)
+    seen = _run_seeing(prepared, ws_dir.resolve() / prepared.session_id)
+    assert seen == {"entries": [], "agents": None}
+    assert "it is a symlink" in caplog.text
+
+
+def test_other_workspaces_mount_as_before_with_scratch_on(scratch, workspace, tmp_path):
+    config, _ = scratch
+    ws_name, ws_path = workspace
+    prepared = _prepare_in(config, ws_name, tmp_path)
+    assert f"{ws_path.resolve()}:/workspace:rw" in prepared.command
+    assert (prepared.scratch_dir, prepared.agents_md) == (None, None)
+    seen = _run_seeing(prepared, ws_path)
+    assert seen == {"entries": [], "agents": None}  # nothing created in the workspace
+
+
+def test_a_scratch_directory_that_already_exists_fails_the_start(scratch, tmp_path):
+    config, ws_dir = scratch
+    prepared = _prepare_in(config, "chat", tmp_path)
+    prepared.scratch_dir.mkdir()
+    (prepared.scratch_dir / "keep.txt").write_text("x")
+    with patch("archie_orchestrator.lifecycle.run_container") as mock_run:
+        with pytest.raises(FileExistsError):
+            run_start(prepared)
+    mock_run.assert_not_called()
+    assert (prepared.scratch_dir / "keep.txt").exists()
+
+
+def _scratch_session(config, ws_dir, tmp_path, *, agents: str | None = "rules\n"):
+    """A started scratch session (docker patched out): its ID and directory."""
+    if agents is not None:
+        (ws_dir / "AGENTS.md").write_text(agents)
+    prepared = _prepare_in(config, "chat", tmp_path)
+    _run_seeing(prepared, ws_dir.resolve() / prepared.session_id)
+    return prepared.session_id, prepared.scratch_dir
+
+
+def _stop(session_id, config):
+    with (
+        patch("archie_orchestrator.lifecycle.stop_container"),
+        patch("archie_orchestrator.lifecycle._remove_empty_session_log", return_value=False),
+    ):
+        return stop_session(session_id, config=config)
+
+
+@pytest.mark.parametrize("agents", [None, "rules\n"])
+def test_stop_removes_an_unused_scratch_directory(scratch, tmp_path, agents):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents=agents)
+    assert directory.is_dir()
+    assert _stop(session_id, config) is False  # the log result is unchanged
+    assert not directory.exists()
+    assert (agents is None) or (ws_dir / "AGENTS.md").read_text() == agents  # source kept
+
+
+def test_stop_keeps_a_scratch_directory_the_session_wrote_to(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "notes.md").write_text("an artefact")
+    _stop(session_id, config)
+    assert sorted(os.listdir(directory)) == ["AGENTS.md", "notes.md"]
+
+
+def test_stop_removes_a_scratch_directory_whose_agents_md_became_a_symlink(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "AGENTS.md").unlink()
+    (directory / "AGENTS.md").symlink_to(ws_dir / "AGENTS.md")
+    _stop(session_id, config)
+    assert not directory.exists()
+    assert (ws_dir / "AGENTS.md").read_text() == "rules\n"  # the link's target is kept
+
+
+def test_stop_keeps_a_scratch_directory_whose_agents_md_is_a_directory(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "AGENTS.md").unlink()
+    (directory / "AGENTS.md").mkdir()
+    _stop(session_id, config)
+    assert (directory / "AGENTS.md").is_dir()
+    assert "WARNING" not in caplog.text
+
+
+def test_a_scratch_directory_swapped_for_a_symlink_is_not_entered(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "AGENTS.md").write_text("not the session's")
+    (tmp_path / "chat-01abc12345").symlink_to(target)
+    assert _remove_unused_scratch_dir(tmp_path / "chat-01abc12345") is False
+    assert (target / "AGENTS.md").exists()
+
+
+def test_stop_without_config_or_for_other_workspaces_leaves_directories_alone(
+    scratch, workspace, tmp_path
+):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    _stop(session_id, None)
+    assert directory.is_dir()
+    ws_name, ws_path = workspace
+    (ws_path / f"{ws_name}-01abc12345").mkdir()  # looks like a scratch dir, but isn't one
+    _stop(f"{ws_name}-01abc12345", config)
+    assert (ws_path / f"{ws_name}-01abc12345").is_dir()
+
+
+def test_stop_of_a_scratch_session_whose_directory_is_gone_is_quiet(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    shutil.rmtree(directory)
+    assert _stop(session_id, config) is False
+    assert "WARNING" not in caplog.text
+
+
+def test_a_scratch_cleanup_error_is_logged_and_the_stop_still_succeeds(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    with patch("archie_orchestrator.lifecycle.os.scandir", side_effect=PermissionError("denied")):
+        assert _stop(session_id, config) is False
+    assert "Cannot inspect scratch directory" in caplog.text
+    assert directory.is_dir()
+
+
+def _fail_start(prepared, *, running):
+    """Run ``prepared`` with a readiness failure and ``container_running`` as given."""
+    error = DockerError(command=["docker", "inspect"], stderr="not ready", returncode=1)
+    alive = (
+        {"side_effect": running} if isinstance(running, Exception) else {"return_value": running}
+    )
+    with (
+        patch("archie_orchestrator.lifecycle.run_container"),
+        patch("archie_orchestrator.lifecycle.wait_for_ready", side_effect=error),
+        patch("archie_orchestrator.lifecycle.container_running", **alive),
+        pytest.raises(DockerError) as raised,
+    ):
+        run_start(prepared)
+    return raised.value
+
+
+def test_a_failed_start_removes_its_scratch_directory_when_the_container_is_gone(scratch, tmp_path):
+    config, ws_dir = scratch
+    (ws_dir / "AGENTS.md").write_text("rules\n")
+    prepared = _prepare_in(config, "chat", tmp_path)
+    error = _fail_start(prepared, running=False)
+    assert "not ready" in str(error)  # the original error is re-raised
+    assert not prepared.scratch_dir.exists()
+
+
+@pytest.mark.parametrize("running", [True, DockerError(["docker"], "daemon down", 1)])
+def test_a_failed_start_keeps_its_scratch_directory_if_the_container_may_run(
+    scratch, tmp_path, running, caplog
+):
+    config, ws_dir = scratch
+    prepared = _prepare_in(config, "chat", tmp_path)
+    error = _fail_start(prepared, running=running)
+    assert "not ready" in str(error)
+    assert prepared.scratch_dir.is_dir()
+    assert "Keeping" in caplog.text
+
+
+def test_a_symlinked_alias_of_the_scratch_workspace_is_scratch_too(scratch, tmp_path):
+    config, ws_dir = scratch
+    (tmp_path / "alias").symlink_to(ws_dir)
+    prepared = _prepare_in(config, "alias", tmp_path)
+    assert prepared.scratch_dir == ws_dir.resolve() / prepared.session_id
+    assert f"{prepared.scratch_dir}:/workspace:rw" in prepared.command
+
+
+def test_a_fifo_agents_md_is_skipped_without_blocking(scratch, tmp_path):
+    config, ws_dir = scratch
+    os.mkfifo(ws_dir / "AGENTS.md")
+    prepared = _prepare_in(config, "chat", tmp_path)
+    seen = _run_seeing(prepared, prepared.scratch_dir)
+    assert seen == {"entries": [], "agents": None}
+
+
+def test_a_failed_agents_md_copy_removes_the_new_directory(scratch, tmp_path):
+    config, ws_dir = scratch
+    agents = ws_dir / "AGENTS.md"
+    agents.write_text("rules")
+    agents.chmod(0)
+    prepared = _prepare_in(config, "chat", tmp_path)
+    try:
+        with patch("archie_orchestrator.lifecycle.run_container") as mock_run:
+            with pytest.raises(PermissionError):
+                run_start(prepared)
+    finally:
+        agents.chmod(0o644)
+    mock_run.assert_not_called()
+    assert not prepared.scratch_dir.exists()
+
+
+@pytest.mark.parametrize("content", ["rules!", "RULES"])  # another size; same size
+def test_stop_removes_a_scratch_directory_whose_agents_md_differs(scratch, tmp_path, content):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents="rules")
+    (directory / "AGENTS.md").write_text(content)
+    _stop(session_id, config)
+    assert not directory.exists()
+
+
+def test_stop_removes_an_agents_md_only_directory_after_the_source_changed(scratch, tmp_path):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents="rules")
+    (ws_dir / "AGENTS.md").write_text("edited while the session ran")
+    _stop(session_id, config)
+    assert not directory.exists()
+
+
+def test_a_scratch_directory_that_cannot_be_removed_is_logged(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents=None)
+    ws_dir.chmod(0o555)
+    try:
+        assert _stop(session_id, config) is False
+    finally:
+        ws_dir.chmod(0o755)
+    assert "Cannot remove scratch directory" in caplog.text
+    assert directory.is_dir()

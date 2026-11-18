@@ -45,6 +45,7 @@ from typing import Protocol
 import msgspec
 import websockets
 from archie_shared.agent_sync import token_hash
+from archie_shared.config import ConfigError
 from archie_shared.events import (
     ErrorNotice,
     Handshake,
@@ -73,7 +74,7 @@ from archie_orchestrator.workspaces import (
     locate,
     location_key,
     refresh_location,
-    resolve_workspace,
+    session_directory,
 )
 
 log = logging.getLogger(__name__)
@@ -128,17 +129,24 @@ class SessionTitler(Protocol):
 
 
 def locate_session(
-    root: Path, workspace: str, state: LocationState
+    root: Path,
+    workspace: str,
+    state: LocationState,
+    *,
+    session_id: str = "",
+    scratch_workspace: str | None = None,
 ) -> tuple[SessionLocation | GaveUp | None, bool]:
     """A session's location from its calls, and whether a root call gave it (084 D26).
 
-    Runs in a worker thread. A workspace that no longer resolves gives None; a path the
-    git reader can't handle (``OSError``, ``ValueError``) is skipped. Files are looked
-    up as their directory (:func:`location_key`). :data:`GAVE_UP` when a cap stopped
-    the search (see :meth:`LocationState.best`).
+    Runs in a worker thread. Paths map to the session's mounted directory
+    (:func:`session_directory`: a scratch session's own directory, 093). A directory that
+    no longer resolves gives None; a path the git reader can't handle (``OSError``,
+    ``ValueError``) is skipped. Files are looked up as their directory
+    (:func:`location_key`). :data:`GAVE_UP` when a cap stopped the search (see
+    :meth:`LocationState.best`).
     """
     try:
-        directory = resolve_workspace(root, workspace)
+        directory = session_directory(root, workspace, session_id, scratch_workspace)
     except ValueError:
         return None, False
 
@@ -153,16 +161,19 @@ def locate_session(
 
 
 def refresh_sessions(
-    root: Path, sessions: list[tuple[str, str, SessionLocation]]
+    root: Path,
+    sessions: list[tuple[str, str, SessionLocation]],
+    scratch_workspace: str | None = None,
 ) -> dict[str, SessionLocation | None]:
     """Each ``(session_id, workspace, location)`` re-read from disk (the sweep, 084 D27).
 
     Runs in a worker thread. Sessions whose location can't be read now are left out.
+    A scratch session's location is read under its own directory (093).
     """
     found: dict[str, SessionLocation | None] = {}
     for session_id, workspace, location in sessions:
         try:
-            directory = resolve_workspace(root, workspace)
+            directory = session_directory(root, workspace, session_id, scratch_workspace)
         except ValueError:
             found[session_id] = None
             continue
@@ -267,7 +278,15 @@ class Runtime(Protocol):
 
 
 class DockerRuntime:
-    """The :class:`Runtime` backed by the Docker CLI."""
+    """The :class:`Runtime` backed by the Docker CLI.
+
+    Args:
+        config: Returns the current config, read at each stop so a scratch session's
+            unused directory is removed (093); None skips that.
+    """
+
+    def __init__(self, config: Callable[[], NexusConfig] | None = None) -> None:
+        self._config = config
 
     def list_running(self) -> list[RunningContainer]:
         return docker.list_sessions()
@@ -282,8 +301,19 @@ class DockerRuntime:
         return docker.container_running(container_name(session_id))
 
     def stop(self, session_id: str) -> bool:
-        """``docker stop`` by name (no ``docker ps``), then drop a log with no prompt (D19)."""
-        return lifecycle.stop_session(session_id)
+        """``docker stop`` by name (no ``docker ps``), then drop a log with no prompt (D19).
+
+        The config is read first; if it can't be, the session still stops, keeping any
+        scratch directory.
+        """
+        if self._config is None:
+            return lifecycle.stop_session(session_id)
+        try:
+            config = self._config()
+        except ConfigError as exc:
+            log.warning("Stopping %s without scratch cleanup: %s", session_id, exc)
+            config = None
+        return lifecycle.stop_session(session_id, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +336,9 @@ class SessionTracker:
         titler: Writes session titles; None turns titles off.
         workspace_root: Returns the expanded ``workspace_root``, read on each use; None
             turns locations off (084 D29).
+        scratch_workspace: Returns ``global.scratch_workspace``, read on each use, so a
+            scratch session's location is read under its own directory (093); None means
+            there is no scratch workspace.
     """
 
     def __init__(
@@ -317,10 +350,12 @@ class SessionTracker:
         clock: Callable[[], float] = time.monotonic,
         titler: SessionTitler | None = None,
         workspace_root: Callable[[], Path] | None = None,
+        scratch_workspace: Callable[[], str | None] | None = None,
     ) -> None:
         self.store = store
         self.titler = titler
         self.workspace_root = workspace_root
+        self.scratch_workspace = scratch_workspace
         self.runtime = runtime
         self.activity_interval = activity_interval
         self.clock = clock
@@ -1062,7 +1097,12 @@ class SessionTracker:
         snapshot = state.snapshot()
         root = workspace_root()
         location, from_root = await asyncio.to_thread(
-            locate_session, root, record.workspace, snapshot
+            locate_session,
+            root,
+            record.workspace,
+            snapshot,
+            session_id=session_id,
+            scratch_workspace=self._scratch_name(),
         )
         if location is GAVE_UP:
             return  # a cap stopped the search: unknown, so the current location stays
@@ -1070,6 +1110,9 @@ class SessionTracker:
         if current is not None:
             current.from_root = from_root
         await self._set_location(session_id, location)
+
+    def _scratch_name(self) -> str | None:
+        return self.scratch_workspace() if self.scratch_workspace is not None else None
 
     async def _set_location(self, session_id: str, location: SessionLocation | None) -> None:
         """Write and publish a live session's new location; nothing when it is unchanged."""
@@ -1102,7 +1145,9 @@ class SessionTracker:
         ]
         if not sessions:
             return
-        found = await asyncio.to_thread(refresh_sessions, workspace_root(), sessions)
+        found = await asyncio.to_thread(
+            refresh_sessions, workspace_root(), sessions, self._scratch_name()
+        )
         for session_id, _, before in sessions:
             record = self._records.get(session_id)
             if session_id not in found or record is None or record.location != before:

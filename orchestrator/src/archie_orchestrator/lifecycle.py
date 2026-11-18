@@ -5,9 +5,12 @@ All functions are synchronous — callers should use asyncio.to_thread()
 when invoking from an async context.
 """
 
+import errno
 import logging
 import os
 import secrets
+import shutil
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,7 +19,7 @@ from archie_shared.config import AGENT_CONTAINER_ENV, home_dir
 from archie_shared.events import UserMessage
 from archie_shared.kiro import startup_error_path
 from archie_shared.schemas import NexusConfig, expand_workspace_root, get_profile
-from archie_shared.session import container_name, generate_session_id
+from archie_shared.session import container_name, generate_session_id, split_id
 from archie_shared.session.log import SessionLog
 
 from archie_orchestrator.docker import (
@@ -33,12 +36,17 @@ from archie_orchestrator.docker import (
     DockerError,
     RunningContainer,
     check_image,
+    container_running,
     run_container,
     stop_container,
     wait_for_ready,
 )
 from archie_orchestrator.mounts import resolve_mounts
-from archie_orchestrator.workspaces import resolve_workspace
+from archie_orchestrator.workspaces import (
+    is_scratch_directory,
+    resolve_workspace,
+    scratch_session_directory,
+)
 
 # orchestrator/src/archie_orchestrator/lifecycle.py → repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -48,6 +56,7 @@ log = logging.getLogger(__name__)
 BACKENDS = ("native", "kiro")
 # Kiro startup has its own 30 s deadline inside the agent (077 D18); leave room for it.
 READY_TIMEOUT_S = {"native": 30.0, "kiro": 45.0}
+AGENTS_MD = "AGENTS.md"
 
 
 def _remove_empty_session_log(session_id: str) -> bool:
@@ -89,6 +98,11 @@ class PreparedStart:
             a value; :func:`run_start` passes the value in the docker CLI's environment.
         nexus_home: Host-side home directory mounted into the container.
         agent_token: The session's agent token (plan 090), or "" when there is none.
+        scratch_dir: The per-session directory mounted at ``/workspace`` when the
+            workspace is ``global.scratch_workspace`` (created by :func:`run_start`);
+            None for every other workspace.
+        agents_md: The scratch workspace's ``AGENTS.md``, copied into ``scratch_dir`` when
+            it is a regular file; None when ``scratch_dir`` is.
     """
 
     session_id: str
@@ -98,6 +112,8 @@ class PreparedStart:
     command: list[str]
     nexus_home: Path
     agent_token: str = field(default="", repr=False)
+    scratch_dir: Path | None = None
+    agents_md: Path | None = None
 
 
 def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native") -> PreparedStart:
@@ -121,7 +137,8 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     if backend not in BACKENDS:
         raise ValueError(f"Invalid backend {backend!r}: expected 'native' or 'kiro'")
     # 1. Resolve and validate workspace path (no escaping workspace_root)
-    resolved = resolve_workspace(expand_workspace_root(config), workspace)
+    root = expand_workspace_root(config)
+    resolved = resolve_workspace(root, workspace)
 
     # 2. Check image exists
     if not check_image(IMAGE_TAG):
@@ -130,6 +147,13 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     # 3. Generate session ID
     session_id = generate_session_id(workspace=workspace)
     cname = container_name(session_id)
+
+    # A scratch workspace's sessions each get a fresh directory (093); run_start creates it.
+    mounted = resolved
+    scratch_dir = agents_md = None
+    if is_scratch_directory(root, resolved, config.global_.scratch_workspace):
+        mounted = scratch_dir = resolved / session_id
+        agents_md = resolved / AGENTS_MD
 
     # 4. Ensure host-side home and agents dirs exist
     nexus_home = home_dir()
@@ -194,7 +218,7 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
         "-v",
         f"{REPO_ROOT / 'container' / 'bin' / 'gh'}:{CONTAINER_GH_WRAPPER}:ro",
         "-v",
-        f"{resolved}:{CONTAINER_WORKSPACE_DIR}:rw",
+        f"{mounted}:{CONTAINER_WORKSPACE_DIR}:rw",
         "-v",
         f"{nexus_home}:{container_home}:rw",
         "-v",
@@ -213,6 +237,8 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
         command=docker_cmd,
         nexus_home=nexus_home,
         agent_token=agent_token,
+        scratch_dir=scratch_dir,
+        agents_md=agents_md,
     )
 
 
@@ -221,7 +247,9 @@ def run_start(prepared: PreparedStart) -> int:
 
     Synchronous — blocks until the container's agent is ready (up to 30 s; 45 s for Kiro).
     Use asyncio.to_thread() when calling from an async handler. A container that fails
-    to become ready is stopped before the error is raised.
+    to become ready is stopped before the error is raised. A scratch session's directory
+    is created first, and removed again if the start fails, the container isn't running
+    and the directory is unused (see :func:`_remove_unused_scratch_dir`).
 
     Returns:
         The agent's published host port.
@@ -229,7 +257,19 @@ def run_start(prepared: PreparedStart) -> int:
     Raises:
         DockerError: If docker run fails or the container does not become ready
             within the timeout (for Kiro, with the agent's recorded startup error).
+        OSError: If the scratch directory can't be created or ``AGENTS.md`` copied.
     """
+    if prepared.scratch_dir is None:
+        return _run(prepared)
+    _create_scratch_dir(prepared.scratch_dir, prepared.agents_md)
+    try:
+        return _run(prepared)
+    except BaseException:
+        _release_scratch_dir_after_failed_start(prepared)
+        raise
+
+
+def _run(prepared: PreparedStart) -> int:
     cname = prepared.container_name
     docker_cmd = prepared.command
     backend = prepared.backend
@@ -263,6 +303,125 @@ def run_start(prepared: PreparedStart) -> int:
 
     log.info("Session started: %s (workspace: %s)", prepared.session_id, prepared.workspace)
     return int(port_str)
+
+
+def _open_regular(path: Path) -> int | None:
+    """A read-only descriptor on ``path`` if it is a regular file; None if it isn't one.
+
+    Sessions can write workspace files, so nothing is followed or waited on: a symlink
+    (``O_NOFOLLOW``), a FIFO or a device (``O_NONBLOCK``, then ``fstat``) gives None.
+
+    Raises:
+        OSError: If ``path`` is there but can't be opened for another reason.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
+    return fd
+
+
+def _create_scratch_dir(directory: Path, agents_md: Path | None) -> None:
+    """Create a scratch session's directory and copy the workspace's ``AGENTS.md`` in.
+
+    Workspace files may have been written by a session, so ``AGENTS.md`` is copied only
+    when it is a regular file (:func:`_open_regular`; a symlink is skipped with a
+    warning), and the copy is created with ``O_EXCL | O_NOFOLLOW`` so nothing planted in
+    the new directory is written through.
+
+    Raises:
+        OSError: If the directory exists or can't be created, or the copy fails (the
+            directory is removed again).
+    """
+    directory.mkdir()
+    if agents_md is None:
+        return
+    target = directory / AGENTS_MD
+    try:
+        source = _open_regular(agents_md)
+        if source is None:
+            if agents_md.is_symlink():
+                log.warning("Not copying %s into %s: it is a symlink", agents_md, directory)
+            return
+        with os.fdopen(source, "rb") as src:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            with os.fdopen(os.open(target, flags, 0o666), "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    except OSError:
+        try:
+            target.unlink(missing_ok=True)
+            directory.rmdir()
+        except OSError as exc:
+            log.warning("Cannot remove %s after a failed copy: %s", directory, exc)
+        raise
+
+
+def _release_scratch_dir_after_failed_start(prepared: PreparedStart) -> None:
+    """Remove a failed start's unused scratch directory unless its container still runs.
+
+    A native readiness timeout leaves the container running, and the tracker can adopt
+    it later, so the directory is kept unless Docker says the container isn't running.
+    """
+    try:
+        running = container_running(prepared.container_name)
+    except Exception as exc:  # noqa: BLE001 — unknown means possibly running: keep it
+        log.warning("Keeping %s: cannot tell if its container runs: %s", prepared.scratch_dir, exc)
+        return
+    if running:
+        log.warning("Keeping %s: its container is still running", prepared.scratch_dir)
+        return
+    _remove_unused_scratch_dir(prepared.scratch_dir)
+
+
+def _remove_unused_scratch_dir(directory: Path) -> bool:
+    """Remove a scratch session's directory if the session left nothing in it.
+
+    Unused means empty, or holding only an ``AGENTS.md`` that isn't a directory, whatever
+    its contents. Anything else is kept. The directory is opened with ``O_NOFOLLOW`` and
+    ``AGENTS.md`` unlinked relative to it, so a directory swapped for a symlink is never
+    entered. Only the first two entries are listed, nothing is removed recursively, and
+    failures are logged, not raised.
+
+    Returns:
+        Whether the directory was removed.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log.warning("Cannot inspect scratch directory %s: %s", directory, exc)
+        return False
+    try:
+        try:
+            with os.scandir(fd) as it:
+                entries = [entry.name for _, entry in zip(range(2), it, strict=False)]
+        except OSError as exc:
+            log.warning("Cannot inspect scratch directory %s: %s", directory, exc)
+            return False
+        try:
+            if entries == [AGENTS_MD]:
+                mode = os.stat(AGENTS_MD, dir_fd=fd, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(mode):
+                    return False
+                os.unlink(AGENTS_MD, dir_fd=fd)
+            elif entries:
+                return False
+            directory.rmdir()
+        except OSError as exc:
+            log.warning("Cannot remove scratch directory %s: %s", directory, exc)
+            return False
+    finally:
+        os.close(fd)
+    log.info("Removed unused scratch directory %s", directory)
+    return True
 
 
 def start_session(
@@ -306,14 +465,17 @@ def _kiro_startup_error(nexus_home: Path, session_id: str) -> str | None:
     return text or None
 
 
-def stop_session(session_id: str) -> bool:
+def stop_session(session_id: str, *, config: NexusConfig | None = None) -> bool:
     """Stop a session's container by name, then remove its log if it holds no prompt.
 
     Runs ``docker stop archie-<session_id>`` directly, without a ``docker ps`` lookup
-    (082 D19); a log with no submitted prompt is removed (D19a).
+    (082 D19); a log with no submitted prompt is removed (D19a). With ``config``, a
+    scratch session's directory is then removed if it is unused (093).
 
     Args:
         session_id: Exact session ID to stop (no prefix matching).
+        config: The current config, for ``global.scratch_workspace`` and
+            ``workspace_root``; None skips the scratch directory.
 
     Returns:
         Whether the session's log was removed.
@@ -323,5 +485,22 @@ def stop_session(session_id: str) -> bool:
     """
     stop_container(container_name(session_id))
     removed = _remove_empty_session_log(session_id)
+    if config is not None:
+        _remove_stopped_scratch_dir(session_id, config)
     log.info("Session stopped: %s", session_id)
     return removed
+
+
+def _remove_stopped_scratch_dir(session_id: str, config: NexusConfig) -> None:
+    """Remove a stopped scratch session's directory if it is unused; quiet if it is gone."""
+    scratch = config.global_.scratch_workspace
+    if scratch is None:
+        return
+    root = expand_workspace_root(config)
+    try:
+        directory = scratch_session_directory(root, split_id(session_id)[0], session_id, scratch)
+    except (ValueError, OSError) as exc:
+        log.debug("No scratch directory to remove for %s: %s", session_id, exc)
+        return
+    if directory is not None:
+        _remove_unused_scratch_dir(directory)

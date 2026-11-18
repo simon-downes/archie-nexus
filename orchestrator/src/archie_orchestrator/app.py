@@ -78,7 +78,7 @@ async def lifespan(app: Starlette):
     app.state.auth_service = AuthService(config_source.latest)
     # Migrate archie.db, reconcile with Docker and follow running sessions before the
     # metrics loop takes its lock (D13). Tests inject a fake runtime (D16).
-    runtime = getattr(app.state, "runtime", None) or DockerRuntime()
+    runtime = getattr(app.state, "runtime", None) or DockerRuntime(config_source.latest)
     # Titles read the last valid config, so an invalid edit doesn't stop them (083 D10);
     # so does the workspace root that session locations are read under (084 D29).
     tracker = SessionTracker(
@@ -86,6 +86,7 @@ async def lifespan(app: Starlette):
         runtime,
         titler=Titler(config_source.latest),
         workspace_root=lambda: expand_workspace_root(config_source.latest()),
+        scratch_workspace=lambda: config_source.latest().global_.scratch_workspace,
     )
     await tracker.start()
     app.state.tracker = tracker

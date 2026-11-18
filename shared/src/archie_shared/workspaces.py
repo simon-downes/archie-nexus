@@ -14,6 +14,11 @@ config is ever executed.
 import msgspec
 
 
+def is_single_name(name: str) -> bool:
+    """Whether ``name`` is one directory name: no separator, not empty, ``.`` or ``..``."""
+    return "/" not in name and "\\" not in name and name not in ("", ".", "..")
+
+
 class Worktree(msgspec.Struct):
     """A linked worktree of a repo (``git worktree add``).
 

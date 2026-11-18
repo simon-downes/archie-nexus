@@ -35,7 +35,7 @@ import stat
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
-from archie_shared.workspaces import Repo, SessionLocation, Workspace, Worktree
+from archie_shared.workspaces import Repo, SessionLocation, Workspace, Worktree, is_single_name
 
 from archie_orchestrator.docker import CONTAINER_WORKSPACE_DIR as CONTAINER_WORKSPACE
 
@@ -82,7 +82,7 @@ def resolve_workspace(root: Path, name: str) -> Path:
             ``root``, or isn't an existing directory.
     """
     # Reject separators and traversal so a user-supplied name can't escape root.
-    if "/" in name or "\\" in name or name in ("", ".", ".."):
+    if not is_single_name(name):
         raise ValueError(f"Invalid workspace name '{name}': must be a single directory name.")
     workspace_path = root / name
     resolved = workspace_path.resolve()
@@ -92,6 +92,61 @@ def resolve_workspace(root: Path, name: str) -> Path:
     if not resolved.is_dir():
         raise ValueError(f"Workspace '{name}' not found under {root}.\nExpected: {workspace_path}")
     return resolved
+
+
+def is_scratch_directory(root: Path, directory: Path, scratch_workspace: str | None) -> bool:
+    """Whether workspace ``directory`` is ``global.scratch_workspace`` (093).
+
+    Compared by file identity, so a symlinked alias of the scratch workspace, or a
+    differently cased name on a case-insensitive volume, counts as it too.
+    """
+    if scratch_workspace is None:
+        return False
+    try:
+        return os.path.samefile(directory, resolve_workspace(root, scratch_workspace))
+    except (ValueError, OSError):
+        return False
+
+
+def scratch_session_directory(
+    root: Path, workspace: str, session_id: str, scratch_workspace: str | None
+) -> Path | None:
+    """A scratch session's own directory, ``<workspace>/<session_id>``; None for others.
+
+    Raises:
+        ValueError: As :func:`resolve_workspace`, or if the session is a scratch session
+            and its directory is missing, a symlink or not a directory.
+    """
+    directory = resolve_workspace(root, workspace)
+    if not is_scratch_directory(root, directory, scratch_workspace):
+        return None
+    if not is_single_name(session_id):
+        raise ValueError(f"Invalid session ID '{session_id}': must be a single directory name.")
+    scratch = directory / session_id
+    if scratch.is_symlink() or not scratch.is_dir():
+        raise ValueError(f"Scratch directory of session '{session_id}' not found: {scratch}")
+    return scratch
+
+
+def session_directory(
+    root: Path, workspace: str, session_id: str, scratch_workspace: str | None
+) -> Path:
+    """The host directory a session has mounted at ``/workspace``.
+
+    The workspace directory, or for the scratch workspace the session's own directory
+    (:func:`scratch_session_directory`).
+
+    Args:
+        root: The expanded ``workspace_root``.
+        workspace: The session's workspace name.
+        session_id: The session's ID.
+        scratch_workspace: ``global.scratch_workspace``, or None when it is off.
+
+    Raises:
+        ValueError: As :func:`scratch_session_directory`.
+    """
+    scratch = scratch_session_directory(root, workspace, session_id, scratch_workspace)
+    return scratch if scratch is not None else resolve_workspace(root, workspace)
 
 
 def list_workspaces(root: Path) -> list[Workspace]:

@@ -557,3 +557,29 @@ async def test_get_workspaces_with_a_bad_config_is_500(root):
             response = await http.get("/api/workspaces")
 
     assert (response.status_code, response.json()) == (500, {"error": "bad"})
+
+
+# ---------------------------------------------------------------------------
+# session_directory (093)
+# ---------------------------------------------------------------------------
+
+
+def test_session_directory_is_the_workspace_unless_it_is_the_scratch_one(tmp_path):
+    (tmp_path / "proj" / "proj-01abc").mkdir(parents=True)
+    proj = (tmp_path / "proj").resolve()
+    assert workspaces.session_directory(tmp_path, "proj", "proj-01abc", None) == proj
+    assert workspaces.session_directory(tmp_path, "proj", "proj-01abc", "chat") == proj
+    assert workspaces.session_directory(tmp_path, "proj", "proj-01abc", "proj") == (
+        proj / "proj-01abc"
+    )
+
+
+@pytest.mark.parametrize("session_id", ["missing-01abc", "link-01abc", "file-01abc", "..", "a/b"])
+def test_session_directory_rejects_a_scratch_directory_that_is_not_one(tmp_path, session_id):
+    chat = tmp_path / "chat"
+    (tmp_path / "elsewhere").mkdir()
+    chat.mkdir()
+    (chat / "link-01abc").symlink_to(tmp_path / "elsewhere")
+    (chat / "file-01abc").write_text("x")
+    with pytest.raises(ValueError):
+        workspaces.session_directory(tmp_path, "chat", session_id, "chat")
