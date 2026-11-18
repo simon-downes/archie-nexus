@@ -87,10 +87,11 @@ Codebase facts found during discovery:
 | D10 | How a dead backend shows in the TUI | `session_status.state: error` (no schema change) | a new `SessionState` value or a new status field | `error` already exists in the contract, the tracker and the TUI; a new value is a cross-package contract change that an older orchestrator would drop as malformed | self |
 | D11 | Messages, model switches and `/compact` that arrive during a restart | wait for the restart to finish, then run or get the dead message | reject at once with a notice | a restart takes about a second; making the user resend is worse | self |
 | D12 | Tool processes still running when Kiro dies | kill them (`ArchieMcpServer.cancel_all`) before restarting | leave them to finish | nobody can receive their results, and they are what used the memory | self |
-| D14 | What `session_status` says while a restart runs | the usual rules: `idle`, or `working` while a waiting message holds the turn | a separate restarting state | the restart takes about a second and the notice says what happened; a new state is a contract change (D10) | self |
-| D15 | An argv spawn whose executable doesn't exist | spawn it unwrapped when `shutil.which(args[0])` finds nothing, so the `OSError` is raised as before | always wrap | the wrapper would turn the `OSError` into exit 127, changing `RunnerCrash` "Failed to spawn runner" and the `FileNotFoundError` the `rg` callers in `fs.py` and `code.py` rely on | self |
-| D16 | The window for counting OOM kills against a Kiro exit | since the later of Kiro's start and the start or end of the last turn | since Kiro started | after M1, tool kills hours earlier would otherwise blame the OOM killer for an unrelated crash | self |
 | D13 | Where Kiro's stderr and exit are recorded | the frame log, as `dir: "err"` and `dir: "exit"` entries | a separate stderr file | the frame log is already the persisted Kiro debugging file under `~/.nexus` | self |
+| D14 | What `session_status` says while a restart runs | the usual rules: `idle`, or `working` while a waiting message holds the turn | a separate restarting state | the restart takes about a second and the notice says what happened; a new state is a contract change (D10) | self |
+| D15 | An argv spawn whose executable doesn't exist | spawn it unwrapped when `shutil.which(args[0])` finds nothing, so the `OSError` is raised as before | always wrap | the wrapper would turn the `OSError` into exit 127, changing `RunnerCrash` "Failed to spawn runner" (`tests/test_exec_tool.py::test_run_exec_bad_python`), and a missing `rg` in `fs.py` and `code.py` would show up as `ripgrep error (exit 127)` instead of an `OSError` | self |
+| D17 | An interrupt while a message waits for a restart | drop the waiting message: no `user_message`, no `session/cancel`, and an `error_notice` kind `turn_error` "Interrupted before Kiro finished restarting; the message wasn't sent" | let the message run after the restart | otherwise the user's ESC is lost, and a `session/cancel` could reach Kiro in the middle of `session/load` | self |
+| D16 | The window for counting OOM kills against a Kiro exit | since the later of Kiro's start and the start or end of the last turn | since Kiro started | after M1, tool kills hours earlier would otherwise blame the OOM killer for an unrelated crash | self |
 
 ## Requirements
 
@@ -116,7 +117,11 @@ Codebase facts found during discovery:
   later of that `kiro-cli`'s start and the start or end of the last turn (D16): in the
   `turn_error` of a cut-off turn, the live notice, and the agent's error log. The reason is
   `Kiro backend stopped (exit code N); the out-of-memory killer killed K process(es) in this
-  container since HH:MM:SS UTC`. Otherwise it stays `Kiro backend stopped (exit code N)`.
+  container since HH:MM:SS UTC`. Otherwise it stays `Kiro backend stopped (exit code N)`. The
+  live notice is `backend_restarted` (`<reason>. Kiro was restarted and the conversation
+  reloaded.`) or `backend_stopped` (`<reason>. <why it can't run>. Start a new session.`).
+  - AC: fake Kiro is SIGKILLed while idle after the test bumps the counter: the
+    `backend_restarted` notice contains `out-of-memory killer`.
   - AC: fake Kiro exits mid-turn after the test bumps the temp counter: the persisted
     `turn_error` contains `exit code 3` and `out-of-memory killer`; without a bump it contains
     `exit code 3` and not `out-of-memory`.
@@ -141,14 +146,20 @@ Codebase facts found during discovery:
 - MUST start the first prompt sent to Kiro after a restart that cut off a turn with a note
   saying so, and keep the canonical `user_message` as the user typed it. The prompt stays one
   text block: the note, a blank line, then the message. The note is `[Archie note: the Kiro
-  backend stopped during your previous turn (<reason>) and was restarted with this
+  backend stopped during your previous turn (<detail>) and was restarted with this
   conversation reloaded. That turn was cut off: its running tool calls and subagents were
-  stopped and their results lost. Check the current state before you continue that work.]`
+  stopped and their results lost. Check the current state before you continue that work.]`,
+  where `<detail>` is the text inside the reason's parentheses (`exit code N; the
+  out-of-memory killer …`). A cut-off compaction sets no note.
   - AC: the fake's recorded prompt text starts with the note and ends with the message; the
     session log's `user_message.content` equals the message; the prompt after that has no note.
 - MUST make a message, model switch or `/compact` that arrives during a restart wait for the
   restart, then go ahead, or get the dead response if the restart failed.
   - AC: a message sent while the restart runs completes with `turn_complete`.
+  - AC: `switch_model` to another allowlisted model while the restart runs returns None and
+    the fake records that model set after the `session/load`.
+  - AC: an interrupt while a message waits drops it as D17 says; the fake records no
+    `session/prompt` and no `session/cancel` for it.
 - MUST restart at most 3 times in any 30 minutes; the next unexpected exit leaves the backend
   dead, with an `error_notice` kind `backend_stopped` that gives the reason.
   - AC: with the limit patched to 1, a second `exit` turn leaves the harness dead and sends
@@ -194,12 +205,13 @@ when that isn't possible, the backend is dead and reports `state: error`.
   (`/proc/self/oom_score_adj`, patched in tests); `MEMORY_EVENTS`
   (`Path("/sys/fs/cgroup/memory.events")`, patched in tests); `oom_kill_count() -> int | None`
   (None when the file is missing or unreadable); `shell_prefix(command) -> str`;
-  `argv_wrapper(args) -> list[str]` (D15); `tool_warning(kills) -> str`.
+  `argv_wrapper(args) -> list[str]` (D15); `kills_since(before) -> int`;
+  `tool_warning(kills) -> str`.
 - `agent/src/archie_agent/exec/tools/_subprocess.py`: `run_shell` and `run_exec` use the
-  prefix and wrapper, and `run_shell` adds `TOOL_WARNING` to stderr when the count rose,
+  prefix and wrapper, and `run_shell` adds `tool_warning(k)` to stderr when the count rose,
   next to the existing `[archie warning: …]` line.
 - `agent/src/archie_agent/exec/tool.py` `run_exec`: wraps the runner argv, adds
-  `start_new_session=True`, adds `TOOL_WARNING` to the `RunnerCrash` message when the count rose.
+  `start_new_session=True`, adds `tool_warning(k)` to the `RunnerCrash` message when the count rose.
 - `agent/src/archie_agent/kiro/acp.py`: `_read_stderr` also writes `err` entries; a public
   `record(direction, msg)` writes one frame-log entry (used by the harness for `exit`).
 - `agent/src/archie_agent/kiro/harness.py`: `start` keeps the one-time setup (key, settings,
@@ -208,7 +220,9 @@ when that isn't possible, the backend is dead and reports `state: error`.
   and applies and verifies the settings (the existing steps from `start`). `_on_exit`
   computes the reason, records the `exit` entry, and either schedules `_restart` or marks the
   backend dead. New state: `_oom_baseline`, `_exit_reason`, `_restarts` (a deque of
-  monotonic times), `_restart_task`, `_restoring`, `_resume_note`, `_dead_reason`.
+  monotonic times), `_restart_task`, `_restoring`, `_resume_note`, `_dead_reason` (also set
+  by `_fail(reason)`, with `Kiro backend stopped` as the fallback), `_interrupted_wait`.
+  `_oom_baseline` is a `(count, datetime)` pair, so the reason can say since when.
 - `tests/fake_kiro.py`: `session/load` (sessions kept in `FAKE_KIRO_HOME/fake-sessions.json`,
   replays three frames, comes back with `contentCollection: enabled` like real Kiro),
   `FAKE_KIRO_LOAD` (`ok`, `error`, `exit`), and an `exit_tool` prompt.
@@ -225,7 +239,7 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
    each turn's start and end), builds `_exit_reason`, records the `exit` frame, logs at
    ERROR, cancels the pending question, and calls `self._mcp.cancel_all()`. If fewer than 3
    restarts happened in the last 30 minutes, it records one, sets `_resume_note` when a turn
-   or compaction was active, and spawns `_restart()` as `_restart_task`; otherwise it marks
+   was active, and spawns `_restart()` as `_restart_task`; otherwise it marks
    the backend dead with `_dead_reason` and spawns a `backend_stopped` notice and a status.
    An `_on_exit` while `_started` is false (during startup or a restart) only marks the
    backend dead: the startup or restart path owns the error report, so each failure sends
@@ -243,7 +257,9 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
 6. `handle_message`, `switch_model` and `run_manual_compaction` await `_restart_task`
    (shielded) before any other check; in `switch_model` that is before the model-list check.
    `_run_turn` prefixes and clears `_resume_note`. During shutdown the awaiter gets
-   `CancelledError`, which is intended.
+   `CancelledError`, which is intended. `interrupt()` while `_restart_task` runs sends no
+   `session/cancel`; it sets `_interrupted_wait`, and the waiting `handle_message` drops its
+   message as D17 says.
 7. `close()` sets `_closing`, then cancels and awaits `_restart_task` before closing
    `self._acp`, so a restart can't spawn `kiro-cli` after `close()` has closed the client.
 
@@ -262,7 +278,8 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
 ### [ ] M1 — Tool processes are the OOM killer's first choice
 
 - **Approach:** add `agent/src/archie_agent/oom.py` with `TOOL_OOM_SCORE_ADJ`,
-  `OOM_SCORE_ADJ_PATH`, `shell_prefix` (`{ echo 1000 >/proc/self/oom_score_adj; } 2>/dev/null; <command>`)
+  `OOM_SCORE_ADJ_PATH`, `shell_prefix` (`{ echo 1000 >/proc/self/oom_score_adj; } 2>/dev/null`, a
+  newline, then `<command>`)
   and `argv_wrapper` (`["/bin/sh", "-c", '{ echo 1000 >/proc/self/oom_score_adj; } 2>/dev/null; exec "$@"', "sh", *args]`,
   or `args` unchanged when `shutil.which(args[0])` is None, D15). Test the unwritable case
   by patching `OOM_SCORE_ADJ_PATH` to a path in a missing directory: no stray stderr.
@@ -279,7 +296,8 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
 
 ### [ ] M2 — OOM kills are named in tool results, Kiro exits and the frame log
 
-- **Approach:** add `MEMORY_EVENTS`, `oom_kill_count()` and `TOOL_WARNING` to `oom.py`.
+- **Approach:** add `MEMORY_EVENTS`, `oom_kill_count()`, `kills_since()` and `tool_warning()` to
+  `oom.py`.
   `run_shell` and the exec runner compare counts around the process. In the harness, read the
   baseline right after spawning `kiro-cli` and again at each turn's start and end (D16); `_on_exit` builds `_exit_reason` and records the
   `exit` entry through the new `AcpClient.record`; `_run_turn` uses `_exit_reason` for the
@@ -342,6 +360,9 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   change what it restores (the restart verifies the settings, so a change fails closed).
 - A cut-off turn may be partly saved in Kiro's session store; the note tells the model to
   check before it continues.
+- `switch_model` is awaited inside the WebSocket receive loop (`app.py`), so waiting for a
+  restart there (up to 60 s, usually about 1 s) delays that client's next commands, as the
+  existing 30 s model-switch request already can.
 
 ## Review
 
@@ -353,7 +374,12 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   awaits the restart first; OOM wording is factual with a count and a turn-based window
   (D16) and exact texts are in the Requirements; one owner per `backend_stopped`; the status
   during a restart is D14; a `RunnerCrash` AC and wider M4 Verify were added; M2's tests are
-  stated to survive M3. No second pass: the ❌ fix is a one-line change in the prefix.
+  stated to survive M3.
+  Second pass: 6 ⚠️/ℹ️ groups, all accepted and fixed: the live notices' texts and an
+  idle-kill AC; a `switch_model`-during-restart AC; D15's reason corrected; D17 for an
+  interrupt during the wait; `_fail` sets `_dead_reason`; `_oom_baseline` keeps its time; no
+  note for a cut-off compaction; the note uses the reason's detail; one name,
+  `tool_warning()`; D13 moved into order; a Risk for the inline model-switch wait. No ❌.
 
 ## Outcome
 
