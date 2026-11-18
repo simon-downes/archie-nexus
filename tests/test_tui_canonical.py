@@ -384,6 +384,21 @@ def test_activity_tracks_provider_request_lifecycle():
     assert listener.names().count("turn") == 4
 
 
+def test_activity_thinks_once_the_last_tool_result_arrives():
+    """Kiro sends the next iteration_start only with its first output, so the last tool
+    result is what says the next provider request is outstanding."""
+    controller, _ = make_controller()
+    controller.turn_active = True
+    controller.apply(_tool_call("t1", "read", {"path": "a.py"}))
+    controller.apply(_tool_call("t2", "read", {"path": "b.py"}))
+    controller.apply(_tool_result("t1", "ok"))
+    assert controller.activity == "Working"  # t2 still runs
+    controller.apply(_tool_result("t2", "ok"))
+    assert controller.activity == "Thinking"
+    controller.apply(_tool_call("t3", "read", {"path": "c.py"}, iteration=2))
+    assert controller.activity == "Working"
+
+
 async def test_cold_cache_compaction_renders_pending_then_success():
     host = _ConversationHost()
     headers = await host.run([_compaction_start(), _compaction_complete()])

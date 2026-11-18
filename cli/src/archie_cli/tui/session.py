@@ -340,6 +340,7 @@ class SessionController:
         self.turn_active = False
         self.thinking = False
         self._phase: Activity = "Working"  # what the turn does once no request waits
+        self._running_tools: set[str] = set()  # root tool calls without a result yet
         self.input_locked = False
         self.turns_ended = 0
         self.turn = TurnMetrics()
@@ -382,8 +383,9 @@ class SessionController:
     def activity(self) -> Activity | None:
         """The activity line's word: what the running root turn is doing (084).
 
-        ``Thinking`` while a provider request is outstanding and no text has arrived,
-        ``Responding`` while a reply streams, ``Working`` while tool calls run. None
+        ``Thinking`` while a provider request is outstanding and no text has arrived
+        (including once the last running tool call has its result), ``Responding`` while
+        a reply streams, ``Working`` while tool calls run. None
         between turns and while a question waits for the user (the question panel
         shows instead).
         """
@@ -584,7 +586,14 @@ class SessionController:
         elif isinstance(event, ce.ToolCall):
             # The provider responded with a tool request: the turn now runs tools
             # until the next iteration's request.
+            self._running_tools.add(event.tool_use_id)
             self._set_phase("Working")
+        elif isinstance(event, ce.ToolResult):
+            self._running_tools.discard(event.tool_use_id)
+            if not self._running_tools:
+                # The last tool finished, so the next request goes out. Kiro only sends
+                # that iteration's iteration_start with its first output.
+                self._start_thinking()
         elif isinstance(event, ce.LLMRequest):
             turn = self.turn
             turn.input_tokens += event.input_tokens
@@ -668,6 +677,7 @@ class SessionController:
         self.thinking = False
         self.turn_active = False
         self._phase = "Working"
+        self._running_tools.clear()
         self.input_locked = False
         self.turns_ended += 1
         self._turn_changed()
@@ -918,6 +928,7 @@ class SessionController:
         self.estimated_output = 0
         self.turn = TurnMetrics()
         self.turn_active = False
+        self._running_tools.clear()
         if self.listener is not None:
             await self.listener.on_reset()
         self._accounting_changed()
