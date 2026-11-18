@@ -267,7 +267,7 @@ async def test_activity_line_is_blank_while_a_view_is_open():
 
         await pilot.press("escape")
         await pilot.pause()
-        assert pane.activity.activity == "Working"
+        assert pane.activity.activity == "Thinking"  # the tool finished: next request
 
 
 async def test_escape_in_a_view_goes_back_without_killing_the_shell():
