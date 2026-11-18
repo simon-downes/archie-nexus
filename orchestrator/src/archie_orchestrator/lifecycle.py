@@ -57,7 +57,6 @@ BACKENDS = ("native", "kiro")
 # Kiro startup has its own 30 s deadline inside the agent (077 D18); leave room for it.
 READY_TIMEOUT_S = {"native": 30.0, "kiro": 45.0}
 AGENTS_MD = "AGENTS.md"
-_COMPARE_CHUNK = 64 * 1024
 
 
 def _remove_empty_session_log(session_id: str) -> bool:
@@ -364,30 +363,6 @@ def _create_scratch_dir(directory: Path, agents_md: Path | None) -> None:
         raise
 
 
-def _same_bytes(copy: Path, source: Path) -> bool:
-    """Whether ``copy`` and ``source`` are regular files with the same bytes.
-
-    Sizes are compared first and the contents in chunks, so a large session-written
-    ``copy`` is never read into memory.
-    """
-    copy_fd = _open_regular(copy)
-    if copy_fd is None:
-        return False
-    with os.fdopen(copy_fd, "rb") as a:
-        source_fd = _open_regular(source)
-        if source_fd is None:
-            return False
-        with os.fdopen(source_fd, "rb") as b:
-            if os.fstat(a.fileno()).st_size != os.fstat(b.fileno()).st_size:
-                return False
-            while True:
-                chunk = a.read(_COMPARE_CHUNK)
-                if chunk != b.read(_COMPARE_CHUNK):
-                    return False
-                if not chunk:
-                    return True
-
-
 def _release_scratch_dir_after_failed_start(prepared: PreparedStart) -> None:
     """Remove a failed start's unused scratch directory unless its container still runs.
 
@@ -402,40 +377,49 @@ def _release_scratch_dir_after_failed_start(prepared: PreparedStart) -> None:
     if running:
         log.warning("Keeping %s: its container is still running", prepared.scratch_dir)
         return
-    _remove_unused_scratch_dir(prepared.scratch_dir, prepared.agents_md)
+    _remove_unused_scratch_dir(prepared.scratch_dir)
 
 
-def _remove_unused_scratch_dir(directory: Path, agents_md: Path | None) -> bool:
+def _remove_unused_scratch_dir(directory: Path) -> bool:
     """Remove a scratch session's directory if the session left nothing in it.
 
-    Unused means empty, or holding only an ``AGENTS.md`` that is a regular file with the
-    same bytes as the workspace's current regular-file ``agents_md``. Anything else is
-    kept. Only the first two entries are listed, nothing is removed recursively, and
+    Unused means empty, or holding only an ``AGENTS.md`` that isn't a directory, whatever
+    its contents. Anything else is kept. The directory is opened with ``O_NOFOLLOW`` and
+    ``AGENTS.md`` unlinked relative to it, so a directory swapped for a symlink is never
+    entered. Only the first two entries are listed, nothing is removed recursively, and
     failures are logged, not raised.
 
     Returns:
         Whether the directory was removed.
     """
     try:
-        with os.scandir(directory) as it:
-            entries = [entry.name for _, entry in zip(range(2), it, strict=False)]
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return False
     except OSError as exc:
         log.warning("Cannot inspect scratch directory %s: %s", directory, exc)
         return False
-    copy = directory / AGENTS_MD
     try:
-        if entries == [AGENTS_MD]:
-            if agents_md is None or not _same_bytes(copy, agents_md):
-                return False
-            copy.unlink()
-        elif entries:
+        try:
+            with os.scandir(fd) as it:
+                entries = [entry.name for _, entry in zip(range(2), it, strict=False)]
+        except OSError as exc:
+            log.warning("Cannot inspect scratch directory %s: %s", directory, exc)
             return False
-        directory.rmdir()
-    except OSError as exc:
-        log.warning("Cannot remove scratch directory %s: %s", directory, exc)
-        return False
+        try:
+            if entries == [AGENTS_MD]:
+                mode = os.stat(AGENTS_MD, dir_fd=fd, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(mode):
+                    return False
+                os.unlink(AGENTS_MD, dir_fd=fd)
+            elif entries:
+                return False
+            directory.rmdir()
+        except OSError as exc:
+            log.warning("Cannot remove scratch directory %s: %s", directory, exc)
+            return False
+    finally:
+        os.close(fd)
     log.info("Removed unused scratch directory %s", directory)
     return True
 
@@ -519,4 +503,4 @@ def _remove_stopped_scratch_dir(session_id: str, config: NexusConfig) -> None:
         log.debug("No scratch directory to remove for %s: %s", session_id, exc)
         return
     if directory is not None:
-        _remove_unused_scratch_dir(directory, directory.parent / AGENTS_MD)
+        _remove_unused_scratch_dir(directory)

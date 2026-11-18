@@ -9,6 +9,7 @@ import pytest
 from archie_orchestrator.docker import DockerError, RunningContainer
 from archie_orchestrator.lifecycle import (
     REPO_ROOT,
+    _remove_unused_scratch_dir,
     prepare_start,
     run_start,
     start_session,
@@ -617,13 +618,33 @@ def test_stop_keeps_a_scratch_directory_the_session_wrote_to(scratch, tmp_path):
     assert sorted(os.listdir(directory)) == ["AGENTS.md", "notes.md"]
 
 
-def test_stop_keeps_a_scratch_directory_whose_agents_md_became_a_symlink(scratch, tmp_path):
+def test_stop_removes_a_scratch_directory_whose_agents_md_became_a_symlink(scratch, tmp_path):
     config, ws_dir = scratch
     session_id, directory = _scratch_session(config, ws_dir, tmp_path)
     (directory / "AGENTS.md").unlink()
-    (directory / "AGENTS.md").symlink_to(ws_dir / "AGENTS.md")  # same bytes when followed
+    (directory / "AGENTS.md").symlink_to(ws_dir / "AGENTS.md")
     _stop(session_id, config)
-    assert (directory / "AGENTS.md").is_symlink()
+    assert not directory.exists()
+    assert (ws_dir / "AGENTS.md").read_text() == "rules\n"  # the link's target is kept
+
+
+def test_stop_keeps_a_scratch_directory_whose_agents_md_is_a_directory(scratch, tmp_path, caplog):
+    config, ws_dir = scratch
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
+    (directory / "AGENTS.md").unlink()
+    (directory / "AGENTS.md").mkdir()
+    _stop(session_id, config)
+    assert (directory / "AGENTS.md").is_dir()
+    assert "WARNING" not in caplog.text
+
+
+def test_a_scratch_directory_swapped_for_a_symlink_is_not_entered(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "AGENTS.md").write_text("not the session's")
+    (tmp_path / "chat-01abc12345").symlink_to(target)
+    assert _remove_unused_scratch_dir(tmp_path / "chat-01abc12345") is False
+    assert (target / "AGENTS.md").exists()
 
 
 def test_stop_without_config_or_for_other_workspaces_leaves_directories_alone(
@@ -726,21 +747,20 @@ def test_a_failed_agents_md_copy_removes_the_new_directory(scratch, tmp_path):
 
 
 @pytest.mark.parametrize("content", ["rules!", "RULES"])  # another size; same size
-def test_stop_keeps_a_scratch_directory_whose_agents_md_differs(scratch, tmp_path, content):
+def test_stop_removes_a_scratch_directory_whose_agents_md_differs(scratch, tmp_path, content):
     config, ws_dir = scratch
     session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents="rules")
     (directory / "AGENTS.md").write_text(content)
     _stop(session_id, config)
-    assert (directory / "AGENTS.md").read_text() == content
+    assert not directory.exists()
 
 
-def test_stop_does_not_read_a_huge_agents_md_into_memory(scratch, tmp_path):
+def test_stop_removes_an_agents_md_only_directory_after_the_source_changed(scratch, tmp_path):
     config, ws_dir = scratch
-    session_id, directory = _scratch_session(config, ws_dir, tmp_path)
-    with open(directory / "AGENTS.md", "r+b") as f:
-        f.truncate(1 << 40)  # sparse: 1 TiB that would not fit in memory
+    session_id, directory = _scratch_session(config, ws_dir, tmp_path, agents="rules")
+    (ws_dir / "AGENTS.md").write_text("edited while the session ran")
     _stop(session_id, config)
-    assert (directory / "AGENTS.md").stat().st_size == 1 << 40
+    assert not directory.exists()
 
 
 def test_a_scratch_directory_that_cannot_be_removed_is_logged(scratch, tmp_path, caplog):

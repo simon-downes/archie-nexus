@@ -117,11 +117,13 @@ def test_load_nexus_config_mounts(tmp_path):
     assert config.mounts == ("~/.gitconfig*", ("~/.ssh/id_ed25519*", "~/.ssh:ro"))
 
 
-def test_scratch_workspace_defaults_to_off_and_loads_a_name(tmp_path):
-    assert NexusConfig().global_.scratch_workspace is None
+def test_scratch_workspace_defaults_to_chat_and_loads_a_name_or_null(tmp_path):
+    assert NexusConfig().global_.scratch_workspace == "chat"
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("global:\n  scratch_workspace: chat\n")
-    assert load_nexus_config(path=cfg).global_.scratch_workspace == "chat"
+    cfg.write_text("global:\n  scratch_workspace: scratch\n")
+    assert load_nexus_config(path=cfg).global_.scratch_workspace == "scratch"
+    cfg.write_text("global:\n  scratch_workspace: null\n")
+    assert load_nexus_config(path=cfg).global_.scratch_workspace is None
 
 
 @pytest.mark.parametrize("name", ["a/b", "a\\b", ".", "..", ""])

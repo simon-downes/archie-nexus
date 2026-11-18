@@ -66,11 +66,11 @@ Codebase facts:
 |----|----------|--------|----------|-----|--------|
 | D1 | Shape of the feature | Per-session directory mounted at `/workspace` for one named workspace | plain `chat/` dir; AGENTS.md telling the agent to use `/tmp`; tmpfs with no host mount | Keeps every `record.workspace` consumer unchanged; isolation doesn't depend on the agent obeying a prompt; artefacts a chat produces stay on the host | user (discussion) |
 | D2 | Config | `global.scratch_workspace: str \| None`, one name | a list of scratch workspaces; a marker file in the directory | User asked for a single key | user (discussion) |
-| D3 | Default | `None` (off) | `"chat"` | Turning it on changes what an existing `chat` workspace mounts; off by default keeps current behaviour for every existing config | self |
+| D3 | Default | `"chat"`; `null` turns it off | `None` (off) | User asked for it after review so it needs no config; with no `chat/` directory it does nothing, and only an existing `chat` workspace changes what it mounts | user (follow-up) |
 | D4 | Where per-session dirs live | `<workspace_root>/<scratch>/<session_id>/` | `~/.nexus/scratch/<id>`; a hidden `.sessions/` subdir | Next to the workspace's `AGENTS.md`, browsable on the host under the workspace the user picked; session IDs are unique and already start with the workspace name | self |
 | D5 | Workspace instructions | Copy `<scratch>/AGENTS.md` into the new dir before `docker run`, only when it opens with `O_NOFOLLOW` as a regular file (a symlink is skipped with a warning) | a nested read-only file bind mount; no instructions | A nested file mount leaves an empty placeholder file on the host and is a second mount to reason about; a copy works for native and Kiro alike | self |
 | D6 | When to create the dir | In `run_start`, before `run_container` | in `prepare_start` | `prepare_start` stays free of workspace side effects (082 D15: it only validates and builds argv); the path is computed in `prepare_start` and carried on `PreparedStart` | self |
-| D7 | Cleanup rule | Remove the dir when it is empty, or holds only an `AGENTS.md` that is a regular file (by `lstat`) byte-identical to the workspace's current regular-file `AGENTS.md`; otherwise keep it. Removal is `unlink` + `rmdir`, never recursive | always delete; never delete; age-based prune | Removes the common no-artefact case without ever deleting something the session wrote or changed | self |
+| D7 | Cleanup rule | Remove the dir when it is empty, or holds only an `AGENTS.md` that isn't a directory, whatever its contents; otherwise keep it. The dir is opened `O_NOFOLLOW` and `AGENTS.md` unlinked through that descriptor; removal is `unlink` + `rmdir`, never recursive | always delete; never delete; age-based prune; keep unless `AGENTS.md` is byte-identical to the workspace's current one (the first version) | Removes the common no-artefact case without deleting anything else the session wrote. The byte comparison kept every running session's dir whenever the user edited `chat/AGENTS.md`, and only protected edits to the instructions file | user (follow-up) |
 | D8 | When to clean up | After a successful `stop_session`; and when `run_start` fails, only if `docker.container_running` then reports the container not running (a failed or raising check keeps the dir) | also on crash/exit detection and at orchestrator start; always on a failed start | A native readiness timeout leaves the container running and adoptable, so a failed start doesn't prove the dir is unused; detecting other ends safely needs the live set, and deleting a dir under a running container loses its writes | self |
 | D9 | How stop learns the config | `DockerRuntime(config=...)` callable; `DockerRuntime.stop` passes `config` to `lifecycle.stop_session(session_id, config=...)`, which derives the workspace with `split_id` | change the `Runtime.stop` protocol to take a path; have the tracker do the cleanup | Keeps the `Runtime` protocol and fakes unchanged; file cleanup stays in `lifecycle` next to the log removal | self |
 | D10 | Location tracking for scratch sessions | Map through the per-session dir | skip location for scratch sessions; leave the wrong mapping (location always None) | User flagged cloning repos in chats as plausible; one helper (`workspaces.session_directory`) serves stop-time cleanup and location, so the cost is a parameter on two functions (`prepare_start` builds `resolved / session_id` itself, as the dir doesn't exist yet) | self (user asked for an opinion) |
@@ -78,9 +78,9 @@ Codebase facts:
 
 ## Requirements
 
-- MUST accept `global.scratch_workspace` as an optional string (default `null`), rejecting a
+- MUST accept `global.scratch_workspace` as an optional string (default `"chat"`), rejecting a
   value that isn't a single directory name (contains `/` or `\`, or is `""`, `.`, `..`).
-  - AC: loading `global: {scratch_workspace: chat}` gives `"chat"`; the default is `None`;
+  - AC: loading `global: {scratch_workspace: chat}` gives `"chat"`; the default is `"chat"`;
     `"a/b"`, `"a\\b"`, `"."`, `".."` and `""` raise `ConfigError` (a direct
     `GlobalConfig(...)` raises `ValueError`).
 - MUST, when starting a session in the scratch workspace, mount
@@ -97,9 +97,10 @@ Codebase facts:
     set to another name, a `myproject` start mounts `myproject` itself and creates nothing.
 - MUST remove the per-session directory after the session is stopped through
   `stop_session`, or its start fails in `run_start`, when it is unused (empty, or only an
-  `AGENTS.md` identical to the workspace's current one), and keep it otherwise.
-  - AC: stop removes an empty dir and an AGENTS.md-only dir; keeps a dir with another file,
-    and one whose `AGENTS.md` differs or is a symlink; a failed `run_start` removes the dir
+  `AGENTS.md` that isn't a directory, whatever its contents), and keep it otherwise.
+  - AC: stop removes an empty dir and an AGENTS.md-only dir, including one whose `AGENTS.md`
+    differs or is a symlink (the target is kept); keeps a dir with another file, and one
+    whose `AGENTS.md` is a directory; a failed `run_start` removes the dir
     it created when the container isn't running and re-raises the original error; when
     `container_running` returns True or raises, the dir is kept.
   - AC: a cleanup `OSError` is logged as a warning and doesn't change `stop_session`'s
@@ -126,7 +127,7 @@ tracker's location mapping.
 
 ### Code structure
 
-- `shared/src/archie_shared/schemas.py`: `GlobalConfig.scratch_workspace: str | None = None`
+- `shared/src/archie_shared/schemas.py`: `GlobalConfig.scratch_workspace: str | None = "chat"`
   with `__post_init__` validation (pattern: `KiroConfig.__post_init__`).
 - `orchestrator/src/archie_orchestrator/workspaces.py` (new functions):
   - `session_directory(root, workspace, session_id, scratch_workspace) -> Path`: the
@@ -139,9 +140,8 @@ tracker's location mapping.
   - `run_start`: `_create_scratch_dir(prepared)` before `run_container`; any exception →
     if `container_running(cname)` is False, `_remove_unused_scratch_dir(...)`; then re-raise
     the original exception.
-  - `_remove_unused_scratch_dir(directory, agents_md) -> bool`: D7 rule; logs `OSError`.
-  - A regular-file check helper using `os.lstat` + `stat.S_ISREG`, used for the copy source
-    and both sides of the D7 comparison.
+  - `_remove_unused_scratch_dir(directory) -> bool`: D7 rule; logs `OSError`.
+  - A regular-file check helper using `os.lstat` + `stat.S_ISREG`, used for the copy source.
   - `stop_session(session_id, *, config: NexusConfig | None = None)`: after the log removal,
     if the session's workspace (`split_id`) is the scratch workspace, remove its unused dir.
 - `orchestrator/src/archie_orchestrator/tracker.py`: `DockerRuntime.__init__(config=None)`;
@@ -194,7 +194,8 @@ tracker's location mapping.
   wire `config_source.latest` in `app.py`.
 - **Test seam:** `run_start`, `stop_session` (tests/test_orchestrator_lifecycle.py);
   `DockerRuntime.stop` with `lifecycle.stop_session` patched (tests/test_session_tracker.py).
-- **Edge cases:** dir already gone → no error; `AGENTS.md` changed → kept; extra file → kept;
+- **Edge cases:** dir already gone → no error; `AGENTS.md` changed → removed (D7 follow-up);
+  extra file → kept;
   `rmtree`/`unlink` `OSError` → warning.
 - **Deliverable:** stopping a chat session that wrote nothing leaves no directory behind.
 - **Verify:** `scripts/dev test tests/test_orchestrator_lifecycle.py tests/test_session_tracker.py`
@@ -260,10 +261,9 @@ tracker's location mapping.
   `scratch_workspace`, and `GlobalConfig` forbids unknown fields). It keeps its last valid
   config and logs "the orchestrator sent a config this agent can't read" until the session
   is restarted. This is the existing version-skew path in `host_config.py`; accepted.
-- Cleanup trusts that `<workspace>/<session_id>` isn't swapped for a symlink between
-  `scratch_session_directory`'s check and the `unlink`/`rmdir` (only a container with the
-  scratch workspace itself mounted could do that). The worst case is removing a regular
-  `AGENTS.md` identical to the workspace's own, then an `rmdir` that fails on the symlink.
+- Cleanup opens `<workspace>/<session_id>` with `O_NOFOLLOW` and unlinks `AGENTS.md`
+  relative to that descriptor, so swapping the dir for a symlink (only a container with the
+  scratch workspace itself mounted could) makes cleanup keep it rather than enter the target.
 - The deliverable (a real `archie start chat`) needs Docker, which isn't available in the
   build container; it is covered by unit tests on the argv and filesystem effects only.
 

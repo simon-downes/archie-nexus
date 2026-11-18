@@ -30,12 +30,13 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
         region: Session default AWS region (fallback for geo-inference models).
         scratch_workspace: Workspace whose sessions each get a fresh directory,
             ``<workspace>/<session_id>``, as ``/workspace``; None turns this off.
+            Has no effect until that workspace directory exists.
     """
 
     model: str = "bedrock-openai-gpt-5-6-luna"
     workspace_root: str = "~/dev"
     region: str = "eu-west-1"
-    scratch_workspace: str | None = None
+    scratch_workspace: str | None = "chat"
 
     def __post_init__(self) -> None:
         name = self.scratch_workspace

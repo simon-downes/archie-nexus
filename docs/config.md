@@ -11,7 +11,7 @@ global:
   model: bedrock-openai-gpt-5-6-luna
   region: eu-west-1
   workspace_root: ~/dev
-  scratch_workspace: null
+  scratch_workspace: chat
 cli: {}
 web: {}
 agent:
@@ -62,11 +62,13 @@ The file is parsed again only when its modification time, size or inode changes.
 
 `global.scratch_workspace` names one workspace (a directory under `workspace_root`) whose
 sessions each start in a fresh directory, for general questions that shouldn't see files
-from earlier sessions. The default `null` turns it off.
+from earlier sessions. It defaults to `chat`, which does nothing until
+`<workspace_root>/chat/` exists. Set another name to use a different workspace, or `null`
+to turn it off.
 
 ```yaml
 global:
-  scratch_workspace: chat
+  scratch_workspace: null
 ```
 
 A session in that workspace (or in a symlinked alias of it) mounts `<workspace_root>/chat/<session_id>/` at `/workspace`
@@ -77,7 +79,7 @@ the workspace name `chat` everywhere else: the sessions list, search, insights a
 
 When the session is stopped (or its start fails and the container isn't running), the
 directory is removed if the session left nothing in it: it is empty, or holds only an
-`AGENTS.md` identical to `chat/AGENTS.md`. Otherwise it is kept for you to look at or
+`AGENTS.md`, whatever that file now contains. Otherwise it is kept for you to look at or
 delete. A session that ends without being stopped, for example when Docker restarts, keeps
 its directory. The setting is read when a session starts and again when it stops, so
 changing it while a scratch session runs can leave that session's directory behind.
