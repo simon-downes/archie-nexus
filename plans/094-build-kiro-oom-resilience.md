@@ -275,7 +275,7 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
 
 ## Milestones
 
-### [ ] M1 — Tool processes are the OOM killer's first choice
+### [x] M1 — Tool processes are the OOM killer's first choice
 
 - **Approach:** add `agent/src/archie_agent/oom.py` with `TOOL_OOM_SCORE_ADJ`,
   `OOM_SCORE_ADJ_PATH`, `shell_prefix` (`{ echo 1000 >/proc/self/oom_score_adj; } 2>/dev/null`, a
@@ -292,7 +292,10 @@ Unexpected exit after startup (`_started` and not `_closing` and not `_dead`):
   runner has its own process group.
 - **Verify:** `env -u ARCHIE_BACKEND scripts/dev test tests/test_oom_tools.py tests/test_exec_tool.py tests/test_exec_tools.py tests/test_runner.py tests/test_kiro_mcp.py`
   passes.
-- **Outcome:**
+- **Outcome:** `archie_agent/oom.py` holds the prefix and wrapper; `run_shell`, `run_exec`
+  and the exec runner use them, and the runner now starts in its own session. The new
+  pgid test failed with the old `exec/tool.py` (stashed) and passes with the fix. Verify
+  plus `tests/test_code_tool.py`: 162 passed; ruff check and format clean.
 
 ### [ ] M2 — OOM kills are named in tool results, Kiro exits and the frame log
 

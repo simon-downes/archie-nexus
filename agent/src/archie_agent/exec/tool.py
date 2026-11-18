@@ -19,6 +19,7 @@ from typing import Any
 from archie_agent.exec.envelope import Envelope
 from archie_agent.exec.tools._runtime_env import subprocess_env
 from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.oom import argv_wrapper
 from archie_agent.tools import ToolRegistry, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -94,13 +95,13 @@ async def run_exec(
     env, env_warning = subprocess_env()
     try:
         proc = await asyncio.create_subprocess_exec(
-            python,
-            "-m",
-            "archie_agent.exec.runner",
-            str(run_dir),
+            *argv_wrapper([python, "-m", "archie_agent.exec.runner", str(run_dir)]),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            # Its own process group, so kill_process_group stops the runner and its
+            # children only, never the agent's group.
+            start_new_session=True,
         )
     except OSError as e:
         return Envelope.error_envelope("RunnerCrash", f"Failed to spawn runner: {e}")
