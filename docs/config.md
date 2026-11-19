@@ -112,6 +112,10 @@ runs on `standard` and the task's result starts with a warning. `native` values 
 catalogue keys, and a key that isn't in the catalogue stops a native session at startup,
 as an unknown `agent.compaction.model` does.
 
+An agent definition under `persona/agents/` can pin its tier with `tier: deep` in its
+frontmatter (`build-it-reviewer` does), and then ignores the caller's tier. A `model:`
+catalogue key in the frontmatter wins over both.
+
 ## Plugins
 
 The `plugins` section configures each plugin under `plugins/<id>/` by its id. Every key is

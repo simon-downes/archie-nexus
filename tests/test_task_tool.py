@@ -391,3 +391,48 @@ async def test_without_tiers_children_use_the_session_model(tmp_path, monkeypatc
 
     assert result == "[0] researcher: done"
     assert used == ["Child model"]
+
+
+@pytest.mark.asyncio
+async def test_pinned_tier_wins_over_the_callers_tier(tmp_path, monkeypatch):
+    used: list[str] = []
+    reviewer = _entry(tmp_path, "reviewer")
+    reviewer = AgentEntry(**{**reviewer.__dict__, "tier": "deep"})
+    spec, _ = await _make_tool(
+        tmp_path,
+        monkeypatch,
+        [_done()],
+        agents={"reviewer": reviewer},
+        tiers=TIERS,
+        catalog=TIER_CATALOG,
+        used_models=used,
+    )
+
+    result = await spec.handler(
+        tasks=[{"agent": "reviewer", "prompt": "review", "tier": "light"}], _launch_scope="s"
+    )
+
+    assert result == "[0] reviewer: done"
+    assert used == ["big"]
+    assert "reviewer — Reviewer (fixed tier: deep)" in spec.description
+
+
+@pytest.mark.asyncio
+async def test_pinned_model_wins_over_tiers_without_a_tier_warning(tmp_path, monkeypatch):
+    used: list[str] = []
+    local = AgentEntry(**{**_entry(tmp_path, "local").__dict__, "model": "mid", "tier": "deep"})
+    spec, _ = await _make_tool(
+        tmp_path,
+        monkeypatch,
+        [_done()],
+        agents={"local": local},
+        tiers=TIERS,
+        catalog=TIER_CATALOG,
+        used_models=used,
+    )
+
+    result = await spec.handler(tasks=[{"agent": "local", "prompt": "go"}], _launch_scope="s")
+
+    assert result == "[0] local: done"
+    assert used == ["mid"]
+    assert "local — Local (fixed model)" in spec.description

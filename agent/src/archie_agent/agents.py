@@ -68,6 +68,7 @@ class AgentEntry:
     skills: list[str]
     body: str
     path: Path
+    tier: str | None = None
 
 
 DEFAULT_AGENT = AgentEntry(
@@ -153,6 +154,11 @@ def _parse_agent_file(path: Path) -> AgentEntry | None:
         log.warning("Agent file has invalid skills list: %s", path)
         return None
 
+    tier = _optional_string(frontmatter.get("tier"), path, "tier")
+    if tier is not None and tier not in SUBAGENT_TIERS:
+        log.warning("Agent file has unknown tier %r (ignored): %s", tier, path)
+        tier = None
+
     return AgentEntry(
         name=str(name),
         description=str(description),
@@ -161,6 +167,7 @@ def _parse_agent_file(path: Path) -> AgentEntry | None:
         skills=list(skills),
         body=parts[2].strip(),
         path=path,
+        tier=tier,
     )
 
 
@@ -315,13 +322,16 @@ def _resolve_child_model(
 ) -> tuple[str, Any, str]:
     """Resolve a child's model key, model and any tier warning.
 
-    The definition's ``model:`` wins, then the caller's tier through ``tiers``. Without
-    ``tiers`` the child runs on the session model.
+    The definition's ``model:`` wins, then its ``tier:``, then the caller's tier, each
+    tier through ``tiers``. Without ``tiers`` the child runs on the session model.
     """
     if entry.model is not None or tiers is None:
         model_key, model = _resolve_model(entry, catalog, active_model)
         return model_key or active_model_key, model, ""
-    tier, warning = _pick_tier(tier_value)
+    if entry.tier is not None:
+        tier, warning = entry.tier, ""
+    else:
+        tier, warning = _pick_tier(tier_value)
     model_key = tiers[tier]
     model = catalog.get(model_key)
     if model is None:
@@ -334,10 +344,21 @@ def _agent_names(agent_catalog: dict[str, AgentEntry]) -> list[str]:
     return [DEFAULT_AGENT.name, *sorted(n for n in agent_catalog if n != DEFAULT_AGENT.name)]
 
 
+def _describe_agent(entry: AgentEntry) -> str:
+    """One agent in the task description, marking a pinned model or tier."""
+    if entry.model is not None:
+        pin = " (fixed model)"
+    elif entry.tier is not None:
+        pin = f" (fixed tier: {entry.tier})"
+    else:
+        pin = ""
+    return f"{entry.name} — {entry.description}{pin}"
+
+
 def _task_description(agent_catalog: dict[str, AgentEntry], max_concurrent: int) -> str:
     """Build the task tool description from the discovered agent catalog."""
     agents = "; ".join(
-        f"{name} — {(agent_catalog.get(name) or DEFAULT_AGENT).description}"
+        _describe_agent(agent_catalog.get(name) or DEFAULT_AGENT)
         for name in _agent_names(agent_catalog)
     )
     tiers = "; ".join(f"{tier} — {TIER_GUIDANCE[tier]}" for tier in SUBAGENT_TIERS)

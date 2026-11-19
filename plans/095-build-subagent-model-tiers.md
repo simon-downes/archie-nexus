@@ -128,13 +128,13 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 - **Verify:** `scripts/dev test tests/test_task_tool.py tests/test_subagents_config.py tests/test_harness.py tests/test_compaction_harness.py tests/test_tiers.py` passes.
 - **Outcome:** `SubagentsConfig.native`/`.kiro` tier maps, `archie_agent/tiers.py`, the required `tier` item and tier guidance in the `task` description, resolution through `_resolve_child_model` (standard + warning on a bad tier), `AgentHarness` wiring and the `_backend_lifespan` exit. `test_compaction_harness.py::test_child_agents_never_compact` now also asserts the child reached `run_loop`. Evidence: the Verify files plus the subagent accounting/interrupt/prompt tests, 138 passed; ruff check clean.
 
-### [ ] M2 — Agent definitions pin a tier
+### [x] M2 — Agent definitions pin a tier
 
 - **Approach:** `_parse_agent_file` reads `tier` with `_optional_string`, then drops values not in `SUBAGENT_TIERS` with a warning. Resolution order D8. `_task_description` appends `(fixed tier: <t>)` or `(fixed model)`. Add `tier: deep` to `persona/agents/build-it-reviewer.md`; add the `deep` instruction to `persona/skills/build-it/SKILL.md` Reviewers.
 - **Test seam:** `discover_agents` with `ARCHIE_PERSONA_DIR` pointed at a temp dir, and the task handler.
 - **Deliverable:** a pinned agent runs on its pinned tier regardless of the caller's tier.
 - **Verify:** `scripts/dev test tests/test_task_tool.py tests/test_agents.py` passes, including a test that loads the real `build-it-reviewer`.
-- **Outcome:**
+- **Outcome:** `AgentEntry.tier` parsed from frontmatter (unknown values warned and ignored), `model:` > `tier:` > caller in `_resolve_child_model`, `(fixed tier: …)`/`(fixed model)` markers via `_describe_agent`, `build-it-reviewer` pinned to `deep`, build-it Reviewers names the `deep` tier, `docs/config.md` documents the pin. Evidence: `tests/test_task_tool.py tests/test_agents.py`, 29 passed; ruff clean.
 
 ### [ ] M3 — Kiro tier workers
 
