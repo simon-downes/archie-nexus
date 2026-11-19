@@ -349,7 +349,7 @@ Not verified: behaviour against live Datadog (no way to run the worktree plugin 
 credentials from this session), and whether the app key has `logs_read_config` and
 `data_scanner_read`.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/45
 CI: pending
 
 ## Follow-ups
