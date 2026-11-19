@@ -12,7 +12,7 @@ import inspect
 import logging
 import signal
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from archie_shared.config import persona_dir
 from archie_shared.events import ErrorNotice, SessionEvent
 from archie_shared.events import TurnError as CanonicalTurnError
 from archie_shared.models import calculate_cost
+from archie_shared.schemas import SUBAGENT_TIERS
 from archie_shared.session.log import LogAppendError
 from archie_shared.types import ImageBlock, ToolResultBlock, ToolUseBlock
 from ulid import ULID
@@ -46,6 +47,7 @@ from archie_agent.loop_events import (
 from archie_agent.prompt import build_subagent_prompt
 from archie_agent.session import Session, Turn
 from archie_agent.skills import SkillEntry, create_skill_tool
+from archie_agent.tiers import DEFAULT_TIER, TIER_GUIDANCE
 from archie_agent.tools import ToolRegistry, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -294,6 +296,39 @@ def _resolve_model(
     return entry.model, model
 
 
+def _pick_tier(value: object) -> tuple[str, str]:
+    """Return the task's tier, or the default tier and a warning when it's missing or unknown."""
+    if isinstance(value, str) and value in SUBAGENT_TIERS:
+        return value, ""
+    problem = "missing tier" if value is None else f"unknown tier {value!r}"
+    names = ", ".join(SUBAGENT_TIERS)
+    return DEFAULT_TIER, f"Warning: {problem} (use one of {names}); using {DEFAULT_TIER}. "
+
+
+def _resolve_child_model(
+    entry: AgentEntry,
+    tier_value: object,
+    tiers: Mapping[str, str] | None,
+    catalog: dict[str, Any],
+    active_model: Any,
+    active_model_key: str,
+) -> tuple[str, Any, str]:
+    """Resolve a child's model key, model and any tier warning.
+
+    The definition's ``model:`` wins, then the caller's tier through ``tiers``. Without
+    ``tiers`` the child runs on the session model.
+    """
+    if entry.model is not None or tiers is None:
+        model_key, model = _resolve_model(entry, catalog, active_model)
+        return model_key or active_model_key, model, ""
+    tier, warning = _pick_tier(tier_value)
+    model_key = tiers[tier]
+    model = catalog.get(model_key)
+    if model is None:
+        raise KeyError(f"unknown model '{model_key}'")
+    return model_key, model, warning
+
+
 def _agent_names(agent_catalog: dict[str, AgentEntry]) -> list[str]:
     """Names accepted by the task tool: the built-in default plus discovered agents."""
     return [DEFAULT_AGENT.name, *sorted(n for n in agent_catalog if n != DEFAULT_AGENT.name)]
@@ -305,12 +340,15 @@ def _task_description(agent_catalog: dict[str, AgentEntry], max_concurrent: int)
         f"{name} — {(agent_catalog.get(name) or DEFAULT_AGENT).description}"
         for name in _agent_names(agent_catalog)
     )
+    tiers = "; ".join(f"{tier} — {TIER_GUIDANCE[tier]}" for tier in SUBAGENT_TIERS)
     return (
         "Delegate one or more tasks to subagents. Tasks in one call run in parallel, "
         f"up to {max_concurrent} at a time; put independent tasks in one call. Subagents "
         "cannot delegate further. Each subagent starts "
         "with no conversation history, so the prompt must state the goal, the relevant "
         "paths and what is already known, and the shape and length of the report. "
+        "Each task needs a tier, which picks the subagent's model; choose it by the work, "
+        f"not by your own model: {tiers}. "
         f"Agents: {agents}."
     )
 
@@ -331,10 +369,15 @@ def create_task_tool(
     runner_context: RunnerContextSource = None,
     turn_cost_limit: float = 50.0,
     max_concurrent: int = 5,
+    tiers: Mapping[str, str] | None = None,
     live_children: dict[tuple[str, int], tuple[Any, asyncio.Event, Callable[[], None]]]
     | None = None,
 ) -> ToolSpec:
-    """Create the root task tool; launch context is injected internally."""
+    """Create the root task tool; launch context is injected internally.
+
+    ``tiers`` maps each tier to a ``model_catalog`` key. Without it every child runs on
+    the session model (or its definition's ``model:``) and the tier is not checked.
+    """
     if max_concurrent <= 0:
         raise ValueError("max_concurrent must be positive")
 
@@ -430,9 +473,17 @@ def create_task_tool(
                 current_model_key = (
                     active_model_key() if callable(active_model_key) else active_model_key
                 )
-                model_key, child_model = _resolve_model(entry, model_catalog, current_model)
-                if not model_key:
-                    model_key = current_model_key
+                model_key, child_model, tier_warning = _resolve_child_model(
+                    entry,
+                    task.get("tier"),
+                    tiers,
+                    model_catalog,
+                    current_model,
+                    current_model_key,
+                )
+                if tier_warning:
+                    log.warning("%s", tier_warning.rstrip())
+                    warning += tier_warning
                 child_llm = create_llm_client(child_model, region)
                 child_skills = _scoped_skills(skill_catalog, entry.skills, entry.name)
                 loaded_content_keys: set[tuple[str, str]] = set()
@@ -655,8 +706,9 @@ def create_task_tool(
                         "properties": {
                             "agent": {"type": "string"},
                             "prompt": {"type": "string"},
+                            "tier": {"type": "string", "enum": list(SUBAGENT_TIERS)},
                         },
-                        "required": ["agent", "prompt"],
+                        "required": ["agent", "prompt", "tier"],
                     },
                 }
             },

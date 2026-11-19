@@ -119,14 +119,14 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 
 ## Milestones
 
-### [ ] M1 — Native tasks run on their tier's model
+### [x] M1 — Native tasks run on their tier's model
 
 - **Approach:** Add the config structs and `SubagentsConfig` fields (follow `CompactionConfig`). Add `tiers.py`. In `create_task_tool`, add `tier` to the item schema and `required`, the tier lines to `_task_description`, and resolution in `run_child` before `_resolve_model`: when `tiers` is given, pick the tier (warning + `standard` on missing/invalid) and look its key up in `model_catalog` (KeyError → task error, as `_resolve_model` does). Wire `tiers=msgspec.structs.asdict(self._subagents.native)` in `AgentHarness`; update the task-running tests in `tests/test_harness.py` and `tests/test_compaction_harness.py` per D16. Add the startup check in `_backend_lifespan`. Update `persona/prompts/delegation.md`, `docs/config.md` and the `docs/architecture.md` config block.
 - **Test seam:** `create_task_tool(...).handler` (`tests/test_task_tool.py`, capturing the model passed to the monkeypatched `create_llm_client`); `load_nexus_config` (`tests/test_subagents_config.py`); `unknown_native_tiers` and `app._backend_lifespan` (new `tests/test_tiers.py`).
 - **Edge cases:** tier missing / not a string / not a tier name → `standard` + warning; tier key not in catalogue → that task returns `KeyError: unknown model '<key>'`, siblings unaffected.
 - **Deliverable:** a native `task` call with `tier: deep` runs the child on the configured deep model.
 - **Verify:** `scripts/dev test tests/test_task_tool.py tests/test_subagents_config.py tests/test_harness.py tests/test_compaction_harness.py tests/test_tiers.py` passes.
-- **Outcome:**
+- **Outcome:** `SubagentsConfig.native`/`.kiro` tier maps, `archie_agent/tiers.py`, the required `tier` item and tier guidance in the `task` description, resolution through `_resolve_child_model` (standard + warning on a bad tier), `AgentHarness` wiring and the `_backend_lifespan` exit. `test_compaction_harness.py::test_child_agents_never_compact` now also asserts the child reached `run_loop`. Evidence: the Verify files plus the subagent accounting/interrupt/prompt tests, 138 passed; ruff check clean.
 
 ### [ ] M2 — Agent definitions pin a tier
 

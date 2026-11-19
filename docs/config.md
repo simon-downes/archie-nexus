@@ -17,6 +17,14 @@ web: {}
 agent:
   subagents:
     max_concurrent: 5
+    native:                       # catalogue model key per tier
+      light: bedrock-openai-gpt-6-luna
+      standard: bedrock-claude-sonnet-5-5
+      deep: bedrock-claude-opus-5-5
+    kiro:                         # Kiro model id per tier
+      light: gpt-5.6-luna
+      standard: claude-sonnet-5.5
+      deep: claude-opus-5.5
   turn_cost_limit: 50.0
   compaction:
     model: bedrock-openai-gpt-6-luna
@@ -83,6 +91,26 @@ directory is removed if the session left nothing in it: it is empty, or holds on
 delete. A session that ends without being stopped, for example when Docker restarts, keeps
 its directory. The setting is read when a session starts and again when it stops, so
 changing it while a scratch session runs can leave that session's directory behind.
+
+## Subagent tiers
+
+Each delegated task runs on a tier, `light`, `standard` or `deep`, and
+`agent.subagents.native` and `agent.subagents.kiro` map each tier to a model for that
+backend. The calling agent picks the tier by the work, so a premium session can hand
+simple lookups to a cheap model and a cheap session can still get a strong model for a
+review. You can override one tier and keep the defaults for the others:
+
+```yaml
+agent:
+  subagents:
+    native:
+      deep: bedrock-claude-fable-5-1
+```
+
+On the native backend each `task` item takes a required `tier`; a missing or unknown tier
+runs on `standard` and the task's result starts with a warning. `native` values are
+catalogue keys, and a key that isn't in the catalogue stops a native session at startup,
+as an unknown `agent.compaction.model` does.
 
 ## Plugins
 
