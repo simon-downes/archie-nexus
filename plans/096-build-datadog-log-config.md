@@ -1,6 +1,6 @@
 # 096 — Datadog log configuration reads and projection fixes
 
-Status: building
+Status: reviewing
 Branch: build-it/096-datadog-log-config (base: (detached) @ ec4b472)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/096-datadog-log-config
 
@@ -280,7 +280,7 @@ them further would repeat the same skill/README/allowlist edits without reducing
   Existing `aggregate_logs` tests pass unchanged. Skill: `fields` docs replace the "query it
   instead" note, `aggregate_spans` entry, rate-limit and table rows. 375 passed; ruff clean.
 
-### [ ] M4 — Every dashboard, group widgets, and query-syntax guidance
+### [x] M4 — Every dashboard, group widgets, and query-syntax guidance
 
 - **Approach:** `dashboards.dashboard_pages`; use it in `list_dashboards` and
   `discovery._dashboards`; children in `formatting.widget`; widget cap 200 across levels.
@@ -292,7 +292,12 @@ them further would repeat the same skill/README/allowlist edits without reducing
 - **Deliverable:** dashboards beyond 100 are visible and grouped widgets show their queries.
 - **Verify:** `scripts/dev test plugins/datadog tests/test_plugin_layout.py -q` passes, then
   the full checks show no new failures against the baseline list.
-- **Outcome:**
+- **Outcome:** `dashboards.dashboard_pages` (async generator, closed with `aclosing`) used by
+  `list_dashboards` (limit 1–1,000) and `discovery._dashboards`; group children in
+  `dashboard_detail` with a 100-child budget. Skill: "Query syntax" section (log/span escaping,
+  IPv6 quoting, `CIDR()`, reserved attributes, monitor `type:` names, from the log search
+  syntax and monitor search docs), dashboard notes; new skill/README content tests.
+  388 passed; ruff clean.
 
 ## Deviations
 
