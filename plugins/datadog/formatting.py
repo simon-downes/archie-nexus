@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -377,3 +378,117 @@ def team(item: dict[str, Any]) -> dict[str, Any]:
         "name": attrs.get("name"),
         "member_count": attrs.get("user_count"),
     }
+
+
+@dataclass(frozen=True)
+class Bounds:
+    """Limits for ``bounded_value``: string length, list length, dict keys and nesting depth."""
+
+    text: int
+    items: int
+    keys: int
+    depth: int
+
+
+CONFIG_BOUNDS = Bounds(text=10_000, items=100, keys=200, depth=8)
+MAX_PROCESSORS = 100
+
+
+def bounded_value(value: Any, bounds: Bounds, depth: int | None = None) -> tuple[Any, bool]:
+    """Return ``(copy, truncated)`` of a JSON value with every dimension bounded.
+
+    Strings are cut, lists and dicts keep their first items, and anything nested deeper than
+    ``bounds.depth`` becomes ``"…"``.
+    """
+    remaining = bounds.depth if depth is None else depth
+    if isinstance(value, str):
+        return text(value, bounds.text)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, False
+    if not isinstance(value, (list, dict)):
+        return None, False
+    if remaining <= 0:
+        return "…", True
+    if isinstance(value, list):
+        result: list[Any] = []
+        truncated = len(value) > bounds.items
+        for item in value[: bounds.items]:
+            copy, cut = bounded_value(item, bounds, remaining - 1)
+            result.append(copy)
+            truncated = truncated or cut
+        return result, truncated
+    mapping: dict[str, Any] = {}
+    truncated = len(value) > bounds.keys
+    for key, item in list(value.items())[: bounds.keys]:
+        copy, cut = bounded_value(item, bounds, remaining - 1)
+        mapping[str(key)] = copy
+        truncated = truncated or cut
+    return mapping, truncated
+
+
+def _filter_query(item: dict[str, Any]) -> str | None:
+    found = item.get("filter")
+    query = found.get("query") if isinstance(found, dict) else None
+    return query if isinstance(query, str) else None
+
+
+def _processor_summary(processors: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Type, name and enabled state per processor; nested pipelines get their own summary."""
+    items = (
+        [item for item in processors if isinstance(item, dict)]
+        if isinstance(processors, list)
+        else []
+    )
+    result: list[dict[str, Any]] = []
+    truncated = len(items) > MAX_PROCESSORS
+    for item in items[:MAX_PROCESSORS]:
+        name, name_cut = text(item.get("name"), MAX_TITLE)
+        record: dict[str, Any] = {
+            "type": item.get("type"),
+            "name": name,
+            "enabled": item.get("is_enabled"),
+        }
+        truncated = truncated or name_cut
+        if item.get("type") == "pipeline":
+            nested, nested_cut = _processor_summary(item.get("processors"))
+            record.update(filter=_filter_query(item), processors=nested)
+            truncated = truncated or nested_cut
+        result.append(record)
+    return result, truncated
+
+
+def _pipeline_header(item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    description, description_cut = text(item.get("description"), MAX_TITLE)
+    tags, tags_cut = bounded(item.get("tags"))
+    processors = item.get("processors")
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "type": item.get("type"),
+        "enabled": item.get("is_enabled"),
+        "read_only": item.get("is_read_only"),
+        "filter": _filter_query(item),
+        "description": description,
+        "tags": tags,
+        "processor_count": len(processors) if isinstance(processors, list) else 0,
+    }, description_cut or tags_cut
+
+
+def pipeline_summary(item: dict[str, Any], position: int | None) -> dict[str, Any]:
+    """A pipeline's place in the processing order, its filter and a processor outline."""
+    header, header_cut = _pipeline_header(item)
+    processors, processors_cut = _processor_summary(item.get("processors"))
+    return {
+        "position": position,
+        **header,
+        "processors": processors,
+        "truncated": header_cut or processors_cut,
+    }
+
+
+def pipeline_detail(item: dict[str, Any]) -> dict[str, Any]:
+    """A pipeline with every processor's configuration, bounded by ``CONFIG_BOUNDS``."""
+    header, header_cut = _pipeline_header(item)
+    raw = item.get("processors")
+    processors, processors_cut = bounded_value(raw if isinstance(raw, list) else [], CONFIG_BOUNDS)
+    return {**header, "processors": processors, "truncated": header_cut or processors_cut}

@@ -1,8 +1,8 @@
 # Datadog plugin
 
-Gives the agent bounded reads over Datadog metrics, logs, spans, events, monitors, dashboards
-and the software catalog, plus create/update for monitors it owns. It calls the Datadog REST
-API directly with `httpx`.
+Gives the agent bounded reads over Datadog metrics, logs, spans, events, monitors, dashboards,
+the software catalog and log configuration (pipelines), plus create/update for monitors it
+owns. It calls the Datadog REST API directly with `httpx`.
 
 ## Namespaces and functions
 
@@ -13,7 +13,8 @@ One namespace, `datadog`. The model learns the functions from `skills/datadog/SK
   `datadog.search_spans`,
   `datadog.list_events`, `datadog.search_monitors`, `datadog.get_monitor`,
   `datadog.validate_monitor`, `datadog.list_dashboards`, `datadog.get_dashboard`,
-  `datadog.list_catalog_entities`, `datadog.list_teams`.
+  `datadog.list_catalog_entities`, `datadog.list_teams`, `datadog.list_log_pipelines`,
+  `datadog.get_log_pipeline`.
 - Write (`policy.write`): `datadog.create_monitor`, `datadog.update_monitor`.
 
 ## Credential
@@ -55,7 +56,9 @@ removes the namespace and skill.
 - `validation.py`: local input checks; every helper raises `DatadogInputError` before a request.
 - `formatting.py`, `paging.py`: bounded normalisers and v2 paging helpers.
 - `metrics.py`, `logs.py`, `traces.py`, `events.py`, `dashboards.py`, `catalog.py`,
-  `discovery.py` (cross-source `search`), `monitors.py`: the tools.
+  `log_config.py` (log pipelines and other log configuration; needs the app key's
+  `logs_read_config` permission), `discovery.py` (cross-source `search`), `monitors.py`: the
+  tools.
 
 Safety rules enforced in code:
 

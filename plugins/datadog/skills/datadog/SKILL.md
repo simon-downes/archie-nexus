@@ -4,7 +4,8 @@ description: >
   Use for Datadog investigation and monitor upkeep through the exec datadog namespace:
   discovery search across monitors, dashboards, metrics and services, metric queries,
   metric search and description (tags, where used), log and span search, the event stream,
-  monitor search and details, dashboards, the software catalog and teams, and creating or updating
+  monitor search and details, dashboards, the software catalog and teams, log pipeline
+  configuration (how logs are parsed), and creating or updating
   monitors that this tool owns (tagged managedby:archie). Not for deleting anything,
   dashboard edits, downtimes or muting, SLOs, posting events, credentials, or raw Datadog
   API calls.
@@ -57,6 +58,8 @@ description: >
 | Find a dashboard, and see its widgets and queries | `datadog.list_dashboards`, `datadog.get_dashboard` |
 | Services, APIs and other catalog entities | `datadog.list_catalog_entities` |
 | Datadog teams | `datadog.list_teams` |
+| How logs are parsed: which pipelines a log passes through, in what order, and their filters | `datadog.list_log_pipelines` |
+| One pipeline's grok rules, remappers and other processors | `datadog.get_log_pipeline` |
 
 For an investigation, start with `search_monitors("status:alert")`. Then use `query_metrics` on the monitor's query, `search_logs` and `search_spans` for the service in the same window, and `list_events` for deploys or changes just before the problem started. If you only have a name or a technology ("rabbitmq", "payments"), start with `search` instead; see "Discovering what exists".
 
@@ -181,6 +184,23 @@ The same approach works for the other time-ordered reads, with these differences
 - `list_events` is always newest first. Use each event's `timestamp` as the next `end`.
 - `search_spans` allows only 5 calls per minute. Use each span's `start` as the next `end`, and keep the loop to two or three pages. Spans have no `id`, so dedupe on `(trace_id, span_id)`. For more than a few hundred spans, use APM metrics with `query_metrics` instead.
 - The other list functions (`search_monitors`, `list_dashboards`, `list_catalog_entities`, `list_teams`) are not time-ordered and can't be paged. Narrow them with `query` (and `kind` for the catalog).
+
+## How logs are processed
+
+Use this when a question depends on how Datadog parsed a log: why an attribute is missing or wrong, which pipeline to change for a new log format, or whether a facet filter can match.
+
+1. Call `list_log_pipelines()`, or `list_log_pipelines("apache")` to keep pipelines whose name or filter contains a term. Pipelines come back in processing order (`position` 1 runs first).
+2. Work out which pipelines a log reaches. Each log is tested against every pipeline's `filter` in order. If it matches, all the pipeline's processors run in order, then the log moves on to the next pipeline. A nested pipeline (a processor of type `pipeline`) applies its own `filter` inside its parent.
+3. Call `get_log_pipeline(id)` on the one or two pipelines that matter to read their processors.
+
+Rules for reading them:
+
+- A pipeline's filter runs before its processors, so it can't match an attribute that the same pipeline extracts. Filters can't use full-text search.
+- A grok parser (`grok-parser`) parses its `source` attribute (default `message`). Only one of its `match_rules` applies to a log: the first, top to bottom, that matches the **whole** value. `support_rules` are helper rules the match rules reference. `samples` are example logs that Datadog took from the highest-volume patterns, so they can contain customer data.
+- When several processors set the same attribute: grok, category, arithmetic, string builder, lookup, URL, user-agent, GeoIP and decoder processors are last write wins. Attribute remappers and array map processors keep an existing value unless `override_on_conflict` is true. Status, service, message, trace and span remappers are first write wins; the date remapper is last write wins.
+- `read_only: true` marks an integration pipeline that Datadog installs for a log `source`. It can't be edited, only cloned. If its `processors` list is empty, treat its rules as unknown rather than absent.
+- JSON logs are preprocessed before any pipeline. Preprocessing maps reserved attributes: `message`/`msg`/`log` become the message, `status`/`severity`/`level` the status, `service`/`dd.service` the service. Preprocessing settings and Auto-Processing entries aren't available through this tool.
+- `enabled: false` on a pipeline or processor means it doesn't run.
 
 ## Functions
 
@@ -441,6 +461,38 @@ Returns `{"id", "kind", "name", "display_name", "owner", "tags", "truncated"}` p
 ### `datadog.list_teams(query=None, limit=50)`
 
 Returns `{"id", "handle", "name", "member_count"}` per team. `query` matches team names and handles.
+
+### `datadog.list_log_pipelines(query=None)`
+
+Returns every log pipeline in processing order. It makes two requests and needs the application key's `logs_read_config` permission; without it, it raises `DatadogAuthorizationError`.
+
+```json
+{
+  "position": 3,
+  "id": "aBcD1234",
+  "name": "Apache",
+  "type": "pipeline",
+  "enabled": true,
+  "read_only": true,
+  "filter": "source:apache",
+  "description": null,
+  "tags": [],
+  "processor_count": 4,
+  "processors": [
+    {"type": "grok-parser", "name": "Parsing Apache logs", "enabled": true},
+    {"type": "pipeline", "name": "Web", "enabled": true, "filter": "service:web", "processors": [{"type": "attribute-remapper", "name": "XFF", "enabled": true}]}
+  ],
+  "truncated": false
+}
+```
+
+- `query` keeps pipelines whose name or filter contains it (case-insensitive). `position` stays the pipeline's place in the full order.
+- A pipeline missing from Datadog's order list comes last with `position: null`.
+- `processors` outlines at most 100 processors per level; `processor_count` is the full top-level count.
+
+### `datadog.get_log_pipeline(pipeline_id)`
+
+Returns one pipeline with the same fields (no `position`) and `processors` as Datadog defines them: each processor's `type`, `name`, `is_enabled` and type-specific settings, such as `grok.match_rules`, `sources`, `target`, `categories`, `lookup_table` or nested `processors`. Strings are cut at 10,000 characters, lists at 100 items and objects at 200 keys, and objects nested more than 8 levels deep show as `"…"`; `truncated` is then true. `pipeline_id` is an `id` from `list_log_pipelines`. Needs `logs_read_config`. An unknown ID raises `DatadogNotFoundError`.
 
 ## Errors and retry policy
 

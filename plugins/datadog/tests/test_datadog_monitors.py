@@ -346,10 +346,12 @@ PUBLIC = {
     "create_monitor",
     "describe_metric",
     "get_dashboard",
+    "get_log_pipeline",
     "get_monitor",
     "list_catalog_entities",
     "list_dashboards",
     "list_events",
+    "list_log_pipelines",
     "list_teams",
     "query_metrics",
     "search",
@@ -401,6 +403,9 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "/api/v1/dashboard/abc-def-ghi": {"id": "abc-def-ghi", "widgets": []},
         "/api/v2/catalog/entity": {"data": []},
         "/api/v2/team": {"data": []},
+        "/api/v1/logs/config/pipelines": [],
+        "/api/v1/logs/config/pipeline-order": {"pipeline_ids": []},
+        "/api/v1/logs/config/pipelines/p1": {"id": "p1", "processors": []},
     }
 
     def handler(request):
@@ -411,7 +416,16 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     async def factory():
         yield DatadogClient("k", "a", "https://api.datadoghq.eu", httpx.MockTransport(handler))
 
-    modules = ("metrics", "logs", "traces", "events", "monitors", "dashboards", "catalog")
+    modules = (
+        "metrics",
+        "logs",
+        "traces",
+        "events",
+        "monitors",
+        "dashboards",
+        "catalog",
+        "log_config",
+    )
     for module in (*modules, "discovery"):
         monkeypatch.setattr(
             sys.modules[f"archie_plugins.datadog.{module}"], "datadog_client", factory
@@ -433,6 +447,8 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "get_dashboard": ("abc-def-ghi",),
         "list_catalog_entities": (),
         "list_teams": (),
+        "list_log_pipelines": (),
+        "get_log_pipeline": ("p1",),
         "search": ("queue:x", list(SOURCES)),
     }
     assert set(calls) == PUBLIC

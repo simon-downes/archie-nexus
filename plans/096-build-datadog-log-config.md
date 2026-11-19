@@ -221,7 +221,7 @@ configuration lives in a new module; projection and dashboard fixes change exist
 M2–M4 each group closely related reads that share one pattern and one test seam; splitting
 them further would repeat the same skill/README/allowlist edits without reducing risk.
 
-### [ ] M1 — Read log pipelines
+### [x] M1 — Read log pipelines
 
 - **Approach:** add allowlist entries (all eight paths, so later milestones only add code),
   `validation.pipeline_id`, `formatting.config_value` and pipeline normalisers, and
@@ -236,7 +236,12 @@ them further would repeat the same skill/README/allowlist edits without reducing
   `DatadogResponseError`; nested `pipeline` processor → summarised and fully projected.
 - **Deliverable:** the agent can list pipelines in order and read one pipeline's grok rules.
 - **Verify:** `scripts/dev test plugins/datadog tests/test_plugin_layout.py -q` passes.
-- **Outcome:**
+- **Outcome:** `log_config.py` with `list_log_pipelines`/`get_log_pipeline`; all eight GET
+  paths allowlisted; `formatting.bounded_value` + `Bounds`/`CONFIG_BOUNDS`; skill gained "How
+  logs are processed" (order, filter-before-processors, grok first-match, precedence,
+  integration pipelines, preprocessing; from the pipelines, grok parser and parsing docs) and
+  both function entries. 347 passed (`scripts/dev test plugins/datadog tests/test_plugin_layout.py`);
+  ruff clean.
 
 ### [ ] M2 — Read indexes, log-based metrics and scanner groups
 

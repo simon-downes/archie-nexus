@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .client import DASHBOARD_ID, METRIC, DatadogInputError
+from .client import DASHBOARD_ID, METRIC, PIPELINE_ID, DatadogInputError
 
 MAX_QUERY = 2_000
 MAX_TEXT = 4_000
@@ -16,6 +16,7 @@ _MAX_WINDOW = timedelta(days=31)
 _MAX_AGE = timedelta(days=365)
 _DASHBOARD = re.compile(DASHBOARD_ID)
 _METRIC = re.compile(METRIC)
+_PIPELINE = re.compile(PIPELINE_ID)
 _KIND = re.compile(r"^[a-z0-9_.-]{1,64}$")
 _FACET = re.compile(r"^@?[A-Za-z0-9_][A-Za-z0-9_.\-]{0,199}$")
 _INTERVAL = re.compile(r"^[1-9][0-9]{0,5}[smhd]$")
@@ -209,6 +210,16 @@ def monitor_id(value: Any) -> int:
 def dashboard_id(value: Any) -> str:
     if not isinstance(value, str) or not _DASHBOARD.fullmatch(value.strip()):
         raise DatadogInputError("dashboard_id must look like abc-def-ghi")
+    return value.strip()
+
+
+def pipeline_id(value: Any) -> str:
+    """A log pipeline ID from ``list_log_pipelines``: 1-64 letters, digits, ``_`` or ``-``."""
+    if not isinstance(value, str) or not _PIPELINE.fullmatch(value.strip()):
+        raise DatadogInputError(
+            "pipeline_id must be a pipeline ID from list_log_pipelines "
+            "(1-64 letters, digits, '_' or '-')"
+        )
     return value.strip()
 
 
