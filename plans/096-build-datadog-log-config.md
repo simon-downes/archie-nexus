@@ -192,7 +192,7 @@ configuration lives in a new module; projection and dashboard fixes change exist
   processors and `fields`), pipeline/index/log-metric/scanner normalisers, `field_values`,
   group children in `widget`/`dashboard_detail`, `span_bucket`.
 - `plugins/datadog/validation.py`: `pipeline_id`, `fields`, span aggregation set.
-- `plugins/datadog/paging.py`: `aggregate_request(...)` shared by logs and spans.
+- `plugins/datadog/paging.py`: `aggregate_attributes(...)` shared by logs and spans.
 - `plugins/datadog/logs.py`, `traces.py`: `fields` argument; `aggregate_spans` in `traces.py`.
 - `plugins/datadog/dashboards.py`: `dashboard_pages(client)` used by `list_dashboards` and
   `discovery._dashboards`.
@@ -258,11 +258,11 @@ them further would repeat the same skill/README/allowlist edits without reducing
   tolerant of unhashable order entries). Skill: index routing/exclusion/quota semantics from
   the indexes doc, scanner rule semantics from the spec. 360 passed; ruff clean.
 
-### [ ] M3 — Nested fields on log and span search, and span aggregation
+### [x] M3 — Nested fields on log and span search, and span aggregation
 
 - **Approach:** `validation.fields`; `formatting.field_values(source_dicts, paths)` with the
   dotted-key resolution; `fields` argument on `search_logs`/`search_spans`; move the
-  compute/group_by body building from `aggregate_logs` into `paging.aggregate_request`;
+  compute/group_by body building from `aggregate_logs` into `paging.aggregate_attributes`;
   `aggregate_spans` in `traces.py`; `avg`/`median` in the shared aggregation set. Skill: replace
   the `search_logs` note that nested values show as `"…"` and must be queried instead, document
   `fields` on both searches, add `aggregate_spans` to "Rate limits that matter" (50/min) and to
@@ -273,7 +273,12 @@ them further would repeat the same skill/README/allowlist edits without reducing
   request body unchanged by the refactor (existing tests).
 - **Deliverable:** agents read nested attributes and aggregate spans server-side.
 - **Verify:** `scripts/dev test plugins/datadog tests/test_plugin_layout.py -q` passes.
-- **Outcome:**
+- **Outcome:** `validation.fields`, `validation.aggregate` (an `Aggregate` dataclass shared by
+  both aggregates), `paging.aggregate_attributes`/`aggregate_result`/`meta_warnings`,
+  `formatting.field_values` (longest-dotted-key lookup, `FIELD_BOUNDS`) and `span_bucket`;
+  `fields` on both searches; `aggregate_spans` in `traces.py`; `avg`/`median` for both.
+  Existing `aggregate_logs` tests pass unchanged. Skill: `fields` docs replace the "query it
+  instead" note, `aggregate_spans` entry, rate-limit and table rows. 375 passed; ruff clean.
 
 ### [ ] M4 — Every dashboard, group widgets, and query-syntax guidance
 

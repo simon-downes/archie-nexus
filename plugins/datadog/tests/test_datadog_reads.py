@@ -601,6 +601,168 @@ async def test_search_spans_one_request_and_normalises(dd_fake):
     assert result[0]["error"] == "http_error: 502 Bad Gateway"
     assert "custom" not in result[0]
     assert "secret_header" not in str(result[0])
+    assert "fields" not in result[0]
+
+
+NESTED = {
+    "http": {"client_ip": "203.0.113.7", "url_details": {"path": "/gift/abc"}},
+    "http.url_details": {"host": "flat.example"},
+    "context": {"brand": "acme", "items": list(range(80)), "note": "n" * 3000},
+    "network": {"client": {"ip": "10.0.0.1"}},
+}
+
+
+async def test_search_logs_fields_read_nested_attributes(dd_fake):
+    dd_fake({LOGS: {"data": [_log(1, attributes=NESTED)]}}, "logs")
+    [record] = await search_logs(
+        "*",
+        fields=[" @http.client_ip ", "@context", "http.url_details.host", "@missing.x", "network"],
+    )
+    fields = record["fields"]
+    assert list(fields) == [
+        "@http.client_ip",
+        "@context",
+        "http.url_details.host",
+        "@missing.x",
+        "network",
+    ]
+    assert fields["@http.client_ip"] == "203.0.113.7"
+    assert fields["http.url_details.host"] == "flat.example"
+    assert fields["@missing.x"] is None
+    assert fields["network"] == {"client": {"ip": "10.0.0.1"}}
+    assert fields["@context"]["brand"] == "acme"
+    assert len(fields["@context"]["items"]) == 50
+    assert len(fields["@context"]["note"]) == 2000
+    assert record["truncated"] is True
+    assert record["attributes"]["http"] == "…"
+
+
+def test_fields_prefer_longest_dotted_key_then_fall_back_to_nesting():
+    from archie_plugins.datadog.formatting import field_values
+
+    source = {"a.b": {"x": 1}, "a": {"b": {"c": 2}}}
+    values, truncated = field_values([source], ["a.b.x", "a.b.c"])
+    assert values == {"a.b.x": 1, "a.b.c": 2}
+    assert truncated is False
+
+
+def test_fields_bound_depth_and_keys():
+    from archie_plugins.datadog.formatting import field_values
+
+    deep = {"l1": {"l2": {"l3": {"l4": {"l5": 1}}}}}
+    wide = {f"k{i}": i for i in range(60)}
+    values, truncated = field_values([{"deep": deep, "wide": wide}], ["deep", "wide"])
+    assert values["deep"] == {"l1": {"l2": {"l3": {"l4": "…"}}}}
+    assert len(values["wide"]) == 50
+    assert truncated is True
+
+
+@pytest.mark.parametrize("fields", [[], "@http", ["bad path"], [5], ["@a"] * 21, ["a/b"], [""]])
+async def test_search_logs_and_spans_reject_bad_fields(dd_fake, fields):
+    client = dd_fake({}, "logs", "traces")
+    with pytest.raises(DatadogInputError):
+        await search_logs("*", fields=fields)
+    with pytest.raises(DatadogInputError):
+        await search_spans("*", fields=fields)
+    assert client.calls == []
+
+
+async def test_search_spans_fields_read_custom_then_attributes(dd_fake):
+    item = {
+        **SPAN,
+        "attributes": {
+            **SPAN["attributes"],
+            "custom": {**SPAN["attributes"]["custom"], "http": {"client_ip": "198.51.100.2"}},
+            "attributes": {"http": {"client_ip": "shadowed"}, "peer": {"service": "db"}},
+        },
+    }
+    dd_fake({SPANS: {"data": [item]}}, "traces")
+    [record] = await search_spans("*", fields=["@http.client_ip", "@peer.service", "@duration"])
+    assert record["fields"] == {
+        "@http.client_ip": "198.51.100.2",
+        "@peer.service": "db",
+        "@duration": 372_039_555,
+    }
+    assert record["truncated"] is False
+
+
+SPAN_AGGREGATE = ("POST", "/api/v2/spans/analytics/aggregate")
+
+
+async def test_aggregate_spans_builds_the_shared_request_and_parses_compute(dd_fake):
+    from archie_plugins.datadog.traces import aggregate_spans
+
+    bucket = {
+        "type": "bucket",
+        "attributes": {"by": {"resource_name": "GET /"}, "compute": {"c0": 12.5}},
+    }
+    client = dd_fake(
+        {SPAN_AGGREGATE: {"data": [bucket, "junk"], "meta": {"status": "done"}}}, "traces"
+    )
+    result = await aggregate_spans(
+        "service:api", ["resource_name"], aggregation="avg", metric="@duration", start="30m"
+    )
+    assert len(client.calls) == 1
+    body = client.calls[0][3]
+    assert body["data"]["type"] == "aggregate_request"
+    attributes = body["data"]["attributes"]
+    assert attributes["compute"] == [{"aggregation": "avg", "type": "total", "metric": "@duration"}]
+    assert attributes["group_by"] == [
+        {
+            "facet": "resource_name",
+            "limit": 100,
+            "sort": {
+                "type": "measure",
+                "aggregation": "avg",
+                "order": "desc",
+                "metric": "@duration",
+            },
+        }
+    ]
+    assert attributes["filter"]["query"] == "service:api"
+    assert result["buckets"] == [{"by": {"resource_name": "GET /"}, "value": 12.5}]
+    assert result["group_by"] == ["resource_name"]
+    assert result["partial"] is False
+
+
+async def test_aggregate_spans_timeseries_and_timeout(dd_fake):
+    from archie_plugins.datadog.traces import aggregate_spans
+
+    points = [{"time": "2026-05-01T11:00:00Z", "value": 4}]
+    bucket = {"attributes": {"by": {"service": "api"}, "compute": {"c0": points}}}
+    dd_fake(
+        {
+            SPAN_AGGREGATE: {
+                "data": [bucket],
+                "meta": {"status": "timeout", "warnings": [{"code": "slow"}]},
+            }
+        },
+        "traces",
+    )
+    result = await aggregate_spans("*", ["service"], interval="5m")
+    assert result["buckets"][0]["points"] == [["2026-05-01T11:00:00Z", 4]]
+    assert result["partial"] is True and result["warnings"] == ["slow"]
+
+
+async def test_aggregate_spans_malformed_and_input_errors(dd_fake):
+    from archie_plugins.datadog.traces import aggregate_spans
+
+    client = dd_fake({SPAN_AGGREGATE: {"data": {}}}, "traces")
+    with pytest.raises(DatadogResponseError):
+        await aggregate_spans("*")
+    calls = len(client.calls)
+    for kwargs in ({"aggregation": "mean"}, {"aggregation": "median"}, {"order": "up"}):
+        with pytest.raises(DatadogInputError):
+            await aggregate_spans("*", **kwargs)
+    assert len(client.calls) == calls
+
+
+async def test_aggregate_logs_accepts_avg_and_median(dd_fake):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    client = dd_fake({AGGREGATE: {"data": {"buckets": []}}}, "logs")
+    await aggregate_logs("*", aggregation="median", metric="@duration")
+    assert client.calls[0][3]["compute"][0]["aggregation"] == "median"
 
 
 EVENT = {
@@ -702,6 +864,7 @@ async def test_list_events_blank_query_is_no_filter(dd_fake):
 
 READS = {
     "aggregate_logs",
+    "aggregate_spans",
     "describe_metric",
     "get_dashboard",
     "get_log_pipeline",

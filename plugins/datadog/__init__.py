@@ -20,10 +20,11 @@ from .monitors import (
     update_monitor,
     validate_monitor,
 )
-from .traces import search_spans
+from .traces import aggregate_spans, search_spans
 
 __all__ = [
     "aggregate_logs",
+    "aggregate_spans",
     "create_monitor",
     "describe_metric",
     "get_dashboard",

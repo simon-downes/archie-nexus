@@ -355,6 +355,7 @@ SCANNER_CONFIG = {
 
 PUBLIC = {
     "aggregate_logs",
+    "aggregate_spans",
     "create_monitor",
     "describe_metric",
     "get_dashboard",
@@ -452,11 +453,12 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         )
     calls = {
         "aggregate_logs": ("*", ["service", "@http.useragent"]),
+        "aggregate_spans": ("*", ["service"]),
         "query_metrics": ("avg:x{*}",),
         "search_metrics": ("x",),
         "describe_metric": ("x",),
-        "search_logs": ("*",),
-        "search_spans": ("*",),
+        "search_logs": ("*", "1h", None, 20, "newest", ["@http"]),
+        "search_spans": ("*", "1h", None, 20, "newest", ["@http"]),
         "list_events": (),
         "search_monitors": (),
         "get_monitor": (42,),

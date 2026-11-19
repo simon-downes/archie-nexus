@@ -11,7 +11,7 @@ One namespace, `datadog`. The model learns the functions from `skills/datadog/SK
 
 - Read (`policy.read`): `datadog.search`, `datadog.query_metrics`, `datadog.search_metrics`,
   `datadog.describe_metric`, `datadog.search_logs`, `datadog.aggregate_logs`,
-  `datadog.search_spans`,
+  `datadog.search_spans`, `datadog.aggregate_spans`,
   `datadog.list_events`, `datadog.search_monitors`, `datadog.get_monitor`,
   `datadog.validate_monitor`, `datadog.list_dashboards`, `datadog.get_dashboard`,
   `datadog.list_catalog_entities`, `datadog.list_teams`, `datadog.list_log_pipelines`,

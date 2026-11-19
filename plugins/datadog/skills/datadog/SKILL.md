@@ -51,6 +51,8 @@ description: >
 | Error logs or log lines for a service | `datadog.search_logs` |
 | Log counts or measures grouped by facets (top IPs, IP × user agent, per-10-minute counts) | `datadog.aggregate_logs` |
 | Slow or failing requests (APM spans) | `datadog.search_spans` |
+| Span counts, latency percentiles or error counts grouped by service, resource or any span facet | `datadog.aggregate_spans` |
+| The value of a nested attribute (`@http.client_ip`, a whole `@context` object) on each log or span | `datadog.search_logs(fields=[...])`, `datadog.search_spans(fields=[...])` |
 | Deploys, Kubernetes changes, integration and alert events | `datadog.list_events` |
 | Which monitors are alerting, or monitors for a service | `datadog.search_monitors` |
 | One monitor's query, message and options | `datadog.get_monitor` |
@@ -98,7 +100,7 @@ async def main():
 
 Datadog limits each endpoint separately, and some limits are tight:
 
-- `search_spans`: 5 calls per minute. Make one well-filtered call, not a loop. `search(sources=[..., "spans"])` uses a span endpoint with a similarly tight limit, which is why spans are not searched by default.
+- `search_spans`: 5 calls per minute. Make one well-filtered call, not a loop. For counts or percentiles, use `aggregate_spans`, which allows 50 calls per minute. `search(sources=[..., "spans"])` uses a span endpoint with a similarly tight limit, which is why spans are not searched by default.
 - `search_logs`: 10 calls per 10 seconds.
 - `aggregate_logs`: Datadog doesn't document this limit. Pace it like `search_logs`: no more than about one call per second in a loop.
 - `describe_metric` makes three requests per call. Describe the metrics you need, not every search result.
@@ -186,7 +188,7 @@ If the loop stops at its page cap, `oldest` shows how far back the records go. S
 The same approach works for the other time-ordered reads, with these differences:
 
 - `list_events` is always newest first. Use each event's `timestamp` as the next `end`.
-- `search_spans` allows only 5 calls per minute. Use each span's `start` as the next `end`, and keep the loop to two or three pages. Spans have no `id`, so dedupe on `(trace_id, span_id)`. For more than a few hundred spans, use APM metrics with `query_metrics` instead.
+- `search_spans` allows only 5 calls per minute. Use each span's `start` as the next `end`, and keep the loop to two or three pages. Spans have no `id`, so dedupe on `(trace_id, span_id)`. For more than a few hundred spans, aggregate them with `aggregate_spans`, or use APM metrics with `query_metrics`.
 - The other list functions (`search_monitors`, `list_dashboards`, `list_catalog_entities`, `list_teams`) are not time-ordered and can't be paged. Narrow them with `query` (and `kind` for the catalog).
 
 ## How logs are processed
@@ -317,7 +319,7 @@ Describes one metric so you can write a correct query. It makes three requests, 
 - `dashboards` and `monitors` (at most 50 each) are where the metric is already used. Pass a dashboard `id` to `get_dashboard`, or a monitor `id` (as an integer) to `get_monitor`, to see working queries.
 - `name` is a metric name: a letter, then letters, digits, `_` or `.`. An unknown metric raises `DatadogNotFoundError`. A metric with no tag data returns `tags` as `{}`.
 
-### `datadog.search_logs(query, start="1h", end=None, limit=20, sort="newest")`
+### `datadog.search_logs(query, start="1h", end=None, limit=20, sort="newest", fields=None)`
 
 Returns log records:
 
@@ -335,7 +337,16 @@ Returns log records:
 }
 ```
 
-`message` is at most 2,000 characters and `tags` at most 50. `attributes` has at most 30 top-level keys; strings are cut at 200 characters, and nested objects or lists show as `"…"`. To read a nested attribute, put it in the query (`@context.status:ERROR`) rather than expecting it in the output.
+`message` is at most 2,000 characters and `tags` at most 50. `attributes` has at most 30 top-level keys; strings are cut at 200 characters, and nested objects or lists show as `"…"`.
+
+To read nested attributes, name them in `fields`: a list of 1–20 attribute paths, with or without `@`. Each record then gets `fields`, which maps each path, as you wrote it, to its value or `null` when the log doesn't have it:
+
+```python
+logs = await datadog.search_logs("service:web", fields=["@http.client_ip", "@http.x_forwarded_for", "@context"])
+# logs[0]["fields"] == {"@http.client_ip": "203.0.113.7", "@http.x_forwarded_for": "203.0.113.7, 10.0.0.4", "@context": {"brand": "acme", ...}}
+```
+
+A path can name a whole object (`@http`) to see what it holds. Values are bounded: strings to 2,000 characters, lists to 50 items, objects to 50 keys and 4 levels, and `truncated` is true if any value was cut. A path resolves through nested objects and through keys that contain dots (`http.url_details`). Comparing `fields` with the raw `message` shows what the pipelines extracted.
 
 ### `datadog.aggregate_logs(query, group_by=None, start="1h", end=None, aggregation="count", metric=None, interval=None, order="desc")`
 
@@ -358,14 +369,14 @@ Aggregates matching logs on the server and returns buckets, not log records:
 
 - `group_by`: up to four levels. Each level is a facet name (`"service"`, `"@http.useragent"`) or a dict `{"facet": ..., "limit": ..., "missing": ...}`. The default `limit` is 100 for the first level and 10 for later ones. The product of the limits must be at most 10,000. Each level keeps its top values by the aggregation, so `["@network.client.ip", "@http.useragent"]` means the top 100 IPs, then the top 10 user agents for each IP. Logs without a facet are left out unless you set `missing` to a placeholder such as `"none"`. With no `group_by`, one bucket holds the total for the whole query.
 - You can only group by facets. A query can filter on an attribute that has no facet, but grouping by it fails or returns nothing. If a grouped call returns no buckets while the same query has matches in `search`, check that the attribute is a facet.
-- `aggregation`: `count` (default), `cardinality`, `sum`, `min`, `max`, `pc75`, `pc90`, `pc95`, `pc98` or `pc99`. Every aggregation except `count` needs `metric`, which is the facet or measure to aggregate (`@duration`, `@network.client.ip` for `cardinality`).
+- `aggregation`: `count` (default), `cardinality`, `sum`, `min`, `max`, `avg`, `median`, `pc75`, `pc90`, `pc95`, `pc98` or `pc99`. Every aggregation except `count` needs `metric`, which is the facet or measure to aggregate (`@duration`, `@network.client.ip` for `cardinality`).
 - `interval` (`30s`, `10m`, `1h`): returns a timeseries per bucket. Each bucket then has `points`, a list of `[time, value]` pairs, instead of `value`. Without it, each bucket has a single `value` for the whole window.
 - `order`: `desc` (default) keeps the largest values at each level; `asc` keeps the smallest.
 - `partial` is true when Datadog timed out and returned partial results, and `warnings` holds Datadog's warning titles. Treat partial results as a lower bound, and retry with a shorter window.
 - A request that would exceed the bucket cap is rejected before any call is made. The tool follows Datadog's cursor for up to five pages.
 - Counts are of log records. If one record bundles several lines, such as an access log that ships several requests in one event, the count undercounts requests.
 
-### `datadog.search_spans(query, start="1h", end=None, limit=20, sort="newest")`
+### `datadog.search_spans(query, start="1h", end=None, limit=20, sort="newest", fields=None)`
 
 Returns spans:
 
@@ -387,7 +398,15 @@ Returns spans:
 }
 ```
 
-This makes one request, so it returns at most `limit` spans. `error` is at most 500 characters. Custom span attributes are not returned.
+This makes one request, so it returns at most `limit` spans. `error` is at most 500 characters. Custom span attributes are not returned unless you name them in `fields`, which works as it does for `search_logs`. A path is looked up in the span's custom attributes (where `@http.*`, `@network.*` and `@duration` live) and then in its other attributes.
+
+### `datadog.aggregate_spans(query, group_by=None, start="1h", end=None, aggregation="count", metric=None, interval=None, order="desc")`
+
+Aggregates matching spans on the server. It takes the same arguments and returns the same shape as `aggregate_logs`, with span facets such as `service`, `resource_name`, `@http.status_code` and the measure `@duration` (nanoseconds). It makes one request with no paging, so the bucket cap of 10,000 is all you get. Datadog allows 50 calls per minute. Searched and aggregated spans are the ones Datadog kept, which can be fewer than all requests when retention filters sample them; for complete request counts, use the `trace.*` APM metrics with `query_metrics`.
+
+```python
+slow = await datadog.aggregate_spans("service:api env:production", ["resource_name"], aggregation="pc95", metric="@duration", start="1h")
+```
 
 ### `datadog.list_events(query=None, start="1h", end=None, limit=20)`
 

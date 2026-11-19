@@ -106,12 +106,43 @@ def _scalar_attributes(values: Any) -> tuple[dict[str, Any], bool]:
     return result, truncated
 
 
-def log(item: dict[str, Any]) -> dict[str, Any]:
+def _lookup(value: Any, parts: list[str]) -> tuple[bool, Any]:
+    """Follow ``parts`` through nested dicts, trying the longest dotted key first at each level."""
+    if not parts:
+        return True, value
+    if not isinstance(value, dict):
+        return False, None
+    for size in range(len(parts), 0, -1):
+        key = ".".join(parts[:size])
+        if key in value:
+            found, result = _lookup(value[key], parts[size:])
+            if found:
+                return True, result
+    return False, None
+
+
+def field_values(sources: list[Any], paths: list[str]) -> tuple[dict[str, Any], bool]:
+    """Each path's value from the first source dict that has it, bounded; missing is ``None``."""
+    values: dict[str, Any] = {}
+    truncated = False
+    for path in paths:
+        parts = path.removeprefix("@").split(".")
+        value = None
+        for source in sources:
+            found, value = _lookup(source, parts)
+            if found:
+                break
+        values[path], cut = bounded_value(value, FIELD_BOUNDS)
+        truncated = truncated or cut
+    return values, truncated
+
+
+def log(item: dict[str, Any], paths: list[str] | None = None) -> dict[str, Any]:
     attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
     message, message_cut = text(attrs.get("message"), MAX_MESSAGE)
     tags, tags_cut = bounded(attrs.get("tags"))
     extra, extra_cut = _scalar_attributes(attrs.get("attributes"))
-    return {
+    record: dict[str, Any] = {
         "id": item.get("id"),
         "timestamp": attrs.get("timestamp"),
         "service": attrs.get("service"),
@@ -120,8 +151,13 @@ def log(item: dict[str, Any]) -> dict[str, Any]:
         "message": message,
         "tags": tags,
         "attributes": extra,
-        "truncated": message_cut or tags_cut or extra_cut,
     }
+    truncated = message_cut or tags_cut or extra_cut
+    if paths:
+        record["fields"], fields_cut = field_values([attrs.get("attributes")], paths)
+        truncated = truncated or fields_cut
+    record["truncated"] = truncated
+    return record
 
 
 def aggregate_bucket(item: dict[str, Any]) -> dict[str, Any]:
@@ -139,14 +175,20 @@ def aggregate_bucket(item: dict[str, Any]) -> dict[str, Any]:
     return bucket
 
 
-def span(item: dict[str, Any]) -> dict[str, Any]:
+def span_bucket(item: dict[str, Any]) -> dict[str, Any]:
+    """One span aggregate bucket; spans keep values under ``attributes.compute``."""
+    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    return aggregate_bucket({"by": attrs.get("by"), "computes": attrs.get("compute")})
+
+
+def span(item: dict[str, Any], paths: list[str] | None = None) -> dict[str, Any]:
     attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
     custom = attrs.get("custom") if isinstance(attrs.get("custom"), dict) else {}
     error = custom.get("error") if isinstance(custom.get("error"), dict) else {}
     duration = custom.get("duration")
     parts = [error.get("type"), error.get("message")]
     error_text, error_cut = text(": ".join(str(part) for part in parts if part), MAX_SPAN_ERROR)
-    return {
+    record: dict[str, Any] = {
         "trace_id": attrs.get("trace_id"),
         "span_id": attrs.get("span_id"),
         "parent_id": attrs.get("parent_id"),
@@ -163,8 +205,13 @@ def span(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "status": attrs.get("status"),
         "error": error_text or None,
-        "truncated": error_cut,
     }
+    truncated = error_cut
+    if paths:
+        record["fields"], fields_cut = field_values([custom, attrs.get("attributes")], paths)
+        truncated = truncated or fields_cut
+    record["truncated"] = truncated
+    return record
 
 
 def event(item: dict[str, Any]) -> dict[str, Any]:
@@ -392,6 +439,7 @@ class Bounds:
 
 
 CONFIG_BOUNDS = Bounds(text=10_000, items=100, keys=200, depth=8)
+FIELD_BOUNDS = Bounds(text=2_000, items=50, keys=50, depth=4)
 MAX_PROCESSORS = 100
 
 

@@ -5,12 +5,54 @@ from __future__ import annotations
 from typing import Any
 
 from .client import DatadogClient, DatadogResponseError
+from .validation import Aggregate
 
 _MAX_PAGES = 5
 
 
 def iso(value) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def aggregate_attributes(spec: Aggregate) -> dict[str, Any]:
+    """The ``filter``, ``compute`` and ``group_by`` shared by log and span aggregate requests."""
+    compute: dict[str, Any] = {"aggregation": spec.function, "type": "total"}
+    sort: dict[str, Any] = {"type": "measure", "aggregation": spec.function, "order": spec.order}
+    if spec.metric:
+        compute["metric"] = spec.metric
+        sort["metric"] = spec.metric
+    if spec.interval:
+        compute.update(type="timeseries", interval=spec.interval)
+    return {
+        "filter": {"query": spec.query, "from": iso(spec.begin), "to": iso(spec.end)},
+        "compute": [compute],
+        "group_by": [
+            {key: value for key, value in {**group, "sort": sort}.items() if value is not None}
+            for group in spec.groups
+        ],
+    }
+
+
+def meta_warnings(meta: dict[str, Any]) -> list[str]:
+    return [
+        str(item.get("title") or item.get("code"))[:200]
+        for item in meta.get("warnings") or []
+        if isinstance(item, dict)
+    ]
+
+
+def aggregate_result(
+    spec: Aggregate, buckets: list[dict], partial: bool, warnings: list[str]
+) -> dict[str, Any]:
+    return {
+        "from": iso(spec.begin),
+        "to": iso(spec.end),
+        "group_by": [group["facet"] for group in spec.groups],
+        "bucket_count": len(buckets),
+        "buckets": buckets,
+        "partial": partial,
+        "warnings": warnings[:10],
+    }
 
 
 def collection(value: Any) -> list[dict]:
