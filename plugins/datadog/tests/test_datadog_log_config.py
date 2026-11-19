@@ -156,7 +156,7 @@ async def test_list_log_pipelines_malformed_response(dd_fake, responses):
         await list_log_pipelines()
 
 
-async def test_list_log_pipelines_missing_permission_is_authorization_error(dd_fake):
+async def test_list_log_pipelines_propagates_authorization_error(dd_fake):
     dd_fake(
         {PIPELINES: DatadogAuthorizationError("Datadog authorization denied: logs_read_config")},
         "log_config",
@@ -219,7 +219,7 @@ async def test_get_log_pipeline_rejects_bad_ids(dd_fake, value):
     assert client.calls == []
 
 
-async def test_get_log_pipeline_unknown_id(dd_fake):
+async def test_get_log_pipeline_propagates_not_found(dd_fake):
     dd_fake(
         {("GET", "/api/v1/logs/config/pipelines/zzz"): DatadogNotFoundError("not found")},
         "log_config",
@@ -510,7 +510,7 @@ async def test_list_scanning_groups_malformed(dd_fake, data):
         await list_scanning_groups()
 
 
-async def test_list_scanning_groups_missing_permission(dd_fake):
+async def test_list_scanning_groups_propagates_authorization_error(dd_fake):
     dd_fake(
         {SCANNER: DatadogAuthorizationError("Datadog authorization denied: data_scanner_read")},
         "log_config",

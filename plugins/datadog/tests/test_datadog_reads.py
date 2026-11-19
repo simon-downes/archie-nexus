@@ -997,6 +997,21 @@ async def test_list_dashboards_malformed(dd_fake):
         await list_dashboards()
 
 
+async def test_list_dashboards_dedupes_ids_when_offsets_shift(dd_fake):
+    first = _dashboards(0, 100)
+    second = {"dashboards": [first["dashboards"][-1], {"id": "new", "title": "Board"}]}
+    dd_fake({DASHBOARDS: Seq([first, second])}, "dashboards")
+    result = await list_dashboards(limit=1000)
+    assert len(result) == 101
+    assert len({item["id"] for item in result}) == 101
+
+
+async def test_list_dashboards_later_page_failure_raises(dd_fake):
+    dd_fake({DASHBOARDS: Seq([_dashboards(0, 100), DatadogRateLimitError(3)])}, "dashboards")
+    with pytest.raises(DatadogRateLimitError):
+        await list_dashboards("missing")
+
+
 async def test_get_dashboard_widgets_and_bounds(dd_fake):
     dd_fake({("GET", "/api/v1/dashboard/abc-def-ghi"): DASHBOARD}, "dashboards")
     result = await get_dashboard("abc-def-ghi")

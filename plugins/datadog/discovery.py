@@ -1,9 +1,10 @@
 """Broad discovery: one search term across monitors, dashboards, metrics, logs and spans.
 
-Each source makes one or two read requests (dashboards one per 100 dashboards, stopping once
-``limit`` match) with its own client and a 25-second timeout, so a slow or throttled source is
-reported in ``skipped`` instead of failing the whole search. Logs
-and spans are aggregated by service: discovery never returns log or span content.
+Each source makes one or two read requests with its own client and a 25-second timeout, so a
+slow or throttled source is reported in ``skipped`` instead of failing the whole search. The
+dashboards source pages through the dashboard list and keeps the matches it has if a later
+page fails or its 20-second budget runs out. Logs and spans are aggregated by service:
+discovery never returns log or span content.
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ from .policy import require_read
 SOURCES = ("monitors", "dashboards", "metrics", "logs", "spans")
 DEFAULT_SOURCES = ("monitors", "dashboards", "metrics", "logs")
 SOURCE_TIMEOUT = 25
+# Dashboard paging stops early, keeping its matches, rather than hit SOURCE_TIMEOUT.
+DASHBOARD_BUDGET = 20
 MAX_LIMIT = 50
 _FATAL = (DatadogPolicyError, DatadogConfigurationError, DatadogAuthenticationError)
 _WORD = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -125,7 +128,10 @@ async def _monitors(query: str, limit: int) -> tuple[list[Result], list[Result]]
 async def _dashboards(query: str, limit: int) -> list[Result]:
     needle = query.casefold()
     found: list[Result] = []
-    async with datadog_client() as client, aclosing(dashboard_pages(client)) as pages:
+    async with (
+        datadog_client() as client,
+        aclosing(dashboard_pages(client, budget_seconds=DASHBOARD_BUDGET)) as pages,
+    ):
         async for page in pages:
             for item in page:
                 if needle in str(item.get("title") or "").casefold():

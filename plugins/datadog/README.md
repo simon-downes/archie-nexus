@@ -2,8 +2,8 @@
 
 Gives the agent bounded reads over Datadog metrics, logs, spans, events, monitors, dashboards,
 the software catalog and log configuration (pipelines, indexes, log-based metrics, Sensitive
-Data Scanner), plus create/update for monitors it
-owns. It calls the Datadog REST API directly with `httpx`.
+Data Scanner), plus create/update for monitors it owns. It calls the Datadog REST API directly
+with `httpx`.
 
 ## Namespaces and functions
 
@@ -59,8 +59,8 @@ removes the namespace and skill.
 - `formatting.py`, `paging.py`: bounded normalisers and v2 paging helpers.
 - `metrics.py`, `logs.py`, `traces.py`, `events.py`, `dashboards.py`, `catalog.py`,
   `log_config.py` (log pipelines, indexes, log-based metrics and scanner groups; needs the app
-  key's `logs_read_config` permission, and `data_scanner_read` for the scanner), `discovery.py` (cross-source `search`), `monitors.py`: the
-  tools.
+  key's `logs_read_config` permission, and `data_scanner_read` for the scanner),
+  `discovery.py` (cross-source `search`), `monitors.py`: the tools.
 
 Safety rules enforced in code:
 

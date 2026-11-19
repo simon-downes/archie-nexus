@@ -91,7 +91,7 @@ async def main():
 
 - **Query strings** use Datadog's own syntax, the same as in the Datadog UI: metric queries (`avg:system.cpu.user{env:prod} by {host}`), log and span search (`service:api status:error @http.status_code:502`), event search, and monitor search (`status:alert tag:service:api`). They are 1–2,000 characters. Optional queries may be `None` or blank, meaning no filter.
 - **Times** (`start`, `end`): an ISO-8601 datetime (naive means UTC), or a relative age `<n>m`, `<n>h` or `<n>d` meaning that long ago. `start` defaults to `1h` and `end` to now. `end` must be after `start`, and the window can be at most 31 days. Output timestamps are UTC strings.
-- **Limit:** an integer `1..100` (`bool` is invalid). For `search`, `1..50` per source.
+- **Limit:** an integer `1..100` (`bool` is invalid). For `search`, `1..50` per source; for `list_dashboards`, `1..1000`.
 - **Monitor ID:** a positive integer. **Dashboard ID:** the `abc-def-ghi` form from `list_dashboards` or a dashboard URL.
 - **Sort** (logs, spans): `newest` (default) or `oldest`.
 - Invalid input raises `DatadogInputError` before any request.
@@ -489,7 +489,7 @@ Changes a monitor that has `managedby:archie`, and returns its detail as Datadog
 
 Returns dashboard summaries: `{"id", "title", "description", "layout_type", "author", "created_at", "modified_at", "truncated"}`. `query` keeps dashboards whose title contains it (case-insensitive). `limit` is 1–1,000.
 
-Only custom and cloned dashboards are listed; Datadog's preset integration dashboards are not. The function reads 100 dashboards per request and stops when it has `limit` matches, after 20 requests (2,000 dashboards), or at the end of the list. The `dashboards` source of `search` pages the same way.
+Only custom and cloned dashboards are listed; Datadog's preset integration dashboards are not. The function reads 100 dashboards per request and stops when it has `limit` matches, after 20 requests (2,000 dashboards), or at the end of the list. The `dashboards` source of `search` pages the same way, but if a later page fails or paging takes more than 20 seconds it returns the matches found so far instead of failing.
 
 ### `datadog.get_dashboard(dashboard_id)`
 

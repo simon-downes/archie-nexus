@@ -1,6 +1,6 @@
 # 096 — Datadog log configuration reads and projection fixes
 
-Status: reviewing
+Status: done
 Branch: build-it/096-datadog-log-config (base: (detached) @ ec4b472)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/096-datadog-log-config
 
@@ -283,7 +283,8 @@ them further would repeat the same skill/README/allowlist edits without reducing
 ### [x] M4 — Every dashboard, group widgets, and query-syntax guidance
 
 - **Approach:** `dashboards.dashboard_pages`; use it in `list_dashboards` and
-  `discovery._dashboards`; children in `formatting.widget`; widget cap 200 across levels.
+  `discovery._dashboards`; children in `formatting.dashboard_detail`; 100 top-level widgets
+  plus 100 children (D10).
   Skill: query-syntax section and pipeline-reading guidance; replace "widgets inside groups are
   not listed"; say the list holds custom dashboards only; update "Choose the right function".
   Add the skill/README content test.
@@ -301,6 +302,12 @@ them further would repeat the same skill/README/allowlist edits without reducing
 
 ## Deviations
 
+- Review (risk ⚠️): `dashboard_pages` now skips IDs it has already yielded, and with a
+  `budget_seconds` it ends quietly after the first page when a later page fails or the budget
+  is spent. `search`'s dashboards source uses a 20 s budget, so it keeps matches already found
+  instead of landing in `skipped`. `list_dashboards` keeps raising on a failed page, because a
+  plain list can't say it is incomplete. Adds behaviour to D9; no scope change.
+
 ## Risks
 
 - Not verifiable against live Datadog from this container: the running agent uses
@@ -312,9 +319,35 @@ them further would repeat the same skill/README/allowlist edits without reducing
 
 ## Review
 
+- Code review: `general` and `risk` (risk ran: external input and a public tool interface),
+  one round, no ❌. Fixed: risk ⚠️ dashboard paging losing earlier matches (see Deviations),
+  risk ℹ️ dedupe by id; general ℹ️ duplicate filter helper (`_query_of` removed, pipelines
+  filter on the normalised record), stale shared `limit` rule in the skill, discovery docstring
+  and README wraps, three tests renamed to "propagates" (403/404 mapping is covered by
+  `test_datadog_client.py`), stale M4 Approach text. Rejected in part: risk's suggestion that
+  `list_dashboards` also return partial results on a later-page failure — its return value
+  can't flag incompleteness, so raising is the honest outcome.
+- Merge risk: Medium: the new functions parse response shapes taken from the OpenAPI spec
+  and were not run against live Datadog, so a shape mismatch would surface as
+  `DatadogResponseError` or missing fields on those reads; every new request is a GET on the
+  allowlist and existing function outputs only gain fields.
 - Plan review: 1 pass. Fixed: skill/README AC (new content test), monitors `PUBLIC`/allowlist tests named in M1, M2–M4 grouping explained, index order fallback, objective (custom dashboards only), log/span path resolution (D6, D7, D13), `avg`/`median` for logs (D14), `fields` key and `truncated`, README module list, dashboard paging cap 20 with early stop (D9), dict key caps, widget caps (D10), named skill edits. Rejected: none. No ❌ findings, so no second pass.
 
 ## Outcome
+
+Delivered eight read functions or arguments: `list_log_pipelines`, `get_log_pipeline`,
+`list_log_indexes`, `list_log_metrics`, `list_scanning_groups`, `aggregate_spans`, `fields` on
+`search_logs`/`search_spans`, plus `avg`/`median` aggregations, dashboard paging (with group
+widgets in `get_dashboard`) and skill guidance on pipeline processing and query syntax.
+
+Verification: `scripts/dev test plugins/datadog tests/test_plugin_layout.py` 392 passed;
+`scripts/dev ruff check .` clean; `ruff format --check` clean for the change (one pre-existing
+diff in `persona/skills/python/assets/output.py`). Full `scripts/dev test`: 17 failed + 9
+errors, the same 26 tests as the baseline, none new.
+
+Not verified: behaviour against live Datadog (no way to run the worktree plugin with real
+credentials from this session), and whether the app key has `logs_read_config` and
+`data_scanner_read`.
 
 PR: pending
 CI: pending

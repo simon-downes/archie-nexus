@@ -113,6 +113,27 @@ async def test_search_dashboards_stops_once_limit_matches(dd_fake):
     assert len(client.calls) == 1
 
 
+async def test_search_dashboards_keeps_matches_when_a_later_page_fails(dd_fake):
+    from datadog_fakes import Seq
+
+    first = {"dashboards": [{"id": "m1", "title": "RabbitMQ"}]}
+    first["dashboards"] += [{"id": f"d{i}", "title": "Board"} for i in range(99)]
+    client = dd_fake({DASHBOARDS: Seq([first, DatadogRateLimitError(5)])}, "discovery")
+    result = await search("rabbitmq", sources=["dashboards"])
+    assert result["skipped"] == {}
+    assert [item["id"] for item in result["results"]] == ["m1"]
+    assert len(client.calls) == 2
+
+
+async def test_search_dashboards_stops_when_budget_is_spent(dd_fake, monkeypatch):
+    page = {"dashboards": [{"id": f"d{i}", "title": "Board"} for i in range(100)]}
+    client = dd_fake({DASHBOARDS: page}, "discovery")
+    monkeypatch.setattr(discovery, "DASHBOARD_BUDGET", 0)
+    result = await search("rabbitmq", sources=["dashboards"])
+    assert result["results"] == [] and result["skipped"] == {}
+    assert len(client.calls) == 1
+
+
 async def test_search_returns_every_type_with_its_handoff(dd_fake):
     client = _default_fake(dd_fake)
     result = await search("rabbitmq")

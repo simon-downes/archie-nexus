@@ -31,11 +31,6 @@ def _matches(needle: str | None, *values: Any) -> bool:
     return any(isinstance(value, str) and needle in value.casefold() for value in values)
 
 
-def _query_of(item: dict[str, Any]) -> Any:
-    found = item.get("filter")
-    return found.get("query") if isinstance(found, dict) else None
-
-
 @tool(namespace="datadog")
 async def list_log_pipelines(query: str | None = None) -> list[dict]:
     """List log pipelines in processing order, keeping names or filters containing ``query``."""
@@ -49,11 +44,11 @@ async def list_log_pipelines(query: str | None = None) -> list[dict]:
         raise DatadogResponseError("Datadog returned a malformed pipeline list")
     needle = text.casefold() if text else None
     pipelines = [item for item in items if isinstance(item, dict)]
-    return [
+    summaries = [
         pipeline_summary(item, position)
         for position, item in in_order(pipelines, ids, lambda item: item.get("id"))
-        if _matches(needle, item.get("name"), _query_of(item))
     ]
+    return [item for item in summaries if _matches(needle, item["name"], item["filter"])]
 
 
 @tool(namespace="datadog")
