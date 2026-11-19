@@ -170,7 +170,7 @@ Evidence: full suite 5687 passed with the same 26 failures as the baseline (only
 Not verified: that real Kiro runs a subagent on its agent file's `model` (fake Kiro only checks the files and the startup check), and how `kiro.effort` applies to subagents.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/44
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
