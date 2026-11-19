@@ -350,7 +350,7 @@ credentials from this session), and whether the app key has `logs_read_config` a
 `data_scanner_read`.
 
 PR: https://github.com/simon-downes/archie-nexus/pull/45
-CI: pending
+CI: none (no checks configured on the repository)
 
 ## Follow-ups
 
