@@ -1,6 +1,6 @@
 # 095 — Subagent model tiers
 
-Status: building
+Status: reviewing
 Branch: build-it/095-subagent-model-tiers (base: build-it/093-scratch-workspace @ 48f5d35)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/095-subagent-model-tiers
 
