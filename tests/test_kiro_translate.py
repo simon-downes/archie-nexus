@@ -198,6 +198,7 @@ def test_subagent_dispatch_maps_to_scoped_task():
     dispatch = next(e for e in events if isinstance(e, ToolCall) and e.scope is None)
     assert dispatch.name == "task"
     assert dispatch.input["tasks"][0]["agent"] == "archie-worker"
+    assert "tier" not in dispatch.input["tasks"][0]  # not a tier worker's name
     assert "SUBAGENT-OK-5512" in dispatch.input["tasks"][0]["prompt"]
     scope = dispatch.tool_use_id
     child = [e for e in events if e.scope == scope]
@@ -425,3 +426,16 @@ def test_root_context_drops_the_placeholder_after_a_summary():
     sub["_meta"]["kiro"]["agentSubtaskId"] = "sub1"
     assert ctx.feed(sub) is None
     assert ctx.feed(_ctx(20)) == 20.0  # a subagent's compaction doesn't arm it
+
+
+def test_dispatch_to_a_tier_worker_logs_its_tier(tmp_path):
+    """095 D12: a Kiro dispatch logs the same {agent, prompt, tier} input as native."""
+    fixture = (FIXTURES / "run2_subagent.jsonl").read_text()
+    assert '"name": "archie-worker"' in fixture
+    renamed = fixture.replace('"name": "archie-worker"', '"name": "archie-worker-deep"')
+    frames = [json.loads(line) for line in renamed.splitlines()]
+    tr = TurnTranslator(Path("/tmp/x.jsonl"), MODEL_KEY, 3)
+    events = [e for f in frames if "update" in f for e in tr.feed(f["update"], f["t"])]
+    dispatch = next(e for e in events if isinstance(e, ToolCall) and e.scope is None)
+    assert dispatch.input["tasks"][0]["agent"] == "archie-worker-deep"
+    assert dispatch.input["tasks"][0]["tier"] == "deep"

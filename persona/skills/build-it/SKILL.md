@@ -255,7 +255,7 @@ These questions don't count against the budget.
 # Reviewers
 
 Spawn the `build-it-reviewer` agent, or the `default` agent if the `task` description
-doesn't list it, with this prompt:
+doesn't list it, on the `deep` tier (`archie-worker-deep` on Kiro), with this prompt:
 
 ```
 You are an independent reviewer for a build-it run. Read <absolute reference path> and

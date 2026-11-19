@@ -355,6 +355,8 @@ global:
 agent:
   subagents:
     max_concurrent: 5
+    native: {light: bedrock-openai-gpt-6-luna, standard: bedrock-claude-sonnet-5-5, deep: bedrock-claude-opus-5-5}
+    kiro: {light: gpt-5.6-luna, standard: claude-sonnet-5.5, deep: claude-opus-5.5}
 orchestrator:
   profiles:
     default:

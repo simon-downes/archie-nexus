@@ -93,7 +93,13 @@ def _all_options() -> list[dict]:
             "id": "mode",
             "category": "mode",
             "currentValue": state["mode"],
-            "options": [{"value": "vibe"}, {"value": "archie"}, {"value": "archie-worker"}],
+            "options": [
+                {"value": "vibe"},
+                {"value": "archie"},
+                {"value": "archie-worker-light"},
+                {"value": "archie-worker-standard"},
+                {"value": "archie-worker-deep"},
+            ],
         },
         {
             "type": "select",

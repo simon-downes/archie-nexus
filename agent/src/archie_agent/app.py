@@ -48,6 +48,7 @@ from archie_agent.harness import AgentHarness
 from archie_agent.kiro.harness import KiroHarness, KiroStartupError, write_startup_error
 from archie_agent.llm import create_llm_client
 from archie_agent.session import Session
+from archie_agent.tiers import unknown_native_tiers
 from archie_agent.tool_policy_live import LiveToolPolicy, startup_runner_state
 
 if TYPE_CHECKING:
@@ -190,6 +191,12 @@ async def _backend_lifespan(backend: str, config: "NexusConfig"):
     model = get_model(_catalog, _config.global_.model)
     if _config.agent.compaction.model not in _catalog:
         log.error("Unknown compaction model: %s", _config.agent.compaction.model)
+        sys.exit(1)
+    tier_errors = unknown_native_tiers(
+        msgspec.structs.asdict(_config.agent.subagents.native), _catalog
+    )
+    if tier_errors:
+        log.error("Unknown subagent tier model: %s", "; ".join(tier_errors))
         sys.exit(1)
 
     llm_client = create_llm_client(model, _config.global_.region)

@@ -11,14 +11,34 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+
+from archie_shared.schemas import SUBAGENT_TIERS
+
+from archie_agent.tiers import TIER_GUIDANCE
 
 log = logging.getLogger(__name__)
 
 ROOT_AGENT = "archie"
-WORKER_AGENT = "archie-worker"
 MCP_SERVER = "archie"
+# One worker per subagent tier, each pinned to the tier's model (095 D10). They share
+# the ``archie-worker.md`` prompt.
+WORKER_PROMPT = "archie-worker"
+WORKER_AGENTS = {tier: f"archie-worker-{tier}" for tier in SUBAGENT_TIERS}
+
+
+def tier_of(agent_name: str) -> str | None:
+    """The tier of a worker agent name, or None for any other agent."""
+    return next((tier for tier, name in WORKER_AGENTS.items() if name == agent_name), None)
+
+
+def worker_description(tier: str) -> str:
+    """The description Kiro shows the root agent when it chooses a worker."""
+    return (
+        f"Archie worker on the {tier} tier, for {TIER_GUIDANCE[tier]}. Pick the tier by "
+        "the work, not by your own model; each tier runs on its own model."
+    )
 
 
 def _mcp_servers(mcp_url: str) -> dict:
@@ -34,6 +54,7 @@ def _mcp_servers(mcp_url: str) -> dict:
 
 def root_agent_config(mcp_url: str, skill_paths: Iterable[Path] = ()) -> dict:
     """Agent JSON for the root ``archie`` agent."""
+    workers = list(WORKER_AGENTS.values())
     return {
         "name": ROOT_AGENT,
         "description": "Archie: Archie's prompt and tools on Kiro",
@@ -47,25 +68,26 @@ def root_agent_config(mcp_url: str, skill_paths: Iterable[Path] = ()) -> dict:
             "rules": [
                 {"capability": "mcp", "match": [f"{MCP_SERVER}/*"], "effect": "allow"},
                 {"capability": "skill", "match": ["*"], "effect": "allow"},
-                {"capability": "subagent", "match": [WORKER_AGENT], "effect": "allow"},
+                {"capability": "subagent", "match": workers, "effect": "allow"},
             ]
         },
-        "toolsSettings": {
-            "subagent": {"availableAgents": [WORKER_AGENT], "trustedAgents": [WORKER_AGENT]}
-        },
+        "toolsSettings": {"subagent": {"availableAgents": workers, "trustedAgents": workers}},
     }
 
 
-def worker_agent_config(mcp_url: str, tools: Sequence[str] | None = None) -> dict:
-    """Agent JSON for the ``archie-worker`` subagent.
+def worker_agent_config(
+    mcp_url: str, tier: str, model: str, tools: Sequence[str] | None = None
+) -> dict:
+    """Agent JSON for the ``archie-worker-<tier>`` subagent, pinned to ``model``.
 
     ``tools`` lists the worker's tools (``@archie/<name>``); ``None`` gives it every Archie
     tool. The harness lists them to keep root-only tools such as ``question`` out (091 D11).
     """
     return {
-        "name": WORKER_AGENT,
-        "description": "General-purpose Archie worker subagent with Archie tools",
-        "prompt": f"file://../archie/{WORKER_AGENT}.md",
+        "name": WORKER_AGENTS[tier],
+        "description": worker_description(tier),
+        "model": model,
+        "prompt": f"file://../archie/{WORKER_PROMPT}.md",
         "mcpServers": _mcp_servers(mcp_url),
         "tools": list(tools) if tools is not None else [f"@{MCP_SERVER}"],
         "includeMcpJson": False,
@@ -95,27 +117,33 @@ def write_agent_files(
     mcp_url: str,
     root_prompt: str,
     worker_prompt: str,
+    worker_models: Mapping[str, str],
     skill_paths: Iterable[Path] = (),
     worker_tools: Sequence[str] | None = None,
 ) -> dict[str, Path]:
-    """Write both prompts and both agent JSONs; return their paths by name."""
+    """Write the prompts, the root agent and one worker per tier; return paths by name.
+
+    ``worker_models`` maps each tier to its Kiro model id. Paths are keyed
+    ``root_prompt``, ``worker_prompt``, ``root_agent`` and ``worker_agent_<tier>``.
+    """
     prompts = kiro_home / "archie"
     agents = kiro_home / "agents"
     paths = {
         "root_prompt": prompts / f"{ROOT_AGENT}.md",
-        "worker_prompt": prompts / f"{WORKER_AGENT}.md",
+        "worker_prompt": prompts / f"{WORKER_PROMPT}.md",
         "root_agent": agents / f"{ROOT_AGENT}.json",
-        "worker_agent": agents / f"{WORKER_AGENT}.json",
     }
     _atomic_write(paths["root_prompt"], root_prompt)
     _atomic_write(paths["worker_prompt"], worker_prompt)
     _atomic_write(
         paths["root_agent"], json.dumps(root_agent_config(mcp_url, skill_paths), indent=2) + "\n"
     )
-    _atomic_write(
-        paths["worker_agent"],
-        json.dumps(worker_agent_config(mcp_url, worker_tools), indent=2) + "\n",
-    )
+    for tier, name in WORKER_AGENTS.items():
+        path = paths[f"worker_agent_{tier}"] = agents / f"{name}.json"
+        config = worker_agent_config(mcp_url, tier, worker_models[tier], worker_tools)
+        _atomic_write(path, json.dumps(config, indent=2) + "\n")
+    # A restarted container may still have the unpinned pre-095 worker; Kiro would offer it.
+    (agents / f"{WORKER_PROMPT}.json").unlink(missing_ok=True)
     return paths
 
 

@@ -25,10 +25,26 @@ def _entry(tmp_path, name="researcher", skills=None) -> AgentEntry:
     return AgentEntry(name, name.title(), None, None, skills or [], f"{name} role", path)
 
 
-async def _make_tool(tmp_path, monkeypatch, clients, agents=None, skills=None, max_concurrent=3):
+async def _make_tool(
+    tmp_path,
+    monkeypatch,
+    clients,
+    agents=None,
+    skills=None,
+    max_concurrent=3,
+    tiers=None,
+    catalog=None,
+    used_models=None,
+):
     model = _model()
     iterator = iter(clients)
-    monkeypatch.setattr("archie_agent.agents.create_llm_client", lambda *_: next(iterator))
+
+    def fake_client(child_model, *_):
+        if used_models is not None:
+            used_models.append(child_model.name)
+        return next(iterator)
+
+    monkeypatch.setattr("archie_agent.agents.create_llm_client", fake_client)
     session = Session("parent", model, "session")
     broadcasts: list[str] = []
 
@@ -39,15 +55,35 @@ async def _make_tool(tmp_path, monkeypatch, clients, agents=None, skills=None, m
         agent_catalog=agents or {"researcher": _entry(tmp_path)},
         skill_catalog=skills or {},
         session=session,
-        model_catalog={"parent": model},
+        model_catalog={"parent": model, **(catalog or {})},
         active_model=model,
         active_model_key="parent",
         region="us-east-1",
         log_path=tmp_path / "session.jsonl",
         emit=emit,
         max_concurrent=max_concurrent,
+        tiers=tiers,
     )
     return spec, broadcasts
+
+
+def _named(name: str) -> ModelEntry:
+    return ModelEntry(
+        name=name,
+        context=10000,
+        provider=BedrockProvider(model_id=name, region="us-east-1"),
+        cost=CostConfig(rates=[Rate(input=1.0, output=1.0)]),
+    )
+
+
+TIERS = {"light": "small", "standard": "mid", "deep": "big"}
+TIER_CATALOG = {key: _named(key) for key in TIERS.values()}
+
+
+def _done(text="done"):
+    return FakeLLMClient(
+        [[TextDelta(text=text), Usage(input_tokens=1, output_tokens=1), Done("end_turn")]]
+    )
 
 
 @pytest.mark.asyncio
@@ -238,3 +274,165 @@ async def test_malformed_child_item_emits_scoped_terminal_event(tmp_path, monkey
     assert terminal[0]["scope"] == "scope-1"
     assert terminal[0]["subagent_index"] == 0
     assert client.calls == []
+
+
+# --- Tiers (095) ---
+
+
+@pytest.mark.asyncio
+async def test_schema_requires_a_tier_from_the_enum(tmp_path, monkeypatch):
+    for tiers in (None, TIERS):
+        spec, _ = await _make_tool(tmp_path, monkeypatch, [], tiers=tiers, catalog=TIER_CATALOG)
+        item = spec.schema["properties"]["tasks"]["items"]
+        assert item["required"] == ["agent", "prompt", "tier"]
+        assert item["properties"]["tier"]["enum"] == ["light", "standard", "deep"]
+
+
+@pytest.mark.asyncio
+async def test_description_explains_each_tier(tmp_path, monkeypatch):
+    spec, _ = await _make_tool(tmp_path, monkeypatch, [])
+
+    assert "choose it by the work, not by your own model" in spec.description
+    assert "light — mechanical work" in spec.description
+    assert "standard — a well-scoped change" in spec.description
+    assert "deep — reviews, design judgement" in spec.description
+
+
+@pytest.mark.asyncio
+async def test_each_task_runs_on_its_tier_model(tmp_path, monkeypatch):
+    used: list[str] = []
+    spec, broadcasts = await _make_tool(
+        tmp_path,
+        monkeypatch,
+        [_done("a"), _done("b")],
+        tiers=TIERS,
+        catalog=TIER_CATALOG,
+        used_models=used,
+    )
+
+    result = await spec.handler(
+        tasks=[
+            {"agent": "researcher", "prompt": "review", "tier": "deep"},
+            {"agent": "researcher", "prompt": "grep", "tier": "light"},
+        ],
+        _launch_scope="s",
+    )
+
+    assert result == "[0] researcher: a\n[1] researcher: b"
+    assert sorted(used) == ["big", "small"]
+    requests = [json.loads(raw) for raw in broadcasts]
+    keys = {e["subagent_index"]: e["model_key"] for e in requests if e["type"] == "llm_request"}
+    assert keys == {0: "big", 1: "small"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_tier", "problem"),
+    [("huge", "unknown tier 'huge'"), (None, "missing tier"), (3, "unknown tier 3")],
+)
+async def test_bad_tier_falls_back_to_standard_with_a_warning(
+    tmp_path, monkeypatch, task_tier, problem
+):
+    used: list[str] = []
+    spec, _ = await _make_tool(
+        tmp_path, monkeypatch, [_done()], tiers=TIERS, catalog=TIER_CATALOG, used_models=used
+    )
+    task = {"agent": "researcher", "prompt": "go"}
+    if task_tier is not None:
+        task["tier"] = task_tier
+
+    result = await spec.handler(tasks=[task], _launch_scope="s")
+
+    assert result.startswith(
+        f"[0] researcher: Warning: {problem} (use one of light, standard, deep)"
+    )
+    assert result.endswith("using standard. done")
+    assert used == ["mid"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_agent_warning_comes_before_the_tier_warning(tmp_path, monkeypatch):
+    spec, _ = await _make_tool(tmp_path, monkeypatch, [_done()], tiers=TIERS, catalog=TIER_CATALOG)
+
+    result = await spec.handler(
+        tasks=[{"agent": "missing", "prompt": "go", "tier": "huge"}], _launch_scope="s"
+    )
+
+    assert result.index("unknown agent 'missing'") < result.index("unknown tier 'huge'")
+
+
+@pytest.mark.asyncio
+async def test_tier_model_missing_from_catalogue_fails_only_that_task(tmp_path, monkeypatch):
+    tiers = {**TIERS, "deep": "gone"}
+    spec, _ = await _make_tool(
+        tmp_path, monkeypatch, [_done("ok")], tiers=tiers, catalog=TIER_CATALOG
+    )
+
+    result = await spec.handler(
+        tasks=[
+            {"agent": "researcher", "prompt": "a", "tier": "deep"},
+            {"agent": "researcher", "prompt": "b", "tier": "light"},
+        ],
+        _launch_scope="s",
+    )
+
+    assert "[0] researcher: KeyError" in result and "unknown model 'gone'" in result
+    assert "[1] researcher: ok" in result
+
+
+@pytest.mark.asyncio
+async def test_without_tiers_children_use_the_session_model(tmp_path, monkeypatch):
+    used: list[str] = []
+    spec, _ = await _make_tool(tmp_path, monkeypatch, [_done()], used_models=used)
+
+    result = await spec.handler(
+        tasks=[{"agent": "researcher", "prompt": "go", "tier": "deep"}], _launch_scope="s"
+    )
+
+    assert result == "[0] researcher: done"
+    assert used == ["Child model"]
+
+
+@pytest.mark.asyncio
+async def test_pinned_tier_wins_over_the_callers_tier(tmp_path, monkeypatch):
+    used: list[str] = []
+    reviewer = _entry(tmp_path, "reviewer")
+    reviewer = AgentEntry(**{**reviewer.__dict__, "tier": "deep"})
+    spec, _ = await _make_tool(
+        tmp_path,
+        monkeypatch,
+        [_done()],
+        agents={"reviewer": reviewer},
+        tiers=TIERS,
+        catalog=TIER_CATALOG,
+        used_models=used,
+    )
+
+    result = await spec.handler(
+        tasks=[{"agent": "reviewer", "prompt": "review", "tier": "light"}], _launch_scope="s"
+    )
+
+    assert result == "[0] reviewer: done"
+    assert used == ["big"]
+    assert "reviewer — Reviewer (fixed tier: deep)" in spec.description
+
+
+@pytest.mark.asyncio
+async def test_pinned_model_wins_over_tiers_without_a_tier_warning(tmp_path, monkeypatch):
+    used: list[str] = []
+    local = AgentEntry(**{**_entry(tmp_path, "local").__dict__, "model": "pinned", "tier": "deep"})
+    spec, _ = await _make_tool(
+        tmp_path,
+        monkeypatch,
+        [_done()],
+        agents={"local": local},
+        tiers=TIERS,
+        catalog={**TIER_CATALOG, "pinned": _named("pinned")},
+        used_models=used,
+    )
+
+    result = await spec.handler(tasks=[{"agent": "local", "prompt": "go"}], _launch_scope="s")
+
+    assert result == "[0] local: done"
+    assert used == ["pinned"]
+    assert "local — Local (fixed model)" in spec.description

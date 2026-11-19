@@ -34,7 +34,8 @@ from archie_shared.events import (
     UserMessage,
     decode_event,
 )
-from archie_shared.models import BedrockProvider, CostConfig, ModelEntry, Rate
+from archie_shared.models import DEFAULT_MODELS, BedrockProvider, CostConfig, ModelEntry, Rate
+from archie_shared.schemas import NativeSubagentTiers, SubagentsConfig
 from archie_shared.session.log import EventIdConflict, LogAppendError
 
 
@@ -97,6 +98,9 @@ def _make_harness(
         log_dir=tmp_path,
         exec_python=exec_python,
         exec_run_root=exec_run_root,
+        # Every subagent tier resolves to the session model (095).
+        model_catalog={**DEFAULT_MODELS, "test-model": model},
+        subagents=SubagentsConfig(native=NativeSubagentTiers(*["test-model"] * 3)),
     )
 
 
@@ -439,7 +443,7 @@ async def test_child_partial_text_is_persisted_before_interruption(tmp_path, mon
     assert task_spec is not None
 
     await task_spec.handler(
-        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        tasks=[{"agent": "missing", "prompt": "child prompt", "tier": "light"}],
         _launch_scope="task-interrupt",
         _parent_turn=3,
     )
@@ -681,7 +685,7 @@ async def test_child_normal_return_gets_scoped_fallback(tmp_path, monkeypatch):
     assert task_spec is not None
 
     await task_spec.handler(
-        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        tasks=[{"agent": "missing", "prompt": "child prompt", "tier": "light"}],
         _launch_scope="task-1",
         _parent_turn=1,
     )
@@ -708,7 +712,7 @@ async def test_child_setup_failure_gets_scoped_fallback(tmp_path, monkeypatch):
     assert task_spec is not None
 
     await task_spec.handler(
-        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        tasks=[{"agent": "missing", "prompt": "child prompt", "tier": "light"}],
         _launch_scope="task-2",
         _parent_turn=1,
     )
@@ -743,7 +747,7 @@ async def test_child_append_failure_notifies_without_terminal(tmp_path, monkeypa
 
     monkeypatch.setattr("archie_agent.agents.run_loop", no_terminal_loop)
     await task_spec.handler(
-        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        tasks=[{"agent": "missing", "prompt": "child prompt", "tier": "light"}],
         _launch_scope="task-3",
         _parent_turn=1,
     )
@@ -769,7 +773,7 @@ async def test_child_failure_after_terminal_does_not_duplicate(tmp_path, monkeyp
     assert task_spec is not None
 
     await task_spec.handler(
-        tasks=[{"agent": "missing", "prompt": "child prompt"}],
+        tasks=[{"agent": "missing", "prompt": "child prompt", "tier": "light"}],
         _launch_scope="task-4",
         _parent_turn=1,
     )

@@ -9,6 +9,9 @@ cheaper to do yourself.
 - Put independent tasks in one `task` call, not one call per task. The tool
   description lists the available agents and how many run at a time per call;
   use `default` unless a listed agent fits.
+- Give each task the `tier` its work needs, whatever model you run on. The tier
+  picks the subagent's model, and the tool description says what each tier is
+  for. An agent listed with a fixed tier or model ignores the tier you pass.
 - A subagent sees nothing of this conversation. Its prompt must state the goal,
   the paths, what you already know, what it must not do (for example "don't
   edit files"), and the report's shape and length ("under 300 words: findings

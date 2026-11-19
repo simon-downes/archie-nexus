@@ -44,10 +44,44 @@ class GlobalConfig(msgspec.Struct, forbid_unknown_fields=True):
             raise ValueError(f"global.scratch_workspace '{name}' must be a single directory name")
 
 
+SUBAGENT_TIERS = ("light", "standard", "deep")
+
+
+def _check_tiers(section: str, tiers: msgspec.Struct) -> None:
+    for tier in SUBAGENT_TIERS:
+        value = getattr(tiers, tier)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"agent.subagents.{section}.{tier} must be a non-empty string")
+
+
+class NativeSubagentTiers(msgspec.Struct, forbid_unknown_fields=True):
+    """Catalogue model key for each subagent tier on the native backend."""
+
+    light: str = "bedrock-openai-gpt-6-luna"
+    standard: str = "bedrock-claude-sonnet-5-5"
+    deep: str = "bedrock-claude-opus-5-5"
+
+    def __post_init__(self) -> None:
+        _check_tiers("native", self)
+
+
+class KiroSubagentTiers(msgspec.Struct, forbid_unknown_fields=True):
+    """Kiro model id for each subagent tier on the Kiro backend."""
+
+    light: str = "gpt-5.6-luna"
+    standard: str = "claude-sonnet-5.5"
+    deep: str = "claude-opus-5.5"
+
+    def __post_init__(self) -> None:
+        _check_tiers("kiro", self)
+
+
 class SubagentsConfig(msgspec.Struct, forbid_unknown_fields=True):
-    """Limits specific to concurrent child-agent delegation."""
+    """Child-agent delegation: concurrency, and the model behind each tier per backend."""
 
     max_concurrent: int = 5
+    native: NativeSubagentTiers = msgspec.field(default_factory=NativeSubagentTiers)
+    kiro: KiroSubagentTiers = msgspec.field(default_factory=KiroSubagentTiers)
 
 
 class CompactionConfig(msgspec.Struct, forbid_unknown_fields=True):
