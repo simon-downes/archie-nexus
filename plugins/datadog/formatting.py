@@ -17,6 +17,7 @@ MAX_ATTRIBUTE = 200
 MAX_SPAN_ERROR = 500
 MAX_TITLE = 500
 MAX_WIDGETS = 100
+MAX_CHILD_WIDGETS = 100
 MAX_WIDGET_QUERIES = 10
 MAX_WIDGET_QUERY = 500
 MAX_TAG_KEYS = 100
@@ -321,24 +322,50 @@ def widget(item: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _group_children(item: dict[str, Any]) -> list[dict[str, Any]]:
+    definition = item.get("definition") if isinstance(item.get("definition"), dict) else {}
+    children = definition.get("widgets") if definition.get("type") == "group" else None
+    return (
+        [child for child in children if isinstance(child, dict)]
+        if isinstance(children, list)
+        else []
+    )
+
+
 def dashboard_detail(item: dict[str, Any]) -> dict[str, Any]:
+    """A dashboard with up to 100 top-level widgets and up to 100 widgets inside their groups."""
     widgets = [value for value in item.get("widgets") or [] if isinstance(value, dict)]
     variables = [
         value.get("name")
         for value in item.get("template_variables") or []
         if isinstance(value, dict) and isinstance(value.get("name"), str)
     ]
+    records = []
+    budget = MAX_CHILD_WIDGETS
+    children_cut = False
+    for value in widgets[:MAX_WIDGETS]:
+        record = widget(value)
+        if record["type"] == "group":
+            children = _group_children(value)
+            record["widgets"] = [widget(child) for child in children[:budget]]
+            if len(children) > budget:
+                record["truncated"] = children_cut = True
+            budget -= len(record["widgets"])
+        records.append(record)
     record = dashboard_summary(item)
     record.update(
         {
             "url": item.get("url"),
             "template_variables": variables[:MAX_TAGS],
             "widget_count": len(widgets),
-            "widgets": [widget(value) for value in widgets[:MAX_WIDGETS]],
+            "widgets": records,
         }
     )
     record["truncated"] = (
-        record["truncated"] or len(widgets) > MAX_WIDGETS or len(variables) > MAX_TAGS
+        record["truncated"]
+        or len(widgets) > MAX_WIDGETS
+        or len(variables) > MAX_TAGS
+        or children_cut
     )
     return record
 

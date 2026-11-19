@@ -96,6 +96,26 @@ async def main():
 - **Sort** (logs, spans): `newest` (default) or `oldest`.
 - Invalid input raises `DatadogInputError` before any request.
 
+## Query syntax
+
+Most rejected queries come from special characters. These rules come from Datadog's search syntax docs.
+
+Log and span search (`search_logs`, `aggregate_logs`, `search_spans`, `aggregate_spans`, and the `logs` source of `search`):
+
+- These characters must be escaped with `\` or the value put in double quotes: `- ! && || > >= < <= ( ) { } [ ] " * ? : \ #` and spaces. `/` needs no escaping. For example, `@my_attribute:hello\:world` or `@my_attribute:"hello:world"`.
+- IPv6 addresses contain colons, so quote them: `@network.client.ip:"2606:54c1:1::1"`. For ranges, use `CIDR(@network.client.ip, 13.0.0.0/8)` or `CIDR(@network.client.ip, 2606:54c1::/32)`, which work for IPv4 and IPv6 and accept several blocks.
+- Attributes need `@` (`@http.status_code:502`). Reserved attributes (`host`, `source`, `status`, `service`, `trace_id`, `message`) and tags (`env:prod`) don't. There is no `tags:` field; search a tag as `key:value`, and group values as `env:(prod OR staging)`.
+- Attribute search is case-sensitive. `-@attr:*` finds records without the attribute.
+- Numeric comparisons and ranges (`@duration:>1000000000`, `@http.status_code:[500 TO 599]`) only work on attributes that are facets or measures.
+- A bare word searches the message (and `@title`, `@error.message`, `@error.stack`) as whole words; `*:term` searches every attribute. A `*` wildcard matches inside one word only; `**` matches across words.
+- `AND`, `OR` and a leading `-` (exclusion) are case-sensitive operators; a space means `AND`.
+
+Monitor search (`search_monitors`) has a different syntax:
+
+- `type:` takes the monitor list's type names, such as `type:metric` (which covers metric and query alerts), `type:log`, `type:apm` and `type:composite`. API type names such as `query alert` are rejected.
+- Other fields: `status:alert` (also `warn`, `"no data"`, `ok`), `muted:true`, `tag:service:api`, `metric:system.cpu.idle`, `notification:...`, `title:`, `message:`, or a monitor ID.
+- Quote a value with `-`, `(`, `)`, `"`, `~`, `*` or spaces. To wildcard a tag value, escape the colon instead: `tag:service\:*`. Wildcards don't work inside quotes, and regular expressions and ranges aren't supported.
+
 ## Rate limits that matter
 
 Datadog limits each endpoint separately, and some limits are tight:
@@ -467,7 +487,9 @@ Changes a monitor that has `managedby:archie`, and returns its detail as Datadog
 
 ### `datadog.list_dashboards(query=None, limit=50)`
 
-Returns dashboard summaries: `{"id", "title", "description", "layout_type", "author", "created_at", "modified_at", "truncated"}`. `query` keeps dashboards whose title contains it (case-insensitive).
+Returns dashboard summaries: `{"id", "title", "description", "layout_type", "author", "created_at", "modified_at", "truncated"}`. `query` keeps dashboards whose title contains it (case-insensitive). `limit` is 1–1,000.
+
+Only custom and cloned dashboards are listed; Datadog's preset integration dashboards are not. The function reads 100 dashboards per request and stops when it has `limit` matches, after 20 requests (2,000 dashboards), or at the end of the list. The `dashboards` source of `search` pages the same way.
 
 ### `datadog.get_dashboard(dashboard_id)`
 
@@ -477,7 +499,7 @@ Returns a summary plus `url`, `template_variables` (names), `widget_count`, and 
 {"id": 123, "type": "timeseries", "title": "Errors", "queries": ["sum:errors{$env}"], "truncated": false}
 ```
 
-Each widget has at most 10 queries of up to 500 characters. A group widget also has `child_count`; widgets inside groups are not listed. Return only what you need, because large dashboards approach the exec output limit.
+Each widget has at most 10 queries of up to 500 characters. A group widget also has `child_count` and `widgets`, the widgets inside the group in the same shape. At most 100 widgets inside groups are listed per dashboard, filled in dashboard order. A group whose children were cut has `truncated: true`, and so does the dashboard. Return only what you need, because large dashboards approach the exec output limit.
 
 ### `datadog.list_catalog_entities(kind=None, query=None, limit=50)`
 

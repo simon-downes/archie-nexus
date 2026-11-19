@@ -1,7 +1,8 @@
 """Broad discovery: one search term across monitors, dashboards, metrics, logs and spans.
 
-Each source makes one or two read requests with its own client and a 25-second timeout, so a
-slow or throttled source is reported in ``skipped`` instead of failing the whole search. Logs
+Each source makes one or two read requests (dashboards one per 100 dashboards, stopping once
+``limit`` match) with its own client and a 25-second timeout, so a slow or throttled source is
+reported in ``skipped`` instead of failing the whole search. Logs
 and spans are aggregated by service: discovery never returns log or span content.
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 from datetime import datetime
 from typing import Any
 
@@ -26,6 +28,7 @@ from .client import (
     DatadogTransportError,
     datadog_client,
 )
+from .dashboards import dashboard_pages
 from .metrics import list_metric_names, search_metric_names
 from .paging import iso
 from .policy import require_read
@@ -120,34 +123,29 @@ async def _monitors(query: str, limit: int) -> tuple[list[Result], list[Result]]
 
 
 async def _dashboards(query: str, limit: int) -> list[Result]:
-    async with datadog_client() as client:
-        data = await client.request("GET", "/api/v1/dashboard")
-    items = data.get("dashboards") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        raise DatadogResponseError("Datadog returned a malformed dashboard list")
     needle = query.casefold()
     found: list[Result] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if needle in str(item.get("title") or "").casefold():
-            matched = "title"
-        elif needle in str(item.get("description") or "").casefold():
-            matched = "description"
-        else:
-            continue
-        found.append(
-            _result(
-                "dashboard",
-                item.get("id"),
-                item.get("title"),
-                "dashboards",
-                matched,
-                "datadog.get_dashboard",
-            )
-        )
-        if len(found) >= limit:
-            break
+    async with datadog_client() as client, aclosing(dashboard_pages(client)) as pages:
+        async for page in pages:
+            for item in page:
+                if needle in str(item.get("title") or "").casefold():
+                    matched = "title"
+                elif needle in str(item.get("description") or "").casefold():
+                    matched = "description"
+                else:
+                    continue
+                found.append(
+                    _result(
+                        "dashboard",
+                        item.get("id"),
+                        item.get("title"),
+                        "dashboards",
+                        matched,
+                        "datadog.get_dashboard",
+                    )
+                )
+                if len(found) >= limit:
+                    return found
     return found
 
 

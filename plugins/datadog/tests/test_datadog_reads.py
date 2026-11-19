@@ -944,8 +944,57 @@ async def test_list_dashboards_filters_title_locally(dd_fake):
     client = dd_fake({DASHBOARDS: {"dashboards": items}}, "dashboards")
     result = await list_dashboards("PAYMENTS", limit=1)
     assert [item["id"] for item in result] == ["aaa-bbb-ccc"]
-    assert client.calls[0][2] is None
+    assert client.calls[0][2] == {"count": 100, "start": 0}
     assert len(await list_dashboards()) == 3
+
+
+def _dashboards(start: int, count: int, title: str = "Board") -> dict:
+    return {"dashboards": [{"id": f"d{start + i}", "title": title} for i in range(count)]}
+
+
+async def test_list_dashboards_pages_past_the_first_hundred(dd_fake):
+    second = _dashboards(100, 30)
+    second["dashboards"][5]["title"] = "Payments"
+    client = dd_fake({DASHBOARDS: Seq([_dashboards(0, 100), second])}, "dashboards")
+    result = await list_dashboards("payments")
+    assert [item["id"] for item in result] == ["d105"]
+    assert [call[2] for call in client.calls] == [
+        {"count": 100, "start": 0},
+        {"count": 100, "start": 100},
+    ]
+
+
+async def test_list_dashboards_stops_once_limit_matches(dd_fake):
+    client = dd_fake({DASHBOARDS: _dashboards(0, 100)}, "dashboards")
+    assert len(await list_dashboards(limit=10)) == 10
+    assert len(client.calls) == 1
+
+
+async def test_list_dashboards_full_page_then_empty_page(dd_fake):
+    client = dd_fake({DASHBOARDS: Seq([_dashboards(0, 100), {"dashboards": []}])}, "dashboards")
+    assert len(await list_dashboards(limit=1000)) == 100
+    assert len(client.calls) == 2
+
+
+async def test_list_dashboards_stops_after_twenty_pages(dd_fake):
+    client = dd_fake({DASHBOARDS: _dashboards(0, 100)}, "dashboards")
+    assert len(await list_dashboards("missing")) == 0
+    assert len(client.calls) == 20
+    assert client.calls[-1][2] == {"count": 100, "start": 1900}
+
+
+@pytest.mark.parametrize("limit", [0, 1001])
+async def test_list_dashboards_limit_bounds(dd_fake, limit):
+    client = dd_fake({}, "dashboards")
+    with pytest.raises(DatadogInputError):
+        await list_dashboards(limit=limit)
+    assert client.calls == []
+
+
+async def test_list_dashboards_malformed(dd_fake):
+    dd_fake({DASHBOARDS: {"dashboards": None}}, "dashboards")
+    with pytest.raises(DatadogResponseError):
+        await list_dashboards()
 
 
 async def test_get_dashboard_widgets_and_bounds(dd_fake):
@@ -957,6 +1006,7 @@ async def test_get_dashboard_widgets_and_bounds(dd_fake):
     assert result["template_variables"] == ["env"]
     assert len(result["description"]) == 500
     assert result["widgets"][1]["queries"] == ["sum:errors{*}", "status:error", "avg:cpu{*}"]
+    empty = {"id": None, "type": None, "title": None, "queries": [], "truncated": False}
     assert result["widgets"][2] == {
         "id": 3,
         "type": "group",
@@ -964,7 +1014,41 @@ async def test_get_dashboard_widgets_and_bounds(dd_fake):
         "queries": [],
         "truncated": False,
         "child_count": 2,
+        "widgets": [empty, empty],
     }
+
+
+async def test_get_dashboard_lists_widgets_inside_groups(dd_fake):
+    child = {
+        "id": 11,
+        "definition": {"type": "query_value", "title": "5xx", "requests": [{"q": "sum:5xx{*}"}]},
+    }
+    group = {"id": 10, "definition": {"type": "group", "title": "HTTP", "widgets": [child, child]}}
+    dd_fake(
+        {("GET", "/api/v1/dashboard/abc-def-ghi"): {"id": "abc-def-ghi", "widgets": [group]}},
+        "dashboards",
+    )
+    result = await get_dashboard("abc-def-ghi")
+    [record] = result["widgets"]
+    assert record["child_count"] == 2
+    assert [w["queries"] for w in record["widgets"]] == [["sum:5xx{*}"], ["sum:5xx{*}"]]
+    assert record["widgets"][0]["title"] == "5xx"
+    assert result["widget_count"] == 1 and result["truncated"] is False
+
+
+async def test_get_dashboard_caps_group_children_in_order(dd_fake):
+    def group(gid, count):
+        children = [{"id": gid * 1000 + i, "definition": {"type": "note"}} for i in range(count)]
+        return {"id": gid, "definition": {"type": "group", "widgets": children}}
+
+    body = {"id": "abc-def-ghi", "widgets": [group(1, 70), group(2, 50), group(3, 5)]}
+    dd_fake({("GET", "/api/v1/dashboard/abc-def-ghi"): body}, "dashboards")
+    result = await get_dashboard("abc-def-ghi")
+    counts = [len(w["widgets"]) for w in result["widgets"]]
+    assert counts == [70, 30, 0]
+    assert [w["truncated"] for w in result["widgets"]] == [False, True, True]
+    assert [w["child_count"] for w in result["widgets"]] == [70, 50, 5]
+    assert result["truncated"] is True
 
 
 @pytest.mark.parametrize("value", ["abc", "ABC-DEF-GHI", "abc-def-ghi/../x", 5])
