@@ -1,6 +1,6 @@
 # 096 — Datadog log configuration reads and projection fixes
 
-Status: planning
+Status: building
 Branch: build-it/096-datadog-log-config (base: (detached) @ ec4b472)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/096-datadog-log-config
 
@@ -10,7 +10,7 @@ The Datadog tool can search logs but can't show how they are processed, so agent
 parsing, masking, retention and log-based metrics, and nested attributes come back as `"…"`.
 When done, the agent can read log pipelines, indexes, log-based metrics and Sensitive Data
 Scanner config, read named nested attributes from logs and spans, aggregate spans, and see
-every dashboard and the widgets inside dashboard groups.
+every custom dashboard (the API omits preset ones) and the widgets inside dashboard groups.
 
 ## Context
 
@@ -89,11 +89,13 @@ docs.datadoghq.com (read 2026-11-19):
 | D3 | Processor output | Generic bounded projection of each processor dict as Datadog returns it | Per-processor-type field mapping | 22 processor types and Datadog adds more; a generic projection keeps grok rules, remappers, lookup tables and new types without code changes | self |
 | D4 | Order | List functions fetch the order endpoint and return `position` (1-based) in processing order | Return API order without position | Pipeline and index order decides which pipeline wins and which index a log lands in; agents need it to reason about parsing | self |
 | D5 | Sensitive Data Scanner shape | `list_scanning_groups()` returns groups in scan order with their rules nested, standard pattern names resolved | Separate group and rule functions | One question ("what masks this attribute?") needs both; config is small; standard patterns are needed to name rules that have no `pattern` | self |
-| D6 | Nested attribute access | `fields=[...]` argument on `search_logs`/`search_spans` returning `{path: bounded value}` | Raise nesting depth for every attribute; return whole attribute tree | Explicit paths keep default output small and let the agent read a whole object (`@context`) when it asks for it | self |
-| D7 | Span path resolution | Resolve a path against span `custom`, then span `attributes` | Only `custom` | The spec documents both objects; `custom` is where `formatting.span` already finds `error` and `duration` | self |
+| D6 | Nested attribute access | `fields=[...]` argument on `search_logs`/`search_spans` returning `{path: bounded value}` keyed by the path as passed (trimmed); a cut value sets the record's `truncated`. Logs resolve against `item.attributes.attributes` only (reserved fields are already in the record) | Raise nesting depth for every attribute; return whole attribute tree | Explicit paths keep default output small and let the agent read a whole object (`@context`) when it asks for it | self |
+| D7 | Span path resolution | Resolve against `item.attributes.custom`, then `item.attributes.attributes` (the nested object), first hit wins | Only `custom` | The spec documents both objects; `custom` is where `formatting.span` already finds `error` and `duration` | self |
+| D13 | Path syntax | A path matches the existing `validation._FACET` regex; a leading `@` is dropped for lookup; at each dict level the longest key formed from the remaining segments is tried first (`http.url_details` as one key before `http` → `url_details`) | Plain segment walk | Datadog attribute keys can contain dots; longest-first finds both shapes | self |
+| D14 | Log aggregations | Add `avg` and `median` to logs too (the spec's `LogsAggregationFunction` has them) | Spans only | Same shared builder and validation; a one-line set change | self |
 | D8 | Aggregation code | Shared request builder for logs and spans aggregates; spans make one request (no paging exists) | Copy `aggregate_logs` body building | Both endpoints take the same compute/group_by shape; one builder avoids drift | self |
-| D9 | Dashboard listing | Page `GET /api/v1/dashboard` with `count=100`/`start` up to 50 pages, shared by `list_dashboards` and `search`; `list_dashboards` limit max 1,000 | Keep a single request | The API defaults `count` to 100, so dashboards past the first 100 are invisible to both functions today | self |
-| D10 | Group widgets | Group widget records carry `widgets` (children, same shape); at most 200 widgets listed across both levels | Flatten children into the top-level list | Nesting keeps the group context; the cap keeps large dashboards bounded | self |
+| D9 | Dashboard listing | Page `GET /api/v1/dashboard` with `count=100`/`start`, at most 20 pages, stopping as soon as `limit` matches are collected or a page has fewer than 100; shared by `list_dashboards` and `search`; `list_dashboards` limit max 1,000 | Keep a single request; 50 pages | The API defaults `count` to 100, so dashboards past the first 100 are invisible to both functions today; 20 sequential pages fit inside `search`'s 25 s per-source timeout and the 60 s call deadline at normal latency | self |
+| D10 | Group widgets | Top-level cap stays 100 (`MAX_WIDGETS`); group records keep `child_count` and gain `widgets` (children, same shape); children are capped at 100 in total, filled in dashboard order; `widget_count` stays top-level | Flatten children into the top-level list; one shared 200 cap | Nesting keeps the group context and the existing top-level contract and tests stay valid | self |
 | D11 | Where code lives | New `plugins/datadog/log_config.py` for the four config reads; normalisers in `formatting.py`; `aggregate_spans` in `traces.py` | One module per Datadog product | The four reads answer one question (how logs are processed) and share patterns | self |
 | D12 | Permissions | No new handling: a missing `logs_read_config`/`data_scanner_read` permission surfaces as the existing `DatadogAuthorizationError`; the skill names the permission per function | Probe permissions up front | Existing error mapping already includes Datadog's message; probing costs a request per call | self |
 
@@ -124,7 +126,8 @@ docs.datadoghq.com (read 2026-11-19):
   `name`, `filter`, `retention_days`, `flex_retention_days`, `daily_limit`,
   `daily_limit_reset`, `daily_limit_warning_threshold_percentage`, `is_rate_limited`, `tags`
   and `exclusion_filters` (`name`, `enabled`, `query`, `sample_rate`, `sample_attribute`).
-  - AC: fake responses map to those fields in index order.
+  - AC: fake responses map to those fields in index order; an index missing from
+    `index_names` comes last with `position: null`.
 - MUST provide `datadog.list_log_metrics(query=None)` returning log-based metrics with `id`,
   `aggregation`, `path`, `include_percentiles`, `filter` and `group_by` (`path`, `tag_name`),
   filtered case-insensitively on id or filter query.
@@ -137,29 +140,36 @@ docs.datadoghq.com (read 2026-11-19):
   - AC: groups come back in `relationships.groups` order with their rules; a rule linked to a
     standard pattern shows that pattern's name; with no standard-pattern links only one request
     is made.
-- MUST accept `fields` (list of 1–20 attribute paths, `@` optional) on `search_logs` and
-  `search_spans`, adding `fields: {path: value}` to each record, values bounded (strings 2,000,
-  lists 50, depth 4); a missing path maps to `null`. Without `fields`, output is unchanged.
+- MUST accept `fields` (list of 1–20 attribute paths matching `validation._FACET`, `@`
+  optional) on `search_logs` and `search_spans`, adding `fields: {path: value}` to each record,
+  values bounded (strings 2,000, lists 50, dict keys 50, depth 4); a missing path maps to
+  `null`; a cut value sets `truncated`. Without `fields`, output is unchanged.
   - AC: `fields=["@http.client_ip", "@context"]` returns the nested IP and the bounded
     `context` object; a key that itself contains dots (`"http.url_details"`) resolves; an
     invalid path raises `DatadogInputError` before any request; spans resolve from `custom`.
 - MUST provide `datadog.aggregate_spans(...)` with the same arguments and return shape as
-  `aggregate_logs`, aggregations including `avg` and `median`, in one request.
+  `aggregate_logs`, in one request; both accept `avg` and `median` as well as the current
+  aggregations.
   - AC: request body has `data.type: aggregate_request` and the same compute/group_by as logs;
     buckets parse from `attributes.compute`; `meta.status: timeout` sets `partial`.
-- MUST page the dashboard list (`count=100`, `start` offset, at most 50 requests) for
-  `list_dashboards` and the `dashboards` source of `search`; `list_dashboards` accepts
-  `limit` up to 1,000.
+- MUST page the dashboard list (`count=100`, `start` offset, at most 20 requests, stopping
+  once `limit` matches are found) for `list_dashboards` and the `dashboards` source of
+  `search`; `list_dashboards` accepts `limit` up to 1,000.
   - AC: with fakes returning 100 then 30 dashboards, a title match in the second page is
-    found by both functions, and the calls carry `start=0` then `start=100`.
-- MUST list widgets inside group widgets in `get_dashboard`, as `widgets` on the group record,
-  with at most 200 widgets across both levels and `truncated` when any are left out.
-  - AC: a group with two children returns both children with their queries.
+    found by both functions, and the calls carry `start=0` then `start=100`; when the first
+    page already holds `limit` matches only one request is made.
+- MUST list widgets inside group widgets in `get_dashboard`, as `widgets` on the group record
+  (children capped at 100 in total), keeping `child_count` and the top-level cap of 100, with
+  `truncated` when any child is left out.
+  - AC: a group with two children returns both children with their queries; the existing
+    103-widget test still returns 100 top-level widgets.
 - MUST document every new function and argument in the skill (with the permission each
   needs), and add query-syntax guidance: escaping/quoting special characters and IPv6 values,
   `CIDR()`, monitor search `type:` values, and how to read pipeline order and precedence.
-  The README function list includes the new functions.
-  - AC: `tests/test_plugin_layout.py` and `plugins/datadog/tests/test_datadog_skill.py` pass.
+  The README function list and module list include the new functions and `log_config.py`.
+  - AC: `tests/test_plugin_layout.py` passes; a new test in `test_datadog_skill.py` asserts the
+    skill contains `logs_read_config`, `data_scanner_read`, `CIDR(` and `type:metric`, and the
+    README names every registered `datadog.*` function.
 
 Out of scope: log facets (no API), archives, custom destinations, restriction queries, APM
 retention filters, span-based metrics, notification rules, any write to log configuration,
@@ -200,19 +210,26 @@ configuration lives in a new module; projection and dashboard fixes change exist
 
 ### Non-functional
 
-- Bounds: config strings 10,000 chars, lists 100, depth 8; `fields` values strings 2,000,
-  lists 50, depth 4; summaries cap processors at 100; widgets 200.
+- Bounds: config strings 10,000 chars, lists 100, dict keys 200, depth 8; `fields` values
+  strings 2,000, lists 50, dict keys 50, depth 4; summaries cap processors at 100; widgets
+  100 top-level plus 100 children.
 - Requests per call: pipelines 2 (list) or 1 (get); indexes 2; log metrics 1; scanner 1–2;
-  spans aggregate 1 (Datadog limit 50/min); dashboards 1 per 100 dashboards, at most 50.
+  spans aggregate 1 (Datadog limit 50/min); dashboards 1 per 100 dashboards, at most 20.
 
 ## Milestones
+
+M2–M4 each group closely related reads that share one pattern and one test seam; splitting
+them further would repeat the same skill/README/allowlist edits without reducing risk.
 
 ### [ ] M1 — Read log pipelines
 
 - **Approach:** add allowlist entries (all eight paths, so later milestones only add code),
   `validation.pipeline_id`, `formatting.config_value` and pipeline normalisers, and
   `log_config.list_log_pipelines`/`get_log_pipeline`. Export from `__init__.py`; document in
-  the skill and README. ⚠️ The skill test forbids `/api/v1` text in the skill.
+  the skill and README. ⚠️ The skill test forbids `/api/v1` text in the skill. ⚠️
+  `test_datadog_monitors.py` `PUBLIC` and `test_every_public_function_stays_inside_the_allowlist`
+  must list each new function (and `log_config` in its patched modules) in the milestone that
+  adds it; `test_datadog_reads.py` `READS` likewise.
 - **Test seam:** the tool functions with `dd_fake(..., "log_config")`; `client.allowed` for
   the allowlist.
 - **Edge cases:** pipeline missing from order → last, `position: null`; non-list response →
@@ -238,7 +255,10 @@ configuration lives in a new module; projection and dashboard fixes change exist
 - **Approach:** `validation.fields`; `formatting.field_values(source_dicts, paths)` with the
   dotted-key resolution; `fields` argument on `search_logs`/`search_spans`; move the
   compute/group_by body building from `aggregate_logs` into `paging.aggregate_request`;
-  `aggregate_spans` in `traces.py`. Skill entries.
+  `aggregate_spans` in `traces.py`; `avg`/`median` in the shared aggregation set. Skill: replace
+  the `search_logs` note that nested values show as `"…"` and must be queried instead, document
+  `fields` on both searches, add `aggregate_spans` to "Rate limits that matter" (50/min) and to
+  "Choose the right function".
 - **Test seam:** `search_logs`, `search_spans`, `aggregate_logs`, `aggregate_spans` with
   `dd_fake`.
 - **Edge cases:** path absent → `null`; value is a list of objects → bounded; `aggregate_logs`
@@ -251,9 +271,11 @@ configuration lives in a new module; projection and dashboard fixes change exist
 
 - **Approach:** `dashboards.dashboard_pages`; use it in `list_dashboards` and
   `discovery._dashboards`; children in `formatting.widget`; widget cap 200 across levels.
-  Skill: query-syntax section and pipeline-reading guidance; update "Choose the right function".
+  Skill: query-syntax section and pipeline-reading guidance; replace "widgets inside groups are
+  not listed"; say the list holds custom dashboards only; update "Choose the right function".
+  Add the skill/README content test.
 - **Test seam:** `list_dashboards`, `get_dashboard`, `search` with `dd_fake`.
-- **Edge cases:** exactly 100 dashboards then an empty page → two requests; 50-page cap.
+- **Edge cases:** exactly 100 dashboards then an empty page → two requests; 20-page cap.
 - **Deliverable:** dashboards beyond 100 are visible and grouped widgets show their queries.
 - **Verify:** `scripts/dev test plugins/datadog tests/test_plugin_layout.py -q` passes, then
   the full checks show no new failures against the baseline list.
@@ -271,6 +293,8 @@ configuration lives in a new module; projection and dashboard fixes change exist
 - JSON preprocessing and Auto-Processing are not exposed by the pipeline API; the skill says so.
 
 ## Review
+
+- Plan review: 1 pass. Fixed: skill/README AC (new content test), monitors `PUBLIC`/allowlist tests named in M1, M2–M4 grouping explained, index order fallback, objective (custom dashboards only), log/span path resolution (D6, D7, D13), `avg`/`median` for logs (D14), `fields` key and `truncated`, README module list, dashboard paging cap 20 with early stop (D9), dict key caps, widget caps (D10), named skill edits. Rejected: none. No ❌ findings, so no second pass.
 
 ## Outcome
 
