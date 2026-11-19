@@ -136,16 +136,18 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 - **Verify:** `scripts/dev test tests/test_task_tool.py tests/test_agents.py` passes, including a test that loads the real `build-it-reviewer`.
 - **Outcome:** `AgentEntry.tier` parsed from frontmatter (unknown values warned and ignored), `model:` > `tier:` > caller in `_resolve_child_model`, `(fixed tier: …)`/`(fixed model)` markers via `_describe_agent`, `build-it-reviewer` pinned to `deep`, build-it Reviewers names the `deep` tier, `docs/config.md` documents the pin. Evidence: `tests/test_task_tool.py tests/test_agents.py`, 29 passed; ruff clean.
 
-### [ ] M3 — Kiro tier workers
+### [x] M3 — Kiro tier workers
 
 - **Approach:** Replace the single worker in `agent_files.py` with the three tier workers (D10), each `model` from `agent.subagents.kiro` and `description` built from `TIER_GUIDANCE`; root permission rule and `toolsSettings` list all three. Harness: pass `config.agent.subagents.kiro`; after the `kiro.default_model` check, raise `KiroStartupError` for the first tier model not in `model_options()`. Translator: `tier_of(name)` adds `tier`. Update `persona/prompts/kiro.md` (pick the worker whose tier fits the work) and `docs/kiro.md`. Update `tests/test_kiro_agent_files.py`, `tests/test_kiro_harness.py::test_question_tool_is_root_only`, `tests/test_kiro_translate.py`.
 - **Test seam:** `write_agent_files`; `KiroHarness.start()` against `tests/fake_kiro.py`; `TurnTranslator` with a dispatch frame.
 - **Edge cases:** a tier model Kiro doesn't offer → startup fails closed; a dispatch to a non-tier agent name → no `tier` key.
 - **Deliverable:** a Kiro session writes three pinned workers and refuses to start when one's model isn't offered.
 - **Verify:** `scripts/dev test tests/test_kiro_agent_files.py tests/test_kiro_harness.py tests/test_kiro_translate.py` passes (apart from baseline failures, of which these files have none).
-- **Outcome:**
+- **Outcome:** `agent_files.py` writes `archie-worker-{light,standard,deep}.json` with `model` and a `TIER_GUIDANCE` description, the root allows and trusts all three, and an old `archie-worker.json` is removed; `KiroHarness._check_tier_models` runs after the default-model check; the translator adds `tier` through `tier_of`; `persona/prompts/kiro.md`, `docs/kiro.md` and `docs/config.md` describe the workers; `fake_kiro.py` mode options name them. Evidence: the three Verify files, 86 passed; ruff clean. The stale-name grep leaves only the shared `archie-worker.md` prompt and the docs sentence about removing the old `archie-worker.json`.
 
 ## Deviations
+
+- M3: `write_agent_files` also deletes an existing `~/.kiro/agents/archie-worker.json`. A container restarted after this change keeps its filesystem, and Kiro would still offer that unpinned worker, which would bring back session-model inheritance. No scope change.
 
 ## Risks
 

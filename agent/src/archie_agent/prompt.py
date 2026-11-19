@@ -323,7 +323,7 @@ def build_kiro_prompt(workspace_dir: str = str(WORKSPACE)) -> str:
 
 
 def build_kiro_worker_prompt(body: str, workspace_dir: str = str(WORKSPACE)) -> str:
-    """Prompt for the Kiro ``archie-worker`` subagent (no identity or soul)."""
+    """Prompt shared by the Kiro ``archie-worker-<tier>`` subagents (no identity or soul)."""
     sections = [
         body.strip(),
         _build_environment("", workspace_dir),

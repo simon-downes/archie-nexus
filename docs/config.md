@@ -116,6 +116,12 @@ An agent definition under `persona/agents/` can pin its tier with `tier: deep` i
 frontmatter (`build-it-reviewer` does), and then ignores the caller's tier. A `model:`
 catalogue key in the frontmatter wins over both.
 
+On Kiro, `kiro` values are Kiro model ids. Each tier is a worker agent,
+`archie-worker-<tier>`, pinned to its model, and Kiro chooses the worker by its
+description (see [kiro.md](kiro.md#prompt-tools-skills-and-subagents)). A tier model Kiro
+doesn't offer stops a Kiro session at startup. The ids need not be in `kiro.models`,
+which only limits model switching.
+
 ## Plugins
 
 The `plugins` section configures each plugin under `plugins/<id>/` by its id. Every key is

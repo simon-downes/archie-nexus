@@ -31,19 +31,22 @@ unchanged. The backend is chosen per session.
 4. The harness completes these steps within a 30 s deadline:
    1. It sets `telemetry.enabled: false` in `~/.kiro/settings/cli.json`.
    2. It starts the Archie MCP server on `127.0.0.1:<free port>`.
-   3. It writes `~/.kiro/agents/archie.json` and `archie-worker.json`, which point at that
-      server. Their prompts go under `~/.kiro/archie/`, because Kiro parses every `.md` file
-      in `agents/` as an agent.
+   3. It writes `~/.kiro/agents/archie.json` and one worker per subagent tier,
+      `archie-worker-light.json`, `archie-worker-standard.json` and
+      `archie-worker-deep.json`, which point at that server, and removes an older
+      `archie-worker.json`. The prompts go under `~/.kiro/archie/` (the workers share
+      `archie-worker.md`), because Kiro parses every `.md` file in `agents/` as an agent.
    4. It spawns `kiro-cli acp --agent-engine=v3` in its own process group.
    5. It sends `initialize` and `session/new` with `_meta.kiro.modeId: "archie"`.
    6. It sets and verifies `contentCollection: disabled`, `autopilot: on`, the model, and
-      `effortLevel` when `kiro.effort` is set and the model offers that level.
+      `effortLevel` when `kiro.effort` is set and the model offers that level. It checks
+      that Kiro offers every `agent.subagents.kiro` tier model.
    7. It waits until the `archie` MCP server is `connected` and Archie tools are advertised.
 5. The session log's `session_started.model_key` is `kiro/<default_model>`.
 
 Startup fails closed. A Kiro agent config error, a mode other than `archie`, or an advertised
 built-in tool other than `read` (the skill category) stops the session. So do a config value
-Kiro doesn't confirm, a default model Kiro doesn't offer, an MCP server that doesn't connect,
+Kiro doesn't confirm, a default model or tier model Kiro doesn't offer, an MCP server that doesn't connect,
 Kiro exiting, or the deadline passing. The agent then writes the reason to
 `~/.nexus/logs/kiro/<session-id>.startup-error` and exits. The orchestrator stops the
 container, marks the session `failed` and appends that reason to the record's `error`, which
@@ -62,9 +65,13 @@ the agent kills Kiro and ends the active turn with `turn_error`.
   anything over 30,000 with a preview.
 - **Skills:** the root agent lists skills from persona, `~/.agents/skills` and enabled
   plugins as `skill://` resources. Kiro loads them with its own skill tool.
-- **Subagents:** one subagent, `archie-worker`, which has the default-agent prompt and every
-  Archie tool except `question`: its agent file lists them as `@archie/<name>`, because
-  both agents share one MCP server and questions are root-only, as on native sessions.
+- **Subagents:** one worker subagent per tier, `archie-worker-light`, `-standard` and
+  `-deep`. Each agent file sets `model` to the tier's `agent.subagents.kiro` model (see
+  [config.md](config.md#subagent-tiers)) and a description saying what the tier is for, so
+  Kiro's `subagent` tool picks the worker by the work. Every worker has the default-agent
+  prompt and every Archie tool except `question`: its agent file lists them as
+  `@archie/<name>`, because all the agents share one MCP server and questions are
+  root-only, as on native sessions.
 
 ## Event mapping
 
@@ -76,7 +83,7 @@ the agent kills Kiro and ends the active turn with `turn_error`.
 | `agent_message_chunk` | `text_delta`, then `assistant_message` per segment |
 | `tool_call` / `tool_call_update` for `@archie/<name>` | `tool_call` / `tool_result` named `<name>` |
 | skill load (`toolId` `disclose_context`) | `tool_call skill {"name"}` |
-| subagent dispatch (`kind` `agent-subtask`) | `tool_call task {"tasks": [{"agent", "prompt"}]}`; child events scoped to its `toolCallId`, `subagent_index` 0 |
+| subagent dispatch (`kind` `agent-subtask`) | `tool_call task {"tasks": [{"agent", "prompt", "tier"}]}` (`tier` when the agent is a tier worker); child events scoped to its `toolCallId`, `subagent_index` 0 |
 | `tool_load`, "Subagent Response" | dropped |
 | any other tool | logged under its `toolId` or title, with a warning |
 | `turn_completion` + prompt result | one root `llm_request`, then `turn_complete` / `turn_interrupted` / `turn_error` |
@@ -136,7 +143,7 @@ to re-check that later.
   and at the end of every turn; the abandoned call returns an `Error:` text that Kiro
   discards.
 - **Permission requests** are answered `cancelled`, with a warning. The agent rules allow
-  every Archie tool, skill and `archie-worker`, so Kiro shouldn't ask.
+  every Archie tool, skill and tier worker, so Kiro shouldn't ask.
 - **Kiro exits mid-session:** the active turn ends with `turn_error` "Kiro backend stopped".
   Later messages get a live `error_notice` saying to start a new session. Kiro sessions are
   not resumed.
