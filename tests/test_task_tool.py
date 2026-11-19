@@ -420,19 +420,19 @@ async def test_pinned_tier_wins_over_the_callers_tier(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_pinned_model_wins_over_tiers_without_a_tier_warning(tmp_path, monkeypatch):
     used: list[str] = []
-    local = AgentEntry(**{**_entry(tmp_path, "local").__dict__, "model": "mid", "tier": "deep"})
+    local = AgentEntry(**{**_entry(tmp_path, "local").__dict__, "model": "pinned", "tier": "deep"})
     spec, _ = await _make_tool(
         tmp_path,
         monkeypatch,
         [_done()],
         agents={"local": local},
         tiers=TIERS,
-        catalog=TIER_CATALOG,
+        catalog={**TIER_CATALOG, "pinned": _named("pinned")},
         used_models=used,
     )
 
     result = await spec.handler(tasks=[{"agent": "local", "prompt": "go"}], _launch_scope="s")
 
     assert result == "[0] local: done"
-    assert used == ["mid"]
+    assert used == ["pinned"]
     assert "local — Local (fixed model)" in spec.description

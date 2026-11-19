@@ -107,6 +107,11 @@ agent:
       deep: bedrock-claude-fable-5-1
 ```
 
+Subagents no longer run on the session's model. The native defaults are Bedrock models, so
+a setup without Bedrock access (one that runs `openai-*` or `ollama-*` models) must
+override all three `native` tiers. On Kiro, an account that doesn't offer one of the
+`kiro` defaults must set that tier, or the session won't start.
+
 On the native backend each `task` item takes a required `tier`; a missing or unknown tier
 runs on `standard` and the task's result starts with a warning. `native` values are
 catalogue keys, and a key that isn't in the catalogue stops a native session at startup,

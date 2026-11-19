@@ -95,7 +95,7 @@ Codebase facts:
 - MUST log a Kiro dispatch to a tier worker as `task` input `{agent, prompt, tier}`.
   - AC: a dispatch with `rawInput.name == "archie-worker-deep"` logs `tasks[0].tier == "deep"`.
 - MUST pin `build-it-reviewer` to `deep`, and update the delegation, Kiro prompt, config, Kiro and architecture docs.
-  - AC: `discover_agents()["build-it-reviewer"].tier == "deep"`; `rg -P 'archie-worker\.json|archie-worker\b(?!-)' docs persona agent/src` finds only the shared prompt file `archie-worker.md`.
+  - AC: `discover_agents()["build-it-reviewer"].tier == "deep"`; `rg -P 'archie-worker\.json|archie-worker\b(?!-)' docs persona agent/src` finds only the shared prompt `archie-worker.md` (and its `WORKER_PROMPT` constant) and the docs sentence about removing the old `archie-worker.json`.
 
 Out of scope: reasoning effort per tier; showing the tier in the TUI or insights; per-subagent accounting on Kiro (Kiro reports one credit figure per turn).
 
@@ -111,7 +111,7 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 - New `agent/src/archie_agent/tiers.py`: `TIER_GUIDANCE: dict[str, str]`, `DEFAULT_TIER = "standard"`, `unknown_native_tiers(tiers, catalog) -> list[str]` (error strings).
 - `agent/src/archie_agent/agents.py`: `AgentEntry.tier: str | None = None` (last field, so positional construction keeps working); `_parse_agent_file` reads `tier`; `create_task_tool(..., tiers: Mapping[str, str] | None = None)`. The schema always has the required `tier`. `tiers=None` only changes resolution: the session model, no tier warning (today's behaviour, for direct callers and existing tests); `AgentHarness` always passes `self._subagents.native`.
 - `agent/src/archie_agent/app.py`: after the compaction check, exit 1 on `unknown_native_tiers`.
-- `agent/src/archie_agent/kiro/agent_files.py`: `WORKER_AGENTS = {tier: f"archie-worker-{tier}"}`, `worker_agent_config(mcp_url, tools, *, name, model, description)`, `write_agent_files(..., worker_models: Mapping[str, str])` returns keys `root_prompt`, `worker_prompt`, `root_agent` and `worker_agent_<tier>`; `tier_of(agent_name) -> str | None`. `prompt.py`'s worker-prompt docstring and `tests/fake_kiro.py`'s mode options name the tier workers; `tests/test_tool_rows.py` keeps `archie-worker` as an arbitrary agent name.
+- `agent/src/archie_agent/kiro/agent_files.py`: `WORKER_AGENTS = {tier: f"archie-worker-{tier}"}`, `worker_agent_config(mcp_url, tier, model, tools=None)` (name and description derived from the tier), `write_agent_files(..., worker_models: Mapping[str, str])` returns keys `root_prompt`, `worker_prompt`, `root_agent` and `worker_agent_<tier>`; `tier_of(agent_name) -> str | None`. `prompt.py`'s worker-prompt docstring and `tests/fake_kiro.py`'s mode options name the tier workers; `tests/test_tool_rows.py` keeps `archie-worker` as an arbitrary agent name.
 - `agent/src/archie_agent/kiro/harness.py`: pass the kiro tier map to `write_agent_files`; check tier models right after the existing `kiro.default_model` check, so the `no_model` scenario still reports the default model.
 - `agent/src/archie_agent/kiro/translate.py`: add `tier` via `tier_of`.
 - Persona: `persona/agents/build-it-reviewer.md`, `persona/prompts/delegation.md`, `persona/prompts/kiro.md`, `persona/skills/build-it/SKILL.md`.
@@ -158,6 +158,8 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 ## Review
 
 - Plan review: 1 pass, 9 ⚠️ and 6 ℹ️, all accepted. Fixed: `tests/test_tiers.py` marked new and given the `_backend_lifespan` seam; `test_compaction_harness.py` added to M1 Verify and D16 fixes how harness tests get tiers; the stale-name grep is now `archie-worker\b(?!-)` with the leftover files named; D15 states the tier guidance; the schema keeps `tier` when `tiers=None`; pinned agents get no tier warning and the agent warning comes first; D9's fact corrected; the Kiro tier check runs after the default-model check; `write_agent_files` return keys named; Baseline count corrected to 26; ACs labelled by milestone.
+- Code review: `general` and `risk`, 1 round, no ❌ or ⚠️. `risk` ran because the change adds config keys and startup failure paths. Fixed: the pinned-`model:` test now pins a key outside the tier map, so it proves `model:` wins; the plan's grep AC and the `worker_agent_config` signature match the code; `delegation.md` and `kiro.md` now point at the tool and worker descriptions instead of restating the tier guidance, leaving `TIER_GUIDANCE` as the one wording. Both reviewers asked whether non-Bedrock sessions and Kiro accounts without the default models were meant to need overrides. They are (the defaults are the user's choices, and `agent.compaction.model` already defaults to Bedrock), and `docs/config.md` now says so. No rejections.
+- Merge risk: Medium: default config sends subagents to Bedrock (native) or Opus/Sonnet (Kiro), so a setup without those models fails each native task or fails Kiro startup with an error naming the config key; the fix is a config override, and Bedrock users with the default Kiro allowlist are unaffected.
 
 ## Outcome
 
