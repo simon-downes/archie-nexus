@@ -1,6 +1,6 @@
 # 095 — Subagent model tiers
 
-Status: reviewing
+Status: done
 Branch: build-it/095-subagent-model-tiers (base: build-it/093-scratch-workspace @ 48f5d35)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/095-subagent-model-tiers
 
@@ -163,7 +163,16 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 
 ## Outcome
 
+Delegated tasks now run on a tier, `light`, `standard` or `deep`, chosen by the calling agent per task, and `agent.subagents.native` / `agent.subagents.kiro` map each tier to a model. Native: a required `tier` on each `task` item (missing or unknown → `standard` with a warning), definition `model:` > `tier:` > caller, `build-it-reviewer` pinned to `deep`, unknown tier keys stop startup. Kiro: three `archie-worker-<tier>` agents pinned to their models, startup fails closed when Kiro doesn't offer one, and dispatches log `tier`.
+
+Evidence: full suite 5687 passed with the same 26 failures as the baseline (only `app.py` line numbers in captured log lines moved); `scripts/dev ruff check .` clean; `ruff format --check` clean on the changed Python files.
+
+Not verified: that real Kiro runs a subagent on its agent file's `model` (fake Kiro only checks the files and the startup check), and how `kiro.effort` applies to subagents.
+
 PR: pending
 CI: pending
 
 ## Follow-ups
+
+- Show the tier (or the child's model) on TUI subagent rows and in insights.
+- Map a tier to model plus reasoning effort, if the native clients gain effort support.
