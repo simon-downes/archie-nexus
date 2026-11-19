@@ -1,6 +1,6 @@
 # 095 — Subagent model tiers
 
-Status: planning
+Status: building
 Branch: build-it/095-subagent-model-tiers (base: build-it/093-scratch-workspace @ 48f5d35)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/095-subagent-model-tiers
 
@@ -48,10 +48,10 @@ Codebase facts:
 - Check commands: `scripts/dev test`, `scripts/dev ruff check .`, `scripts/dev ruff format --check <files>`
 - Setup: `scripts/dev sync`
 - Setup leftovers: none (`.venv-archie/` and caches are gitignored)
-- Failing before this work: 32 tests, all in `tests/test_question_tool.py` (10),
-  `tests/test_ws_integration.py` (13), `tests/test_host_config.py` (2),
-  `tests/test_local_api.py` (1) plus 6 teardown errors; list in `/tmp/095-baseline.txt`.
-  Ruff check passes.
+- Failing before this work: 26 tests, all in `tests/test_question_tool.py` (10),
+  `tests/test_ws_integration.py` (13: 4 failed, 9 errors), `tests/test_host_config.py` (2)
+  and `tests/test_local_api.py` (1); pytest also reports 6 logged `ERROR` lines from
+  `archie_agent.app` and `asyncio`. Ruff check passes.
 - Not included: `.DS_Store`, `plans/060-spec-container-aws-profiles.md`,
   `plans/070-build-nexus-plugins.md` (untracked in the user's checkout)
 
@@ -67,11 +67,13 @@ Codebase facts:
 | D6 | Native tier selection | A required `tier` enum on each `task` item | optional with a default; one tier per call | Required forces a choice per task; tasks in one call can need different tiers (a survey and a review) | self (approved design) |
 | D7 | Missing or invalid `tier` at run time (providers don't enforce the enum) | Use `standard` and prefix a warning to that task's result | fail the task | Matches the unknown-agent fallback in `run_child` | self |
 | D8 | Precedence on native | definition `model:` > definition `tier:` > caller's `tier` | caller overrides the pin; pin as a minimum | A cheap caller underestimates reviews; a pin doesn't depend on its judgement. A minimum adds a concept | self (approved design) |
-| D9 | Unknown native tier key | Startup check in `app.py` `_backend_lifespan` (log, exit 1), like `agent.compaction.model`; at run time an unknown key fails that task | check in `AgentHarness.__init__` | Many harness tests build `AgentHarness` with a one-model catalogue; the app boundary is where config is validated | self |
+| D9 | Unknown native tier key | Startup check in `app.py` `_backend_lifespan` (log, exit 1), like `agent.compaction.model`; at run time an unknown key fails that task | check in `AgentHarness.__init__` | Harness tests build `AgentHarness` with no catalogue (`tests/test_harness.py`) or a two-model one (`tests/test_compaction_harness.py`); the app boundary is where config is validated | self |
 | D10 | Kiro tier mechanism | Three worker agents, `archie-worker-light`, `archie-worker-standard`, `archie-worker-deep`, each with `model` set and the tier's guidance in `description`; they share the `archie-worker.md` prompt. `archie-worker` is no longer written | keep `archie-worker` beside them | An unpinned worker brings back session-model inheritance | self |
 | D11 | Kiro tier model not offered by Kiro | Startup fails closed: `Kiro does not offer agent.subagents.kiro.<tier> '<id>'` | warn and drop the pin | Matches `kiro.default_model`; dropping silently brings back the cost problem. Tier ids need not be in `kiro.models` (that is the switch allowlist) | self |
 | D12 | Kiro dispatch log shape | The translator adds `tier` to the logged `task` input when the agent name is a tier worker | log only the name | Gives both backends the same `{agent, prompt, tier}` shape | self |
 | D13 | Where tier names and guidance live | `SUBAGENT_TIERS` (names) in `shared/schemas.py`; guidance text in new `agent/src/archie_agent/tiers.py`, used by the task description and the Kiro agent files | duplicating text in each | One source for the wording | self |
+| D15 | Tier guidance wording (`TIER_GUIDANCE`) | light: "mechanical work: run commands, look things up, read or survey files and summarise them"; standard: "a well-scoped change, or an investigation with a clear question"; deep: "reviews, design judgement, debugging across modules, or work where a wrong answer is costly" | one generic line per tier | This text is how callers on both backends choose | self |
+| D16 | Harness tests that run tasks | They pass `model_catalog={<key>: model}` and `subagents=SubagentsConfig(native=NativeSubagentTiers(<key>, <key>, <key>))`, and their task items set `tier` | task tool falls back to `DEFAULT_MODELS` | A fallback catalogue would hide a misconfigured harness; explicit test config keeps the tests meaningful | self |
 | D14 | Pinned agents | `build-it-reviewer` gets `tier: deep`; the build-it skill's Reviewers section says to use `deep` (`archie-worker-deep` on Kiro) | leave reviewers to the caller | Reviews are the case the user named | self |
 
 ## Requirements
@@ -79,21 +81,21 @@ Codebase facts:
 - MUST accept `agent.subagents.native.{light,standard,deep}` and `agent.subagents.kiro.{light,standard,deep}` with the D5 defaults, allow overriding a single tier, and reject unknown tier keys and empty values.
   - AC: `NexusConfig().agent.subagents.native.deep == "bedrock-claude-opus-5-5"`; YAML with only `kiro: {deep: x}` loads with `light == "gpt-5.6-luna"`; `native: {huge: x}` and `native: {light: ""}` raise `ConfigError`.
 - MUST give each native `task` item a required `tier` property with enum `light|standard|deep`, and describe each tier in the tool description.
-  - AC: the `task` schema's item `required` is `["agent", "prompt", "tier"]`; the description names all three tiers with their guidance.
+  - AC (M1): the `task` schema's item `required` is `["agent", "prompt", "tier"]` whether or not `tiers` is given; the description names all three tiers with their D15 guidance.
 - MUST run a native child on the model its tier maps to.
   - AC: a `deep` task with tiers `{deep: "big"}` creates its LLM client with catalogue entry `big`, and its `llm_request` events carry `model_key` `big`.
 - MUST fall back to `standard` with a warning when `tier` is missing or invalid.
-  - AC: a task with `tier: "huge"` runs on the `standard` model and its result starts with `[0] <agent>: Warning: unknown tier 'huge'`.
+  - AC: a task with `tier: "huge"` runs on the `standard` model and its result starts with `[0] <agent>: Warning: unknown tier 'huge'`. With an unknown agent too, the agent warning comes first. A definition that pins `tier:` or `model:` gets no tier warning.
 - MUST let an agent definition pin a tier with `tier:` frontmatter, and keep `model:` winning over it; the description marks pinned agents.
-  - AC: a definition with `tier: deep` runs on the `deep` model when called with `light`; one with `model: m` runs on `m`; an invalid `tier:` value is ignored with a warning; the description shows `(fixed tier: deep)`.
+  - AC (M2): a definition with `tier: deep` runs on the `deep` model when called with `light`; one with `model: m` runs on `m`; an invalid `tier:` value is ignored with a warning; the description shows `(fixed tier: deep)` or `(fixed model)`.
 - MUST exit a native session at startup when a native tier maps to a key not in the catalogue.
-  - AC: the startup helper reports `agent.subagents.native.deep: unknown model 'nope'`; `_backend_lifespan` logs it and exits 1.
+  - AC: `unknown_native_tiers` reports `agent.subagents.native.deep: unknown model 'nope'`; `async with app._backend_lifespan("native", config)` with that config raises `SystemExit(1)`.
 - MUST write the three Kiro tier worker agents with their models, let the root start and trust all three, and fail Kiro startup when Kiro doesn't offer a tier model.
   - AC: `~/.kiro/agents/archie-worker-deep.json` has `"model": "claude-opus-5.5"` and the `question`-free tool list; `archie.json` rules match all three names; with `kiro: {light: gpt-9}` `start()` raises `KiroStartupError` naming `agent.subagents.kiro.light 'gpt-9'`.
 - MUST log a Kiro dispatch to a tier worker as `task` input `{agent, prompt, tier}`.
   - AC: a dispatch with `rawInput.name == "archie-worker-deep"` logs `tasks[0].tier == "deep"`.
 - MUST pin `build-it-reviewer` to `deep`, and update the delegation, Kiro prompt, config, Kiro and architecture docs.
-  - AC: `discover_agents()["build-it-reviewer"].tier == "deep"`; `tests/test_kiro_agent_files.py` and the docs grep for `archie-worker-` show no stale `archie-worker.json` references.
+  - AC: `discover_agents()["build-it-reviewer"].tier == "deep"`; `rg -P 'archie-worker\.json|archie-worker\b(?!-)' docs persona agent/src` finds only the shared prompt file `archie-worker.md`.
 
 Out of scope: reasoning effort per tier; showing the tier in the TUI or insights; per-subagent accounting on Kiro (Kiro reports one credit figure per turn).
 
@@ -107,10 +109,10 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 
 - `shared/src/archie_shared/schemas.py`: `SUBAGENT_TIERS`, `NativeSubagentTiers`, `KiroSubagentTiers` (each `__post_init__` rejects empty values), `SubagentsConfig.native` and `.kiro`.
 - New `agent/src/archie_agent/tiers.py`: `TIER_GUIDANCE: dict[str, str]`, `DEFAULT_TIER = "standard"`, `unknown_native_tiers(tiers, catalog) -> list[str]` (error strings).
-- `agent/src/archie_agent/agents.py`: `AgentEntry.tier: str | None = None` (last field, so positional construction keeps working); `_parse_agent_file` reads `tier`; `create_task_tool(..., tiers: Mapping[str, str] | None = None)`. `tiers=None` keeps today's behaviour (session model, no tier check), for direct callers and tests; `AgentHarness` always passes `self._subagents.native`.
+- `agent/src/archie_agent/agents.py`: `AgentEntry.tier: str | None = None` (last field, so positional construction keeps working); `_parse_agent_file` reads `tier`; `create_task_tool(..., tiers: Mapping[str, str] | None = None)`. The schema always has the required `tier`. `tiers=None` only changes resolution: the session model, no tier warning (today's behaviour, for direct callers and existing tests); `AgentHarness` always passes `self._subagents.native`.
 - `agent/src/archie_agent/app.py`: after the compaction check, exit 1 on `unknown_native_tiers`.
-- `agent/src/archie_agent/kiro/agent_files.py`: `WORKER_AGENTS = {tier: f"archie-worker-{tier}"}`, `worker_agent_config(mcp_url, tools, *, name, model, description)`, `write_agent_files(..., worker_models: Mapping[str, str])`; `tier_of(agent_name) -> str | None`.
-- `agent/src/archie_agent/kiro/harness.py`: pass the kiro tier map to `write_agent_files`; check tier models after `_wait_for_models`.
+- `agent/src/archie_agent/kiro/agent_files.py`: `WORKER_AGENTS = {tier: f"archie-worker-{tier}"}`, `worker_agent_config(mcp_url, tools, *, name, model, description)`, `write_agent_files(..., worker_models: Mapping[str, str])` returns keys `root_prompt`, `worker_prompt`, `root_agent` and `worker_agent_<tier>`; `tier_of(agent_name) -> str | None`. `prompt.py`'s worker-prompt docstring and `tests/fake_kiro.py`'s mode options name the tier workers; `tests/test_tool_rows.py` keeps `archie-worker` as an arbitrary agent name.
+- `agent/src/archie_agent/kiro/harness.py`: pass the kiro tier map to `write_agent_files`; check tier models right after the existing `kiro.default_model` check, so the `no_model` scenario still reports the default model.
 - `agent/src/archie_agent/kiro/translate.py`: add `tier` via `tier_of`.
 - Persona: `persona/agents/build-it-reviewer.md`, `persona/prompts/delegation.md`, `persona/prompts/kiro.md`, `persona/skills/build-it/SKILL.md`.
 - Docs: `docs/config.md`, `docs/kiro.md`, `docs/architecture.md`.
@@ -119,11 +121,11 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 
 ### [ ] M1 — Native tasks run on their tier's model
 
-- **Approach:** Add the config structs and `SubagentsConfig` fields (follow `CompactionConfig`). Add `tiers.py`. In `create_task_tool`, add `tier` to the item schema and `required`, the tier lines to `_task_description`, and resolution in `run_child` before `_resolve_model`: when `tiers` is given, pick the tier (warning + `standard` on missing/invalid) and look its key up in `model_catalog` (KeyError → task error, as `_resolve_model` does). Wire `tiers=msgspec.structs.asdict(self._subagents.native)` in `AgentHarness`; give harness tests that run tasks a catalogue/tier map they can resolve. Add the startup check in `_backend_lifespan`. Update `persona/prompts/delegation.md`, `docs/config.md` and the `docs/architecture.md` config block.
-- **Test seam:** `create_task_tool(...).handler` (`tests/test_task_tool.py`, capturing the model passed to the monkeypatched `create_llm_client`); `load_nexus_config` (`tests/test_subagents_config.py`); `unknown_native_tiers`.
+- **Approach:** Add the config structs and `SubagentsConfig` fields (follow `CompactionConfig`). Add `tiers.py`. In `create_task_tool`, add `tier` to the item schema and `required`, the tier lines to `_task_description`, and resolution in `run_child` before `_resolve_model`: when `tiers` is given, pick the tier (warning + `standard` on missing/invalid) and look its key up in `model_catalog` (KeyError → task error, as `_resolve_model` does). Wire `tiers=msgspec.structs.asdict(self._subagents.native)` in `AgentHarness`; update the task-running tests in `tests/test_harness.py` and `tests/test_compaction_harness.py` per D16. Add the startup check in `_backend_lifespan`. Update `persona/prompts/delegation.md`, `docs/config.md` and the `docs/architecture.md` config block.
+- **Test seam:** `create_task_tool(...).handler` (`tests/test_task_tool.py`, capturing the model passed to the monkeypatched `create_llm_client`); `load_nexus_config` (`tests/test_subagents_config.py`); `unknown_native_tiers` and `app._backend_lifespan` (new `tests/test_tiers.py`).
 - **Edge cases:** tier missing / not a string / not a tier name → `standard` + warning; tier key not in catalogue → that task returns `KeyError: unknown model '<key>'`, siblings unaffected.
 - **Deliverable:** a native `task` call with `tier: deep` runs the child on the configured deep model.
-- **Verify:** `scripts/dev test tests/test_task_tool.py tests/test_subagents_config.py tests/test_harness.py tests/test_tiers.py` passes.
+- **Verify:** `scripts/dev test tests/test_task_tool.py tests/test_subagents_config.py tests/test_harness.py tests/test_compaction_harness.py tests/test_tiers.py` passes.
 - **Outcome:**
 
 ### [ ] M2 — Agent definitions pin a tier
@@ -136,7 +138,7 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 
 ### [ ] M3 — Kiro tier workers
 
-- **Approach:** Replace the single worker in `agent_files.py` with the three tier workers (D10), each `model` from `agent.subagents.kiro` and `description` built from `TIER_GUIDANCE`; root permission rule and `toolsSettings` list all three. Harness: pass `config.agent.subagents.kiro`; after `_wait_for_models`, raise `KiroStartupError` for each tier model not in `model_options()`. Translator: `tier_of(name)` adds `tier`. Update `persona/prompts/kiro.md` (pick the worker whose tier fits the work) and `docs/kiro.md`. Update `tests/test_kiro_agent_files.py`, `tests/test_kiro_harness.py::test_question_tool_is_root_only`, `tests/test_kiro_translate.py`.
+- **Approach:** Replace the single worker in `agent_files.py` with the three tier workers (D10), each `model` from `agent.subagents.kiro` and `description` built from `TIER_GUIDANCE`; root permission rule and `toolsSettings` list all three. Harness: pass `config.agent.subagents.kiro`; after the `kiro.default_model` check, raise `KiroStartupError` for the first tier model not in `model_options()`. Translator: `tier_of(name)` adds `tier`. Update `persona/prompts/kiro.md` (pick the worker whose tier fits the work) and `docs/kiro.md`. Update `tests/test_kiro_agent_files.py`, `tests/test_kiro_harness.py::test_question_tool_is_root_only`, `tests/test_kiro_translate.py`.
 - **Test seam:** `write_agent_files`; `KiroHarness.start()` against `tests/fake_kiro.py`; `TurnTranslator` with a dispatch frame.
 - **Edge cases:** a tier model Kiro doesn't offer → startup fails closed; a dispatch to a non-tier agent name → no `tier` key.
 - **Deliverable:** a Kiro session writes three pinned workers and refuses to start when one's model isn't offered.
@@ -152,6 +154,8 @@ Config maps tier → model per backend. Native: `run_child` picks the model by d
 - Stacked on the unmerged 093 branch: this PR targets `build-it/093-scratch-workspace` until #40 merges.
 
 ## Review
+
+- Plan review: 1 pass, 9 ⚠️ and 6 ℹ️, all accepted. Fixed: `tests/test_tiers.py` marked new and given the `_backend_lifespan` seam; `test_compaction_harness.py` added to M1 Verify and D16 fixes how harness tests get tiers; the stale-name grep is now `archie-worker\b(?!-)` with the leftover files named; D15 states the tier guidance; the schema keeps `tier` when `tiers=None`; pinned agents get no tier warning and the agent warning comes first; D9's fact corrected; the Kiro tier check runs after the default-model check; `write_agent_files` return keys named; Baseline count corrected to 26; ACs labelled by milestone.
 
 ## Outcome
 
