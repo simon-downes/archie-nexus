@@ -601,6 +601,168 @@ async def test_search_spans_one_request_and_normalises(dd_fake):
     assert result[0]["error"] == "http_error: 502 Bad Gateway"
     assert "custom" not in result[0]
     assert "secret_header" not in str(result[0])
+    assert "fields" not in result[0]
+
+
+NESTED = {
+    "http": {"client_ip": "203.0.113.7", "url_details": {"path": "/gift/abc"}},
+    "http.url_details": {"host": "flat.example"},
+    "context": {"brand": "acme", "items": list(range(80)), "note": "n" * 3000},
+    "network": {"client": {"ip": "10.0.0.1"}},
+}
+
+
+async def test_search_logs_fields_read_nested_attributes(dd_fake):
+    dd_fake({LOGS: {"data": [_log(1, attributes=NESTED)]}}, "logs")
+    [record] = await search_logs(
+        "*",
+        fields=[" @http.client_ip ", "@context", "http.url_details.host", "@missing.x", "network"],
+    )
+    fields = record["fields"]
+    assert list(fields) == [
+        "@http.client_ip",
+        "@context",
+        "http.url_details.host",
+        "@missing.x",
+        "network",
+    ]
+    assert fields["@http.client_ip"] == "203.0.113.7"
+    assert fields["http.url_details.host"] == "flat.example"
+    assert fields["@missing.x"] is None
+    assert fields["network"] == {"client": {"ip": "10.0.0.1"}}
+    assert fields["@context"]["brand"] == "acme"
+    assert len(fields["@context"]["items"]) == 50
+    assert len(fields["@context"]["note"]) == 2000
+    assert record["truncated"] is True
+    assert record["attributes"]["http"] == "…"
+
+
+def test_fields_prefer_longest_dotted_key_then_fall_back_to_nesting():
+    from archie_plugins.datadog.formatting import field_values
+
+    source = {"a.b": {"x": 1}, "a": {"b": {"c": 2}}}
+    values, truncated = field_values([source], ["a.b.x", "a.b.c"])
+    assert values == {"a.b.x": 1, "a.b.c": 2}
+    assert truncated is False
+
+
+def test_fields_bound_depth_and_keys():
+    from archie_plugins.datadog.formatting import field_values
+
+    deep = {"l1": {"l2": {"l3": {"l4": {"l5": 1}}}}}
+    wide = {f"k{i}": i for i in range(60)}
+    values, truncated = field_values([{"deep": deep, "wide": wide}], ["deep", "wide"])
+    assert values["deep"] == {"l1": {"l2": {"l3": {"l4": "…"}}}}
+    assert len(values["wide"]) == 50
+    assert truncated is True
+
+
+@pytest.mark.parametrize("fields", [[], "@http", ["bad path"], [5], ["@a"] * 21, ["a/b"], [""]])
+async def test_search_logs_and_spans_reject_bad_fields(dd_fake, fields):
+    client = dd_fake({}, "logs", "traces")
+    with pytest.raises(DatadogInputError):
+        await search_logs("*", fields=fields)
+    with pytest.raises(DatadogInputError):
+        await search_spans("*", fields=fields)
+    assert client.calls == []
+
+
+async def test_search_spans_fields_read_custom_then_attributes(dd_fake):
+    item = {
+        **SPAN,
+        "attributes": {
+            **SPAN["attributes"],
+            "custom": {**SPAN["attributes"]["custom"], "http": {"client_ip": "198.51.100.2"}},
+            "attributes": {"http": {"client_ip": "shadowed"}, "peer": {"service": "db"}},
+        },
+    }
+    dd_fake({SPANS: {"data": [item]}}, "traces")
+    [record] = await search_spans("*", fields=["@http.client_ip", "@peer.service", "@duration"])
+    assert record["fields"] == {
+        "@http.client_ip": "198.51.100.2",
+        "@peer.service": "db",
+        "@duration": 372_039_555,
+    }
+    assert record["truncated"] is False
+
+
+SPAN_AGGREGATE = ("POST", "/api/v2/spans/analytics/aggregate")
+
+
+async def test_aggregate_spans_builds_the_shared_request_and_parses_compute(dd_fake):
+    from archie_plugins.datadog.traces import aggregate_spans
+
+    bucket = {
+        "type": "bucket",
+        "attributes": {"by": {"resource_name": "GET /"}, "compute": {"c0": 12.5}},
+    }
+    client = dd_fake(
+        {SPAN_AGGREGATE: {"data": [bucket, "junk"], "meta": {"status": "done"}}}, "traces"
+    )
+    result = await aggregate_spans(
+        "service:api", ["resource_name"], aggregation="avg", metric="@duration", start="30m"
+    )
+    assert len(client.calls) == 1
+    body = client.calls[0][3]
+    assert body["data"]["type"] == "aggregate_request"
+    attributes = body["data"]["attributes"]
+    assert attributes["compute"] == [{"aggregation": "avg", "type": "total", "metric": "@duration"}]
+    assert attributes["group_by"] == [
+        {
+            "facet": "resource_name",
+            "limit": 100,
+            "sort": {
+                "type": "measure",
+                "aggregation": "avg",
+                "order": "desc",
+                "metric": "@duration",
+            },
+        }
+    ]
+    assert attributes["filter"]["query"] == "service:api"
+    assert result["buckets"] == [{"by": {"resource_name": "GET /"}, "value": 12.5}]
+    assert result["group_by"] == ["resource_name"]
+    assert result["partial"] is False
+
+
+async def test_aggregate_spans_timeseries_and_timeout(dd_fake):
+    from archie_plugins.datadog.traces import aggregate_spans
+
+    points = [{"time": "2026-05-01T11:00:00Z", "value": 4}]
+    bucket = {"attributes": {"by": {"service": "api"}, "compute": {"c0": points}}}
+    dd_fake(
+        {
+            SPAN_AGGREGATE: {
+                "data": [bucket],
+                "meta": {"status": "timeout", "warnings": [{"code": "slow"}]},
+            }
+        },
+        "traces",
+    )
+    result = await aggregate_spans("*", ["service"], interval="5m")
+    assert result["buckets"][0]["points"] == [["2026-05-01T11:00:00Z", 4]]
+    assert result["partial"] is True and result["warnings"] == ["slow"]
+
+
+async def test_aggregate_spans_malformed_and_input_errors(dd_fake):
+    from archie_plugins.datadog.traces import aggregate_spans
+
+    client = dd_fake({SPAN_AGGREGATE: {"data": {}}}, "traces")
+    with pytest.raises(DatadogResponseError):
+        await aggregate_spans("*")
+    calls = len(client.calls)
+    for kwargs in ({"aggregation": "mean"}, {"aggregation": "median"}, {"order": "up"}):
+        with pytest.raises(DatadogInputError):
+            await aggregate_spans("*", **kwargs)
+    assert len(client.calls) == calls
+
+
+async def test_aggregate_logs_accepts_avg_and_median(dd_fake):
+    from archie_plugins.datadog.logs import aggregate_logs
+
+    client = dd_fake({AGGREGATE: {"data": {"buckets": []}}}, "logs")
+    await aggregate_logs("*", aggregation="median", metric="@duration")
+    assert client.calls[0][3]["compute"][0]["aggregation"] == "median"
 
 
 EVENT = {
@@ -702,12 +864,18 @@ async def test_list_events_blank_query_is_no_filter(dd_fake):
 
 READS = {
     "aggregate_logs",
+    "aggregate_spans",
     "describe_metric",
     "get_dashboard",
+    "get_log_pipeline",
     "get_monitor",
     "list_catalog_entities",
     "list_dashboards",
     "list_events",
+    "list_log_indexes",
+    "list_log_metrics",
+    "list_log_pipelines",
+    "list_scanning_groups",
     "list_teams",
     "query_metrics",
     "search",
@@ -776,8 +944,72 @@ async def test_list_dashboards_filters_title_locally(dd_fake):
     client = dd_fake({DASHBOARDS: {"dashboards": items}}, "dashboards")
     result = await list_dashboards("PAYMENTS", limit=1)
     assert [item["id"] for item in result] == ["aaa-bbb-ccc"]
-    assert client.calls[0][2] is None
+    assert client.calls[0][2] == {"count": 100, "start": 0}
     assert len(await list_dashboards()) == 3
+
+
+def _dashboards(start: int, count: int, title: str = "Board") -> dict:
+    return {"dashboards": [{"id": f"d{start + i}", "title": title} for i in range(count)]}
+
+
+async def test_list_dashboards_pages_past_the_first_hundred(dd_fake):
+    second = _dashboards(100, 30)
+    second["dashboards"][5]["title"] = "Payments"
+    client = dd_fake({DASHBOARDS: Seq([_dashboards(0, 100), second])}, "dashboards")
+    result = await list_dashboards("payments")
+    assert [item["id"] for item in result] == ["d105"]
+    assert [call[2] for call in client.calls] == [
+        {"count": 100, "start": 0},
+        {"count": 100, "start": 100},
+    ]
+
+
+async def test_list_dashboards_stops_once_limit_matches(dd_fake):
+    client = dd_fake({DASHBOARDS: _dashboards(0, 100)}, "dashboards")
+    assert len(await list_dashboards(limit=10)) == 10
+    assert len(client.calls) == 1
+
+
+async def test_list_dashboards_full_page_then_empty_page(dd_fake):
+    client = dd_fake({DASHBOARDS: Seq([_dashboards(0, 100), {"dashboards": []}])}, "dashboards")
+    assert len(await list_dashboards(limit=1000)) == 100
+    assert len(client.calls) == 2
+
+
+async def test_list_dashboards_stops_after_twenty_pages(dd_fake):
+    client = dd_fake({DASHBOARDS: _dashboards(0, 100)}, "dashboards")
+    assert len(await list_dashboards("missing")) == 0
+    assert len(client.calls) == 20
+    assert client.calls[-1][2] == {"count": 100, "start": 1900}
+
+
+@pytest.mark.parametrize("limit", [0, 1001])
+async def test_list_dashboards_limit_bounds(dd_fake, limit):
+    client = dd_fake({}, "dashboards")
+    with pytest.raises(DatadogInputError):
+        await list_dashboards(limit=limit)
+    assert client.calls == []
+
+
+async def test_list_dashboards_malformed(dd_fake):
+    dd_fake({DASHBOARDS: {"dashboards": None}}, "dashboards")
+    with pytest.raises(DatadogResponseError):
+        await list_dashboards()
+
+
+async def test_list_dashboards_dedupes_ids_when_offsets_shift(dd_fake):
+    first = _dashboards(0, 100)
+    second = {"dashboards": [first["dashboards"][-1], {"id": "new", "title": "Board"}]}
+    dd_fake({DASHBOARDS: Seq([first, second])}, "dashboards")
+    result = await list_dashboards(limit=1000)
+    assert len(result) == 101
+    assert len({item["id"] for item in result}) == 101
+
+
+async def test_list_dashboards_later_page_failure_raises(dd_fake):
+    dd_fake({DASHBOARDS: Seq([_dashboards(0, 100), DatadogRateLimitError(3)])}, "dashboards")
+    with pytest.raises(DatadogRateLimitError):
+        await list_dashboards("missing")
 
 
 async def test_get_dashboard_widgets_and_bounds(dd_fake):
@@ -789,6 +1021,7 @@ async def test_get_dashboard_widgets_and_bounds(dd_fake):
     assert result["template_variables"] == ["env"]
     assert len(result["description"]) == 500
     assert result["widgets"][1]["queries"] == ["sum:errors{*}", "status:error", "avg:cpu{*}"]
+    empty = {"id": None, "type": None, "title": None, "queries": [], "truncated": False}
     assert result["widgets"][2] == {
         "id": 3,
         "type": "group",
@@ -796,7 +1029,41 @@ async def test_get_dashboard_widgets_and_bounds(dd_fake):
         "queries": [],
         "truncated": False,
         "child_count": 2,
+        "widgets": [empty, empty],
     }
+
+
+async def test_get_dashboard_lists_widgets_inside_groups(dd_fake):
+    child = {
+        "id": 11,
+        "definition": {"type": "query_value", "title": "5xx", "requests": [{"q": "sum:5xx{*}"}]},
+    }
+    group = {"id": 10, "definition": {"type": "group", "title": "HTTP", "widgets": [child, child]}}
+    dd_fake(
+        {("GET", "/api/v1/dashboard/abc-def-ghi"): {"id": "abc-def-ghi", "widgets": [group]}},
+        "dashboards",
+    )
+    result = await get_dashboard("abc-def-ghi")
+    [record] = result["widgets"]
+    assert record["child_count"] == 2
+    assert [w["queries"] for w in record["widgets"]] == [["sum:5xx{*}"], ["sum:5xx{*}"]]
+    assert record["widgets"][0]["title"] == "5xx"
+    assert result["widget_count"] == 1 and result["truncated"] is False
+
+
+async def test_get_dashboard_caps_group_children_in_order(dd_fake):
+    def group(gid, count):
+        children = [{"id": gid * 1000 + i, "definition": {"type": "note"}} for i in range(count)]
+        return {"id": gid, "definition": {"type": "group", "widgets": children}}
+
+    body = {"id": "abc-def-ghi", "widgets": [group(1, 70), group(2, 50), group(3, 5)]}
+    dd_fake({("GET", "/api/v1/dashboard/abc-def-ghi"): body}, "dashboards")
+    result = await get_dashboard("abc-def-ghi")
+    counts = [len(w["widgets"]) for w in result["widgets"]]
+    assert counts == [70, 30, 0]
+    assert [w["truncated"] for w in result["widgets"]] == [False, True, True]
+    assert [w["child_count"] for w in result["widgets"]] == [70, 50, 5]
+    assert result["truncated"] is True
 
 
 @pytest.mark.parametrize("value", ["abc", "ABC-DEF-GHI", "abc-def-ghi/../x", 5])

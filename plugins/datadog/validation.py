@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .client import DASHBOARD_ID, METRIC, DatadogInputError
+from .client import DASHBOARD_ID, METRIC, PIPELINE_ID, DatadogInputError
 
 MAX_QUERY = 2_000
 MAX_TEXT = 4_000
@@ -16,6 +17,7 @@ _MAX_WINDOW = timedelta(days=31)
 _MAX_AGE = timedelta(days=365)
 _DASHBOARD = re.compile(DASHBOARD_ID)
 _METRIC = re.compile(METRIC)
+_PIPELINE = re.compile(PIPELINE_ID)
 _KIND = re.compile(r"^[a-z0-9_.-]{1,64}$")
 _FACET = re.compile(r"^@?[A-Za-z0-9_][A-Za-z0-9_.\-]{0,199}$")
 _INTERVAL = re.compile(r"^[1-9][0-9]{0,5}[smhd]$")
@@ -136,9 +138,23 @@ def time_window(start: Any, end: Any, *, now: datetime | None = None) -> tuple[d
 
 MAX_GROUP_LEVELS = 4
 MAX_BUCKETS = 10_000
-LOG_AGGREGATIONS = frozenset(
-    {"count", "cardinality", "sum", "min", "max", "pc75", "pc90", "pc95", "pc98", "pc99"}
+AGGREGATIONS = frozenset(
+    {
+        "count",
+        "cardinality",
+        "sum",
+        "min",
+        "max",
+        "avg",
+        "median",
+        "pc75",
+        "pc90",
+        "pc95",
+        "pc98",
+        "pc99",
+    }
 )
+MAX_FIELDS = 20
 
 
 def optional_facet(value: Any, name: str = "facet") -> str | None:
@@ -152,7 +168,7 @@ def optional_facet(value: Any, name: str = "facet") -> str | None:
     return value.strip()
 
 
-def log_group_by(value: Any) -> list[dict[str, Any]]:
+def group_by(value: Any) -> list[dict[str, Any]]:
     """Group-by levels: facet strings or ``{"facet", "limit", "missing"}`` dicts.
 
     Default limits are 100 for the first level and 10 for later ones; the product of the
@@ -184,11 +200,67 @@ def log_group_by(value: Any) -> list[dict[str, Any]]:
     return groups
 
 
-def log_aggregation(value: Any, metric: Any) -> str:
-    function = choice(value, "aggregation", LOG_AGGREGATIONS)
+def aggregation(value: Any, metric: Any) -> str:
+    function = choice(value, "aggregation", AGGREGATIONS)
     if function != "count" and metric is None:
         raise DatadogInputError(f"aggregation {function} needs a metric (a facet or measure)")
     return function
+
+
+def fields(value: Any) -> list[str] | None:
+    """Optional attribute paths to read from each record, such as ``@http.client_ip``."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not 0 < len(value) <= MAX_FIELDS:
+        raise DatadogInputError(f"fields must be a list of 1-{MAX_FIELDS} attribute paths")
+    paths = []
+    for item in value:
+        if not isinstance(item, str) or not _FACET.fullmatch(item.strip()):
+            raise DatadogInputError(
+                "each field must be an attribute path such as @http.client_ip "
+                "(letters, digits, '@', '_', '.', '-'; at most 200)"
+            )
+        paths.append(item.strip())
+    return list(dict.fromkeys(paths))
+
+
+@dataclass(frozen=True)
+class Aggregate:
+    """Validated inputs shared by ``aggregate_logs`` and ``aggregate_spans``."""
+
+    query: str
+    begin: datetime
+    end: datetime
+    groups: list[dict[str, Any]]
+    function: str
+    metric: str | None
+    interval: str | None
+    order: str
+
+
+def aggregate(
+    query_text: Any,
+    groups: Any,
+    start: Any,
+    end: Any,
+    function: Any,
+    metric: Any,
+    step: Any,
+    order: Any,
+) -> Aggregate:
+    """Validate every aggregate argument before any request."""
+    text = query(query_text)
+    begin, finish = time_window(start, end)
+    return Aggregate(
+        query=text,
+        begin=begin,
+        end=finish,
+        groups=group_by(groups),
+        function=aggregation(function, metric),
+        metric=optional_facet(metric, "metric"),
+        interval=interval(step),
+        order=choice(order, "order", {"asc", "desc"}),
+    )
 
 
 def interval(value: Any) -> str | None:
@@ -209,6 +281,16 @@ def monitor_id(value: Any) -> int:
 def dashboard_id(value: Any) -> str:
     if not isinstance(value, str) or not _DASHBOARD.fullmatch(value.strip()):
         raise DatadogInputError("dashboard_id must look like abc-def-ghi")
+    return value.strip()
+
+
+def pipeline_id(value: Any) -> str:
+    """A log pipeline ID from ``list_log_pipelines``: 1-64 letters, digits, ``_`` or ``-``."""
+    if not isinstance(value, str) or not _PIPELINE.fullmatch(value.strip()):
+        raise DatadogInputError(
+            "pipeline_id must be a pipeline ID from list_log_pipelines "
+            "(1-64 letters, digits, '_' or '-')"
+        )
     return value.strip()
 
 
