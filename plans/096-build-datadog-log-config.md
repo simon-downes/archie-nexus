@@ -188,7 +188,7 @@ configuration lives in a new module; projection and dashboard fixes change exist
 - `plugins/datadog/client.py`: new allowlist entries and a `PIPELINE_ID` pattern.
 - `plugins/datadog/log_config.py` (new): `list_log_pipelines`, `get_log_pipeline`,
   `list_log_indexes`, `list_log_metrics`, `list_scanning_groups`. Follow `dashboards.py`.
-- `plugins/datadog/formatting.py`: `config_value` (generic bounded projection used for
+- `plugins/datadog/formatting.py`: `bounded_value`/`Bounds` (generic bounded projection used for
   processors and `fields`), pipeline/index/log-metric/scanner normalisers, `field_values`,
   group children in `widget`/`dashboard_detail`, `span_bucket`.
 - `plugins/datadog/validation.py`: `pipeline_id`, `fields`, span aggregation set.
@@ -224,7 +224,7 @@ them further would repeat the same skill/README/allowlist edits without reducing
 ### [x] M1 — Read log pipelines
 
 - **Approach:** add allowlist entries (all eight paths, so later milestones only add code),
-  `validation.pipeline_id`, `formatting.config_value` and pipeline normalisers, and
+  `validation.pipeline_id`, `formatting.bounded_value` and pipeline normalisers, and
   `log_config.list_log_pipelines`/`get_log_pipeline`. Export from `__init__.py`; document in
   the skill and README. ⚠️ The skill test forbids `/api/v1` text in the skill. ⚠️
   `test_datadog_monitors.py` `PUBLIC` and `test_every_public_function_stays_inside_the_allowlist`
@@ -243,7 +243,7 @@ them further would repeat the same skill/README/allowlist edits without reducing
   both function entries. 347 passed (`scripts/dev test plugins/datadog tests/test_plugin_layout.py`);
   ruff clean.
 
-### [ ] M2 — Read indexes, log-based metrics and scanner groups
+### [x] M2 — Read indexes, log-based metrics and scanner groups
 
 - **Approach:** `list_log_indexes`, `list_log_metrics`, `list_scanning_groups` in
   `log_config.py` with normalisers in `formatting.py`; skill and README entries.
@@ -253,7 +253,10 @@ them further would repeat the same skill/README/allowlist edits without reducing
 - **Deliverable:** the agent can read retention/exclusion filters, log-metric definitions and
   masking rules.
 - **Verify:** `scripts/dev test plugins/datadog tests/test_plugin_layout.py -q` passes.
-- **Outcome:**
+- **Outcome:** `list_log_indexes`, `list_log_metrics`, `list_scanning_groups` in `log_config.py`;
+  `in_order` moved to `formatting.py` (shared by pipelines, indexes and scanner groups, and
+  tolerant of unhashable order entries). Skill: index routing/exclusion/quota semantics from
+  the indexes doc, scanner rule semantics from the spec. 360 passed; ruff clean.
 
 ### [ ] M3 — Nested fields on log and span search, and span aggregation
 

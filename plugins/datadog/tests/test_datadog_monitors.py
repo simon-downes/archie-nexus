@@ -341,6 +341,18 @@ async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
         await update_monitor(42, name="y")
 
 
+SCANNER_CONFIG = {
+    "data": {"relationships": {"groups": {"data": [{"id": "g"}]}}},
+    "included": [
+        {"id": "g", "type": "sensitive_data_scanner_group", "attributes": {}},
+        {
+            "id": "r",
+            "type": "sensitive_data_scanner_rule",
+            "relationships": {"standard_pattern": {"data": {"id": "sp"}}},
+        },
+    ],
+}
+
 PUBLIC = {
     "aggregate_logs",
     "create_monitor",
@@ -351,7 +363,10 @@ PUBLIC = {
     "list_catalog_entities",
     "list_dashboards",
     "list_events",
+    "list_log_indexes",
+    "list_log_metrics",
     "list_log_pipelines",
+    "list_scanning_groups",
     "list_teams",
     "query_metrics",
     "search",
@@ -406,6 +421,11 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "/api/v1/logs/config/pipelines": [],
         "/api/v1/logs/config/pipeline-order": {"pipeline_ids": []},
         "/api/v1/logs/config/pipelines/p1": {"id": "p1", "processors": []},
+        "/api/v1/logs/config/indexes": {"indexes": []},
+        "/api/v1/logs/config/index-order": {"index_names": []},
+        "/api/v2/logs/config/metrics": {"data": []},
+        "/api/v2/sensitive-data-scanner/config": SCANNER_CONFIG,
+        "/api/v2/sensitive-data-scanner/config/standard-patterns": {"data": []},
     }
 
     def handler(request):
@@ -449,6 +469,9 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "list_teams": (),
         "list_log_pipelines": (),
         "get_log_pipeline": ("p1",),
+        "list_log_indexes": (),
+        "list_log_metrics": (),
+        "list_scanning_groups": (),
         "search": ("queue:x", list(SOURCES)),
     }
     assert set(calls) == PUBLIC

@@ -4,8 +4,9 @@ description: >
   Use for Datadog investigation and monitor upkeep through the exec datadog namespace:
   discovery search across monitors, dashboards, metrics and services, metric queries,
   metric search and description (tags, where used), log and span search, the event stream,
-  monitor search and details, dashboards, the software catalog and teams, log pipeline
-  configuration (how logs are parsed), and creating or updating
+  monitor search and details, dashboards, the software catalog and teams, log configuration
+  (pipelines and how logs are parsed, indexes and retention, log-based metrics, Sensitive Data
+  Scanner rules), and creating or updating
   monitors that this tool owns (tagged managedby:archie). Not for deleting anything,
   dashboard edits, downtimes or muting, SLOs, posting events, credentials, or raw Datadog
   API calls.
@@ -60,6 +61,9 @@ description: >
 | Datadog teams | `datadog.list_teams` |
 | How logs are parsed: which pipelines a log passes through, in what order, and their filters | `datadog.list_log_pipelines` |
 | One pipeline's grok rules, remappers and other processors | `datadog.get_log_pipeline` |
+| Log retention, which index a log lands in, daily quotas, exclusion filters (dropped or sampled logs) | `datadog.list_log_indexes` |
+| How a log-based metric is computed: its filter, measure and group-by attributes | `datadog.list_log_metrics` |
+| What masks, hashes or redacts values in logs (Sensitive Data Scanner) | `datadog.list_scanning_groups` |
 
 For an investigation, start with `search_monitors("status:alert")`. Then use `query_metrics` on the monitor's query, `search_logs` and `search_spans` for the service in the same window, and `list_events` for deploys or changes just before the problem started. If you only have a name or a technology ("rabbitmq", "payments"), start with `search` instead; see "Discovering what exists".
 
@@ -201,6 +205,8 @@ Rules for reading them:
 - `read_only: true` marks an integration pipeline that Datadog installs for a log `source`. It can't be edited, only cloned. If its `processors` list is empty, treat its rules as unknown rather than absent.
 - JSON logs are preprocessed before any pipeline. Preprocessing maps reserved attributes: `message`/`msg`/`log` become the message, `status`/`severity`/`level` the status, `service`/`dd.service` the service. Preprocessing settings and Auto-Processing entries aren't available through this tool.
 - `enabled: false` on a pipeline or processor means it doesn't run.
+
+After the pipelines, a log enters the first index (by `list_log_indexes` `position`) whose filter matches. Within that index, only the first enabled exclusion filter that matches applies: it drops `sample_rate` of the matching logs (1.0 drops them all), and later exclusion filters are skipped. Logs over an index's `daily_limit` aren't indexed either. Excluded and over-quota logs aren't searchable, but log-based metrics (`list_log_metrics`), archives and Live Tail still see them. The Sensitive Data Scanner (`list_scanning_groups`) redacts matching values in logs that match a group's filter.
 
 ## Functions
 
@@ -493,6 +499,65 @@ Returns every log pipeline in processing order. It makes two requests and needs 
 ### `datadog.get_log_pipeline(pipeline_id)`
 
 Returns one pipeline with the same fields (no `position`) and `processors` as Datadog defines them: each processor's `type`, `name`, `is_enabled` and type-specific settings, such as `grok.match_rules`, `sources`, `target`, `categories`, `lookup_table` or nested `processors`. Strings are cut at 10,000 characters, lists at 100 items and objects at 200 keys, and objects nested more than 8 levels deep show as `"…"`; `truncated` is then true. `pipeline_id` is an `id` from `list_log_pipelines`. Needs `logs_read_config`. An unknown ID raises `DatadogNotFoundError`.
+
+### `datadog.list_log_indexes()`
+
+Returns every log index in routing order. It makes two requests and needs `logs_read_config`.
+
+```json
+{
+  "position": 1,
+  "name": "main",
+  "filter": "*",
+  "retention_days": 15,
+  "flex_retention_days": null,
+  "daily_limit": 300000000,
+  "daily_limit_reset": {"reset_time": "14:00", "reset_utc_offset": "+00:00"},
+  "daily_limit_warning_threshold_percentage": 70,
+  "is_rate_limited": false,
+  "tags": [],
+  "exclusion_filters": [{"name": "drop health checks", "enabled": true, "query": "@http.url:/health", "sample_rate": 1.0, "sample_attribute": null}],
+  "truncated": false
+}
+```
+
+`retention_days` is how long logs stay searchable. `sample_rate` is the share of matching logs that the exclusion filter drops, where 1.0 drops them all. An index missing from Datadog's order list comes last with `position: null`.
+
+### `datadog.list_log_metrics(query=None)`
+
+Returns log-based metric definitions. It makes one request and needs `logs_read_config`.
+
+```json
+{"id": "logs.web.requests", "aggregation": "count", "path": null, "include_percentiles": null, "filter": "service:web", "group_by": [{"path": "@network.client.ip", "tag_name": "client_ip"}], "truncated": false}
+```
+
+`id` is the metric name to use in `query_metrics`. `aggregation` is `count` or `distribution`, and `path` is the measure a distribution uses. Each `group_by` attribute becomes the metric tag `tag_name`. A metric only sees attributes that pipelines extracted, so a parsing change can silently empty it. `query` keeps metrics whose `id` or `filter` contains it (case-insensitive).
+
+### `datadog.list_scanning_groups()`
+
+Returns Sensitive Data Scanner groups in scan order, each with its rules in order. It needs the `data_scanner_read` permission, and makes a second request only when a rule uses a standard pattern.
+
+```json
+{
+  "position": 1,
+  "id": "...",
+  "name": "Gift links",
+  "description": null,
+  "enabled": true,
+  "filter": "service:web",
+  "products": ["logs"],
+  "samplings": [{"product": "logs", "rate": 100.0}],
+  "rules": [
+    {"id": "...", "name": "Gift path", "description": null, "enabled": true, "priority": 2, "pattern": "/gift/[^/]+", "standard_pattern": null, "namespaces": ["http.url"], "excluded_namespaces": null, "text_replacement": {"type": "replacement_string", "replacement_string": "[redacted]"}, "keywords": null, "suppressions": null, "tags": ["sensitive_data:gift"]}
+  ],
+  "truncated": false
+}
+```
+
+- A rule has its own `pattern` (a regular expression), or a `standard_pattern` (`{id, name}`) from Datadog's library, whose regex isn't returned.
+- `namespaces` limits a rule to those attributes, and `excluded_namespaces` skips attributes. When both are empty, the rule scans the whole event.
+- `text_replacement.type` is `none` (tag only), `hash`, `replacement_string`, `partial_replacement_from_beginning` or `partial_replacement_from_end`.
+- `keywords` (`keywords`, `character_count`) means a match only counts near one of those words. `suppressions` lists values that are never treated as matches.
 
 ## Errors and retry policy
 

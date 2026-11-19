@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -432,6 +433,24 @@ def _filter_query(item: dict[str, Any]) -> str | None:
     return query if isinstance(query, str) else None
 
 
+def in_order(
+    items: list[dict[str, Any]], order: list[Any], key: Callable[[dict[str, Any]], Any]
+) -> list[tuple[int | None, dict[str, Any]]]:
+    """Pair items with their 1-based position in ``order``; unlisted items follow, unnumbered."""
+    positions: dict[str | int, int] = {}
+    for index, value in enumerate(order, start=1):
+        if isinstance(value, (str, int)) and value not in positions:
+            positions[value] = index
+
+    def place(item: dict[str, Any]) -> int | None:
+        value = key(item)
+        return positions.get(value) if isinstance(value, (str, int)) else None
+
+    placed = [(place(item), item) for item in items]
+    listed = sorted((pair for pair in placed if pair[0] is not None), key=lambda pair: pair[0])
+    return [*listed, *(pair for pair in placed if pair[0] is None)]
+
+
 def _processor_summary(processors: Any) -> tuple[list[dict[str, Any]], bool]:
     """Type, name and enabled state per processor; nested pipelines get their own summary."""
     items = (
@@ -492,3 +511,164 @@ def pipeline_detail(item: dict[str, Any]) -> dict[str, Any]:
     raw = item.get("processors")
     processors, processors_cut = bounded_value(raw if isinstance(raw, list) else [], CONFIG_BOUNDS)
     return {**header, "processors": processors, "truncated": header_cut or processors_cut}
+
+
+def _config(value: Any) -> tuple[Any, bool]:
+    return bounded_value(value, CONFIG_BOUNDS)
+
+
+def log_index(item: dict[str, Any], position: int | None) -> dict[str, Any]:
+    """One log index: its filter, retention, daily quota and exclusion filters."""
+    exclusions = []
+    raw = item.get("exclusion_filters")
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        found = entry.get("filter") if isinstance(entry.get("filter"), dict) else {}
+        exclusions.append(
+            {
+                "name": entry.get("name"),
+                "enabled": entry.get("is_enabled"),
+                "query": found.get("query"),
+                "sample_rate": found.get("sample_rate"),
+                "sample_attribute": found.get("sample_attribute"),
+            }
+        )
+    kept, exclusions_cut = _config(exclusions)
+    reset, reset_cut = _config(item.get("daily_limit_reset"))
+    tags, tags_cut = bounded(item.get("tags"))
+    return {
+        "position": position,
+        "name": item.get("name"),
+        "filter": _filter_query(item),
+        "retention_days": item.get("num_retention_days"),
+        "flex_retention_days": item.get("num_flex_logs_retention_days"),
+        "daily_limit": item.get("daily_limit"),
+        "daily_limit_reset": reset,
+        "daily_limit_warning_threshold_percentage": item.get(
+            "daily_limit_warning_threshold_percentage"
+        ),
+        "is_rate_limited": item.get("is_rate_limited"),
+        "tags": tags,
+        "exclusion_filters": kept,
+        "truncated": exclusions_cut or reset_cut or tags_cut,
+    }
+
+
+def log_metric(item: dict[str, Any]) -> dict[str, Any]:
+    """One log-based metric: what it computes, from which logs, grouped by which attributes."""
+    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    compute = attrs.get("compute") if isinstance(attrs.get("compute"), dict) else {}
+    groups = [
+        {"path": entry.get("path"), "tag_name": entry.get("tag_name")}
+        for entry in attrs.get("group_by") or []
+        if isinstance(entry, dict)
+    ]
+    kept, groups_cut = bounded(groups)
+    return {
+        "id": item.get("id"),
+        "aggregation": compute.get("aggregation_type"),
+        "path": compute.get("path"),
+        "include_percentiles": compute.get("include_percentiles"),
+        "filter": _filter_query(attrs),
+        "group_by": kept,
+        "truncated": groups_cut,
+    }
+
+
+def _related_ids(item: dict[str, Any], name: str) -> list[Any]:
+    """IDs under ``relationships.<name>.data``, which may be one object or a list."""
+    relationships = item.get("relationships")
+    related = relationships.get(name) if isinstance(relationships, dict) else None
+    data = related.get("data") if isinstance(related, dict) else None
+    entries = data if isinstance(data, list) else [data]
+    return [entry.get("id") for entry in entries if isinstance(entry, dict)]
+
+
+def standard_pattern_ids(config: dict[str, Any]) -> set[str]:
+    """Standard pattern IDs referenced by any scanner rule in a scanner config response."""
+    found: set[str] = set()
+    for item in config.get("included") or []:
+        if isinstance(item, dict) and item.get("type") == "sensitive_data_scanner_rule":
+            found.update(i for i in _related_ids(item, "standard_pattern") if isinstance(i, str))
+    return found
+
+
+def _scanner_rule(item: dict[str, Any], patterns: dict[str, str]) -> tuple[dict[str, Any], bool]:
+    attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    standard = next(iter(_related_ids(item, "standard_pattern")), None)
+    pattern, pattern_cut = text(attrs.get("pattern"), MAX_TEXT)
+    description, description_cut = text(attrs.get("description"), MAX_TITLE)
+    settings = {
+        key: attrs.get(source)
+        for key, source in (
+            ("namespaces", "namespaces"),
+            ("excluded_namespaces", "excluded_namespaces"),
+            ("text_replacement", "text_replacement"),
+            ("keywords", "included_keyword_configuration"),
+            ("suppressions", "suppressions"),
+            ("tags", "tags"),
+        )
+    }
+    kept, settings_cut = _config(settings)
+    return {
+        "id": item.get("id"),
+        "name": attrs.get("name"),
+        "description": description,
+        "enabled": attrs.get("is_enabled"),
+        "priority": attrs.get("priority"),
+        "pattern": pattern,
+        "standard_pattern": (
+            {"id": standard, "name": patterns.get(standard)} if standard is not None else None
+        ),
+        **kept,
+    }, pattern_cut or description_cut or settings_cut
+
+
+def scanning_groups(config: dict[str, Any], patterns: dict[str, str]) -> list[dict[str, Any]]:
+    """Scanner groups in scan order, each with its rules in rule order.
+
+    ``patterns`` maps standard pattern IDs to names. Groups or rules that the order lists but
+    ``included`` lacks are skipped; included groups missing from the order come last.
+    """
+    data = config.get("data") if isinstance(config.get("data"), dict) else {}
+    order = _related_ids(data, "groups")
+    included = [item for item in config.get("included") or [] if isinstance(item, dict)]
+    groups = {
+        item.get("id"): item
+        for item in included
+        if item.get("type") == "sensitive_data_scanner_group"
+    }
+    rules = {
+        item.get("id"): item
+        for item in included
+        if item.get("type") == "sensitive_data_scanner_rule"
+    }
+    result = []
+    for position, group in in_order(list(groups.values()), order, lambda item: item.get("id")):
+        attrs = group.get("attributes") if isinstance(group.get("attributes"), dict) else {}
+        description, description_cut = text(attrs.get("description"), MAX_TITLE)
+        settings, settings_cut = _config(
+            {"products": attrs.get("product_list"), "samplings": attrs.get("samplings")}
+        )
+        members = []
+        truncated = description_cut or settings_cut
+        for rule_id in _related_ids(group, "rules"):
+            if rule_id in rules:
+                record, cut = _scanner_rule(rules[rule_id], patterns)
+                members.append(record)
+                truncated = truncated or cut
+        result.append(
+            {
+                "position": position,
+                "id": group.get("id"),
+                "name": attrs.get("name"),
+                "description": description,
+                "enabled": attrs.get("is_enabled"),
+                "filter": _filter_query(attrs),
+                **settings,
+                "rules": members,
+                "truncated": truncated,
+            }
+        )
+    return result
