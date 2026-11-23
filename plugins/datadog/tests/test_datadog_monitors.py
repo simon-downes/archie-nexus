@@ -341,15 +341,33 @@ async def test_deadline_before_write_is_transport_error(monkeypatch, policy):
         await update_monitor(42, name="y")
 
 
+SCANNER_CONFIG = {
+    "data": {"relationships": {"groups": {"data": [{"id": "g"}]}}},
+    "included": [
+        {"id": "g", "type": "sensitive_data_scanner_group", "attributes": {}},
+        {
+            "id": "r",
+            "type": "sensitive_data_scanner_rule",
+            "relationships": {"standard_pattern": {"data": {"id": "sp"}}},
+        },
+    ],
+}
+
 PUBLIC = {
     "aggregate_logs",
+    "aggregate_spans",
     "create_monitor",
     "describe_metric",
     "get_dashboard",
+    "get_log_pipeline",
     "get_monitor",
     "list_catalog_entities",
     "list_dashboards",
     "list_events",
+    "list_log_indexes",
+    "list_log_metrics",
+    "list_log_pipelines",
+    "list_scanning_groups",
     "list_teams",
     "query_metrics",
     "search",
@@ -401,6 +419,14 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "/api/v1/dashboard/abc-def-ghi": {"id": "abc-def-ghi", "widgets": []},
         "/api/v2/catalog/entity": {"data": []},
         "/api/v2/team": {"data": []},
+        "/api/v1/logs/config/pipelines": [],
+        "/api/v1/logs/config/pipeline-order": {"pipeline_ids": []},
+        "/api/v1/logs/config/pipelines/p1": {"id": "p1", "processors": []},
+        "/api/v1/logs/config/indexes": {"indexes": []},
+        "/api/v1/logs/config/index-order": {"index_names": []},
+        "/api/v2/logs/config/metrics": {"data": []},
+        "/api/v2/sensitive-data-scanner/config": SCANNER_CONFIG,
+        "/api/v2/sensitive-data-scanner/config/standard-patterns": {"data": []},
     }
 
     def handler(request):
@@ -411,18 +437,28 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
     async def factory():
         yield DatadogClient("k", "a", "https://api.datadoghq.eu", httpx.MockTransport(handler))
 
-    modules = ("metrics", "logs", "traces", "events", "monitors", "dashboards", "catalog")
+    modules = (
+        "metrics",
+        "logs",
+        "traces",
+        "events",
+        "monitors",
+        "dashboards",
+        "catalog",
+        "log_config",
+    )
     for module in (*modules, "discovery"):
         monkeypatch.setattr(
             sys.modules[f"archie_plugins.datadog.{module}"], "datadog_client", factory
         )
     calls = {
         "aggregate_logs": ("*", ["service", "@http.useragent"]),
+        "aggregate_spans": ("*", ["service"]),
         "query_metrics": ("avg:x{*}",),
         "search_metrics": ("x",),
         "describe_metric": ("x",),
-        "search_logs": ("*",),
-        "search_spans": ("*",),
+        "search_logs": ("*", "1h", None, 20, "newest", ["@http"]),
+        "search_spans": ("*", "1h", None, 20, "newest", ["@http"]),
         "list_events": (),
         "search_monitors": (),
         "get_monitor": (42,),
@@ -433,6 +469,11 @@ async def test_every_public_function_stays_inside_the_allowlist(monkeypatch, pol
         "get_dashboard": ("abc-def-ghi",),
         "list_catalog_entities": (),
         "list_teams": (),
+        "list_log_pipelines": (),
+        "get_log_pipeline": ("p1",),
+        "list_log_indexes": (),
+        "list_log_metrics": (),
+        "list_scanning_groups": (),
         "search": ("queue:x", list(SOURCES)),
     }
     assert set(calls) == PUBLIC

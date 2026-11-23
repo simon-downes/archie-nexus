@@ -34,6 +34,7 @@ SITES = frozenset(
 _MONITOR = r"[1-9][0-9]{0,18}"
 DASHBOARD_ID = r"[a-z0-9]{3}-[a-z0-9]{3}-[a-z0-9]{3}"
 METRIC = r"[A-Za-z][A-Za-z0-9_.]{0,199}"
+PIPELINE_ID = r"[A-Za-z0-9_-]{1,64}"
 _ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
@@ -57,6 +58,14 @@ _ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("GET", rf"/api/v1/dashboard/{DASHBOARD_ID}"),
         ("GET", r"/api/v2/catalog/entity"),
         ("GET", r"/api/v2/team"),
+        ("GET", r"/api/v1/logs/config/pipelines"),
+        ("GET", rf"/api/v1/logs/config/pipelines/{PIPELINE_ID}"),
+        ("GET", r"/api/v1/logs/config/pipeline-order"),
+        ("GET", r"/api/v1/logs/config/indexes"),
+        ("GET", r"/api/v1/logs/config/index-order"),
+        ("GET", r"/api/v2/logs/config/metrics"),
+        ("GET", r"/api/v2/sensitive-data-scanner/config"),
+        ("GET", r"/api/v2/sensitive-data-scanner/config/standard-patterns"),
     )
 )
 

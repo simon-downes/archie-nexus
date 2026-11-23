@@ -56,3 +56,27 @@ def test_skill_is_discovered():
     _scan_directory(SKILLS, catalog)
     assert "datadog" in catalog
     assert "managedby:archie" in catalog["datadog"].description
+
+
+def test_skill_names_permissions_and_query_syntax():
+    text = SKILL.read_text(encoding="utf-8")
+    for term in (
+        "logs_read_config",
+        "data_scanner_read",
+        "CIDR(",
+        "type:metric",
+        "## Query syntax",
+        "## How logs are processed",
+        "fields=",
+    ):
+        assert term in text, term
+
+
+def test_readme_names_every_registered_function():
+    from archie_agent.exec.plugin import plugin_tools
+
+    readme = (SKILLS.parent / "README.md").read_text(encoding="utf-8")
+    names = sorted(key for key in plugin_tools() if key.startswith("datadog."))
+    assert names
+    missing = [name for name in names if f"`{name}`" not in readme]
+    assert not missing, missing
