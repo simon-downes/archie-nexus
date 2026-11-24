@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import NoReturn
 
@@ -462,21 +462,29 @@ async def _serve_servers(
     gateway_server = uvicorn.Server(
         uvicorn.Config(gateway, host=gateway_host, port=gateway_port, log_config=None)
     )
-    # The main server owns process signal handlers. The supervisor shuts down the gateway
+    # Only the main server captures process signals. The supervisor shuts down the gateway
     # when the main server receives SIGINT/SIGTERM or when either task fails.
-    gateway_server.install_signal_handlers = lambda: None
+    gateway_server.capture_signals = lambda: nullcontext()
     tasks = [
         asyncio.create_task(main_server.serve(), name="archie-orchestrator"),
         asyncio.create_task(gateway_server.serve(), name="archie-agent-gateway"),
     ]
     try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         main_server.should_exit = True
         gateway_server.should_exit = True
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in [*results, *(task.exception() for task in done if not task.cancelled())]:
-            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-                raise result
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=5.0
+                )
+            except TimeoutError:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if not task.cancelled() and (exception := task.exception()) is not None:
+                raise exception
     finally:
         for server in (main_server, gateway_server):
             server.should_exit = True

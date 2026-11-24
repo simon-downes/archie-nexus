@@ -141,7 +141,14 @@ def docker_bridge_gateway() -> str:
         "--format",
         "{{(index .IPAM.Config 0).Gateway}}",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=10.0)
+    except subprocess.TimeoutExpired:
+        raise DockerError(
+            command=cmd, stderr="bridge inspection timed out after 10 seconds", returncode=-1
+        ) from None
+    except OSError as exc:
+        raise DockerError(command=cmd, stderr=str(exc), returncode=-1) from None
     gateway = result.stdout.strip()
     if result.returncode != 0:
         raise DockerError(

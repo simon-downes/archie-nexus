@@ -204,6 +204,28 @@ def test_serve_rejects_occupied_port_before_logging(monkeypatch, tmp_path):
     mock_gateway_host.assert_not_called()
 
 
+def test_serve_rejects_occupied_gateway_port_before_logging(monkeypatch, tmp_path):
+    """An occupied gateway port fails before either server starts."""
+    monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "orchestrator:\n  profiles:\n    default:\n      port: 9902\n"
+    )
+
+    with (
+        socket.socket() as occupied,
+        patch("archie_cli.cli._agent_gateway_host", return_value="127.0.0.1"),
+        patch("archie_orchestrator.configure_logging") as mock_logging,
+    ):
+        occupied.bind(("127.0.0.1", 9903))
+        runner = CliRunner()
+        result = runner.invoke(main, ["serve"])
+
+    assert result.exit_code != 0
+    assert "agent gateway" in result.output.lower()
+    assert "address already in use" in result.output.lower()
+    mock_logging.assert_not_called()
+
+
 def test_serve_uses_default_port_when_no_config(monkeypatch, tmp_path):
     """archie serve defaults to the main port 7600 and gateway port 7601."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))

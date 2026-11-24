@@ -1,7 +1,9 @@
 """Tests for the agent-facing orchestrator gateway."""
 
 import asyncio
+import gzip
 import logging
+import subprocess
 from unittest.mock import patch
 
 import httpx
@@ -29,11 +31,13 @@ async def test_health_is_forwarded_and_disallowed_routes_are_not():
         health = await client.get("/health")
         rejected = await client.post("/health")
         hidden = await client.get("/api/sessions")
+        missing_slash = await client.get("/api/agent")
 
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
     assert rejected.status_code == 404
     assert hidden.status_code == 404
+    assert missing_slash.status_code == 404
     assert [request.url.path for request in requests] == ["/health"]
     await upstream_client.aclose()
 
@@ -44,15 +48,22 @@ async def test_agent_prefix_forwards_all_methods_query_body_and_headers():
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        encoded = gzip.compress(request.method.encode())
         return httpx.Response(
             201,
-            content=request.method.encode(),
-            headers={"X-Upstream": "yes", "Connection": "close"},
+            content=encoded,
+            headers={
+                "X-Upstream": "yes",
+                "Connection": "close, X-Response-Internal",
+                "X-Response-Internal": "secret",
+                "Content-Encoding": "gzip",
+                "Content-Length": str(len(encoded)),
+            },
         )
 
     upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
     gateway = AgentGateway("http://main", client=upstream_client)
-    methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"]
+    methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CUSTOM"]
     async with await _client(gateway) as client:
         responses = [
             await client.request(
@@ -64,7 +75,8 @@ async def test_agent_prefix_forwards_all_methods_query_body_and_headers():
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                     "X-Request": "kept",
-                    "Connection": "close",
+                    "Connection": "close, X-Internal",
+                    "X-Internal": "secret",
                 },
             )
             for method in methods
@@ -79,8 +91,12 @@ async def test_agent_prefix_forwards_all_methods_query_body_and_headers():
     assert all(request.headers["content-type"] == "application/json" for request in requests)
     assert all(request.headers["x-request"] == "kept" for request in requests)
     assert all("connection" not in request.headers for request in requests)
+    assert all("x-internal" not in request.headers for request in requests)
     assert all(response.headers["x-upstream"] == "yes" for response in responses)
     assert all("connection" not in response.headers for response in responses)
+    assert all("x-response-internal" not in response.headers for response in responses)
+    assert all("content-encoding" not in response.headers for response in responses)
+    assert all("content-length" not in response.headers for response in responses)
     await upstream_client.aclose()
 
 
@@ -100,6 +116,43 @@ async def test_rejected_websocket_does_not_forward():
 
     await gateway({"type": "websocket", "path": "/api/sessions"}, receive, send)
     assert messages == [{"type": "websocket.close", "code": 1008}]
+    await gateway._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_body_is_bounded_and_has_a_receive_deadline(monkeypatch):
+    import archie_orchestrator.agent_gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "MAX_REQUEST_BODY_BYTES", 4)
+    upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("forwarded"))
+    )
+    gateway = AgentGateway("http://main", client=upstream_client)
+    async with await _client(gateway) as client:
+        too_large = await client.post("/api/agent/test", content=b"12345")
+    assert too_large.status_code == 413
+    await upstream_client.aclose()
+
+    monkeypatch.setattr(gateway_module, "UPSTREAM_TIMEOUT_SECONDS", 0.01)
+    gateway = AgentGateway(
+        "http://main",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("forwarded"))),
+    )
+    messages: list[dict] = []
+
+    async def receive() -> dict:
+        await asyncio.sleep(1)
+        return {"type": "http.request", "body": b"", "more_body": True}
+
+    async def send(message: dict) -> None:
+        messages.append(message)
+
+    await gateway(
+        {"type": "http", "method": "POST", "path": "/api/agent/test", "headers": []},
+        receive,
+        send,
+    )
+    assert messages[0]["status"] == 408
     await gateway._client.aclose()
 
 
@@ -175,6 +228,20 @@ def test_docker_bridge_gateway_reads_and_validates_output(monkeypatch):
     bad = type("Result", (), {"returncode": 0, "stdout": "not-an-ip\n", "stderr": ""})()
     monkeypatch.setattr("archie_orchestrator.docker.subprocess.run", lambda *args, **kwargs: bad)
     with pytest.raises(DockerError, match="invalid bridge gateway"):
+        docker_bridge_gateway()
+
+    monkeypatch.setattr(
+        "archie_orchestrator.docker.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("docker")),
+    )
+    with pytest.raises(DockerError, match="docker"):
+        docker_bridge_gateway()
+
+    monkeypatch.setattr(
+        "archie_orchestrator.docker.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("docker", 10)),
+    )
+    with pytest.raises(DockerError, match="timed out"):
         docker_bridge_gateway()
 
 

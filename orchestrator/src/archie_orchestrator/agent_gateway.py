@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterable
 from typing import Any
@@ -12,6 +13,7 @@ log = logging.getLogger(__name__)
 
 GATEWAY_PORT_OFFSET = 1
 UPSTREAM_TIMEOUT_SECONDS = 5.0
+MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         b"connection",
@@ -38,11 +40,32 @@ def gateway_port(orchestrator_port: int) -> int:
 
 def _forward_headers(headers: Iterable[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
     """Remove headers that must not cross the gateway boundary."""
+    values = list(headers)
+    nominated = {
+        header_value.strip().lower()
+        for name, header_value in values
+        if name.lower() == b"connection"
+        for header_value in header_value.split(b",")
+    }
     return [
         (name, value)
-        for name, value in headers
-        if name.lower() not in _HOP_BY_HOP_HEADERS and name.lower() != b"host"
+        for name, value in values
+        if name.lower() not in _HOP_BY_HOP_HEADERS
+        and name.lower() != b"host"
+        and name.lower() not in nominated
     ]
+
+
+def _response_headers(response: httpx.Response) -> list[tuple[bytes, bytes]]:
+    """Return safe response headers for the body representation HTTPX produced."""
+    headers = _forward_headers(response.headers.raw)
+    if response.headers.get("content-encoding"):
+        headers = [
+            (name, value)
+            for name, value in headers
+            if name.lower() not in {b"content-encoding", b"content-length"}
+        ]
+    return headers
 
 
 def _url_host(host: str) -> str:
@@ -53,6 +76,10 @@ def _url_host(host: str) -> str:
 def upstream_url(host: str, port: int) -> str:
     """Build the loopback/main-listener URL used by the gateway."""
     return f"http://{_url_host(host)}:{port}"
+
+
+class RequestBodyTooLargeError(Exception):
+    """The gateway request exceeded its bounded body size."""
 
 
 class AgentGateway:
@@ -66,7 +93,7 @@ class AgentGateway:
         timeout: float = UPSTREAM_TIMEOUT_SECONDS,
     ) -> None:
         self._upstream = upstream.rstrip("/")
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        self._client = client or httpx.AsyncClient(timeout=timeout, trust_env=False)
         for header in _HOP_BY_HOP_HEADERS:
             self._client.headers.pop(header.decode(), None)
         self._owns_client = client is None
@@ -92,12 +119,25 @@ class AgentGateway:
                 await self._respond(send, 404, b'{"error":"not found"}')
             return
 
-        body = await self._read_body(receive)
+        try:
+            body = await asyncio.wait_for(
+                self._read_body(receive), timeout=UPSTREAM_TIMEOUT_SECONDS
+            )
+            query = scope.get("query_string", b"").decode("ascii")
+        except TimeoutError:
+            await self._respond(send, 408, b'{"error":"request body timeout"}')
+            return
+        except RequestBodyTooLargeError:
+            await self._respond(send, 413, b'{"error":"request body too large"}')
+            return
+        except UnicodeDecodeError:
+            await self._respond(send, 400, b'{"error":"invalid query"}')
+            return
+
         path = scope["path"]
-        query = scope.get("query_string", b"")
         target = f"{self._upstream}{path}"
         if query:
-            target += "?" + query.decode("ascii")
+            target += "?" + query
         try:
             response = await self._client.request(
                 scope["method"],
@@ -114,7 +154,7 @@ class AgentGateway:
             {
                 "type": "http.response.start",
                 "status": response.status_code,
-                "headers": _forward_headers(response.headers.raw),
+                "headers": _response_headers(response),
             }
         )
         await send({"type": "http.response.body", "body": response.content})
@@ -128,6 +168,8 @@ class AgentGateway:
             if message["type"] != "http.request":
                 break
             chunks.append(message.get("body", b""))
+            if sum(map(len, chunks)) > MAX_REQUEST_BODY_BYTES:
+                raise RequestBodyTooLargeError
             if not message.get("more_body", False):
                 break
         return b"".join(chunks)
