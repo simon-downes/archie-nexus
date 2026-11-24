@@ -19,6 +19,7 @@ from archie_shared.schemas import NexusConfig, expand_workspace_root, get_profil
 from archie_shared.session import container_name, generate_session_id
 from archie_shared.session.log import SessionLog
 
+from archie_orchestrator.agent_gateway import gateway_port
 from archie_orchestrator.docker import (
     CONTAINER_AGENT_DIR,
     CONTAINER_AGENTS_HOME,
@@ -152,7 +153,9 @@ def prepare_start(workspace: str, config: NexusConfig, *, backend: str = "native
     configured_brain = os.environ.get("ARCHIE_BRAIN_DIR")
     # The agent fetches config and credentials from this orchestrator (plan 090).
     agent_token = secrets.token_urlsafe(32)
-    orchestrator_url = f"http://host.docker.internal:{get_profile(config.orchestrator).port}"
+    orchestrator_url = (
+        f"http://host.docker.internal:{gateway_port(get_profile(config.orchestrator).port)}"
+    )
 
     docker_cmd = [
         "docker",

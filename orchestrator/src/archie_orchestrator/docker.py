@@ -5,6 +5,7 @@ querying port mappings via `docker port`. Also provides helpers for
 starting, stopping, and health-checking containers.
 """
 
+import ipaddress
 import json
 import logging
 import os
@@ -124,6 +125,50 @@ def check_image(tag: str = IMAGE_TAG) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def docker_bridge_gateway() -> str:
+    """Return the IPv4 gateway address of Docker's default bridge network.
+
+    Raises:
+        DockerError: If Docker cannot inspect the bridge or returns a non-IP gateway.
+    """
+    cmd = [
+        "docker",
+        "network",
+        "inspect",
+        "bridge",
+        "--format",
+        "{{(index .IPAM.Config 0).Gateway}}",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=10.0)
+    except subprocess.TimeoutExpired:
+        raise DockerError(
+            command=cmd, stderr="bridge inspection timed out after 10 seconds", returncode=-1
+        ) from None
+    except OSError as exc:
+        raise DockerError(command=cmd, stderr=str(exc), returncode=-1) from None
+    gateway = result.stdout.strip()
+    if result.returncode != 0:
+        raise DockerError(
+            command=cmd,
+            stderr=result.stderr or "bridge inspection failed",
+            returncode=result.returncode,
+        )
+    try:
+        address = ipaddress.ip_address(gateway)
+    except ValueError:
+        raise DockerError(
+            command=cmd,
+            stderr=f"Docker returned an invalid bridge gateway: {gateway!r}",
+            returncode=1,
+        ) from None
+    if address.version != 4:
+        raise DockerError(
+            command=cmd, stderr=f"Docker bridge gateway is not IPv4: {gateway!r}", returncode=1
+        )
+    return gateway
 
 
 def run_container(cmd: list[str], env: dict[str, str] | None = None) -> None:

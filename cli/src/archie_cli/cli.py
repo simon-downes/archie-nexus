@@ -1,5 +1,6 @@
 """Archie CLI — orchestrator protocol client."""
 
+import asyncio
 import os
 import socket
 import sqlite3
@@ -7,7 +8,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import NoReturn
 
@@ -414,44 +415,132 @@ def _resolve_target(arg: str, config) -> tuple:
     return get_profile(config.orchestrator), arg
 
 
+def _listener_probe(host: str, port: int, label: str) -> None:
+    """Fail before logging if a listener address is unavailable."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, port))
+    except OSError as exc:
+        raise click.ClickException(
+            f"Cannot start {label} on {host}:{port}: {exc.strerror or 'address unavailable'}"
+        ) from None
+
+
+def _agent_gateway_host() -> str:
+    """Return the host address reachable through ``host.docker.internal``."""
+    if not sys.platform.startswith("linux"):
+        return "127.0.0.1"
+    from archie_orchestrator.docker import DockerError, docker_bridge_gateway
+
+    try:
+        return docker_bridge_gateway()
+    except DockerError as exc:
+        raise click.ClickException(
+            f"Cannot determine the Docker bridge address for the agent gateway: {exc}"
+        ) from None
+
+
+def _upstream_host(bind_host: str) -> str:
+    """Choose a connectable address for a server bind host."""
+    return {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(bind_host, bind_host)
+
+
+async def _serve_servers(
+    *, main_host: str, main_port: int, gateway_host: str, gateway_port: int, upstream_host: str
+) -> None:
+    """Run the main orchestrator and agent gateway until either one exits."""
+    from archie_orchestrator.agent_gateway import AgentGateway, upstream_url
+
+    gateway = AgentGateway(upstream_url(upstream_host, main_port))
+    main_server = uvicorn.Server(
+        uvicorn.Config(
+            "archie_orchestrator.app:app", host=main_host, port=main_port, log_config=None
+        )
+    )
+    gateway_server = uvicorn.Server(
+        uvicorn.Config(gateway, host=gateway_host, port=gateway_port, log_config=None)
+    )
+    # Only the main server captures process signals. The supervisor shuts down the gateway
+    # when the main server receives SIGINT/SIGTERM or when either task fails.
+    gateway_server.capture_signals = lambda: nullcontext()
+    tasks = [
+        asyncio.create_task(main_server.serve(), name="archie-orchestrator"),
+        asyncio.create_task(gateway_server.serve(), name="archie-agent-gateway"),
+    ]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        main_server.should_exit = True
+        gateway_server.should_exit = True
+        pending_results: list[object] = []
+        if pending:
+            try:
+                pending_results = await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=5.0
+                )
+            except TimeoutError:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if not task.cancelled() and (exception := task.exception()) is not None:
+                raise exception
+        for result in pending_results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
+    finally:
+        for server in (main_server, gateway_server):
+            server.should_exit = True
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await gateway.close()
+
+
 @main.command()
 def serve():
-    """Start the archie orchestrator (foreground HTTP server).
+    """Start the archie orchestrator and its agent gateway.
 
-    Binds to 127.0.0.1:7600 by default. Override via ~/.nexus/config.yaml:
-
-    \b
-    orchestrator:
-      profiles:
-        default:
-          host: 0.0.0.0
-          port: 7600
+    The operator-facing server binds to 127.0.0.1:7600 by default. Agents use the
+    adjacent gateway port, 7601, which exposes only health and /api/agent/* routes.
     """
+    from archie_orchestrator.agent_gateway import gateway_port
     from archie_shared.schemas import get_profile, load_nexus_config
 
     cfg = load_nexus_config()
     profile = get_profile(cfg.orchestrator)
     host = profile.host
     port = profile.port
-
-    # Check availability before configuring logging: a failed second instance
-    # must not rotate the active orchestrator's logs. This is necessarily only
-    # a preflight check; Uvicorn performs the authoritative bind afterward.
     try:
-        family = socket.AF_INET6 if ":" in host else socket.AF_INET
-        with socket.socket(family, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind((host, port))
-    except OSError as exc:
-        raise click.ClickException(
-            f"Cannot start orchestrator on {host}:{port}: address already in use"
-        ) from exc
+        agent_port = gateway_port(port)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    # Check the main socket first so an occupied operator port fails without requiring
+    # Docker bridge discovery. Neither server starts until both sockets are available.
+    upstream_host = _upstream_host(host)
+    _listener_probe(host, port, "orchestrator")
+    gateway_host = _agent_gateway_host()
+    _listener_probe(gateway_host, agent_port, "agent gateway")
 
     from archie_orchestrator import configure_logging
 
     configure_logging()
     click.echo(f"Starting archie orchestrator on {host}:{port}")
-    uvicorn.run("archie_orchestrator.app:app", host=host, port=port, log_config=None)
+    click.echo(
+        f"Agent gateway on {gateway_host}:{agent_port} -> {upstream_host}:{port} "
+        "(health and /api/agent/*)"
+    )
+    asyncio.run(
+        _serve_servers(
+            main_host=host,
+            main_port=port,
+            gateway_host=gateway_host,
+            gateway_port=agent_port,
+            upstream_host=upstream_host,
+        )
+    )
 
 
 @main.command(name="migrate-sessions")
