@@ -122,14 +122,14 @@ The gateway MUST not log bearer tokens or request bodies. It MUST not expose the
 
 ## Milestones
 
-### [ ] M1 — Run the agent-facing gateway on both runtimes
+### [x] M1 — Run the agent-facing gateway on both runtimes
 
 - **Approach:** Add the route-filtered gateway and bridge-address discovery, start it beside the existing Uvicorn app with explicit task supervision, inject its URL into lifecycle-built containers, and cover the public gateway boundary with in-process HTTP tests. Follow the current serve preflight pattern in `cli/src/archie_cli/cli.py` and lifecycle command tests in `tests/test_orchestrator_lifecycle.py`. Keep `/api/agent/` forwarded to the existing handlers rather than duplicating them. ⚠️ The full suite has pre-existing credential-dependent failures; targeted gateway/lifecycle tests must pass independently.
 - **Test seam:** Gateway HTTP client boundary with an injected ASGI/HTTPX upstream, `prepare_start`'s generated Docker environment, Docker bridge address helper, and serve server-supervision seam.
 - **Edge cases:** occupied main or gateway port → fail before either server starts; missing Linux Docker bridge → actionable startup error; `/health` with POST → 404; `/api/sessions` or WebSocket → 404 without upstream traffic; any `/api/agent/` method → forwarded; upstream sync 401 → 401 remains visible; upstream timeout/unavailable → 502 within 5 seconds; shutdown or peer server failure → both tasks are awaited; logs omit token/body.
 - **Deliverable:** New agents on Colima and native Linux are configured for the same gateway URL shape; GET `/health` and all methods under `/api/agent/` work through it; the rest of the orchestrator API is unreachable through the gateway; the main listener and orchestrator-to-agent proxy remain unchanged.
 - **Verify:** `scripts/dev test tests/test_agent_gateway.py tests/test_orchestrator_lifecycle.py tests/test_orchestrator_cli.py tests/test_agent_sync_api.py` passes; `scripts/dev ruff check .` passes; `scripts/dev ruff format --check .` passes; the gateway test output includes the allowlist, forwarding, timeout, logging and supervision cases; lifecycle assertions show `ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:<port+1>`.
-- **Outcome:** pending
+- **Outcome:** Built `agent_gateway.py`, Linux Docker bridge discovery, dual Uvicorn supervision, gateway URL injection and architecture documentation. `scripts/dev test tests/test_agent_gateway.py tests/test_orchestrator_lifecycle.py tests/test_orchestrator_cli.py tests/test_agent_sync_api.py` passed 64 tests; `scripts/dev ruff check .` passed. The full format check still reports the pre-existing `persona/skills/python/assets/output.py` mismatch.
 
 ## Deviations
 
@@ -138,7 +138,8 @@ The gateway MUST not log bearer tokens or request bodies. It MUST not expose the
 ## Risks
 
 - A real native-Linux Docker smoke test is not available in this container; address discovery and HTTP forwarding will be unit-tested, while live Docker connectivity remains a deployment check.
-- Running two Uvicorn servers in one process changes serve lifecycle code and must preserve signal handling and clean shutdown.
+- The repository-wide format check currently reports the pre-existing `persona/skills/python/assets/output.py` mismatch; the changed files pass `scripts/dev ruff format --check`.
+- Running two Uvicorn servers in one process changes serve lifecycle code; the supervision test covers peer shutdown and clean task awaiting.
 
 ## Review
 

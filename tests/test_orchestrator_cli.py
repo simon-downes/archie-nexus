@@ -1,7 +1,7 @@
 """Tests for archie ls and archie serve CLI commands (orchestrator integration)."""
 
 import socket
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgspec
 from archie_cli.cli import ls_cmd, main
@@ -158,27 +158,32 @@ def test_ls_no_docker_subprocess(monkeypatch, tmp_path):
 # --- archie serve ---
 
 
-def test_serve_invokes_uvicorn_with_config(monkeypatch, tmp_path):
-    """archie serve reads the default profile and passes host/port to uvicorn.run."""
+def test_serve_invokes_both_servers_with_config(monkeypatch, tmp_path):
+    """archie serve reads the profile and starts the main and gateway servers."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
         "orchestrator:\n  profiles:\n    default:\n      port: 9900\n"
     )
 
-    with patch("archie_cli.cli.uvicorn") as mock_uvicorn:
+    with (
+        patch("archie_cli.cli._agent_gateway_host", return_value="127.0.0.1"),
+        patch("archie_cli.cli._serve_servers", new_callable=AsyncMock) as mock_serve,
+    ):
         runner = CliRunner()
-        runner.invoke(main, ["serve"])
+        result = runner.invoke(main, ["serve"])
 
-    mock_uvicorn.run.assert_called_once_with(
-        "archie_orchestrator.app:app",
-        host="127.0.0.1",
-        port=9900,
-        log_config=None,
+    assert result.exit_code == 0
+    mock_serve.assert_awaited_once_with(
+        main_host="127.0.0.1",
+        main_port=9900,
+        gateway_host="127.0.0.1",
+        gateway_port=9901,
+        upstream_host="127.0.0.1",
     )
 
 
 def test_serve_rejects_occupied_port_before_logging(monkeypatch, tmp_path):
-    """An occupied port fails before configure_logging can rotate files."""
+    """An occupied main port fails before gateway discovery or logging."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
         "orchestrator:\n  profiles:\n    default:\n      port: 9901\n"
@@ -187,27 +192,34 @@ def test_serve_rejects_occupied_port_before_logging(monkeypatch, tmp_path):
     with (
         socket.socket() as occupied,
         patch("archie_orchestrator.configure_logging") as mock_logging,
+        patch("archie_cli.cli._agent_gateway_host") as mock_gateway_host,
     ):
         occupied.bind(("127.0.0.1", 9901))
         runner = CliRunner()
         result = runner.invoke(main, ["serve"])
 
     assert result.exit_code != 0
-    assert "address already in use" in result.output
+    assert "address already in use" in result.output.lower()
     mock_logging.assert_not_called()
+    mock_gateway_host.assert_not_called()
 
 
 def test_serve_uses_default_port_when_no_config(monkeypatch, tmp_path):
-    """archie serve defaults to port 7600 when no orchestrator config."""
+    """archie serve defaults to the main port 7600 and gateway port 7601."""
     monkeypatch.setenv("ARCHIE_HOME_DIR", str(tmp_path))
 
-    with patch("archie_cli.cli.uvicorn") as mock_uvicorn:
+    with (
+        patch("archie_cli.cli._agent_gateway_host", return_value="127.0.0.1"),
+        patch("archie_cli.cli._serve_servers", new_callable=AsyncMock) as mock_serve,
+    ):
         runner = CliRunner()
-        runner.invoke(main, ["serve"])
+        result = runner.invoke(main, ["serve"])
 
-    mock_uvicorn.run.assert_called_once_with(
-        "archie_orchestrator.app:app",
-        host="127.0.0.1",
-        port=7600,
-        log_config=None,
+    assert result.exit_code == 0
+    mock_serve.assert_awaited_once_with(
+        main_host="127.0.0.1",
+        main_port=7600,
+        gateway_host="127.0.0.1",
+        gateway_port=7601,
+        upstream_host="127.0.0.1",
     )

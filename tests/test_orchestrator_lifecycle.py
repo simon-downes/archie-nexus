@@ -461,7 +461,7 @@ def test_prepare_start_names_the_agent_token_without_its_value(config, workspace
     assert prepared.agent_token not in " ".join(cmd)
     assert prepared.agent_token not in repr(prepared)
     assert cmd[cmd.index("ARCHIE_AGENT_CONTAINER=1") - 1] == "-e"
-    assert "ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:7600" in cmd
+    assert "ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:7601" in cmd
 
 
 def test_orchestrator_url_follows_the_default_profile_port(config, workspace, tmp_path):
@@ -474,7 +474,7 @@ def test_orchestrator_url_follows_the_default_profile_port(config, workspace, tm
         ),
     )
     cmd = _prepare(custom, workspace, tmp_path).command
-    assert "ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:7611" in cmd
+    assert "ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:7612" in cmd
 
 
 def test_each_session_gets_its_own_token(config, workspace, tmp_path):
