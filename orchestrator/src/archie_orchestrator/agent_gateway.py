@@ -109,6 +109,8 @@ class AgentGateway:
         if scope["type"] != "http":
             return False
         path = scope["path"]
+        if any(segment in {".", ".."} for segment in path.split("/")):
+            return False
         return (scope["method"] == "GET" and path == "/health") or path.startswith("/api/agent/")
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:

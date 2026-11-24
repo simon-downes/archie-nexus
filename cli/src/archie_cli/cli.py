@@ -473,9 +473,10 @@ async def _serve_servers(
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         main_server.should_exit = True
         gateway_server.should_exit = True
+        pending_results: list[object] = []
         if pending:
             try:
-                await asyncio.wait_for(
+                pending_results = await asyncio.wait_for(
                     asyncio.gather(*pending, return_exceptions=True), timeout=5.0
                 )
             except TimeoutError:
@@ -485,6 +486,9 @@ async def _serve_servers(
         for task in done:
             if not task.cancelled() and (exception := task.exception()) is not None:
                 raise exception
+        for result in pending_results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
     finally:
         for server in (main_server, gateway_server):
             server.should_exit = True

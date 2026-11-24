@@ -32,12 +32,14 @@ async def test_health_is_forwarded_and_disallowed_routes_are_not():
         rejected = await client.post("/health")
         hidden = await client.get("/api/sessions")
         missing_slash = await client.get("/api/agent")
+        escaped = await client.get("/api/agent/%2e%2e/sessions")
 
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
     assert rejected.status_code == 404
     assert hidden.status_code == 404
     assert missing_slash.status_code == 404
+    assert escaped.status_code == 404
     assert [request.url.path for request in requests] == ["/health"]
     await upstream_client.aclose()
 
@@ -93,6 +95,10 @@ async def test_agent_prefix_forwards_all_methods_query_body_and_headers():
     assert all("connection" not in request.headers for request in requests)
     assert all("x-internal" not in request.headers for request in requests)
     assert all(response.headers["x-upstream"] == "yes" for response in responses)
+    assert all(
+        response.content == method.encode()
+        for response, method in zip(responses, methods, strict=True)
+    )
     assert all("connection" not in response.headers for response in responses)
     assert all("x-response-internal" not in response.headers for response in responses)
     assert all("content-encoding" not in response.headers for response in responses)
