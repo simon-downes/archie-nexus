@@ -1,6 +1,6 @@
 # 097 — Agent gateway
 
-Status: planning
+Status: building
 Branch: build-it/097-agent-gateway (base: main @ 2e8b9cf)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/097-agent-gateway
 
