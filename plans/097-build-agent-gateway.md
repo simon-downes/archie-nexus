@@ -1,6 +1,6 @@
 # 097 — Agent gateway
 
-Status: reviewing
+Status: done
 Branch: build-it/097-agent-gateway (base: main @ 2e8b9cf)
 Worktree: /workspace/archie-nexus/.git/build-it-worktrees/097-agent-gateway
 
@@ -151,7 +151,9 @@ The gateway MUST not log bearer tokens or request bodies. It MUST not expose the
 
 ## Outcome
 
-Pending implementation.
+Implemented a same-process agent gateway on both Colima/Docker Desktop and native Linux. Agents now target `host.docker.internal:<profile.port+1>`; the gateway permits only `GET /health` and `/api/agent/*`, forwards to the loopback orchestrator, filters headers, bounds bodies, and supervises alongside the main Uvicorn server. Added Docker bridge discovery, lifecycle URL injection, route/security tests and architecture documentation.
+
+Verified: 67 targeted tests passed; full Ruff lint passed; all changed files pass Ruff formatting. The full repository suite reaches the existing missing-Kiro-credential failure in `tests/test_host_config.py::test_the_agent_syncs_while_it_runs`; a full run then stalls during environment-dependent teardown. The repository-wide format check still reports the pre-existing `persona/skills/python/assets/output.py` mismatch. No live native-Linux Docker smoke test was available.
 
 PR: pending
 CI: pending
