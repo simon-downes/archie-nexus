@@ -14,6 +14,7 @@ import dataclasses
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +51,7 @@ from archie_agent.kiro import agent_files
 from archie_agent.kiro.acp import CLIENT_INFO, PROTOCOL_VERSION, AcpClient, AcpError
 from archie_agent.kiro.mcp_server import ArchieMcpServer
 from archie_agent.kiro.translate import RootContext, TurnTranslator, summarization
+from archie_agent.oom import kills_since, oom_kill_count
 from archie_agent.prompt import build_kiro_prompt, build_kiro_worker_prompt
 from archie_agent.question import Answer, QuestionBroker, QuestionError, create_question_tool
 from archie_agent.session_bus import SessionEventBus
@@ -69,6 +71,11 @@ KIRO_COMMAND = ("kiro-cli", "acp", "--agent-engine=v3")
 ALLOWED_BUILTIN_TAGS = frozenset({"read"})
 STARTUP_TIMEOUT_S = 30.0
 DEAD_MESSAGE = "Kiro backend stopped; start a new session"
+# Restart Kiro after an unexpected exit, up to RESTART_LIMIT times in RESTART_WINDOW_S,
+# reloading the conversation with ACP session/load (094 D7, D8).
+RESTART_LIMIT = 3
+RESTART_WINDOW_S = 1800.0
+RESTART_TIMEOUT_S = 60.0
 # Kiro caps its own summary call at 60 s (091 D4).
 COMPACT_TIMEOUT_S = 120.0
 COMPACT_BUSY_MESSAGE = "Kiro did not compact: a turn or compaction is in progress"
@@ -198,12 +205,23 @@ class KiroHarness:
         self._started = False
         self._changed = asyncio.Event()
         self._exit_code: int | None = None
+        # Why the last Kiro process stopped, e.g. "Kiro backend stopped (exit code 1; ...)".
+        self._exit_reason: str | None = None
+        # The container's OOM-kill count and when it was read: when Kiro started, and at
+        # each turn's start and end, so an exit is only blamed on recent kills (094 D16).
+        self._oom_baseline: tuple[int | None, datetime] = (None, datetime.now(UTC))
         self._ledger = CreditLedger(self._kiro.credits)
         self._context_pct: float | None = None  # Kiro's latest root context usage (089)
         self._root_context = RootContext()  # live figure without placeholders (091 D8)
         self._compacting = False  # a manual ``_kiro/session/compact`` is in flight (091)
         self._compaction_summary: str | None = None
         self._tasks: set[asyncio.Task] = set()
+        self._restoring = False  # a restart's ``_launch`` is replaying history (094)
+        self._restart_task: asyncio.Task | None = None
+        self._restarts: deque[float] = deque()  # monotonic times of recent restarts (D8)
+        self._resume_note: str | None = None  # prefix for the next prompt after a cut-off turn
+        self._dead_reason: str | None = None  # why the backend is dead, for the user
+        self._interrupted_wait = False  # ESC dropped a message waiting for a restart (D17)
 
     # -- surface used by app.py ---------------------------------------------------
 
@@ -240,15 +258,7 @@ class KiroHarness:
     # -- startup -------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the MCP server and Kiro, and configure the ACP session (D18 deadline)."""
-        deadline = time.monotonic() + self._startup_timeout
-
-        def remaining(step: str) -> float:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise KiroStartupError(f"Kiro startup timed out before {step}")
-            return left
-
+        """Do the one-time setup, then launch Kiro and configure a new ACP session."""
         api_key = resolve_api_key()
         self._api_key = api_key
         if not api_key:
@@ -274,9 +284,33 @@ class KiroHarness:
                 if name != QUESTION_TOOL
             ],
         )
+        await self._launch(
+            load_session_id=None,
+            model_id=self._kiro.default_model,
+            timeout=self._startup_timeout,
+        )
+        self._started = True
+        log.info(
+            "Kiro session ready",
+            extra={"kiro_session": self._kiro_session_id, "model": self.session.model_id},
+        )
+
+    async def _launch(self, *, load_session_id: str | None, model_id: str, timeout: float) -> None:
+        """Spawn ``kiro-cli``, open or reload the ACP session, and apply the settings.
+
+        ``load_session_id`` is ``None`` for a fresh ``session/new`` (startup) or a Kiro session
+        id to reload with ``session/load`` (a restart, 094). One ``timeout`` covers every step.
+        """
+        deadline = time.monotonic() + timeout
+
+        def remaining(step: str) -> float:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise KiroStartupError(f"Kiro startup timed out before {step}")
+            return left
 
         env = dict(os.environ)
-        env["KIRO_API_KEY"] = api_key
+        env["KIRO_API_KEY"] = self._api_key
         self._acp = AcpClient(
             self._command,
             env=env,
@@ -284,12 +318,13 @@ class KiroHarness:
             frame_log=frame_log_path(home_dir(), self.session.session_id),
             on_notification=self._on_notification,
             on_exit=self._on_exit,
-            redact=[api_key],
+            redact=[self._api_key],
         )
         try:
             await self._acp.start()
         except OSError as exc:
             raise KiroStartupError(f"Cannot start {self._command[0]}: {exc}") from exc
+        self._mark_oom_baseline()
 
         try:
             await self._acp.request(
@@ -304,18 +339,28 @@ class KiroHarness:
                 },
                 timeout=remaining("initialize"),
             )
-            result = await self._acp.request(
-                "session/new",
-                {
-                    "cwd": self._workspace,
-                    "mcpServers": [],
-                    "_meta": {"kiro": {"modeId": agent_files.ROOT_AGENT}},
-                },
-                timeout=remaining("session/new"),
-            )
-            self._kiro_session_id = (result or {}).get("sessionId")
-            if not self._kiro_session_id:
-                raise KiroStartupError("Kiro session/new returned no sessionId")
+            meta = {"kiro": {"modeId": agent_files.ROOT_AGENT}}
+            if load_session_id is None:
+                result = await self._acp.request(
+                    "session/new",
+                    {"cwd": self._workspace, "mcpServers": [], "_meta": meta},
+                    timeout=remaining("session/new"),
+                )
+                self._kiro_session_id = (result or {}).get("sessionId")
+                if not self._kiro_session_id:
+                    raise KiroStartupError("Kiro session/new returned no sessionId")
+            else:
+                result = await self._acp.request(
+                    "session/load",
+                    {
+                        "sessionId": load_session_id,
+                        "cwd": self._workspace,
+                        "mcpServers": [],
+                        "_meta": meta,
+                    },
+                    timeout=remaining("session/load"),
+                )
+                self._kiro_session_id = load_session_id
             self.config_options = (result or {}).get("configOptions") or self.config_options
             self._check_agent()
             mode = config_value(self.config_options, "mode")
@@ -327,22 +372,15 @@ class KiroHarness:
             await self._set_config("contentCollection", "disabled", remaining)
             await self._set_config("autopilot", "on", remaining)
             await self._wait_for_models(remaining)
-            if self._kiro.default_model not in self.model_options():
-                raise KiroStartupError(
-                    f"Kiro does not offer kiro.default_model {self._kiro.default_model!r}"
-                )
-            await self._set_config("model", self._kiro.default_model, remaining)
-            await self._apply_effort(self._kiro.default_model, remaining)
+            if model_id not in self.model_options():
+                raise KiroStartupError(f"Kiro does not offer model {model_id!r}")
+            await self._set_config("model", model_id, remaining)
+            await self._apply_effort(model_id, remaining)
             await self._wait_for_tools(remaining)
         except TimeoutError as exc:
             raise KiroStartupError(f"Kiro startup timed out: {exc or 'no response'}") from exc
         except AcpError as exc:
             raise KiroStartupError(f"Kiro startup failed: {exc}") from exc
-        self._started = True
-        log.info(
-            "Kiro session ready",
-            extra={"kiro_session": self._kiro_session_id, "model": self.session.model_id},
-        )
 
     async def _set_config(self, config_id: str, value: str, remaining) -> None:
         """Set one config option and verify Kiro reports the new value."""
@@ -444,14 +482,13 @@ class KiroHarness:
     async def switch_model(self, model_key: str) -> str | None:
         """Switch to an allowlisted ``kiro/<id>`` model; return error text or None."""
         model_id = kiro_model_id(model_key)
-        if (
-            model_id is None
-            or model_id not in self._kiro.models
-            or model_id not in self.model_options()
-        ):
+        if model_id is None or model_id not in self._kiro.models:
             return f"Unknown model: {model_key}"
+        await self._await_restart()
         if self._dead or self._acp is None:
-            return DEAD_MESSAGE
+            return self._dead_message()
+        if model_id not in self.model_options():
+            return f"Unknown model: {model_key}"
         try:
             result = await self._acp.request(
                 "session/set_config_option",
@@ -466,7 +503,7 @@ class KiroHarness:
         problem = self._agent_problem()
         if problem:
             self._fail(problem)
-            return DEAD_MESSAGE
+            return self._dead_message()
         self.session.model_id = kiro_model_key(model_id)
         return None
 
@@ -477,6 +514,13 @@ class KiroHarness:
         params = msg.get("params") or {}
         if method == "session/update":
             update = params.get("update") or {}
+            if self._restoring:
+                # A restart's session/load replays the history; keep only the config so
+                # _wait_for_models and _wait_for_tools can finish (094).
+                if update.get("sessionUpdate") == "config_option_update":
+                    self.config_options = update.get("configOptions") or self.config_options
+                    self._changed.set()
+                return
             if self._compacting and self._translator is None:
                 info = summarization(update)
                 if info is not None and info.kind == "completed" and info.subtask is None:
@@ -531,19 +575,120 @@ class KiroHarness:
         """Fail closed after startup: mark the backend dead and kill Kiro (D17)."""
         log.error("Stopping the Kiro backend: %s", reason)
         self._dead = True
+        self._dead_reason = reason
         if self._acp is not None:
             task = asyncio.get_running_loop().create_task(self._acp.close())
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
+    def _mark_oom_baseline(self) -> None:
+        self._oom_baseline = (oom_kill_count(), datetime.now(UTC))
+
+    def _reason(self, code: int | None, kills: int, since: datetime) -> str:
+        detail = f"exit code {code}"
+        if kills:
+            detail += (
+                f"; the out-of-memory killer killed {kills} process(es) in this container "
+                f"since {since:%H:%M:%S} UTC"
+            )
+        return f"Kiro backend stopped ({detail})"
+
+    def _can_restart(self) -> bool:
+        cutoff = time.monotonic() - RESTART_WINDOW_S
+        while self._restarts and self._restarts[0] < cutoff:
+            self._restarts.popleft()
+        return len(self._restarts) < RESTART_LIMIT
+
     def _on_exit(self, code: int | None) -> None:
+        """Handle ``kiro-cli`` exiting: record it, then restart or mark the backend dead."""
         self._exit_code = code
-        if not self._dead:
+        before, since = self._oom_baseline
+        kills = kills_since(before)
+        reason = self._reason(code, kills, since)
+        if self._acp is not None:
+            self._acp.record("exit", {"code": code, "oom_kills": kills})
+        if self._closing:
             self._dead = True
+            log.info("%s", reason)
+            return
+        if self._dead:
+            return
+        self._exit_reason = reason
+        if self._restoring or not self._started:
+            # Exit during startup or a restart: the start/_restart path reports it and
+            # marks the backend dead; keep the reason for its turn_error.
+            self._dead = True
+            log.error("%s", reason)
+            return
+        # Unexpected exit after a working session: recover if we can (094).
+        log.error("%s", reason)
+        self._questions.cancel()
+        self._mcp.cancel_all()
+        if not self._can_restart():
+            minutes = int(RESTART_WINDOW_S // 60)
+            self._mark_dead(
+                f"{reason}. Stopped restarting after {RESTART_LIMIT} tries in {minutes} minutes"
+            )
+            return
+        self._restarts.append(time.monotonic())
+        self._resume_note = reason if (self._turn_active and not self._compacting) else None
+        self._restart_task = asyncio.get_running_loop().create_task(self._restart(reason))
+        self._tasks.add(self._restart_task)
+        self._restart_task.add_done_callback(self._tasks.discard)
+
+    def _mark_dead(self, reason: str) -> None:
+        """Mark the backend dead and tell the user, from a sync context (094)."""
+        self._dead = True
+        self._dead_reason = reason
+        self._spawn(self._notice("backend_stopped", f"{reason}. Start a new session."))
+        self._spawn(self._emit_status())
+
+    async def _restart(self, reason: str) -> None:
+        """Relaunch ``kiro-cli`` and reload the Kiro session after an unexpected exit (094)."""
+        old = self._acp
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.close()
+        if self._closing:
+            return
+        self.config_options = []
+        self.mcp_status = None
+        self.tool_tags = None
+        self.config_errors = []
+        self._started = False
+        self._restoring = True
+        try:
+            await self._launch(
+                load_session_id=self._kiro_session_id,
+                model_id=kiro_model_id(self.session.model_id) or self._kiro.default_model,
+                timeout=RESTART_TIMEOUT_S,
+            )
+        except (KiroStartupError, AcpError, TimeoutError) as exc:
+            self._restoring = False
+            if self._acp is not None and self._acp.alive:
+                with contextlib.suppress(Exception):
+                    await self._acp.close()
             if self._closing:
-                log.info("Kiro backend stopped (exit code %s)", code)
-            else:
-                log.error("Kiro backend stopped (exit code %s)", code)
+                return
+            self._dead = True
+            self._dead_reason = f"{reason}. The restart failed: {exc}"
+            await self._notice("backend_stopped", f"{self._dead_reason}. Start a new session.")
+            await self._emit_status()
+            return
+        self._restoring = False
+        self._started = True
+        if self._closing:
+            return
+        await self._notice(
+            "backend_restarted", f"{reason}. Kiro was restarted and the conversation reloaded."
+        )
+        await self._emit_status()
+
+    async def _await_restart(self) -> None:
+        """Block until any in-flight restart finishes (shielded from the caller's cancel)."""
+        task = self._restart_task
+        if task is not None and not task.done():
+            await asyncio.shield(task)
 
     # -- turns -------------------------------------------------------------------
 
@@ -551,9 +696,21 @@ class KiroHarness:
         """Run one turn on Kiro and guarantee a terminal event and status refresh."""
         self._turn_active = True
         try:
+            await self._await_restart()
+            if self._interrupted_wait:
+                self._interrupted_wait = False
+                await self._event_bus.emit(
+                    ErrorNotice(
+                        id=str(ULID()),
+                        kind="turn_error",
+                        message="Interrupted before Kiro finished restarting; the message "
+                        "wasn't sent",
+                    )
+                )
+                return
             if self._dead or self._acp is None:
                 await self._event_bus.emit(
-                    ErrorNotice(id=str(ULID()), kind="turn_error", message=DEAD_MESSAGE)
+                    ErrorNotice(id=str(ULID()), kind="turn_error", message=self._dead_message())
                 )
                 return
             await self._run_turn(content)
@@ -567,11 +724,18 @@ class KiroHarness:
             await self._emit_status()
 
     async def _run_turn(self, content: str) -> None:
-        assert self._acp is not None
+        acp = self._acp
+        assert acp is not None
+        self._mark_oom_baseline()
         turn = self.session.next_turn_index()
         await self._event_bus.emit(
             UserMessage(id=str(ULID()), turn=turn, scope=None, content=content)
         )
+        prompt_text = content
+        if self._resume_note is not None:
+            # Tell Kiro the previous turn was cut off; the logged user_message stays as typed.
+            prompt_text = f"{self._note_text(self._resume_note)}\n\n{content}"
+            self._resume_note = None
         translator = TurnTranslator(self.log_path, self.session.model_id, turn)
         self._translator = translator
         self._mcp.reset()
@@ -580,19 +744,24 @@ class KiroHarness:
         error: str | None = None
         terminal_done = False
         try:
-            result = await self._acp.request(
+            result = await acp.request(
                 "session/prompt",
                 {
                     "sessionId": self._kiro_session_id,
-                    "prompt": [{"type": "text", "text": content}],
+                    "prompt": [{"type": "text", "text": prompt_text}],
                 },
             )
             stop_reason = (result or {}).get("stopReason") or "end_turn"
         except AcpError as exc:
-            error = str(exc)
+            # Kiro died: say why, with the OOM kills seen during the turn (094).
+            error = self._exit_reason if not acp.alive and self._exit_reason else str(exc)
+            if not acp.alive and self._restart_task is not None and not self._restart_task.done():
+                error = f"{error}; restarting Kiro"
         except Exception as exc:  # noqa: BLE001 — every turn ends with a terminal event
             log.exception("Kiro turn failed")
             error = f"{type(exc).__name__}: {exc}"
+        if acp.alive:
+            self._mark_oom_baseline()
         try:
             self._translator = None
             now = datetime.now(UTC)
@@ -622,6 +791,10 @@ class KiroHarness:
         """Cancel the whole Kiro turn and kill running Archie tool processes (D22)."""
         if not self._turn_active or self._acp is None or self._kiro_session_id is None:
             return
+        if self._restart_task is not None and not self._restart_task.done():
+            # A message is waiting for the restart; drop it without touching Kiro (D17).
+            self._interrupted_wait = True
+            return
         if self._compacting:
             # Kiro's compaction has no cancel; say so rather than ignore the key (091 D5).
             self._spawn(self._notice("compaction_not_cancellable", COMPACT_NOT_CANCELLABLE))
@@ -649,8 +822,9 @@ class KiroHarness:
         Runs with the turn flag taken by ``try_begin_turn`` and always releases it.
         """
         try:
+            await self._await_restart()
             if self._dead or self._acp is None:
-                await self._notice("manual_compaction_failed", DEAD_MESSAGE)
+                await self._notice("manual_compaction_failed", self._dead_message())
                 return
             if self.session.turn_index == 0:
                 await self._notice("manual_compaction_failed", "Nothing to compact")
@@ -728,6 +902,20 @@ class KiroHarness:
 
     # -- helpers -------------------------------------------------------------------
 
+    def _dead_message(self) -> str:
+        return f"{self._dead_reason}; start a new session" if self._dead_reason else DEAD_MESSAGE
+
+    def _note_text(self, reason: str) -> str:
+        """The resume note prefixed to the first prompt after a cut-off turn (094)."""
+        start, end = reason.find("("), reason.rfind(")")
+        detail = reason[start + 1 : end] if 0 <= start < end else reason
+        return (
+            "[Archie note: the Kiro backend stopped during your previous turn "
+            f"({detail}) and was restarted with this conversation reloaded. That turn was "
+            "cut off: its running tool calls and subagents were stopped and their results "
+            "lost. Check the current state before you continue that work.]"
+        )
+
     async def _notice(self, kind: str, message: str, target: Any = None) -> None:
         try:
             await self._event_bus.emit(
@@ -746,7 +934,10 @@ class KiroHarness:
         from archie_agent.app import _read_git_branch
 
         question = self._questions.pending
-        if question is not None:
+        if self._dead:
+            # A dead backend can't run; the TUI shows this as a failed session (094).
+            state = "error"
+        elif question is not None:
             state = "blocked"
         elif self._turn_active:
             state = "working"
@@ -793,6 +984,12 @@ class KiroHarness:
     async def close(self) -> None:
         """Kill Kiro's process group and stop the MCP server."""
         self._closing = True
+        task = self._restart_task
+        if task is not None and not task.done():
+            # Cancel and await before closing _acp, so a restart can't spawn kiro-cli after.
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         if self._acp is not None:
             await self._acp.close()
         await self._mcp.stop()

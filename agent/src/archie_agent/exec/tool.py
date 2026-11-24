@@ -19,6 +19,7 @@ from typing import Any
 from archie_agent.exec.envelope import Envelope
 from archie_agent.exec.tools._runtime_env import subprocess_env
 from archie_agent.exec.tools._subprocess import kill_process_group
+from archie_agent.oom import argv_wrapper, kills_since, oom_kill_count, tool_warning
 from archie_agent.tools import ToolRegistry, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -92,15 +93,16 @@ async def run_exec(
     # Spawn the runner subprocess.
     # Current credential/settings variables, so a new login reaches this run.
     env, env_warning = subprocess_env()
+    oom_before = oom_kill_count()
     try:
         proc = await asyncio.create_subprocess_exec(
-            python,
-            "-m",
-            "archie_agent.exec.runner",
-            str(run_dir),
+            *argv_wrapper([python, "-m", "archie_agent.exec.runner", str(run_dir)]),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            # Its own process group, so kill_process_group stops the runner and its
+            # children only, never the agent's group.
+            start_new_session=True,
         )
     except OSError as e:
         return Envelope.error_envelope("RunnerCrash", f"Failed to spawn runner: {e}")
@@ -123,10 +125,12 @@ async def run_exec(
     result_path = run_dir / "result.json"
     if not result_path.exists():
         stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
-        return Envelope.error_envelope(
-            "RunnerCrash",
-            f"Runner exited (code={proc.returncode}) without result.json. stderr: {stderr_text}",
+        message = (
+            f"Runner exited (code={proc.returncode}) without result.json. stderr: {stderr_text}"
         )
+        if kills := kills_since(oom_before):
+            message = f"{message}\n{tool_warning(kills)}"
+        return Envelope.error_envelope("RunnerCrash", message)
 
     try:
         envelope = Envelope.read(run_dir)
