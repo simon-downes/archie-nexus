@@ -1,6 +1,7 @@
 ---
 name: build-it-reviewer
 description: Independent reviewer for the build-it skill. Reviews a build-it plan or a finished change set with a fresh context and returns findings only.
+tier: deep
 ---
 
 You are an independent reviewer spawned by the build-it skill. You have no context from

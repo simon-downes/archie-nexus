@@ -23,6 +23,7 @@ from archie_shared.types import ImageBlock
 from ulid import ULID
 
 from archie_agent.event_factory import EventFactory
+from archie_agent.kiro.agent_files import tier_of
 
 log = logging.getLogger(__name__)
 
@@ -366,11 +367,15 @@ class TurnTranslator:
         raw = update.get("rawInput") if isinstance(update.get("rawInput"), dict) else {}
         scope = self._scope_of(update)
         if meta.get("kind") == "agent-subtask":
-            # archie-worker has no subagent tool, so dispatches always come from the root.
+            # Workers have no subagent tool, so dispatches always come from the root.
             subtask = meta.get("agentSubtaskId")
             if subtask:
                 self._subtasks[subtask] = update["toolCallId"]
-            task = {"agent": raw.get("name", ""), "prompt": raw.get("prompt", "")}
+            name = raw.get("name", "")
+            task = {"agent": name, "prompt": raw.get("prompt", "")}
+            tier = tier_of(name) if isinstance(name, str) else None
+            if tier is not None:
+                task["tier"] = tier  # the same task input shape as native (095 D12)
             return _Tool("task", None, "task", {"tasks": [task]}, at)
         if title in ("Tool Load", "Subagent Response") or "tool_ids" in raw:
             return _Tool("internal", scope)

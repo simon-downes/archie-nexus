@@ -17,7 +17,7 @@ from archie_shared.events import (
     decode_event,
 )
 from archie_shared.models import DEFAULT_MODELS, BedrockProvider, CostConfig, ModelEntry, Rate
-from archie_shared.schemas import CompactionConfig
+from archie_shared.schemas import CompactionConfig, NativeSubagentTiers, SubagentsConfig
 from archie_shared.session.log import LogAppendError
 from archie_shared.types import TextBlock
 
@@ -92,6 +92,7 @@ def _harness(
         tmp_path,
         model_catalog={"session": active, "compactor": _compaction_model()},
         compaction=config or CompactionConfig(model="compactor", percent=50),
+        subagents=SubagentsConfig(native=NativeSubagentTiers(*["session"] * 3)),
         compaction_llm=compaction,
         **({"clock": clock} if clock is not None else {}),
     )
@@ -569,9 +570,12 @@ async def test_child_agents_never_compact(tmp_path, monkeypatch):
     task = harness._registry.get("task")
     assert task is not None
     await task.handler(
-        tasks=[{"agent": "missing", "prompt": "child"}], _launch_scope="t1", _parent_turn=1
+        tasks=[{"agent": "missing", "prompt": "child", "tier": "deep"}],
+        _launch_scope="t1",
+        _parent_turn=1,
     )
 
+    assert "messages" in seen  # the child reached run_loop
     assert "before_request" not in seen or seen["before_request"] is None
 
 

@@ -32,7 +32,7 @@ from archie_shared.events import (
     decode_event,
     encode_event,
 )
-from archie_shared.schemas import NexusConfig
+from archie_shared.schemas import AgentConfig, KiroSubagentTiers, NexusConfig, SubagentsConfig
 
 FAKE = Path(__file__).parent / "fake_kiro.py"
 SECRET = "kiro-test-secret-0123456789"
@@ -449,11 +449,48 @@ async def test_question_tool_is_root_only(harness, tmp_path):
     """091 D11: the root agent gets every Archie tool; the worker lists all but question."""
     served = await _served_tools(harness.mcp_url)
     assert {"question", "shell", "exec"} <= served and not served & {"skill", "task"}
-    root = json.loads((tmp_path / "kiro" / "agents" / "archie.json").read_text())
-    worker = json.loads((tmp_path / "kiro" / "agents" / "archie-worker.json").read_text())
+    agents = tmp_path / "kiro" / "agents"
+    root = json.loads((agents / "archie.json").read_text())
     assert "@archie" in root["tools"]
-    assert "@archie/question" not in worker["tools"]
-    assert set(worker["tools"]) == {f"@archie/{n}" for n in served - {"question"}}
+    for tier in ("light", "standard", "deep"):
+        worker = json.loads((agents / f"archie-worker-{tier}.json").read_text())
+        assert "@archie/question" not in worker["tools"]
+        assert set(worker["tools"]) == {f"@archie/{n}" for n in served - {"question"}}
+
+
+async def test_tier_workers_are_pinned_to_the_configured_models(harness, tmp_path):
+    """095 D10: one worker per tier, each with the agent.subagents.kiro model."""
+    agents = tmp_path / "kiro" / "agents"
+    models = {
+        tier: json.loads((agents / f"archie-worker-{tier}.json").read_text())["model"]
+        for tier in ("light", "standard", "deep")
+    }
+    assert models == {
+        "light": "gpt-5.6-luna",
+        "standard": "claude-sonnet-5.5",
+        "deep": "claude-opus-5.5",
+    }
+    assert not (agents / "archie-worker.json").exists()
+
+
+async def test_startup_fails_when_kiro_does_not_offer_a_tier_model(home, tmp_path):
+    """095 D11: a tier model Kiro doesn't offer stops the session, like default_model."""
+    config = NexusConfig(
+        agent=AgentConfig(subagents=SubagentsConfig(kiro=KiroSubagentTiers(light="gpt-9")))
+    )
+    h = KiroHarness(
+        config,
+        session_id="kirotest-01",
+        log_dir=home / "sessions",
+        tool_policy=LiveToolPolicy.static(None),
+        kiro_home=tmp_path / "kiro",
+        command=[sys.executable, str(FAKE)],
+        workspace=str(tmp_path),
+        startup_timeout=5.0,
+    )
+    with pytest.raises(KiroStartupError, match="does not offer agent.subagents.kiro.light 'gpt-9'"):
+        await h.start()
+    await h.close()
 
 
 async def test_question_blocks_until_answered(harness, home):

@@ -40,6 +40,7 @@ from archie_shared.kiro import (
     period_start,
     startup_error_path,
 )
+from archie_shared.schemas import SUBAGENT_TIERS
 from archie_shared.session.log import LogAppendError, SessionLog
 from ulid import ULID
 
@@ -267,6 +268,7 @@ class KiroHarness:
             mcp_url=mcp_url,
             root_prompt=build_kiro_prompt(self._workspace),
             worker_prompt=build_kiro_worker_prompt(DEFAULT_AGENT.body, self._workspace),
+            worker_models=msgspec.structs.asdict(self._config.agent.subagents.kiro),
             skill_paths=[entry.path for entry in skills.values()],
             worker_tools=[
                 f"@{agent_files.MCP_SERVER}/{name}"
@@ -331,6 +333,7 @@ class KiroHarness:
                 raise KiroStartupError(
                     f"Kiro does not offer kiro.default_model {self._kiro.default_model!r}"
                 )
+            self._check_tier_models()
             await self._set_config("model", self._kiro.default_model, remaining)
             await self._apply_effort(self._kiro.default_model, remaining)
             await self._wait_for_tools(remaining)
@@ -343,6 +346,15 @@ class KiroHarness:
             "Kiro session ready",
             extra={"kiro_session": self._kiro_session_id, "model": self.session.model_id},
         )
+
+    def _check_tier_models(self) -> None:
+        """Fail startup when Kiro doesn't offer a tier worker's pinned model (095 D11)."""
+        offered = self.model_options()
+        tiers = self._config.agent.subagents.kiro
+        for tier in SUBAGENT_TIERS:
+            model = getattr(tiers, tier)
+            if model not in offered:
+                raise KiroStartupError(f"Kiro does not offer agent.subagents.kiro.{tier} {model!r}")
 
     async def _set_config(self, config_id: str, value: str, remaining) -> None:
         """Set one config option and verify Kiro reports the new value."""

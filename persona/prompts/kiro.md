@@ -13,7 +13,10 @@ are Archie's and take precedence where they are more specific.
 - **Skills.** Load a skill with Kiro's skill tool when a task matches its
   description. Skill files reference their own directory; read referenced files
   with `archie::read`.
-- **Subagents.** Delegate independent work to the `archie-worker` subagent. It has
+- **Subagents.** Delegate independent work to an Archie worker subagent. There is one
+  per tier, `archie-worker-light`, `archie-worker-standard` and `archie-worker-deep`,
+  each on its own model, and each worker's description says what its tier is for.
+  Pick the tier by the work, whatever model you run on. A worker has
   Archie's tools but sees nothing of this conversation, so its prompt must state the
   goal, the paths, what is already known, what it must not do, and the shape of the
   report you want back.

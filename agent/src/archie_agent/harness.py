@@ -195,6 +195,7 @@ class AgentHarness:
                 runner_context=self._current_runner_context,
                 turn_cost_limit=self._turn_cost_limit,
                 max_concurrent=self._subagents.max_concurrent,
+                tiers=msgspec.structs.asdict(self._subagents.native),
                 live_children=self._children,
             )
         )

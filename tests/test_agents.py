@@ -68,3 +68,27 @@ def test_discover_agents_duplicate_name_last_sorted_file_wins(monkeypatch, tmp_p
 
     assert catalog["same"].body == "B"
     assert "Duplicate agent name" in caplog.text
+
+
+def test_parse_agent_file_reads_tier(tmp_path: Path):
+    path = tmp_path / "reviewer.md"
+    path.write_text("---\nname: reviewer\ndescription: R\ntier: deep\n---\nBody", encoding="utf-8")
+
+    entry = _parse_agent_file(path)
+
+    assert entry is not None and entry.tier == "deep"
+
+
+def test_parse_agent_file_ignores_unknown_tier(tmp_path: Path, caplog):
+    path = tmp_path / "reviewer.md"
+    path.write_text("---\nname: reviewer\ndescription: R\ntier: huge\n---\nBody", encoding="utf-8")
+
+    entry = _parse_agent_file(path)
+
+    assert entry is not None and entry.tier is None
+    assert "unknown tier 'huge'" in caplog.text
+
+
+def test_build_it_reviewer_is_pinned_to_deep():
+    """095 D14: the persona's reviewer always runs on the deep tier."""
+    assert discover_agents()["build-it-reviewer"].tier == "deep"
