@@ -155,7 +155,7 @@ Implemented a same-process agent gateway on both Colima/Docker Desktop and nativ
 
 Verified: 67 targeted tests passed; full Ruff lint passed; all changed files pass Ruff formatting. The full repository suite reaches the existing missing-Kiro-credential failure in `tests/test_host_config.py::test_the_agent_syncs_while_it_runs`; a full run then stalls during environment-dependent teardown. The repository-wide format check still reports the pre-existing `persona/skills/python/assets/output.py` mismatch. No live native-Linux Docker smoke test was available.
 
-PR: pending
+PR: https://github.com/simon-downes/archie-nexus/pull/46
 CI: pending
 
 ## Follow-ups
