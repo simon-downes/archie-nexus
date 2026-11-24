@@ -131,7 +131,7 @@ The gateway MUST not log bearer tokens or request bodies. It MUST not expose the
 - **Edge cases:** occupied main or gateway port → fail before either server starts; missing Linux Docker bridge → actionable startup error; `/health` with POST → 404; `/api/sessions` or WebSocket → 404 without upstream traffic; any `/api/agent/` method → forwarded; `/api/agent` without slash → 404; body over 10 MiB → 413; slow body → 408; upstream sync 401 → 401 remains visible; upstream timeout/unavailable → 502 within 5 seconds; shutdown or peer server failure → both tasks are awaited; logs omit token/body.
 - **Deliverable:** New agents on Colima and native Linux are configured for the same gateway URL shape; GET `/health` and all methods under `/api/agent/` work through it; the rest of the orchestrator API is unreachable through the gateway; the main listener and orchestrator-to-agent proxy remain unchanged.
 - **Verify:** `scripts/dev test tests/test_agent_gateway.py tests/test_orchestrator_lifecycle.py tests/test_orchestrator_cli.py tests/test_agent_sync_api.py` passes; `scripts/dev ruff check .` passes; `scripts/dev ruff format --check .` passes; the gateway test output includes the allowlist, forwarding, timeout, logging and supervision cases; lifecycle assertions show `ARCHIE_ORCHESTRATOR_URL=http://host.docker.internal:<port+1>`.
-- **Outcome:** Built `agent_gateway.py`, Linux Docker bridge discovery, dual Uvicorn supervision, gateway URL injection and architecture documentation. `scripts/dev test tests/test_agent_gateway.py tests/test_orchestrator_lifecycle.py tests/test_orchestrator_cli.py tests/test_agent_sync_api.py` passed 66 tests; `scripts/dev ruff check .` passed. The full format check still reports the pre-existing `persona/skills/python/assets/output.py` mismatch.
+- **Outcome:** Built `agent_gateway.py`, Linux Docker bridge discovery, dual Uvicorn supervision, gateway URL injection and architecture documentation. `scripts/dev test tests/test_agent_gateway.py tests/test_orchestrator_lifecycle.py tests/test_orchestrator_cli.py tests/test_agent_sync_api.py` passed 67 tests; `scripts/dev ruff check .` passed. The full format check still reports the pre-existing `persona/skills/python/assets/output.py` mismatch.
 
 ## Deviations
 
@@ -146,8 +146,8 @@ The gateway MUST not log bearer tokens or request bodies. It MUST not expose the
 ## Review
 
 - Plan review: 1 pass; findings resolved by specifying method/path boundaries, the new gateway test file, exact header/timeout/logging contracts, wildcard/specific upstream selection, and concurrent server supervision.
-- Code review: first round ran `general` and `risk`; both critical findings were agreed and fixed: proxy environment isolation, dynamic hop-by-hop filtering, encoded response headers, Docker discovery timeout/errors, bounded request bodies, peer cancellation, signal capture, documentation, and missing boundary tests. Second round pending.
-- Merge risk: pending
+- Code review: first round ran `general` and `risk`; all agreed findings were fixed. The second round reran both roles and found pending-peer exception propagation, response-body coverage and encoded dot-segment handling; all were fixed and covered by the final 67-test targeted run. No third pass was run because the build-it workflow caps review at two rounds.
+- Merge risk: high: a regression in the gateway allowlist or runtime bind selection could expose the host control plane to agent containers; route filtering, token checks, body limits and boundary tests limit the path, but live native-Linux Docker connectivity was not verified here.
 
 ## Outcome
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -78,6 +79,18 @@ def upstream_url(host: str, port: int) -> str:
     return f"http://{_url_host(host)}:{port}"
 
 
+def _has_dot_segment(path: str) -> bool:
+    """Reject dot segments even when a client percent-encodes them repeatedly."""
+    for _ in range(5):
+        if any(segment in {".", ".."} for segment in path.split("/")):
+            return True
+        decoded = unquote(path)
+        if decoded == path:
+            return False
+        path = decoded
+    return True
+
+
 class RequestBodyTooLargeError(Exception):
     """The gateway request exceeded its bounded body size."""
 
@@ -109,7 +122,7 @@ class AgentGateway:
         if scope["type"] != "http":
             return False
         path = scope["path"]
-        if any(segment in {".", ".."} for segment in path.split("/")):
+        if _has_dot_segment(path):
             return False
         return (scope["method"] == "GET" and path == "/health") or path.startswith("/api/agent/")
 

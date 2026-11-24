@@ -33,6 +33,7 @@ async def test_health_is_forwarded_and_disallowed_routes_are_not():
         hidden = await client.get("/api/sessions")
         missing_slash = await client.get("/api/agent")
         escaped = await client.get("/api/agent/%2e%2e/sessions")
+        double_escaped = await client.get("/api/agent/%252e%252e/sessions")
 
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
@@ -40,6 +41,7 @@ async def test_health_is_forwarded_and_disallowed_routes_are_not():
     assert hidden.status_code == 404
     assert missing_slash.status_code == 404
     assert escaped.status_code == 404
+    assert double_escaped.status_code == 404
     assert [request.url.path for request in requests] == ["/health"]
     await upstream_client.aclose()
 
@@ -287,6 +289,36 @@ async def test_server_failure_stops_the_peer_server():
 
     with patch.object(cli.uvicorn, "Server", FakeServer):
         with pytest.raises(RuntimeError, match="main failed"):
+            await cli._serve_servers(
+                main_host="127.0.0.1",
+                main_port=7600,
+                gateway_host="127.0.0.1",
+                gateway_port=7601,
+                upstream_host="127.0.0.1",
+            )
+    assert len(servers) == 2
+    assert all(server.should_exit for server in servers)
+
+
+@pytest.mark.asyncio
+async def test_pending_gateway_failure_propagates():
+    from archie_cli import cli
+
+    servers = []
+
+    class FakeServer:
+        def __init__(self, config):
+            self.should_exit = False
+            servers.append(self)
+
+        async def serve(self):
+            if self is servers[1]:
+                raise RuntimeError("gateway failed")
+            while not self.should_exit:
+                await asyncio.sleep(0)
+
+    with patch.object(cli.uvicorn, "Server", FakeServer):
+        with pytest.raises(RuntimeError, match="gateway failed"):
             await cli._serve_servers(
                 main_host="127.0.0.1",
                 main_port=7600,
